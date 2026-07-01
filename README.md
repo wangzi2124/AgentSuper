@@ -314,7 +314,7 @@ LLM_API_KEY=sk-xxxxxxxxxxxx
 LLM_API_BASE=https://api.deepseek.com
 
 # ===== Embedding =====
-EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5     # 中文模型；英文文档可用 all-MiniLM-L6-v2
+EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5     # 中文模型；英文文档可用 all-MiniLM-L6-v2  也需要 重排序模型  ms-marco-MiniLM-L-6-v2
 
 # ===== RAG =====
 VECTOR_STORE_PATH=data/vector_store
