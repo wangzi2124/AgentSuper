@@ -20,7 +20,7 @@
 | **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如搜索、天气、生成文档），Agent 按需调用 |
 | **Vector DB 开关** | 用户可在聊天界面手动控制是否启用向量库检索，关闭后 Agent 仅凭自身知识回答 |
-| **生成文件管理** | Agent 创建的 .docx 文件可在独立页面查看、搜索文件名、下载和删除 |
+| **生成文件管理** | Agent 创建的文档（.docx/.pdf/.xlsx）可在独立页面查看、搜索、下载和删除 |
 | **本地 Embedding** | 使用 sentence-transformers 本地运行，通过 ModelScope 下载模型 |
 | **检索重排序** | Cross-encoder 对检索结果重打分（top-3），显著提升回答精度 |
 | **上下文管理** | 滑动窗口截断历史（4000 tokens），防止 context 溢出 |
@@ -212,10 +212,10 @@ _retrieve(state)
 | **路由** | Vue Router 4 |
 | **文档解析** | pypdf（PDF）, 原生文本解析（TXT/MD） |
 | **关键词检索** | BM25（rank_bm25）+ jieba 中文分词 |
-| **文档生成** | python-docx 生成 Word 文档（产品介绍、报告、表格等） |
+| **文档生成** | python-docx（Word）、reportlab（PDF）、openpyxl（Excel）三大生成引擎 |
 | **互联网搜索** | Tavily API 实时搜索新闻、网页、财经信息 |
 | **天气查询** | Open-Meteo API（免费，无需 key）获取天气实况和预报 |
-| **生成文件管理** | Web 页面浏览/搜索/下载/删除 Agent 生成的 .docx 文件 |
+| **生成文件管理** | Web 页面浏览/搜索/下载/删除 Agent 生成的 .docx/.pdf/.xlsx 文件 |
 | **文本分块** | 父子文档分块（parent=章节摘要，child=正文块），按 `第X章`/`Chapter X` 边界 |
 | **章节元数据** | SQLite 章节映射表（`ChapterStore`），支持章节号/标题精确查询 |
 | **查询意图识别** | 正则匹配 `第X章`/`Chapter X`/`关于...章节`，自动选择检索策略 |
@@ -360,9 +360,9 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 | GET | `/api/plugins/` | 插件列表 |
 | POST | `/api/plugins/{name}/toggle` | 启用/禁用插件 |
 | GET | `/api/vectors/?offset=0&limit=50&query=xxx&document_id=xxx` | 查看/搜索向量库内容（分页+全文检索） |
-| GET | `/api/generated/` | 列出 Agent 生成的 .docx 文件（可选 `?q=关键字` 搜索文件名） |
-| GET | `/api/generated/download/{filename}` | 下载生成的 .docx 文件 |
-| DELETE | `/api/generated/{filename}` | 删除生成的 .docx 文件 |
+| GET | `/api/generated/` | 列出 Agent 生成的文档（可选 `?q=关键字` 搜索文件名） |
+| GET | `/api/generated/download/{filename}` | 下载生成的文档（.docx/.pdf/.xlsx 等） |
+| DELETE | `/api/generated/{filename}` | 删除生成的文档 |
 | GET | `/api/monitor/stats` | 系统监控统计（请求量/模型调用/token 用量/耗时） |
 
 ---
@@ -407,12 +407,13 @@ CHUNK_PAIRS=10                            # 每批摘要的消息对数量（用
 
 ## 生成文件管理
 
-Agent 创建的 .docx 文件（通过 docx-generator 或 kb-export 插件）自动保存到 `backend/data/generated/`，可在前端 **Generated** 页面管理：
+Agent 创建的文档（通过 docx-generator、pdf-generator、excel-generator、kb-export 等插件）自动保存到 `backend/data/generated/`，可在前端 **Generated** 页面管理：
 
 - **列表查看**：按创建时间倒序排列
 - **搜索**：按文件名关键字过滤
-- **下载**：点击 Download 按钮下载原始 .docx 文件
+- **下载**：点击 Download 按钮下载原始文件
 - **删除**：点击 Delete 按钮从磁盘删除
+- **运行 JS**：`.js` 文件显示"Run"按钮，可在浏览器沙箱中执行（含 mock `fs`/`require`）
 
 ---
 
@@ -489,6 +490,10 @@ Agent 创建的 .docx 文件（通过 docx-generator 或 kb-export 插件）自�
 | | `tool_get_current_time(format)` — 获取当前时间 | *"现在几点了？"* · *"获取当前日期和时间"* |
 | | `tool_hello(name)` — 返回问候语 | *"跟张三打个招呼"* |
 | **docx-generator** | `tool_create_docx(title, sections)` — 创建 Word 文档 | *"帮我创建一个 Word 文档，内容是产品介绍"* · *"把这段内容导出为 .docx"* |
+| **pdf-generator** | `tool_create_pdf(title, sections)` — 创建 PDF 文档 | *"把这份报告导出为 PDF"* · *"帮我创建一个 PDF 文档"* |
+| **excel-generator** | `tool_create_excel(sheets)` — 创建 Excel 表格 | *"创建一个 Excel 表格，包含销售数据"* · *"导出数据为 .xlsx"* |
+| **kb-export** | `tool_export_kb_to_docx(query, title)` — 知识库导出为 Word | *"把知识库中关于 XX 的内容导出为 Word"* |
+| **filesystem** | `tool_write_file/read_file/ls/grep/glob/edit_file/execute` — 文件操作套件 | Agent 自动用于创建项目、读写文件 |
 | **internet-search** | `tool_internet_search(query, max_results, topic)` — 搜索互联网 | *"今天有什么新闻？"* · *"搜索一下 Python 的最新动态"* |
 | **weather** | `tool_get_weather(city, forecast_days)` — 查询天气 | *"今天北京天气怎么样？"* · *"伦敦未来三天的天气预报"* |
 

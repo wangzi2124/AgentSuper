@@ -128,5 +128,8 @@ def tool_create_docx(title: str = "Document", sections: str = "[]", output_path:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = str(output_dir / f"{safe_title}_{ts}.docx")
 
+    if not output_path.lower().endswith(".docx"):
+        output_path = output_path.rsplit(".", 1)[0] + ".docx"
+
     doc.save(output_path)
     return f"Document created successfully: {output_path}"
