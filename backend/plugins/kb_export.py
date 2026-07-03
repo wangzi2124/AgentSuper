@@ -3,9 +3,6 @@ KB Export Plugin
 
 Searches the knowledge base and exports results as a Word document.
 """
-import json
-import os
-from pathlib import Path
 from datetime import datetime
 from docx import Document
 from docx.shared import Pt, RGBColor
@@ -102,14 +99,17 @@ def tool_export_kb_to_docx(query: str, title: str = "", top_k: int = 10) -> str:
         if i < len(results):
             doc.add_paragraph("")
 
-    # Save
-    output_dir = Path(os.getcwd()) / "data" / "generated"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Save via file_generator
+    from plugins.file_generator import save_file as _save_file
     safe_name = "".join(c for c in doc_title if c.isascii() and (c.isalnum() or c in " _-")).strip()
     if not safe_name:
         safe_name = "kb_export"
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = str(output_dir / f"{safe_name}_{ts}.docx")
+    filename = f"{safe_name}_{ts}.docx"
 
-    doc.save(out_path)
+    import io
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    out_path = _save_file(buf.read(), filename)
     return f"Document created: {out_path} ({len(results)} results)"

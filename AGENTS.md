@@ -57,7 +57,7 @@ npm run preview
 - **Hybrid search**: vector + BM25 fused via RRF (weights 0.7/0.3). BM25 index auto-built on startup and updated on each upload. Requires `rank_bm25` + `jieba`
 - **Chapter intent detection** (`backend/app/rag/intent.py`): regex matches `第X章`/`Chapter X` → skips vector search, queries `ChapterStore` directly
 - **Toggling skills/plugins** at runtime calls `agent.refresh_tools()` which rebuilds the LangGraph
-- **Generated files** saved to `backend/data/generated/` by `docx-generator` plugin; managed via `GET/DELETE /api/generated/` + `GET /api/generated/download/{filename}`
+- **Generated files** saved to `backend/data/generated/` via `file_generator.save_file()` utility; managed via `GET/DELETE /api/generated/` + `GET /api/generated/download/{filename}`
 - **kb-export plugin** (`plugin_kb-export_tool_export_kb_to_docx`): combines KB retrieval + docx generation in one tool call, bypassing LLM content relay. Set via `app.rag.plugin_bridge.set_retriever()` in `runtime.py`
 - **Monitoring**: `backend/app/monitor.py` — in-memory stats (`record_request`/`record_model_call`), exposed at `GET /api/monitor/stats`. `RequestLogMiddleware` logs every HTTP request. `_llm_call` wrapper in `graph.py` records model, prompt/completion tokens, duration, and tool-rounds per generation.
 

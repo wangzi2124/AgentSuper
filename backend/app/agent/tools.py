@@ -131,9 +131,11 @@ def build_system_prompt_no_kb(
         tool_parts.append(f"Skill tools (load skill files):\n{skills_desc}")
 
     if enabled_plugins:
-        plugins_desc = "\n".join(
-            f"   - {tool_name}" for p in enabled_plugins for tool_name in p.functions
-        )
+        lines = []
+        for p in enabled_plugins:
+            for func_name in p.functions:
+                lines.append(f"   - plugin_{p.name}_{func_name}")
+        plugins_desc = "\n".join(lines)
         tool_parts.append(f"Plugin tools:\n{plugins_desc}")
 
     if tool_parts:
@@ -146,6 +148,37 @@ def build_system_prompt_no_kb(
         "- There is no knowledge base available (no documents uploaded).",
         "- Answer based on your own knowledge.",
         "- If you don't know something, say so honestly.",
+        "- Only call tools that are directly relevant to the user's request. Do NOT call unrelated tools.",
+        "- For file/command tasks (creating projects, editing files, running commands), use filesystem tools.",
+        "- For document generation, generate the file content and save it to data/generated/ using tool_write_file.",
+        "- For web search, use internet-search tools.",
+        "- For knowledge base export, use kb-export tools.",
+        "- If the user's request doesn't match any tool's purpose, answer directly without calling tools.",
+        "",
+        "IMPORTANT - Skill loading before code/design tasks:",
+        "  When the user asks to create code, web pages, apps, or designs:",
+        "  1. FIRST, call the relevant load_skill_*() tool to get specialized instructions and best practices.",
+        "  2. Then follow the skill's guidance to write files using filesystem tools.",
+        "  3. Only run tool_execute for build/install if the skill instructs you to.",
+        "",
+        "IMPORTANT - All generated output files go to data/generated/:",
+        "  Whenever you generate ANY output file (docx, pdf, html, csv, image, code snippet as deliverable, etc.):",
+        "  - ALWAYS save it to `data/generated/` directory so the user can find and download it.",
+        "  - Use tool_write_file with paths like `data/generated/<filename>`.",
+        "  - For plugins that auto-save (kb_export), they already save to data/generated/.",
+        "",
+        "IMPORTANT - DOCX document creation:",
+        "  When the user asks to create a Word document (.docx):",
+        "  1. Call load_skill_docx() to get instructions.",
+        "  2. Follow the skill to use JavaScript + docx-js for creating .docx files.",
+        "  3. Save the generated file to data/generated/ using tool_write_file.",
+        "  4. ALL output files MUST be saved under data/generated/.",
+        "",
+        "IMPORTANT - Order of operations for creating projects:",
+        "  1. FIRST, write ALL necessary code files using tool_write_file (it auto-creates directories).",
+        "  2. Do NOT use tool_execute with mkdir or Set-Content to create files — use tool_write_file instead.",
+        "  3. ONLY AFTER all files are written, run tool_execute for npm install or build if needed.",
+        "  Do NOT run 'npm create', 'npx create-react-app', 'npm create vite' etc. Write files manually.",
     ])
 
     return "\n".join(parts)

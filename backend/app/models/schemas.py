@@ -28,6 +28,17 @@ class Source(BaseModel):
     score: float
 
 
+class StepEvent(BaseModel):
+    type: str  # "step_start" | "step_end" | "tool_start" | "tool_end"
+    step_id: str
+    name: str
+    status: str  # "running" | "completed" | "failed"
+    detail: Optional[str] = None
+    duration_ms: Optional[float] = None
+    tool_name: Optional[str] = None
+    tool_args: Optional[dict] = None
+
+
 class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
@@ -40,6 +51,7 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[Source]
     conversation_id: str
+    steps: list[StepEvent] = []
 
 
 class UploadResponse(BaseModel):

@@ -10,6 +10,12 @@ export async function listGenerated(q?: string): Promise<GeneratedFileList> {
   return res.json()
 }
 
+export async function getGeneratedContent(filename: string): Promise<string> {
+  const res = await fetchWithTimeout(BASE + '/download/' + encodeURIComponent(filename))
+  if (!res.ok) throw new Error(`Failed to fetch file: ${res.statusText}`)
+  return res.text()
+}
+
 export async function deleteGenerated(filename: string): Promise<void> {
   const res = await fetchWithTimeout(BASE + '/' + encodeURIComponent(filename), { method: 'DELETE' })
   if (!res.ok) {

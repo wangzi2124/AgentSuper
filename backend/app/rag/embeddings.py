@@ -30,11 +30,6 @@ class LocalEmbeddings:
             if candidate.exists():
                 return candidate.resolve()
 
-        if self.local_cache_dir.exists():
-            for sub in self.local_cache_dir.rglob(model_name):
-                if sub.is_dir() and not any(p.startswith(".") for p in sub.relative_to(self.local_cache_dir).parts):
-                    return sub.resolve()
-
         return None
 
     def _load_model(self, model_name: str) -> SentenceTransformer:

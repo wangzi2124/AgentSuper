@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, ref, watch, computed } from 'vue'
 import { useChatStore, SUPPORTED_MODELS } from '../stores/chat'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
+import StepTaskList from '../components/StepTaskList.vue'
 
 const chat = useChatStore()
 const msgList = ref<HTMLElement>()
+const chatInputRef = ref<any>()
 
 watch(() => chat.messages.length, async () => {
   await nextTick()
@@ -14,6 +16,24 @@ watch(() => chat.messages.length, async () => {
 
 function handleSend(text: string) {
   chat.send(text)
+}
+
+function handleCancel() {
+  chat.cancel()
+}
+
+function handleCopy(_text: string) {
+  // Could show a toast notification here if needed
+}
+
+function handleUndo(index: number) {
+  if (chat.loading) chat.cancel()
+  const msgText = chat.messages[index]?.content
+  chat.messages.splice(index)
+  if (msgText) {
+    chatInputRef.value?.setText(msgText)
+    nextTick(() => chatInputRef.value?.focus())
+  }
 }
 </script>
 
@@ -49,10 +69,20 @@ function handleSend(text: string) {
       </div>
 
       <div v-else ref="msgList" class="message-list">
-        <ChatMessage v-for="msg in chat.messages" :key="msg.id" :message="msg" />
-        <div v-if="chat.loading" class="loading-indicator">
-          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-        </div>
+        <ChatMessage 
+          v-for="(msg, idx) in chat.messages" 
+          :key="msg.id" 
+          :message="msg" 
+          :index="idx"
+          @copy="handleCopy"
+          @undo="handleUndo"
+        />
+        
+        <StepTaskList
+          v-if="chat.loading"
+          :steps="chat.currentSteps"
+          :is-running="chat.loading"
+        />
       </div>
     </div>
 
@@ -60,7 +90,7 @@ function handleSend(text: string) {
       <button v-if="chat.messages.length > 0" class="btn" @click="chat.clear()" style="margin: 0 24px 8px;" :disabled="chat.loading">
         Clear conversation
       </button>
-      <ChatInput :loading="chat.loading" @send="handleSend" />
+      <ChatInput ref="chatInputRef" :loading="chat.loading" @send="handleSend" @cancel="handleCancel" />
     </div>
   </div>
 </template>

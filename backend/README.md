@@ -54,7 +54,7 @@
 cd backend
 
 # （可选）创建虚拟环境
-python -m venv .venv 或 windows 系统 盘符:\Python313\python.exe -m venv .venv
+python -m venv .venv
 .venv\Scripts\activate   # Windows
 # source .venv/bin/activate  # Linux/Mac
 

@@ -4,10 +4,38 @@ export interface Source {
   score: number
 }
 
+export interface AgentStep {
+  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end'
+  step_id: string
+  name: string
+  status: 'running' | 'completed' | 'failed'
+  detail?: string
+  duration_ms?: number
+  tool_name?: string
+  tool_args?: Record<string, unknown>
+}
+
 export interface ChatResponse {
   answer: string
   sources: Source[]
   conversation_id: string
+  steps?: AgentStep[]
+}
+
+export interface SSEEvent {
+  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error'
+  step_id?: string
+  name?: string
+  status?: string
+  detail?: string
+  duration_ms?: number
+  tool_name?: string
+  tool_args?: Record<string, unknown>
+  answer?: string
+  sources?: Source[]
+  conversation_id?: string
+  steps?: AgentStep[]
+  error?: string
 }
 
 export interface FileContent {
@@ -124,6 +152,7 @@ export interface Message {
   role: 'user' | 'assistant'
   content: string
   sources?: Source[]
+  steps?: AgentStep[]
   files?: { filename: string; mime_type: string }[]
   timestamp: Date
 }

@@ -8,8 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import documents, chat, skills, plugins, vectors, generated
 from app.monitor import RequestLogMiddleware, get_stats
 from app.runtime import ensure_runtime_state
-import warnings
-warnings.filterwarnings('ignore', category=SyntaxWarning)
 
 logging.basicConfig(
     level=logging.INFO,

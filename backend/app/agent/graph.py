@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import time as tmod
 from typing import Any, List, Optional, TypedDict, Annotated, Sequence
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,8 @@ class AgentState(TypedDict):
     history: list[dict]
     use_vector_db: bool
     files: list[dict]
+    steps: list[dict]
+    _event_queue: Optional[asyncio.Queue]
 
 
 class RAGAgent:
@@ -61,9 +65,22 @@ class RAGAgent:
 
         self.graph = self._build_graph()
 
+    def _push_event(self, state: AgentState, event: dict):
+        state["steps"].append(event)
+        eq = state.get("_event_queue")
+        if eq:
+            eq.put_nowait(event)
+
     def _retrieve(self, state: AgentState) -> dict:
+        start = tmod.time()
+        self._push_event(state, {"type": "step_start", "step_id": "retrieve", "name": "检索中", "status": "running"})
+
         if self.retriever.is_empty or not state.get("use_vector_db", True):
+            reason = "知识库为空" if self.retriever.is_empty else "已禁用向量检索"
+            dur = (tmod.time() - start) * 1000
+            self._push_event(state, {"type": "step_end", "step_id": "retrieve", "name": "检索中", "status": "completed", "detail": reason, "duration_ms": round(dur, 1)})
             return {"context": [], "sources": []}
+
         results = self.retriever.invoke(state["question"], k=5)
         context = []
         sources = []
@@ -75,17 +92,25 @@ class RAGAgent:
                 "content": doc["text"][:300],
                 "score": score,
             })
+        dur = (tmod.time() - start) * 1000
+        self._push_event(state, {"type": "step_end", "step_id": "retrieve", "name": "检索中", "status": "completed", "detail": f"找到 {len(results)} 个相关片段", "duration_ms": round(dur, 1)})
         return {"context": context, "sources": sources}
 
     def _rerank(self, state: AgentState) -> dict:
         if not self.reranker or not state.get("context"):
+            if state.get("context"):
+                self._push_event(state, {"type": "step_end", "step_id": "rerank", "name": "相关性重排序", "status": "completed", "detail": "重排序已禁用"})
             return {}
+        start = tmod.time()
+        self._push_event(state, {"type": "step_start", "step_id": "rerank", "name": "相关性重排序", "status": "running"})
         reranked = self.reranker.rerank(
             query=state["question"],
             documents=state["context"],
             top_k=3,
         )
         context = [{"content": doc["content"], "metadata": doc["metadata"]} for doc, _ in reranked]
+        dur = (tmod.time() - start) * 1000
+        self._push_event(state, {"type": "step_end", "step_id": "rerank", "name": "相关性重排序", "status": "completed", "detail": f"筛选出 {len(reranked)} 个最相关片段", "duration_ms": round(dur, 1)})
         return {"context": context}
 
     def _system_prompt_with_kb(self) -> str:
@@ -148,6 +173,9 @@ class RAGAgent:
         return response
 
     async def _generate(self, state: AgentState) -> dict:
+        _gen_start = tmod.time()
+        self._push_event(state, {"type": "step_start", "step_id": "generate", "name": "生成回答", "status": "running"})
+
         if state["context"]:
             context_parts = [
                 f"[Source {i+1}]: {c['content']}"
@@ -191,9 +219,6 @@ class RAGAgent:
             elif self.api_base and "openai" in self.api_base:
                 model = f"openai/{model}"
 
-        import time as tmod
-        _gen_start = tmod.time()
-
         response = await self._llm_call(model, messages, tool_defs)
         msg = response.choices[0].message
 
@@ -215,17 +240,20 @@ class RAGAgent:
             })
 
             for tc in msg.tool_calls:
+                tool_name = tc.function.name
                 try:
                     args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError as e:
-                    result = f"Error parsing arguments for '{tc.function.name}': {e}"
+                    result = f"Error parsing arguments for '{tool_name}': {e}"
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": result,
                     })
                     continue
-                result = await self._execute_tool(tc.function.name, args)
+                self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
+                result = await self._execute_tool(tool_name, args)
+                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -241,7 +269,37 @@ class RAGAgent:
             tool_rounds=rounds,
         )
 
+        # If tool calls remain (max rounds reached) or content is empty, force a final answer
+        if msg.tool_calls:
+            # Must include tool_calls in assistant message for DeepSeek/OpenAI compatibility
+            messages.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in msg.tool_calls
+                ],
+            })
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                except json.JSONDecodeError:
+                    args = {}
+                result = await self._execute_tool(tc.function.name, args)
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+            response = await self._llm_call(model, messages, tool_defs)
+            msg = response.choices[0].message
+        if not (msg.content or "").strip():
+            # Last resort: LLM still returned empty, use a summary
+            msg.content = "任务已完成，请查看结果。"
+
         answer = msg.content or ""
+        gen_dur = (tmod.time() - _gen_start) * 1000
+        self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "completed", "detail": f"完成（{rounds} 轮工具调用）" if rounds else "完成", "duration_ms": round(gen_dur, 1)})
         return {
             "answer": answer,
             "messages": [AIMessage(content=answer)],
@@ -274,7 +332,7 @@ class RAGAgent:
             self.tools.extend(create_plugin_tools(self.plugin_loader))
         self.graph = self._build_graph()
 
-    async def invoke(self, question: str, model: Optional[str] = None, history: Optional[list[dict]] = None, use_vector_db: bool = True, files: Optional[list[dict]] = None) -> dict:
+    async def invoke(self, question: str, model: Optional[str] = None, history: Optional[list[dict]] = None, use_vector_db: bool = True, files: Optional[list[dict]] = None, event_queue: Optional[asyncio.Queue] = None) -> dict:
         state = AgentState(
             messages=[HumanMessage(content=question)],
             question=question,
@@ -285,5 +343,13 @@ class RAGAgent:
             history=history or [],
             use_vector_db=use_vector_db,
             files=files or [],
+            steps=[],
+            _event_queue=event_queue,
         )
-        return await self.graph.ainvoke(state)
+        result = await self.graph.ainvoke(state)
+        return {
+            "answer": result.get("answer", ""),
+            "sources": result.get("sources", []),
+            "steps": result.get("steps", []),
+            "messages": result.get("messages", []),
+        }

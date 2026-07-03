@@ -1,4 +1,5 @@
 import os
+import mimetypes
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -26,7 +27,7 @@ async def list_generated(q: Optional[str] = None):
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
     files: list[GeneratedFile] = []
     for f in sorted(GENERATED_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if f.is_file() and f.suffix.lower() == ".docx":
+        if f.is_file():
             if q and q.lower() not in f.stem.lower():
                 continue
             stat = f.stat()
@@ -43,9 +44,10 @@ async def download_generated(filename: str):
     filepath = GENERATED_DIR / filename
     if not filepath.exists() or not filepath.is_file():
         raise HTTPException(status_code=404, detail="File not found")
+    media_type, _ = mimetypes.guess_type(filename)
     return FileResponse(
         str(filepath),
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        media_type=media_type or "application/octet-stream",
         filename=filename,
     )
 

@@ -15,14 +15,6 @@ def download_model(model_name: str, cache_dir: Optional[Path] = None) -> Path:
 
     modelscope_id = MODELSCOPE_MAP.get(model_name, model_name)
 
-    structured_path = cache_dir / model_name
-    modelscope_path = cache_dir / modelscope_id
-    flat_path = cache_dir / model_name.replace("/", "_")
-
-    for candidate in (modelscope_path, structured_path, flat_path):
-        if candidate.exists():
-            return candidate
-
     try:
         from modelscope import snapshot_download
         local_path = snapshot_download(modelscope_id, cache_dir=str(cache_dir))
@@ -31,9 +23,14 @@ def download_model(model_name: str, cache_dir: Optional[Path] = None) -> Path:
         pass
 
     from huggingface_hub import snapshot_download as hf_download
+
+    hf_dir = cache_dir / model_name.replace("/", "_")
+    if hf_dir.exists():
+        return hf_dir
+
     hf_download(
         model_name,
-        local_dir=str(structured_path),
+        local_dir=str(hf_dir),
         local_dir_use_symlinks=False,
     )
-    return structured_path
+    return hf_dir
