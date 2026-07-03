@@ -25,15 +25,21 @@ def tool_create_excel(sheets: str = "[]", output_path: str = "") -> str:
         At least one sheet is required.
     - output_path: optional absolute path to save (auto-generated if empty)
     """
-    if not output_path:
+    base_dir = Path(__file__).resolve().parents[1]
+    output_dir = base_dir / "data" / "generated"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if output_path:
+        p = Path(output_path)
+        if not p.is_absolute():
+            output_path = str(output_dir / p)
+    else:
         from datetime import datetime
-        output_dir = Path(os.getcwd()) / "data" / "generated"
-        output_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = str(output_dir / f"spreadsheet_{ts}.xlsx")
+        output_path = str(output_dir / f"spreadsheet_{ts}")
 
     if not output_path.lower().endswith(".xlsx"):
-        output_path = output_path.rsplit(".", 1)[0] + ".xlsx"
+        output_path += ".xlsx"
 
     try:
         parsed_sheets = json.loads(sheets)

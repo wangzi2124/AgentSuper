@@ -118,18 +118,24 @@ def tool_create_docx(title: str = "Document", sections: str = "[]", output_path:
                 p = doc.add_paragraph(item, style="List Bullet")
                 p.paragraph_format.space_after = Pt(2)
 
-    if not output_path:
+    base_dir = Path(__file__).resolve().parents[1]
+    output_dir = base_dir / "data" / "generated"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if output_path:
+        p = Path(output_path)
+        if not p.is_absolute():
+            output_path = str(output_dir / p)
+    else:
         from datetime import datetime
-        output_dir = Path(os.getcwd()) / "data" / "generated"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        safe_title = "".join(c for c in title if c.isascii() and (c.isalnum() or c in " _-")).strip()
+        safe_title = "".join(c for c in title if c not in '<>:"/\\|?*').strip()
         if not safe_title:
             safe_title = "document"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = str(output_dir / f"{safe_title}_{ts}.docx")
+        output_path = str(output_dir / f"{safe_title}_{ts}")
 
     if not output_path.lower().endswith(".docx"):
-        output_path = output_path.rsplit(".", 1)[0] + ".docx"
+        output_path += ".docx"
 
     doc.save(output_path)
     return f"Document created successfully: {output_path}"
