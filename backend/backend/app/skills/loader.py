@@ -1,0 +1,114 @@
+from pathlib import Path
+from typing import List, Optional
+import yaml
+
+
+class Skill:
+    def __init__(self, name: str, description: str, path: str, enabled: bool = True):
+        self.name = name
+        self.description = description
+        self.path = path
+        self.enabled = enabled
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "path": self.path,
+            "enabled": self.enabled,
+        }
+
+
+class SkillLoader:
+    def __init__(self, skills_dir: str = "skills"):
+        self.skills_dir = Path(skills_dir)
+        self.skills_dir.mkdir(parents=True, exist_ok=True)
+        self._skills: dict[str, Skill] = {}
+
+    def load_all(self) -> List[Skill]:
+        self._skills.clear()
+
+        for f in self.skills_dir.glob("*.md"):
+            skill = self._load_skill_file(f)
+            if skill:
+                self._skills[skill.name] = skill
+
+        for subdir in self.skills_dir.iterdir():
+            if not subdir.is_dir():
+                continue
+            skill_file = subdir / "SKILL.md"
+            if not skill_file.exists():
+                continue
+            skill = self._load_skill_file(skill_file)
+            if skill:
+                self._skills[skill.name] = skill
+
+        return self.list()
+
+    def _load_skill_file(self, path: Path) -> Optional[Skill]:
+        try:
+            content = path.read_text(encoding="utf-8")
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                meta = yaml.safe_load(parts[1]) or {}
+            else:
+                meta = {}
+
+            name = meta.get("name", path.stem)
+            description = meta.get("description", "") or content[:200].strip()
+
+            return Skill(
+                name=name,
+                description=description,
+                path=str(path),
+                enabled=meta.get("enabled", True),
+            )
+        except Exception:
+            return None
+
+    def get(self, name: str) -> Optional[Skill]:
+        return self._skills.get(name)
+
+    def list(self) -> List[Skill]:
+        return list(self._skills.values())
+
+    def toggle(self, name: str, enabled: bool) -> bool:
+        skill = self._skills.get(name)
+        if not skill:
+            return False
+        skill.enabled = enabled
+        try:
+            self._save_skill_file(skill)
+        except Exception:
+            return False
+        return True
+
+    def _save_skill_file(self, skill: Skill) -> None:
+        path = Path(skill.path)
+        content = path.read_text(encoding="utf-8")
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            body = parts[2].lstrip("\n")
+            meta = yaml.safe_load(parts[1]) or {}
+        else:
+            body = content
+            meta = {}
+
+        meta["name"] = skill.name
+        meta["description"] = skill.description
+        meta["enabled"] = skill.enabled
+
+        new_content = "---\n" + yaml.safe_dump(meta, allow_unicode=True, sort_keys=False) + "---\n" + body
+        path.write_text(new_content, encoding="utf-8")
+
+    def get_enabled_skills(self) -> List[Skill]:
+        return [s for s in self._skills.values() if s.enabled]
+
+    def get_skill_content(self, name: str) -> Optional[str]:
+        skill = self._skills.get(name)
+        if not skill:
+            return None
+        try:
+            return Path(skill.path).read_text(encoding="utf-8")
+        except Exception:
+            return None
