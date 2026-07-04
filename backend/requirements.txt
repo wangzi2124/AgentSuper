@@ -19,3 +19,5 @@ huggingface_hub
 rank_bm25
 jieba
 tavily-python
+reportlab
+openpyxl
