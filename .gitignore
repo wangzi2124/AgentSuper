@@ -10,3 +10,5 @@ wheels/
 
 # Virtual environments
 .venv
+backend/.env
+backend/data.zip
