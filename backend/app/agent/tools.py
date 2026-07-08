@@ -18,7 +18,7 @@ _TYPE_MAP: Dict[str, str] = {
 
 
 def _annotation_to_json_type(annotation: str) -> str:
-    low = annotation.lower().replace("typing.", "").replace("optional[", "").rstrip("]")
+    low = annotation.lower().replace("typing.", "").replace("optional[", "").removesuffix("]")
     for k, v in _TYPE_MAP.items():
         if k in low:
             return v

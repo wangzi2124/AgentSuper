@@ -100,7 +100,7 @@ def tool_export_kb_to_docx(query: str, title: str = "", top_k: int = 10) -> str:
             doc.add_paragraph("")
 
     # Save via file_generator
-    from plugins.file_generator import save_file as _save_file
+    from app.storage.file_generator import save_file as _save_file
     safe_name = "".join(c for c in doc_title if c.isascii() and (c.isalnum() or c in " _-")).strip()
     if not safe_name:
         safe_name = "kb_export"

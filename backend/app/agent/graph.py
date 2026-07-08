@@ -20,6 +20,7 @@ from app.agent.tools import (
     create_plugin_tools,
     build_system_prompt_no_kb,
 )
+from app.monitor import record_model_call
 
 
 class AgentState(TypedDict):
@@ -71,7 +72,7 @@ class RAGAgent:
         if eq:
             eq.put_nowait(event)
 
-    def _retrieve(self, state: AgentState) -> dict:
+    async def _retrieve(self, state: AgentState) -> dict:
         start = tmod.time()
         self._push_event(state, {"type": "step_start", "step_id": "retrieve", "name": "检索中", "status": "running"})
 
@@ -81,7 +82,10 @@ class RAGAgent:
             self._push_event(state, {"type": "step_end", "step_id": "retrieve", "name": "检索中", "status": "completed", "detail": reason, "duration_ms": round(dur, 1)})
             return {"context": [], "sources": []}
 
-        results = self.retriever.invoke(state["question"], k=5)
+        import functools
+        results = await asyncio.to_thread(
+            functools.partial(self.retriever.invoke, state["question"], k=5)
+        )
         context = []
         sources = []
         for doc, score in results:
@@ -96,17 +100,16 @@ class RAGAgent:
         self._push_event(state, {"type": "step_end", "step_id": "retrieve", "name": "检索中", "status": "completed", "detail": f"找到 {len(results)} 个相关片段", "duration_ms": round(dur, 1)})
         return {"context": context, "sources": sources}
 
-    def _rerank(self, state: AgentState) -> dict:
+    async def _rerank(self, state: AgentState) -> dict:
         if not self.reranker or not state.get("context"):
             if state.get("context"):
                 self._push_event(state, {"type": "step_end", "step_id": "rerank", "name": "相关性重排序", "status": "completed", "detail": "重排序已禁用"})
             return {}
         start = tmod.time()
         self._push_event(state, {"type": "step_start", "step_id": "rerank", "name": "相关性重排序", "status": "running"})
-        reranked = self.reranker.rerank(
-            query=state["question"],
-            documents=state["context"],
-            top_k=3,
+        import functools
+        reranked = await asyncio.to_thread(
+            functools.partial(self.reranker.rerank, query=state["question"], documents=state["context"], top_k=3)
         )
         context = [{"content": doc["content"], "metadata": doc["metadata"]} for doc, _ in reranked]
         dur = (tmod.time() - start) * 1000
@@ -133,7 +136,6 @@ class RAGAgent:
         for t in self.tools:
             if t.name == name:
                 try:
-                    import asyncio
                     result = await asyncio.to_thread(t.fn, **args)
                     return str(result)
                 except Exception as e:
@@ -141,9 +143,6 @@ class RAGAgent:
         return f"Tool '{name}' not found"
 
     async def _llm_call(self, model: str, messages: list, tool_defs: list) -> litellm.ModelResponse:
-        import time as tmod
-        from app.monitor import record_model_call
-
         start = tmod.time()
         try:
             response = await litellm.acompletion(
@@ -263,7 +262,6 @@ class RAGAgent:
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
 
-        from app.monitor import record_model_call
         record_model_call(
             model, duration_ms=(tmod.time() - _gen_start) * 1000,
             tool_rounds=rounds,

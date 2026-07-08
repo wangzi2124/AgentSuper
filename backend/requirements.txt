@@ -2,16 +2,11 @@ fastapi
 uvicorn[standard]
 pydantic
 pydantic-settings
-python-dotenv
-langchain
 langchain-core
 langgraph
-langchain-community
 litellm
 pyyaml
-aiofiles
 python-multipart
-deepagents
 chromadb
 sentence-transformers
 modelscope

@@ -83,10 +83,11 @@ def _truncate_history(history: list[dict], max_tokens: int = MAX_HISTORY_TOKENS)
     for msg in reversed(history):
         tokens = len(msg.get("content", "")) // 2
         if total + tokens > max_tokens:
-            truncated.insert(0, {"role": "system", "content": "[earlier history truncated]"})
+            truncated.append({"role": "system", "content": "[earlier history truncated]"})
             break
         total += tokens
-        truncated.insert(0, msg)
+        truncated.append(msg)
+    truncated.reverse()
     return truncated
 
 
@@ -123,7 +124,7 @@ async def chat(request: Request, body: ChatRequest):
         result = await agent.invoke(body.message, model=body.model, history=compressed, use_vector_db=body.use_vector_db, files=[f.model_dump() for f in body.files])
     except Exception as e:
         logger.exception("chat invocation failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     history.append({"role": "user", "content": body.message})
     history.append({"role": "assistant", "content": result["answer"]})

@@ -8,23 +8,26 @@ CHAPTER_PATTERN = re.compile(
     r'|(CHAPTER\s+\d+)',
 )
 
+_CN_QUOTE_LEFT = '\u201c'
+_CN_QUOTE_RIGHT = '\u201d'
+
 DIALOGUE_PREFIX = re.compile(
     r'([\u4e00-\u9fff\w]{1,8})'
-    r'(?:说|道|问|答|喊|叫|骂|嚷|叹|念|读|讲|哭|笑|唱|吼|吟|夸|赞|骂|'
+    r'(?:说|道|问|答|喊|叫|骂|嚷|叹|念|读|讲|哭|笑|唱|吼|吟|夸|赞|'
     r'批评|表扬|解释|回答|告诉|吩咐|命令|警告|威胁|劝|安慰|询问|补充|回应|宣布|声明|感叹)'
-    r'[：:：]?\s*'
-    r'[「「""""""]'
-    r'([^「「""""""]{2,200})'
-    r'[」」""""""]'
+    r'[：:]\s*'
+    r'[' + _CN_QUOTE_LEFT + r'\u300c"\uff02]'
+    r'([^' + _CN_QUOTE_RIGHT + r'\u300d"\uff02]{2,200})'
+    r'[' + _CN_QUOTE_RIGHT + r'\u300d"\uff02]'
 )
 
 DIALOGUE_SUFFIX = re.compile(
-    r'[「「""""""]'
-    r'([^「「""""""]{2,200})'
-    r'[」」""""""]'
+    r'[' + _CN_QUOTE_LEFT + r'\u300c"\uff02]'
+    r'([^' + _CN_QUOTE_RIGHT + r'\u300d"\uff02]{2,200})'
+    r'[' + _CN_QUOTE_RIGHT + r'\u300d"\uff02]'
     r'\s*'
     r'([\u4e00-\u9fff\w]{1,8})'
-    r'(?:说|道|问|答|喊|叫|骂|嚷|叹|念|读|讲|哭|笑|唱|吼|吟|夸|赞|骂|解释|回答|告诉|回应|补充|声明)'
+    r'(?:说|道|问|答|喊|叫|骂|嚷|叹|念|读|讲|哭|笑|唱|吼|吟|夸|赞|解释|回答|告诉|回应|补充|声明)'
 )
 
 MAX_CHUNK_SIZE = 500
@@ -89,17 +92,32 @@ class DocumentProcessor:
         num_str = re.sub(r'[^\d]', '', raw)
         if num_str:
             return int(num_str), raw
-        cn_map = {
-            '零': '0', '一': '1', '二': '2', '三': '3', '四': '4',
-            '五': '5', '六': '6', '七': '7', '八': '8', '九': '9',
-            '十': '10', '百': '100', '千': '1000',
-        }
-        for k, v in cn_map.items():
-            raw = raw.replace(k, v)
-        num_str = re.sub(r'[^\d]', '', raw)
-        if num_str:
-            return int(num_str), chapter_title
-        return 0, chapter_title
+
+        cn_digits = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4,
+                     '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+        cn_scale = {'十': 10, '百': 100, '千': 1000}
+
+        chars = [ch for ch in chapter_title if ch in cn_digits or ch in cn_scale or ch.isdigit()]
+        if not chars:
+            return 0, chapter_title
+
+        result = 0
+        tmp = 0
+        for ch in chars:
+            if ch.isdigit():
+                tmp = int(ch)
+            elif ch in cn_digits:
+                tmp = cn_digits[ch]
+            elif ch in cn_scale:
+                scale = cn_scale[ch]
+                if tmp == 0:
+                    tmp = scale
+                else:
+                    tmp *= scale
+                result += tmp
+                tmp = 0
+        result += tmp
+        return result if result > 0 else 0, chapter_title
 
     def _chunk_text(self, text: str, metadata: dict) -> List[Tuple[str, dict]]:
         chunks = []

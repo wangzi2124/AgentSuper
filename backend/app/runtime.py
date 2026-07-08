@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from app.rag.vector_store import VectorStore
 from app.services.task_manager import TaskManager
 from app.skills.loader import SkillLoader
 from app.storage.file_store import FileStore
+
+logger = logging.getLogger(__name__)
 
 
 def _load_env_to_os():
@@ -35,8 +38,8 @@ def _build_bm25_index(vs: VectorStore) -> BM25Index:
         texts, metadatas = vs.get_all()
         if texts:
             idx.build(texts, metadatas)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to build BM25 index: %s", e)
     return idx
 
 

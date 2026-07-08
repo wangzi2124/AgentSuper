@@ -12,27 +12,37 @@ export async function listDocuments(): Promise<DocumentListResponse> {
 export function uploadDocument(
   file: File,
   onProgress?: (pct: number, stage: string) => void,
+  signal?: AbortSignal,
 ): Promise<DocumentResponse> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException('Aborted', 'AbortError'))
+
     const form = new FormData()
     form.append('file', file)
 
     const xhr = new XMLHttpRequest()
     xhr.open('POST', BASE + '/upload')
 
+    const onAbort = () => {
+      xhr.abort()
+      reject(new DOMException('Aborted', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) {
-        onProgress(Math.round((e.loaded / e.total) * 4), 'Uploading to server')
+        onProgress(Math.round((e.loaded / e.total) * 4), `Uploading to server (${Math.round(e.loaded / e.total * 100)}%)`)
       }
     }
 
     xhr.onload = async () => {
+      signal?.removeEventListener('abort', onAbort)
       if (xhr.status >= 200 && xhr.status < 300) {
         const { task_id } = JSON.parse(xhr.responseText) as UploadResponse
         onProgress?.(5, 'Queued for processing')
 
         try {
-          const doc = await pollTask(task_id, onProgress)
+          const doc = await pollTask(task_id, onProgress, signal)
           resolve(doc)
         } catch (e) {
           reject(e)
@@ -54,8 +64,11 @@ export function uploadDocument(
 async function pollTask(
   taskId: string,
   onProgress?: (pct: number, stage: string) => void,
+  signal?: AbortSignal,
 ): Promise<DocumentResponse> {
   const poll = async (): Promise<DocumentResponse> => {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+
     const res = await fetchWithTimeout(`${BASE}/tasks/${taskId}`, {}, 0)
     if (!res.ok) throw new Error(`Failed to get task progress: ${res.statusText}`)
 
@@ -74,6 +87,7 @@ async function pollTask(
     }
 
     await new Promise((r) => setTimeout(r, 400))
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     return poll()
   }
 
