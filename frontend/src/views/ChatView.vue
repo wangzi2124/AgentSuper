@@ -1,18 +1,49 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import { useVirtualizer } from '@tanstack/vue-virtual'
 import { useChatStore, SUPPORTED_MODELS } from '../stores/chat'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
 import StepTaskList from '../components/StepTaskList.vue'
 
 const chat = useChatStore()
-const msgList = ref<HTMLElement>()
+const parentRef = ref<HTMLElement>()
 const chatInputRef = ref<any>()
+const isNearBottom = ref(true)
 
-watch(() => chat.messages.length, async () => {
-  await nextTick()
-  msgList.value?.scrollTo({ top: msgList.value.scrollHeight, behavior: 'smooth' })
+const messages = computed(() => chat.messages)
+
+const virtualizer = useVirtualizer({
+  count: messages.value.length,
+  getScrollElement: () => parentRef.value ?? null,
+  estimateSize: (index: number) => {
+    const msg = messages.value[index]
+    if (!msg) return 80
+    const base = msg.role === 'user' ? 70 : 90
+    const contentLines = msg.content ? Math.ceil(msg.content.length / 60) : 0
+    const contentH = Math.min(contentLines * 22, 400)
+    const sourcesH = msg.sources?.length ? 50 + msg.sources.length * 24 : 0
+    const stepsH = msg.steps?.length ? 36 : 0
+    const filesH = msg.files?.length ? 30 : 0
+    return base + contentH + sourcesH + stepsH + filesH + 24
+  },
+  overscan: 5,
 })
+
+watch(() => messages.value.length, async (len) => {
+  virtualizer.value.options.count = len
+  await nextTick()
+  if (isNearBottom.value && parentRef.value) {
+    parentRef.value.scrollTo({ top: parentRef.value.scrollHeight, behavior: 'smooth' })
+  }
+})
+
+function onScroll() {
+  const el = parentRef.value
+  if (!el) return
+  const threshold = 100
+  isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
+}
 
 function handleSend(text: string) {
   chat.send(text)
@@ -28,7 +59,7 @@ function handleCopy(_text: string) {
 
 function handleUndo(index: number) {
   if (chat.loading) chat.cancel()
-  const msgText = chat.messages[index]?.content
+  const msgText = messages.value[index]?.content
   chat.messages.splice(index)
   if (msgText) {
     chatInputRef.value?.setText(msgText)
@@ -62,22 +93,33 @@ function handleUndo(index: number) {
     </div>
 
     <div class="chat-body">
-      <div v-if="chat.messages.length === 0" class="empty-state">
+      <div v-if="messages.length === 0" class="empty-state">
         <div class="icon">💬</div>
         <p>Ask a question to get started</p>
         <p class="hint">The AI agent will retrieve relevant documents and answer based on your knowledge base.</p>
       </div>
 
-      <div v-else ref="msgList" class="message-list">
-        <ChatMessage 
-          v-for="(msg, idx) in chat.messages" 
-          :key="msg.id" 
-          :message="msg" 
-          :index="idx"
-          @copy="handleCopy"
-          @undo="handleUndo"
-        />
-        
+      <div v-else ref="parentRef" class="message-list" @scroll="onScroll">
+        <div :style="{ height: `${virtualizer.getTotalSize()}px`, position: 'relative', width: '100%' }">
+          <div v-for="vitem in virtualizer.getVirtualItems()" :key="vitem.index"
+            :data-index="vitem.index"
+            :style="{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: `${vitem.size}px`,
+              transform: `translateY(${vitem.start}px)`,
+            }"
+          >
+            <ChatMessage
+              :message="messages[vitem.index]"
+              :index="vitem.index"
+              @copy="handleCopy"
+              @undo="handleUndo"
+            />
+          </div>
+        </div>
         <StepTaskList
           v-if="chat.loading"
           :steps="chat.currentSteps"
@@ -87,7 +129,7 @@ function handleUndo(index: number) {
     </div>
 
     <div class="chat-footer">
-      <button v-if="chat.messages.length > 0" class="btn" @click="chat.clear()" style="margin: 0 24px 8px;" :disabled="chat.loading">
+      <button v-if="messages.length > 0" class="btn" @click="chat.clear()" style="margin: 0 24px 8px;" :disabled="chat.loading">
         Clear conversation
       </button>
       <ChatInput ref="chatInputRef" :loading="chat.loading" @send="handleSend" @cancel="handleCancel" />
@@ -146,9 +188,7 @@ function handleUndo(index: number) {
   flex: 1;
   overflow-y: auto;
   padding: 20px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  position: relative;
 }
 .loading-indicator {
   display: flex;
