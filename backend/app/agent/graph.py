@@ -186,6 +186,21 @@ class RAGAgent:
             resolved_cwd = Path(WORKSPACE) / resolved_cwd
         resolved_cwd = resolved_cwd.resolve()
 
+        # Permission check for work_dir (same logic as tool_execute)
+        try:
+            resolved_cwd.relative_to(WORKSPACE)
+        except ValueError:
+            from app.permission import get_manager as _get_perm_mgr, NeedsPermission as _NeedsPermission
+            mgr = _get_perm_mgr()
+            decision = mgr.check(str(resolved_cwd), "execute")
+            if decision == "deny":
+                return f"Error: access denied to directory '{work_dir}'"
+            if decision == "ask":
+                raise _NeedsPermission(str(resolved_cwd), "execute", "tool_execute", args)
+
+        if not resolved_cwd.is_dir():
+            return f"Error: directory not found: {work_dir}"
+
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         start_time = tmod.time()
@@ -202,7 +217,7 @@ class RAGAgent:
                 cwd=str(resolved_cwd),
             )
         except Exception as e:
-            return f"Error starting command: {e}"
+            return f"Error starting command: command={command}, cwd={resolved_cwd}, error={e}"
 
         async def _read_stream(stream, storage: list[str], source: str):
             nonlocal last_heartbeat
