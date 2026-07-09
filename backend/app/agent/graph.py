@@ -21,6 +21,7 @@ from app.agent.tools import (
     build_system_prompt_no_kb,
 )
 from app.monitor import record_model_call
+from app.permission import NeedsPermission, get_manager as get_perm_mgr
 
 
 class AgentState(TypedDict):
@@ -132,12 +133,32 @@ class RAGAgent:
             return None
         return [t.to_openai_tool() for t in self.tools]
 
-    async def _execute_tool(self, name: str, args: dict) -> str:
+    async def _execute_tool(self, name: str, args: dict, state: Optional[dict] = None) -> str:
         for t in self.tools:
             if t.name == name:
                 try:
                     result = await asyncio.to_thread(t.fn, **args)
                     return str(result)
+                except NeedsPermission as e:
+                    mgr = get_perm_mgr()
+                    req = mgr.create_request(e.path, e.operation, name, args)
+                    if state:
+                        eq = state.get("_event_queue")
+                        if eq:
+                            eq.put_nowait({
+                                "type": "permission_request",
+                                "request_id": req.id,
+                                "path": e.path,
+                                "operation": e.operation,
+                                "tool_name": name,
+                                "tool_args": args,
+                            })
+                    decision = await mgr.await_decision(req.id)
+                    if decision == "allowed":
+                        mgr.add_temp_approval(e.path)
+                        result = await asyncio.to_thread(t.fn, **args)
+                        return str(result)
+                    return f"Permission denied: {e.path}"
                 except Exception as e:
                     return f"Error executing {name}: {e}"
         return f"Tool '{name}' not found"
@@ -253,7 +274,7 @@ class RAGAgent:
                     })
                     continue
                 self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
-                tool_tasks.append(self._execute_tool(tool_name, args))
+                tool_tasks.append(self._execute_tool(tool_name, args, state))
                 tool_metas.append((tc.id, tool_name))
 
             tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)
@@ -300,7 +321,7 @@ class RAGAgent:
                 except json.JSONDecodeError:
                     args = {}
                 self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tc.function.name}", "name": f"调用工具: {tc.function.name}", "status": "running", "tool_name": tc.function.name, "tool_args": args})
-                tool_tasks.append(self._execute_tool(tc.function.name, args))
+                tool_tasks.append(self._execute_tool(tc.function.name, args, state))
                 tool_metas.append((tc.id, tc.function.name))
 
             tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)

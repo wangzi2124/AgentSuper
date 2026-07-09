@@ -24,7 +24,7 @@ export interface ChatResponse {
 }
 
 export interface SSEEvent {
-  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error'
+  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'permission_request'
   step_id?: string
   name?: string
   status?: string
@@ -38,12 +38,24 @@ export interface SSEEvent {
   conversation_id?: string
   steps?: AgentStep[]
   error?: string
+  request_id?: string
+  path?: string
+  operation?: string
 }
 
 export interface FileContent {
   filename: string
   data: string
   mime_type: string
+}
+
+export interface PermissionRequest {
+  id: string
+  path: string
+  operation: string
+  tool_name: string
+  tool_args: Record<string, unknown>
+  created_at: string
 }
 
 export interface ChatRequest {

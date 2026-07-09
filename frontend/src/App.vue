@@ -1,5 +1,13 @@
 <script setup lang="ts">
+import { onMounted } from 'vue'
 import Sidebar from './components/Sidebar.vue'
+import PermissionDialog from './components/PermissionDialog.vue'
+import { usePermissionStore } from './stores/permission'
+
+const perm = usePermissionStore()
+onMounted(() => {
+  perm.pollPending()
+})
 </script>
 
 <template>
@@ -9,4 +17,5 @@ import Sidebar from './components/Sidebar.vue'
       <router-view />
     </main>
   </div>
+  <PermissionDialog />
 </template>

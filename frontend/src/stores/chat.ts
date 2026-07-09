@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
 import { ref, shallowRef } from 'vue'
-import type { FileContent, Message, AgentStep, SSEEvent } from '../types'
+import type { FileContent, Message, AgentStep, SSEEvent, PermissionRequest } from '../types'
 import { sendMessageStream } from '../api/chat'
+import { usePermissionStore } from './permission'
 
 export const SUPPORTED_MODELS = [
   { value: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
@@ -77,6 +78,16 @@ export const useChatStore = defineStore('chat', () => {
           } else {
             currentSteps.value.push(step)
           }
+        } else if (event.type === 'permission_request') {
+          const permStore = usePermissionStore()
+          permStore.handleIncoming({
+            id: event.request_id!,
+            path: event.path!,
+            operation: event.operation!,
+            tool_name: event.tool_name!,
+            tool_args: event.tool_args as Record<string, unknown>,
+            created_at: new Date().toISOString(),
+          })
         } else if (event.type === 'done') {
           conversationId.value = event.conversation_id
           const assistantMsg: Message = {

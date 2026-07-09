@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.agent.graph import RAGAgent
+from app.permission import PermissionManager, set_manager as set_perm_manager
 from app.plugins.loader import PluginLoader
 from app.rag.bm25_index import BM25Index
 from app.rag.chapter_store import ChapterStore
@@ -78,6 +79,9 @@ def _do_init(app):
 
     plugin_loader = PluginLoader(settings.plugins_dir)
     plugin_loader.load_all()
+
+    perm_mgr = PermissionManager(workspace=str(Path(__file__).resolve().parents[1]))
+    set_perm_manager(perm_mgr)
 
     agent = RAGAgent(retriever, skill_loader, plugin_loader, reranker=reranker)
 

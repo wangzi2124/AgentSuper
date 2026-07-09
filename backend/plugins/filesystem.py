@@ -36,7 +36,18 @@ def _resolve(path_str: str) -> Path:
 
 def _ensure_safe(path: Path) -> None:
     resolved = path.resolve()
-    if not str(resolved).startswith(str(WORKSPACE)):
+    if str(resolved).startswith(str(WORKSPACE)):
+        return
+    try:
+        from app.permission import get_manager, NeedsPermission
+        mgr = get_manager()
+        decision = mgr.check(str(resolved), "write")
+        if decision == "allow":
+            return
+        if decision == "deny":
+            raise PermissionError(f"Access denied: '{path}' is outside workspace")
+        raise NeedsPermission(str(resolved), "write")
+    except ImportError:
         raise PermissionError(f"Access denied: '{path}' is outside workspace")
 
 
