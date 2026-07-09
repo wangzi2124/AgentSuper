@@ -1,3 +1,4 @@
+import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -83,6 +84,34 @@ def create_skill_tools(skill_loader: SkillLoader) -> List[ToolDef]:
     return tools
 
 
+def create_filesystem_tools() -> List[ToolDef]:
+    from app.tools.filesystem import (
+        tool_ls, tool_read_file, tool_write_file, tool_edit_file,
+        tool_glob, tool_grep, tool_execute,
+    )
+    tools: List[ToolDef] = []
+    for func in [tool_ls, tool_read_file, tool_write_file, tool_edit_file, tool_glob, tool_grep, tool_execute]:
+        name = func.__name__
+        doc = inspect.getdoc(func) or ""
+        sig = inspect.signature(func)
+        properties: Dict[str, dict] = {}
+        required: List[str] = []
+        for p in sig.parameters.values():
+            if p.name == "self":
+                continue
+            json_type = "string"
+            properties[p.name] = {"type": json_type, "description": f"Parameter {p.name}"}
+            if p.default is inspect.Parameter.empty:
+                required.append(p.name)
+        tools.append(ToolDef(
+            name=name,
+            description=doc,
+            parameters={"type": "object", "properties": properties, "required": required},
+            fn=func,
+        ))
+    return tools
+
+
 def create_plugin_tools(plugin_loader: PluginLoader) -> List[ToolDef]:
     tools: List[ToolDef] = []
     for plugin in plugin_loader.get_enabled_plugins():
@@ -113,7 +142,7 @@ def create_plugin_tools(plugin_loader: PluginLoader) -> List[ToolDef]:
 
 
 def build_system_prompt_no_kb(
-    skill_loader: SkillLoader, plugin_loader: PluginLoader
+    skill_loader: SkillLoader, plugin_loader: PluginLoader, include_filesystem: bool = True
 ) -> str:
     enabled_skills = skill_loader.get_enabled_skills()
     enabled_plugins = plugin_loader.get_enabled_plugins()
@@ -123,6 +152,19 @@ def build_system_prompt_no_kb(
     ]
 
     tool_parts = []
+
+    if include_filesystem:
+        tool_parts.append(
+            "Built-in filesystem tools (for reading/writing/searching local files):\n"
+            "   - tool_ls(path) - List directory contents\n"
+            "   - tool_read_file(path, offset, limit) - Read file content\n"
+            "   - tool_write_file(path, content) - Create a new file\n"
+            "   - tool_edit_file(path, old_string, new_string, replace_all) - Edit a file\n"
+            "   - tool_glob(pattern) - Find files matching a pattern\n"
+            "   - tool_grep(pattern, include, context, count_only, files_only) - Search file contents\n"
+            "   - tool_execute(command, timeout, work_dir) - Run a shell command (build/install only)"
+        )
+
     if enabled_skills:
         skills_desc = "\n".join(
             f"   - load_skill_{s.name.replace('-', '_').replace(' ', '_')}() - Load '{s.name}' skill: {s.description}"
@@ -134,6 +176,8 @@ def build_system_prompt_no_kb(
         lines = []
         for p in enabled_plugins:
             for func_name in p.functions:
+                if func_name.startswith("tool_") and p.name == "filesystem":
+                    continue
                 lines.append(f"   - plugin_{p.name}_{func_name}")
         plugins_desc = "\n".join(lines)
         tool_parts.append(f"Plugin tools:\n{plugins_desc}")
@@ -149,18 +193,17 @@ def build_system_prompt_no_kb(
         "- Answer based on your own knowledge.",
         "- If you don't know something, say so honestly.",
         "- Only call tools that are directly relevant to the user's request. Do NOT call unrelated tools.",
-        "- Filesystem plugin (plugin_filesystem_tool_*) is ONLY for reading/writing/searching local files. Do NOT access filesystem plugin for anything non-file-related.",
         "- For document generation, use the docx-generator plugin (plugin_docx-generator_tool_create_docx) for .docx files, or save content using tool_write_file for other formats.",
         "- For keyword web search (查找信息), use plugin_internet-search_tool_internet_search.",
         "- For fetching content from a specific URL (查看某个网站的内容), use plugin_internet-search_tool_extract_urls.",
-        "- CRITICAL: The filesystem plugin's tool_execute is ONLY for building/testing projects (npm install, npm run build, etc.). NEVER use tool_execute for curl, wget, ping, or any network/web operations.",
+        "- CRITICAL: tool_execute is ONLY for building/testing projects (npm install, npm run build, etc.). NEVER use tool_execute for curl, wget, ping, or any network/web operations.",
         "- For knowledge base export, use kb-export tools.",
         "- If the user's request doesn't match any tool's purpose, answer directly without calling tools.",
         "",
         "IMPORTANT - Skill loading before code/design tasks:",
         "  When the user asks to create code, web pages, apps, or designs:",
         "  1. FIRST, call the relevant load_skill_*() tool to get specialized instructions and best practices.",
-        "  2. Then follow the skill's guidance to write files using filesystem tools.",
+        "  2. Then follow the skill's guidance to write files using tool_write_file.",
         "  3. Only run tool_execute for build/install if the skill instructs you to.",
         "",
         "IMPORTANT - DOCX / PDF / Excel / PPTX document creation:",

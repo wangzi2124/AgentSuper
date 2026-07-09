@@ -1,8 +1,3 @@
-"""
-Filesystem Operations Plugin
-
-Provides file system tools: ls, read_file, write_file, edit_file, glob, grep, execute.
-"""
 import base64
 import json
 import os
@@ -11,45 +6,18 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-PLUGIN_NAME = "filesystem"
-PLUGIN_VERSION = "0.1.0"
-PLUGIN_DESCRIPTION = "File system operations: list, read, write, edit, glob, grep, and execute commands"
+from app.permission import get_manager as get_perm_mgr, NeedsPermission
 
-WORKSPACE = Path(__file__).resolve().parents[1]
+WORKSPACE = Path(__file__).resolve().parents[2]
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
-_TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml", ".log", ".py", ".js", ".ts", ".vue", ".html", ".css", ".scss", ".less", ".sh", ".bat", ".ps1", ".env", ".env.example", ".ini", ".cfg", ".conf", ".toml", ".yml", ".yaml", ".sql", ".sqlite"}
+_TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml", ".log", ".py", ".js", ".ts", ".vue", ".html", ".css", ".scss", ".less", ".sh", ".bat", ".ps1", ".env", ".env.example", ".ini", ".cfg", ".conf", ".toml", ".sql", ".sqlite"}
 _PDF_EXTS = {".pdf"}
 _AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".flac", ".m4a"}
 _VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 _DOC_EXTS = {".docx", ".xlsx", ".pptx"}
-
 _MULTIMODAL_EXTS = _IMAGE_EXTS | _PDF_EXTS | _AUDIO_EXTS | _VIDEO_EXTS
-
-
-def _resolve(path_str: str) -> Path:
-    p = Path(path_str)
-    if not p.is_absolute():
-        p = WORKSPACE / p
-    return p.resolve()
-
-
-def _ensure_safe(path: Path) -> None:
-    resolved = path.resolve()
-    if str(resolved).startswith(str(WORKSPACE)):
-        return
-    try:
-        from app.permission import get_manager, NeedsPermission
-        mgr = get_manager()
-        decision = mgr.check(str(resolved), "write")
-        if decision == "allow":
-            return
-        if decision == "deny":
-            raise PermissionError(f"Access denied: '{path}' is outside workspace")
-        raise NeedsPermission(str(resolved), "write")
-    except ImportError:
-        raise PermissionError(f"Access denied: '{path}' is outside workspace")
-
 
 _MIME_MAP = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -64,14 +32,27 @@ _MIME_MAP = {
 }
 
 
-# ─── tools ────────────────────────────────────────────────────────────
+def _resolve(path_str: str) -> Path:
+    p = Path(path_str)
+    if not p.is_absolute():
+        p = WORKSPACE / p
+    return p.resolve()
+
+
+def _ensure_safe(path: Path) -> None:
+    resolved = path.resolve()
+    if str(resolved).startswith(str(WORKSPACE)):
+        return
+    mgr = get_perm_mgr()
+    decision = mgr.check(str(resolved), "write")
+    if decision == "allow":
+        return
+    if decision == "deny":
+        raise PermissionError(f"Access denied: '{path}' is outside workspace")
+    raise NeedsPermission(str(resolved), "write")
+
 
 def tool_ls(path: str = ".") -> str:
-    """List files and directories in the given path with size and modification time.
-
-    Parameters:
-    - path: directory path (relative to workspace or absolute)
-    """
     target = _resolve(path)
     _ensure_safe(target)
     if not target.is_dir():
@@ -90,21 +71,11 @@ def tool_ls(path: str = ".") -> str:
 
 
 def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
-    """Read file content. For text files, reads by line with offset/limit.
-    For images/audio/video/pdf, returns a base64 data URI for multimodal LLMs.
-
-    Parameters:
-    - path: file path (relative to workspace or absolute)
-    - offset: starting line number (1-based, for text files only)
-    - limit: max lines to return (0 = all, for text files only)
-    """
     target = _resolve(path)
     _ensure_safe(target)
     if not target.is_file():
         return f"Error: file not found: {path}"
-
     ext = target.suffix.lower()
-
     if ext in _TEXT_EXTS:
         try:
             lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
@@ -121,7 +92,6 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
         result = "".join(selected)
         info = f"--- {path} (lines {offset}-{min(offset + (limit or total) - 1, total)} of {total}) ---\n"
         return info + result
-
     try:
         raw = target.read_bytes()
         b64 = base64.b64encode(raw).decode("utf-8")
@@ -132,13 +102,6 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
 
 
 def tool_write_file(path: str, content: str) -> str:
-    """Create a new file with the given content (text only).
-    Will NOT overwrite an existing file.
-
-    Parameters:
-    - path: file path (relative to workspace or absolute)
-    - content: text content to write
-    """
     target = _resolve(path)
     _ensure_safe(target)
     if target.exists():
@@ -152,15 +115,6 @@ def tool_write_file(path: str, content: str) -> str:
 
 
 def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
-    """Perform exact string replacement in a text file.
-    Supports single or global (all occurrences) replacement.
-
-    Parameters:
-    - path: file path (relative to workspace or absolute)
-    - old_string: exact text to find
-    - new_string: replacement text
-    - replace_all: if true, replace all occurrences; if false, replace first only
-    """
     target = _resolve(path)
     _ensure_safe(target)
     if not target.is_file():
@@ -169,7 +123,6 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
         text = target.read_text(encoding="utf-8")
     except Exception as e:
         return f"Error reading file: {e}"
-
     if replace_all:
         count = text.count(old_string)
         if count == 0:
@@ -180,7 +133,6 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
             return f"Error: old_string not found in {path}"
         count = 1
         text = text.replace(old_string, new_string, 1)
-
     try:
         target.write_text(text, encoding="utf-8")
         return f"Replaced {count} occurrence(s) in {path}"
@@ -189,11 +141,6 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
 
 
 def tool_glob(pattern: str) -> str:
-    """Find files matching a glob pattern (e.g. **/*.py, src/**/*.ts).
-
-    Parameters:
-    - pattern: glob pattern relative to workspace
-    """
     matches = sorted(WORKSPACE.glob(pattern))
     if not matches:
         return f"No matches for: {pattern}"
@@ -202,21 +149,11 @@ def tool_glob(pattern: str) -> str:
 
 
 def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: bool = False, files_only: bool = False) -> str:
-    """Search file contents using a regular expression.
-
-    Parameters:
-    - pattern: regex pattern to search for
-    - include: file pattern to filter (e.g. *.py, *.{ts,tsx})
-    - context: number of context lines before/after match (0 = just match line)
-    - count_only: if true, return only match counts per file
-    - files_only: if true, return only file paths with matches
-    """
-    import re as _re
-    use_re = _re.compile(pattern, _re.MULTILINE | _re.DOTALL)
+    import re
+    use_re = re.compile(pattern, re.MULTILINE | re.DOTALL)
     file_pattern = include if include else "**/*"
     matched_any = False
     output: list[str] = []
-
     for f in sorted(WORKSPACE.glob(file_pattern)):
         if not f.is_file():
             continue
@@ -232,7 +169,6 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
         for m in use_re.finditer(text):
             line_start = text[:m.start()].count("\n")
             found_positions.append(line_start)
-
         if not found_positions:
             continue
         matched_any = True
@@ -260,21 +196,21 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
     return "\n".join(output).rstrip()
 
 
-def tool_execute(command: str, timeout: int = 30) -> str:
-    """Execute a shell command on the local filesystem (NOT for fetching web pages or making network requests).
-    Use ONLY for local operations: build, install, run scripts, etc.
-    Do NOT use curl/wget or any network commands — use internet-search tool instead for web queries.
-
-    !! WARNING: this executes arbitrary commands on the host system !!
-
-    Parameters:
-    - command: shell command to run
-    - timeout: max execution time in seconds (default 30, max 120)
-    """
-    if timeout > 120:
-        timeout = 120
+def tool_execute(command: str, timeout: int = 120, work_dir: str = ".") -> str:
+    if timeout > 300:
+        timeout = 300
     if timeout < 1:
         timeout = 5
+    resolved_cwd = _resolve(work_dir)
+    try:
+        resolved_cwd.relative_to(WORKSPACE)
+    except ValueError:
+        mgr = get_perm_mgr()
+        decision = mgr.check(str(resolved_cwd), "execute")
+        if decision == "ask":
+            raise NeedsPermission(str(resolved_cwd), "execute", "tool_execute", {"command": command, "timeout": timeout, "work_dir": work_dir})
+        if decision == "deny":
+            return f"Error: access denied to directory '{work_dir}'"
     try:
         result = subprocess.run(
             command,
@@ -282,7 +218,7 @@ def tool_execute(command: str, timeout: int = 30) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=str(WORKSPACE),
+            cwd=str(resolved_cwd),
         )
         parts = []
         if result.stdout:

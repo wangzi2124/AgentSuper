@@ -16,6 +16,7 @@ from app.plugins.loader import PluginLoader
 from app.config import settings
 from app.agent.tools import (
     ToolDef,
+    create_filesystem_tools,
     create_skill_tools,
     create_plugin_tools,
     build_system_prompt_no_kb,
@@ -54,16 +55,18 @@ class RAGAgent:
         self.api_key = settings.llm_api_key
         self.api_base = settings.llm_api_base
 
-        self.system_prompt = build_system_prompt_no_kb(
-            skill_loader or SkillLoader(""),
-            plugin_loader or PluginLoader(""),
-        )
-
         self.tools: List[ToolDef] = []
+        self.tools.extend(create_filesystem_tools())
         if skill_loader:
             self.tools.extend(create_skill_tools(skill_loader))
         if plugin_loader:
             self.tools.extend(create_plugin_tools(plugin_loader))
+
+        self.system_prompt = build_system_prompt_no_kb(
+            skill_loader or SkillLoader(""),
+            plugin_loader or PluginLoader(""),
+            include_filesystem=True,
+        )
 
         self.graph = self._build_graph()
 
@@ -125,7 +128,9 @@ class RAGAgent:
             "\n- If a source has 'chapter_title' in its metadata, use that exact title when referring to the chapter."
             "\n- If a source has 'chapter_summary', it is a chapter overview — use it to describe the chapter's content."
             "\n- If you don't have enough information, say so."
-            "\n\nYou also have access to skill tools (load_skill_*) and plugin tools. If the user asks to create/edit/manipulate documents (Word, PDF, PPT, Excel), generate visual designs, build web pages, or use other specialized capabilities, call the relevant skill tool to get instructions first."
+            "\n\nYou have access to built-in filesystem tools (tool_ls, tool_read_file, tool_write_file, tool_edit_file, tool_glob, tool_grep, tool_execute) for reading/writing files and running shell commands."
+            "\nYou also have access to skill tools (load_skill_*) and plugin tools."
+            "\nIf the user asks to create/edit/manipulate documents (Word, PDF, PPT, Excel), generate visual designs, build web pages, or use other specialized capabilities, call the relevant skill or plugin tool to get instructions first."
         )
 
     def _build_tool_defs(self) -> Optional[List[dict]]:
@@ -362,15 +367,17 @@ class RAGAgent:
         return builder.compile()
 
     def refresh_tools(self):
-        self.system_prompt = build_system_prompt_no_kb(
-            self.skill_loader or SkillLoader(""),
-            self.plugin_loader or PluginLoader(""),
-        )
         self.tools = []
+        self.tools.extend(create_filesystem_tools())
         if self.skill_loader:
             self.tools.extend(create_skill_tools(self.skill_loader))
         if self.plugin_loader:
             self.tools.extend(create_plugin_tools(self.plugin_loader))
+        self.system_prompt = build_system_prompt_no_kb(
+            self.skill_loader or SkillLoader(""),
+            self.plugin_loader or PluginLoader(""),
+            include_filesystem=True,
+        )
         self.graph = self._build_graph()
 
     async def invoke(self, question: str, model: Optional[str] = None, history: Optional[list[dict]] = None, use_vector_db: bool = True, files: Optional[list[dict]] = None, event_queue: Optional[asyncio.Queue] = None) -> dict:
