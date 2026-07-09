@@ -147,7 +147,15 @@ class RAGAgent:
                 try:
                     eq = state.get("_event_queue") if state else None
                     if eq and name == "tool_execute":
-                        return await self._execute_tool_streaming(args, eq)
+                        try:
+                            return await self._execute_tool_streaming(args, eq)
+                        except NeedsPermission:
+                            raise
+                        except Exception as e:
+                            logger.warning("tool_execute streaming failed, falling back to sync: %s", e)
+                            from app.tools.filesystem import tool_execute as _sync_execute
+                            result = await asyncio.to_thread(_sync_execute, **args)
+                            return str(result)
                     result = await asyncio.to_thread(t.fn, **args)
                     return str(result)
                 except NeedsPermission as e:
@@ -168,7 +176,12 @@ class RAGAgent:
                     if decision == "allowed":
                         mgr.add_temp_approval(e.path)
                         if eq and name == "tool_execute":
-                            return await self._execute_tool_streaming(args, eq)
+                            try:
+                                return await self._execute_tool_streaming(args, eq)
+                            except NeedsPermission:
+                                pass
+                            except Exception as e2:
+                                logger.warning("tool_execute streaming failed on retry, falling back: %s", e2)
                         result = await asyncio.to_thread(t.fn, **args)
                         return str(result)
                     return f"Permission denied: {e.path}"
@@ -198,9 +211,6 @@ class RAGAgent:
             if decision == "ask":
                 raise _NeedsPermission(str(resolved_cwd), "execute", "tool_execute", args)
 
-        if not resolved_cwd.is_dir():
-            return f"Error: directory not found: {work_dir}"
-
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         start_time = tmod.time()
@@ -214,10 +224,27 @@ class RAGAgent:
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=str(resolved_cwd),
+                cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
             )
         except Exception as e:
-            return f"Error starting command: command={command}, cwd={resolved_cwd}, error={e}"
+            await _push({
+                "type": "tool_output",
+                "tool_name": "tool_execute",
+                "source": "stderr",
+                "line": f"[streaming error] create_subprocess_shell failed: {e}",
+                "elapsed_seconds": 0,
+            })
+            await _push({
+                "type": "tool_output",
+                "tool_name": "tool_execute",
+                "source": "stderr",
+                "line": f"[fallback] retrying via sync subprocess.run...",
+                "elapsed_seconds": 0,
+            })
+            # Fallback to sync subprocess.run
+            from app.tools.filesystem import tool_execute as _sync_execute
+            result = await asyncio.to_thread(_sync_execute, **args)
+            return str(result)
 
         async def _read_stream(stream, storage: list[str], source: str):
             nonlocal last_heartbeat
@@ -249,17 +276,26 @@ class RAGAgent:
                     "elapsed_seconds": int(tmod.time() - start_time),
                 })
 
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(_read_stream(process.stdout, stdout_lines, "stdout"))
-            tg.create_task(_read_stream(process.stderr, stderr_lines, "stderr"))
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(_read_stream(process.stdout, stdout_lines, "stdout"))
+                tg.create_task(_read_stream(process.stderr, stderr_lines, "stderr"))
+        except Exception as e:
+            logger.warning("Streaming read error: %s", e)
 
         timed_out = False
         elapsed = tmod.time() - start_time
         if elapsed >= timeout:
-            process.kill()
+            try:
+                process.kill()
+            except Exception:
+                pass
             timed_out = True
 
-        await process.wait()
+        try:
+            await process.wait()
+        except Exception as e:
+            logger.warning("process.wait error: %s", e)
 
         if timed_out:
             return f"Error: command timed out after {timeout}s"
