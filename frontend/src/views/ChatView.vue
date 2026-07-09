@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { useVirtualizer } from '@tanstack/vue-virtual'
 import { useChatStore, SUPPORTED_MODELS } from '../stores/chat'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
@@ -13,25 +12,7 @@ const isNearBottom = ref(true)
 
 const messages = computed(() => chat.messages)
 
-const virtualizer = useVirtualizer({
-  count: messages.value.length,
-  getScrollElement: () => parentRef.value ?? null,
-  estimateSize: (index: number) => {
-    const msg = messages.value[index]
-    if (!msg) return 80
-    const base = msg.role === 'user' ? 70 : 90
-    const contentLines = msg.content ? Math.ceil(msg.content.length / 60) : 0
-    const contentH = Math.min(contentLines * 22, 400)
-    const sourcesH = msg.sources?.length ? 50 + msg.sources.length * 24 : 0
-    const stepsH = msg.steps?.length ? 36 : 0
-    const filesH = msg.files?.length ? 30 : 0
-    return base + contentH + sourcesH + stepsH + filesH + 24
-  },
-  overscan: 5,
-})
-
-watch(() => messages.value.length, async (len) => {
-  virtualizer.value.options.count = len
+watch(() => messages.value.length, async () => {
   await nextTick()
   if (isNearBottom.value && parentRef.value) {
     parentRef.value.scrollTo({ top: parentRef.value.scrollHeight, behavior: 'smooth' })
@@ -54,7 +35,6 @@ function handleCancel() {
 }
 
 function handleCopy(_text: string) {
-  // Could show a toast notification here if needed
 }
 
 function handleUndo(index: number) {
@@ -100,25 +80,13 @@ function handleUndo(index: number) {
       </div>
 
       <div v-else ref="parentRef" class="message-list" @scroll="onScroll">
-        <div :style="{ height: `${virtualizer.getTotalSize()}px`, position: 'relative', width: '100%' }">
-          <div v-for="vitem in virtualizer.getVirtualItems()" :key="vitem.index"
-            :data-index="vitem.index"
-            :style="{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              width: '100%',
-              height: `${vitem.size}px`,
-              transform: `translateY(${vitem.start}px)`,
-            }"
-          >
-            <ChatMessage
-              :message="messages[vitem.index]"
-              :index="vitem.index"
-              @copy="handleCopy"
-              @undo="handleUndo"
-            />
-          </div>
+        <div v-for="(msg, idx) in messages" :key="msg.id" class="message-wrapper">
+          <ChatMessage
+            :message="msg"
+            :index="idx"
+            @copy="handleCopy"
+            @undo="handleUndo"
+          />
         </div>
         <StepTaskList
           v-if="chat.loading"
