@@ -14,6 +14,7 @@ export interface AgentStep {
   tool_name?: string
   tool_args?: Record<string, unknown>
   tool_result?: string
+  tool_output?: string
 }
 
 export interface ChatResponse {
@@ -24,7 +25,7 @@ export interface ChatResponse {
 }
 
 export interface SSEEvent {
-  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'permission_request'
+  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'permission_request' | 'tool_output' | 'tool_heartbeat'
   step_id?: string
   name?: string
   status?: string
@@ -41,6 +42,9 @@ export interface SSEEvent {
   request_id?: string
   path?: string
   operation?: string
+  source?: string
+  line?: string
+  elapsed_seconds?: number
 }
 
 export interface FileContent {

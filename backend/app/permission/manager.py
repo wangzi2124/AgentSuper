@@ -112,6 +112,8 @@ class PermissionManager:
         p = Path(path_str).resolve()
         if str(p) in self._temp_approvals:
             return "allow"
+        if str(p.parent) in self._temp_approvals:
+            return "allow"
         for allowed in self._whitelist:
             try:
                 Path(p).relative_to(Path(allowed).resolve())
@@ -121,7 +123,9 @@ class PermissionManager:
         return "ask"
 
     def add_temp_approval(self, path_str: str):
-        self._temp_approvals.add(str(Path(path_str).resolve()))
+        p = Path(path_str).resolve()
+        self._temp_approvals.add(str(p))
+        self._temp_approvals.add(str(p.parent))
 
     def create_request(self, path: str, operation: str, tool_name: str = "", tool_args: Optional[dict] = None, session_id: str = "") -> PermissionRequest:
         req = PermissionRequest(path, operation, tool_name, tool_args or {}, session_id)

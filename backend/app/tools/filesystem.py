@@ -196,9 +196,9 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
     return "\n".join(output).rstrip()
 
 
-def tool_execute(command: str, timeout: int = 120, work_dir: str = ".") -> str:
-    if timeout > 300:
-        timeout = 300
+def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
+    if timeout > 600:
+        timeout = 600
     if timeout < 1:
         timeout = 5
     resolved_cwd = _resolve(work_dir)

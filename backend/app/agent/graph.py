@@ -2,9 +2,12 @@ import asyncio
 import json
 import logging
 import time as tmod
+from pathlib import Path
 from typing import Any, List, Optional, TypedDict, Annotated, Sequence
 
 logger = logging.getLogger(__name__)
+
+WORKSPACE = Path(__file__).resolve().parents[2]
 
 import litellm
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
@@ -142,6 +145,9 @@ class RAGAgent:
         for t in self.tools:
             if t.name == name:
                 try:
+                    eq = state.get("_event_queue") if state else None
+                    if eq and name == "tool_execute":
+                        return await self._execute_tool_streaming(args, eq)
                     result = await asyncio.to_thread(t.fn, **args)
                     return str(result)
                 except NeedsPermission as e:
@@ -161,12 +167,99 @@ class RAGAgent:
                     decision = await mgr.await_decision(req.id)
                     if decision == "allowed":
                         mgr.add_temp_approval(e.path)
+                        if eq and name == "tool_execute":
+                            return await self._execute_tool_streaming(args, eq)
                         result = await asyncio.to_thread(t.fn, **args)
                         return str(result)
                     return f"Permission denied: {e.path}"
                 except Exception as e:
                     return f"Error executing {name}: {e}"
         return f"Tool '{name}' not found"
+
+    async def _execute_tool_streaming(self, args: dict, event_queue: asyncio.Queue) -> str:
+        command = args.get("command", "")
+        timeout = min(args.get("timeout", 300), 600)
+        work_dir = args.get("work_dir", ".")
+
+        resolved_cwd = Path(work_dir)
+        if not resolved_cwd.is_absolute():
+            resolved_cwd = Path(WORKSPACE) / resolved_cwd
+        resolved_cwd = resolved_cwd.resolve()
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        start_time = tmod.time()
+        last_heartbeat = 0.0
+
+        async def _push(event: dict):
+            event_queue.put_nowait(event)
+
+        try:
+            process = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(resolved_cwd),
+            )
+        except Exception as e:
+            return f"Error starting command: {e}"
+
+        async def _read_stream(stream, storage: list[str], source: str):
+            nonlocal last_heartbeat
+            while True:
+                now = tmod.time()
+                if now - last_heartbeat >= 5:
+                    last_heartbeat = now
+                    await _push({
+                        "type": "tool_heartbeat",
+                        "tool_name": "tool_execute",
+                        "elapsed_seconds": int(now - start_time),
+                        "command": command[:200],
+                    })
+                try:
+                    line = await asyncio.wait_for(stream.readline(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    if process.returncode is not None:
+                        break
+                    continue
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace").rstrip()
+                storage.append(decoded)
+                await _push({
+                    "type": "tool_output",
+                    "tool_name": "tool_execute",
+                    "source": source,
+                    "line": decoded,
+                    "elapsed_seconds": int(tmod.time() - start_time),
+                })
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(_read_stream(process.stdout, stdout_lines, "stdout"))
+            tg.create_task(_read_stream(process.stderr, stderr_lines, "stderr"))
+
+        timed_out = False
+        elapsed = tmod.time() - start_time
+        if elapsed >= timeout:
+            process.kill()
+            timed_out = True
+
+        await process.wait()
+
+        if timed_out:
+            return f"Error: command timed out after {timeout}s"
+
+        parts = []
+        if stdout_lines:
+            parts.append("\n".join(stdout_lines))
+        if stderr_lines:
+            parts.append(f"[stderr]\n{'\n'.join(stderr_lines)}")
+        output = "\n".join(parts)
+        rc = process.returncode or 0
+        header = f"Exit code: {rc}"
+        if output:
+            return f"{header}\n{output}"
+        return header
 
     async def _llm_call(self, model: str, messages: list, tool_defs: list) -> litellm.ModelResponse:
         start = tmod.time()

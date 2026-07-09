@@ -78,6 +78,24 @@ export const useChatStore = defineStore('chat', () => {
           } else {
             currentSteps.value.push(step)
           }
+        } else if (event.type === 'tool_output') {
+          const idx = currentSteps.value.findIndex(
+            s => s.tool_name === 'tool_execute' && s.status === 'running'
+          )
+          if (idx >= 0) {
+            const step = currentSteps.value[idx]
+            const prefix = event.source === 'stderr' ? '[stderr] ' : ''
+            const line = prefix + (event.line || '')
+            step.tool_output = (step.tool_output || '') + line + '\n'
+          }
+        } else if (event.type === 'tool_heartbeat') {
+          const idx = currentSteps.value.findIndex(
+            s => s.tool_name === 'tool_execute' && s.status === 'running'
+          )
+          if (idx >= 0) {
+            const step = currentSteps.value[idx]
+            step.detail = `运行中 (${event.elapsed_seconds}s)`
+          }
         } else if (event.type === 'permission_request') {
           const permStore = usePermissionStore()
           permStore.handleIncoming({

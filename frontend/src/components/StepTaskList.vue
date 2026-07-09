@@ -66,6 +66,9 @@ function formatDuration(ms?: number): string {
         </div>
         <span v-if="s.duration_ms != null" class="task-duration">{{ formatDuration(s.duration_ms) }}</span>
         <span v-else-if="isRunning && s.status === 'running'" class="task-duration spinning">...</span>
+        <div v-if="s.tool_output" class="task-output" @click.stop>
+          <pre>{{ s.tool_output }}</pre>
+        </div>
         <div v-if="s.tool_result && expandedResults[s.step_id]" class="task-result" @click.stop>
           <pre>{{ s.tool_result }}</pre>
         </div>
@@ -201,6 +204,25 @@ function formatDuration(ms?: number): string {
 }
 .task-view-result:hover {
   opacity: 0.8;
+}
+.task-output {
+  margin: 4px 0 0 24px;
+  padding: 8px 10px;
+  background: #0d1117;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  width: calc(100% - 24px);
+}
+.task-output pre {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #c9d1d9;
+  font-family: monospace;
 }
 .task-result {
   margin: 4px 0 0 24px;
