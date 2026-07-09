@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 from pathlib import Path
 
 from app.config import settings
@@ -17,6 +18,8 @@ from app.skills.loader import SkillLoader
 from app.storage.file_store import FileStore
 
 logger = logging.getLogger(__name__)
+
+_init_lock = threading.Lock()
 
 
 def _load_env_to_os():
@@ -47,6 +50,14 @@ def ensure_runtime_state(app) -> object:
     if hasattr(app.state, "vector_store") and hasattr(app.state, "file_store"):
         return app.state
 
+    with _init_lock:
+        if hasattr(app.state, "vector_store") and hasattr(app.state, "file_store"):
+            return app.state
+        _do_init(app)
+    return app.state
+
+
+def _do_init(app):
     vs = VectorStore.load(settings.vector_store_path)
     emb = LocalEmbeddings(settings.embedding_model)
     bm25 = _build_bm25_index(vs)

@@ -18,7 +18,7 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    ensure_runtime_state(app)
+    await asyncio.to_thread(ensure_runtime_state, app)
     try:
         yield
     except asyncio.CancelledError:
@@ -61,8 +61,9 @@ async def root():
 
 @app.get("/health")
 async def health():
-    state = ensure_runtime_state(app)
-    return {"status": "ok", "vector_store_size": state.vector_store.count}
+    if not hasattr(app.state, "vector_store"):
+        return {"status": "initializing"}
+    return {"status": "ok", "vector_store_size": app.state.vector_store.count}
 
 
 @app.get("/api/monitor/stats")

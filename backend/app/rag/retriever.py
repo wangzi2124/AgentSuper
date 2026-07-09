@@ -173,17 +173,19 @@ class Retriever:
         return results
 
     def _enrich_with_parent(self, results: List[Tuple[dict, float]]) -> List[Tuple[dict, float]]:
-        """For each result that has chapter_title, look up parent chapter info."""
-        enriched = []
-        for doc, score in results:
-            meta = doc["metadata"]
-            chapter_title = meta.get("chapter_title")
-            if chapter_title:
-                chapters = self.chapter_store.find_by_keyword(chapter_title)
-                if chapters:
-                    meta["chapter_summary"] = chapters[0]["summary"]
-            enriched.append((doc, score))
-        return enriched
+        chapter_titles = list({
+            doc["metadata"]["chapter_title"]
+            for doc, _ in results
+            if doc["metadata"].get("chapter_title")
+        })
+        if chapter_titles:
+            chapters = self.chapter_store.find_by_keywords(chapter_titles)
+            lookup = {ch["chapter_title"]: ch for ch in chapters}
+            for doc, _ in results:
+                ct = doc["metadata"].get("chapter_title")
+                if ct and ct in lookup:
+                    doc["metadata"]["chapter_summary"] = lookup[ct]["summary"]
+        return results
 
     @property
     def is_empty(self) -> bool:

@@ -238,6 +238,8 @@ class RAGAgent:
                 ],
             })
 
+            tool_tasks = []
+            tool_metas = []
             for tc in msg.tool_calls:
                 tool_name = tc.function.name
                 try:
@@ -251,11 +253,18 @@ class RAGAgent:
                     })
                     continue
                 self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
-                result = await self._execute_tool(tool_name, args)
+                tool_tasks.append(self._execute_tool(tool_name, args))
+                tool_metas.append((tc.id, tool_name))
+
+            tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)
+
+            for (tc_id, tool_name), result in zip(tool_metas, tool_results):
+                if isinstance(result, Exception):
+                    result = f"Error executing {tool_name}: {result}"
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name})
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tc.id,
+                    "tool_call_id": tc_id,
                     "content": result,
                 })
 
@@ -282,13 +291,22 @@ class RAGAgent:
                     for tc in msg.tool_calls
                 ],
             })
+            tool_tasks = []
+            tool_metas = []
             for tc in msg.tool_calls:
                 try:
                     args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError:
                     args = {}
-                result = await self._execute_tool(tc.function.name, args)
-                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                tool_tasks.append(self._execute_tool(tc.function.name, args))
+                tool_metas.append((tc.id, tc.function.name))
+
+            tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)
+
+            for (tc_id, tool_name), result in zip(tool_metas, tool_results):
+                if isinstance(result, Exception):
+                    result = f"Error executing {tool_name}: {result}"
+                messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
         if not (msg.content or "").strip():

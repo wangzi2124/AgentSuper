@@ -69,6 +69,20 @@ class ChapterStore:
         cols = ["id", "document_id", "document_filename", "chapter_number", "chapter_title", "summary", "parent_chunk_id"]
         return [dict(zip(cols, r)) for r in rows]
 
+    def find_by_keywords(self, keywords: list[str]) -> list[dict]:
+        if not keywords:
+            return []
+        conn = self._get_conn()
+        conditions = " OR ".join(["chapter_title LIKE ?" for _ in keywords])
+        params = [f"%{k}%" for k in keywords]
+        cursor = conn.execute(
+            f"SELECT * FROM chapters WHERE ({conditions}) ORDER BY document_id, chapter_number",
+            params,
+        )
+        rows = cursor.fetchall()
+        cols = ["id", "document_id", "document_filename", "chapter_number", "chapter_title", "summary", "parent_chunk_id"]
+        return [dict(zip(cols, r)) for r in rows]
+
     def find_by_number(self, document_id: Optional[str], chapter_number: int) -> list[dict]:
         conn = self._get_conn()
         if document_id:
