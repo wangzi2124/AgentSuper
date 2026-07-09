@@ -20,13 +20,15 @@
 | **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如搜索、天气、生成文档），Agent 按需调用 |
 | **Vector DB 开关** | 用户可在聊天界面手动控制是否启用向量库检索，关闭后 Agent 仅凭自身知识回答 |
-| **生成文件管理** | Agent 创建的文档（.docx/.pdf/.xlsx）可在独立页面查看、搜索、下载和删除 |
+| **生成文件管理** | Agent 创建的文档（.docx/.pdf/.xlsx/.pptx）可在独立页面查看、搜索、下载和删除 |
 | **本地 Embedding** | 使用 sentence-transformers 本地运行，通过 ModelScope 下载模型 |
 | **检索重排序** | Cross-encoder 对检索结果重打分（top-3），显著提升回答精度 |
 | **上下文管理** | 滑动窗口截断历史（4000 tokens），防止 context 溢出 |
 | **对话持久化** | SQLite 存储对话历史，服务重启不丢失 |
 | **来源引用** | 回答时标注检索到的文档来源及相似度分数 |
 | **系统监控** | 请求级日志（方法/路径/状态/耗时）+ LLM 调用统计（模型/token/耗时/工具轮数），Web 页面可视化展示 |
+| **虚拟滚动** | 聊天消息列表使用 `@tanstack/vue-virtual`，只渲染可视区域节点，长对话 DOM 不臃肿 |
+| **权限系统** | AI Agent 写外部路径时前端弹窗审批，支持白名单持久化 |
 
 ---
 
@@ -492,9 +494,11 @@ Agent 创建的文档（通过 docx-generator、pdf-generator、excel-generator�
 | **docx-generator** | `tool_create_docx(title, sections)` — 创建 Word 文档 | *"帮我创建一个 Word 文档，内容是产品介绍"* · *"把这段内容导出为 .docx"* |
 | **pdf-generator** | `tool_create_pdf(title, sections)` — 创建 PDF 文档 | *"把这份报告导出为 PDF"* · *"帮我创建一个 PDF 文档"* |
 | **excel-generator** | `tool_create_excel(sheets)` — 创建 Excel 表格 | *"创建一个 Excel 表格，包含销售数据"* · *"导出数据为 .xlsx"* |
+| **pptx-generator** | `tool_create_pptx(title, slides)` — 创建 PPT 演示文稿 | *"帮我创建一个 PPT，主题是新能源"* · *"把这份大纲变成幻灯片"* |
 | **kb-export** | `tool_export_kb_to_docx(query, title)` — 知识库导出为 Word | *"把知识库中关于 XX 的内容导出为 Word"* |
 | **filesystem** | `tool_write_file/read_file/ls/grep/glob/edit_file/execute` — 文件操作套件 | Agent 自动用于创建项目、读写文件 |
 | **internet-search** | `tool_internet_search(query, max_results, topic)` — 搜索互联网 | *"今天有什么新闻？"* · *"搜索一下 Python 的最新动态"* |
+| | `tool_extract_urls(urls, format)` — 按 URL 提取页面内容 | *"打开这篇文章看看"* · *"查看某个网站的具体内容"* |
 | **weather** | `tool_get_weather(city, forecast_days)` — 查询天气 | *"今天北京天气怎么样？"* · *"伦敦未来三天的天气预报"* |
 
 在聊天框中直接输入需求，Agent 会自动判断需要调用哪些工具来完成你的请求。
@@ -529,3 +533,123 @@ backend/skills/
 ```
 
 两种格式可以混用，`SkillLoader` 在启动时自动检测并加载。目录型 skill 中的脚本/资源文件保持原位，LLM 通过 `load_skill_<name>()` 工具获取 `SKILL.md` 内容后按指令引用。
+
+---
+
+## 权限系统（Permission System）
+
+当 AI Agent 尝试写入工作区之外的路径时（如 `D:\`），系统会通过前端弹窗请求用户授权。
+
+### 路径分级
+
+| 级别 | 行为 | 示例 |
+|------|------|------|
+| **工作区内** | 静默允许 | `backend/` 下任意路径 |
+| **系统临时目录** | 静默允许 | `%TEMP%` |
+| **系统敏感目录** | 永远拒绝，不弹窗 | `C:\Windows\`, `/etc` |
+| **白名单路径** | 静默允许 | `permissions.json` 中记录的路径 |
+| **其他外盘路径** | 弹窗询问 | `D:\projects\` |
+
+### 交互流程
+
+```
+AI 调用 tool_write_file("D:\tetris\game.tsx")
+  │
+  ▼
+PermissionManager.check()
+  ├─ 工作区内 → 直接执行
+  ├─ 白名单中 → 直接执行
+  └─ 外部路径 → 抛出 NeedsPermission
+       │
+       ▼
+graph.py 捕获 → 创建 PermissionRequest
+  → SSE 推送 permission_request 事件
+  → 等待用户决策
+       │
+       ▼
+前端 PermissionDialog 弹窗 ───┬── [拒绝] → 返回 "Permission denied"
+                              ├── [允许本次] → 临时放行，重试工具
+                              └── [允许并记住] → 写入 permissions.json，重试
+       │
+       ▼
+工具执行成功 → LLM 继续生成回答
+```
+
+### 白名单持久化
+
+用户选择"允许并记住此路径"后，路径会写入 `backend/data/permissions.json`：
+
+```json
+{
+  "allowed_paths": [
+    "D:\\tetris"
+  ]
+}
+```
+
+重启服务后依然生效，无需再次审批。
+
+### 实现文件
+
+| 层 | 文件 | 职责 |
+|----|------|------|
+| 后端核心 | `backend/app/permission/manager.py` | 路径分类、请求管理、白名单持久化 |
+| 后端 API | `backend/app/api/permission.py` | `GET /api/permission/pending` + `POST /.../respond` |
+| 工具拦截 | `backend/plugins/filesystem.py` | `_ensure_safe` 集成权限检查 |
+| Agent 集成 | `backend/app/agent/graph.py` | `_execute_tool` 捕获 `NeedsPermission` 并等待决策 |
+| 前端组件 | `frontend/src/components/PermissionDialog.vue` | 审批弹窗 UI |
+| 前端 Store | `frontend/src/stores/permission.ts` | 轮询 + SSE 事件处理 |
+| 前端 API | `frontend/src/api/permission.ts` | 请求/响应 API 客户端 |
+
+---
+
+## 性能优化
+
+### 虚拟滚动（Virtual Scrolling）
+
+聊天消息列表使用 `@tanstack/vue-virtual` 实现虚拟滚动，只渲染可视区域 ±5 条的 DOM 节点：
+
+- 长对话（数百条消息）DOM 节点数保持恒定，不再线性增长
+- 消息高度动态估算（基于内容长度 + sources + 附件），首次渲染后自动校正
+- 自动检测是否靠近底部，新消息到达时仅在靠近底部时自动滚动
+
+实现路径：`frontend/src/views/ChatView.vue` — `useVirtualizer({ estimateSize, overscan: 5 })`
+
+### BM25 增量索引
+
+上传新文档时，BM25 索引从全量重建优化为增量更新：
+
+| 旧行为 | 新行为 |
+|--------|--------|
+| 每次上传扫描全部文档重新分词 | 缓存历史词频，只对新文档分词并合并 |
+| 复杂度 O(n) | 复杂度 O(新增) |
+
+实现路径：`backend/app/rag/bm25_index.py` — `add()` 方法
+
+### 向量库分页优化
+
+向量库查看页从 2 次 ChromaDB `get()` 调用减少为 1 次：
+
+- 旧：先 `count()` 查总数，再 `get()` 拉数据
+- 新：一次 `get()` 获取全部，Python 端切片分页
+
+实现路径：`backend/app/api/vectors.py` — 列表接口
+
+### 并发工具调用
+
+Agent 在每一轮工具调用循环中，所有工具通过 `asyncio.gather()` **并发执行**，而非串行：
+
+- 多工具调用场景下，总延迟从「各工具耗时之和」降为「最慢工具的耗时」
+- 文件读写、网络搜索等 IO 密集型工具可并行运行
+
+实现路径：`backend/app/agent/graph.py:259` — `asyncio.gather(*tool_tasks)`
+
+### 启动不阻塞
+
+后端启动从同步阻塞改为线程池异步加载，服务在初始化完成前即可响应健康检查：
+
+- `ensure_runtime_state()` 在 `asyncio.to_thread()` 中执行，不阻塞事件循环
+- 双检锁防止竞态
+- `/health` 在初始化完成前返回 `{"status": "initializing"}`，不 hang
+
+实现路径：`backend/app/runtime.py` — `ensure_runtime_state()` + `_do_init()`
