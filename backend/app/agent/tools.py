@@ -90,22 +90,45 @@ def create_filesystem_tools() -> List[ToolDef]:
         tool_glob, tool_grep, tool_execute,
     )
     tools: List[ToolDef] = []
+
+    # Manual parameter descriptions for each tool
+    _PARAM_DOCS: dict[str, dict[str, str]] = {
+        "tool_ls": {"path": "Directory path to list (default: current directory)"},
+        "tool_read_file": {"path": "File path to read", "offset": "Line number to start reading from (1-indexed, default: 1)", "limit": "Maximum number of lines to read (0 = all)"},
+        "tool_write_file": {"path": "File path to create", "content": "Text content to write into the file"},
+        "tool_edit_file": {"path": "File path to edit", "old_string": "Text to search for and replace", "new_string": "Replacement text", "replace_all": "If true, replace ALL occurrences; if false, replace only the first (default: false)"},
+        "tool_glob": {"pattern": "Glob pattern to match files (e.g. **/*.py)"},
+        "tool_grep": {"pattern": "Regex pattern to search for", "include": "File glob pattern to restrict search (e.g. *.py)", "context": "Number of context lines before/after each match", "count_only": "If true, return only match counts per file", "files_only": "If true, return only file paths"},
+        "tool_execute": {"command": "Shell command to run", "timeout": "Max execution time in seconds (default 300, max 600)", "work_dir": "Working directory for the command (default: current directory)"},
+    }
+
     for func in [tool_ls, tool_read_file, tool_write_file, tool_edit_file, tool_glob, tool_grep, tool_execute]:
         name = func.__name__
-        doc = inspect.getdoc(func) or ""
         sig = inspect.signature(func)
+        param_docs = _PARAM_DOCS.get(name, {})
         properties: Dict[str, dict] = {}
         required: List[str] = []
         for p in sig.parameters.values():
             if p.name == "self":
                 continue
             json_type = "string"
-            properties[p.name] = {"type": json_type, "description": f"Parameter {p.name}"}
+            desc = param_docs.get(p.name, f"Parameter {p.name}")
+            properties[p.name] = {"type": json_type, "description": desc}
             if p.default is inspect.Parameter.empty:
                 required.append(p.name)
+        # Use a concise description for the tool
+        _DESC = {
+            "tool_ls": "List files and directories",
+            "tool_read_file": "Read file content (text or base64 for images/pdf/audio/video)",
+            "tool_write_file": "Create a new file with text content (auto-creates parent directories)",
+            "tool_edit_file": "Edit a file by replacing text (single or all occurrences)",
+            "tool_glob": "Find files matching a glob pattern",
+            "tool_grep": "Search file contents using regex",
+            "tool_execute": "Run a shell command (build/install/test only, NOT for network/web operations)",
+        }
         tools.append(ToolDef(
             name=name,
-            description=doc,
+            description=_DESC.get(name, name),
             parameters={"type": "object", "properties": properties, "required": required},
             fn=func,
         ))
