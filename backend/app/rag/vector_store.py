@@ -70,26 +70,38 @@ class VectorStore:
     ) -> Tuple[List[dict], int]:
         where = {"document_id": document_id} if document_id else None
         where_document = {"$contains": query} if query else None
-        results = self.collection.get(
-            where=where,
-            where_document=where_document,
-            offset=offset,
-            limit=limit,
-            include=["documents", "metadatas"],
-        )
+
         if where or where_document:
-            total = len(self.collection.get(
-                where=where, where_document=where_document, include=[]
-            )["ids"])
+            all_results = self.collection.get(
+                where=where,
+                where_document=where_document,
+                include=["documents", "metadatas"],
+            )
+            total = len(all_results["ids"])
+            page_ids_set = set(all_results["ids"][offset:offset + limit])
+            chunks = []
+            for i, id_ in enumerate(all_results["ids"]):
+                if id_ not in page_ids_set:
+                    continue
+                chunks.append({
+                    "id": id_,
+                    "text": all_results["documents"][i] if all_results["documents"] else "",
+                    "metadata": all_results["metadatas"][i] if all_results["metadatas"] else "",
+                })
         else:
+            results = self.collection.get(
+                offset=offset,
+                limit=limit,
+                include=["documents", "metadatas"],
+            )
             total = self.collection.count()
-        chunks = []
-        for i in range(len(results["ids"])):
-            chunks.append({
-                "id": results["ids"][i],
-                "text": results["documents"][i] if results["documents"] else "",
-                "metadata": results["metadatas"][i] if results["metadatas"] else {},
-            })
+            chunks = []
+            for i in range(len(results["ids"])):
+                chunks.append({
+                    "id": results["ids"][i],
+                    "text": results["documents"][i] if results["documents"] else "",
+                    "metadata": results["metadatas"][i] if results["metadatas"] else {},
+                })
         return chunks, total
 
     @classmethod

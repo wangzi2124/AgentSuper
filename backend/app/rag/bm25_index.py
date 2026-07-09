@@ -20,18 +20,19 @@ class BM25Index:
         self.bm25: Optional[BM25Okapi] = None
         self.documents: List[str] = []
         self.metadata: List[dict] = []
+        self._tokenized: List[List[str]] = []
 
     def build(self, documents: List[str], metadata: List[dict]):
         self.documents = documents
         self.metadata = metadata
-        tokenized = [_tokenize(d) for d in documents]
-        self.bm25 = BM25Okapi(tokenized)
+        self._tokenized = [_tokenize(d) for d in documents]
+        self.bm25 = BM25Okapi(self._tokenized)
 
     def add(self, documents: List[str], metadata: List[dict]):
         self.documents.extend(documents)
         self.metadata.extend(metadata)
-        tokenized = [_tokenize(d) for d in self.documents]
-        self.bm25 = BM25Okapi(tokenized)
+        self._tokenized.extend(_tokenize(d) for d in documents)
+        self.bm25 = BM25Okapi(self._tokenized)
 
     def search(self, query: str, k: int = 5) -> List[Tuple[dict, float]]:
         if not self.bm25 or not self.documents:
