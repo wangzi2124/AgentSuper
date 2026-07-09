@@ -1,6 +1,9 @@
+import logging
 from pathlib import Path
 from typing import List, Optional
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 class Skill:
@@ -63,7 +66,8 @@ class SkillLoader:
                 path=str(path),
                 enabled=meta.get("enabled", True),
             )
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to load skill %s: %s", path.name, e)
             return None
 
     def get(self, name: str) -> Optional[Skill]:

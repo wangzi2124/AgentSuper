@@ -1,8 +1,11 @@
+import logging
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from typing import List, Optional
 
 from app.utils.model_download import download_model
+
+logger = logging.getLogger(__name__)
 
 
 class LocalEmbeddings:
@@ -49,8 +52,8 @@ class LocalEmbeddings:
             if local_model:
                 try:
                     return SentenceTransformer(str(local_model), device="cpu", local_files_only=True)
-                except Exception:
-                    pass
+                except Exception as local_error:
+                    logger.warning("Failed to load local embedding model %s: %s", local_model, local_error)
             raise RuntimeError(
                 "Failed to load embedding model from remote source and no local fallback was found. "
                 f"Set EMBEDDING_MODEL to a local path such as data/models/{model_name}"

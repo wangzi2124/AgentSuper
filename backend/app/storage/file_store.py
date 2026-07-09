@@ -1,8 +1,11 @@
 import json
+import logging
 import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class FileStore:
@@ -15,12 +18,19 @@ class FileStore:
 
     def _load_metadata(self):
         if self.meta_path.exists():
-            with open(self.meta_path, "r", encoding="utf-8") as f:
-                self.metadata = json.load(f)
+            try:
+                with open(self.meta_path, "r", encoding="utf-8") as f:
+                    self.metadata = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("Failed to load metadata from %s: %s", self.meta_path, e)
+                self.metadata = {}
 
     def _save_metadata(self):
-        with open(self.meta_path, "w", encoding="utf-8") as f:
-            json.dump(self.metadata, f, ensure_ascii=False, indent=2)
+        try:
+            with open(self.meta_path, "w", encoding="utf-8") as f:
+                json.dump(self.metadata, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.error("Failed to save metadata to %s: %s", self.meta_path, e)
 
     def save(self, filename: str, content: bytes) -> tuple[str, str]:
         doc_id = str(uuid.uuid4())

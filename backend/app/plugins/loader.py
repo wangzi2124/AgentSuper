@@ -1,9 +1,11 @@
 import importlib
 import importlib.util
 import inspect
-import json
+import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class Plugin:
@@ -101,7 +103,8 @@ class PluginLoader:
                 functions=functions,
                 functions_meta=functions_meta,
             )
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to load plugin %s: %s", path.name, e)
             return None
 
     def get(self, name: str) -> Optional[Plugin]:

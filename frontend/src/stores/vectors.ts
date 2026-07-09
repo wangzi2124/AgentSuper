@@ -27,12 +27,6 @@ export const useVectorStore = defineStore('vectors', () => {
     }
   }
 
-  async function loadMore() {
-    if (loading.value || chunks.value.length >= total.value) return
-    offset.value += limit.value
-    await fetch(true)
-  }
-
   function reset(docId = '', query = '') {
     filterDocId.value = docId
     searchQuery.value = query
@@ -42,5 +36,5 @@ export const useVectorStore = defineStore('vectors', () => {
     fetch()
   }
 
-  return { chunks, total, offset, limit, loading, filterDocId, searchQuery, fetch, loadMore, reset }
+  return { chunks, total, offset, limit, loading, filterDocId, searchQuery, fetch, reset }
 })
