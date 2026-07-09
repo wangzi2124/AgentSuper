@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { AgentStep } from '../types'
 
 const emit = defineEmits<{ undo: [] }>()
@@ -22,6 +22,12 @@ const sortedSteps = computed(() => {
   })
 })
 
+const expandedResults = ref<Record<string, boolean>>({})
+
+function toggleResult(stepId: string) {
+  expandedResults.value[stepId] = !expandedResults.value[stepId]
+}
+
 function getStatusIcon(status: string): string {
   if (status === 'completed') return '✅'
   if (status === 'failed') return '❌'
@@ -33,6 +39,8 @@ function formatDuration(ms?: number): string {
   if (ms < 1000) return `${ms.toFixed(0)}ms`
   return `${(ms / 1000).toFixed(1)}s`
 }
+
+
 </script>
 
 <template>
@@ -52,9 +60,15 @@ function formatDuration(ms?: number): string {
           <span class="task-name">{{ s.name }}</span>
           <span v-if="s.detail" class="task-detail">{{ s.detail }}</span>
           <span v-if="s.tool_name" class="task-tool">🔧 {{ s.tool_name }}{{ s.tool_args ? '(' + JSON.stringify(s.tool_args).slice(0, 50) + ')' : '' }}</span>
+          <span v-if="s.tool_result && s.status === 'completed'" class="task-view-result" @click.stop="toggleResult(s.step_id)">
+            {{ expandedResults[s.step_id] ? '收起' : '查看结果' }}
+          </span>
         </div>
         <span v-if="s.duration_ms != null" class="task-duration">{{ formatDuration(s.duration_ms) }}</span>
         <span v-else-if="isRunning && s.status === 'running'" class="task-duration spinning">...</span>
+        <div v-if="s.tool_result && expandedResults[s.step_id]" class="task-result" @click.stop>
+          <pre>{{ s.tool_result }}</pre>
+        </div>
       </div>
       
       <div v-if="!props.steps.length && isRunning" class="task-item pending">
@@ -120,6 +134,7 @@ function formatDuration(ms?: number): string {
 }
 .task-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
@@ -175,5 +190,35 @@ function formatDuration(ms?: number): string {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+.task-view-result {
+  font-size: 11px;
+  color: var(--primary);
+  cursor: pointer;
+  text-decoration: underline;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+.task-view-result:hover {
+  opacity: 0.8;
+}
+.task-result {
+  margin: 4px 0 0 24px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+  width: calc(100% - 24px);
+}
+.task-result pre {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+  font-family: monospace;
 }
 </style>

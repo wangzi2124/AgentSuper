@@ -13,6 +13,7 @@ export interface AgentStep {
   duration_ms?: number
   tool_name?: string
   tool_args?: Record<string, unknown>
+  tool_result?: string
 }
 
 export interface ChatResponse {
@@ -31,6 +32,7 @@ export interface SSEEvent {
   duration_ms?: number
   tool_name?: string
   tool_args?: Record<string, unknown>
+  tool_result?: string
   answer?: string
   sources?: Source[]
   conversation_id?: string

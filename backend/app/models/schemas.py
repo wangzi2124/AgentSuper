@@ -37,6 +37,7 @@ class StepEvent(BaseModel):
     duration_ms: Optional[float] = None
     tool_name: Optional[str] = None
     tool_args: Optional[dict] = None
+    tool_result: Optional[str] = None
 
 
 class ChatRequest(BaseModel):

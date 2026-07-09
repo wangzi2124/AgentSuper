@@ -261,11 +261,12 @@ class RAGAgent:
             for (tc_id, tool_name), result in zip(tool_metas, tool_results):
                 if isinstance(result, Exception):
                     result = f"Error executing {tool_name}: {result}"
-                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name})
+                result_str = str(result)
+                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": result_str[:3000]})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
-                    "content": result,
+                    "content": result_str,
                 })
 
             response = await self._llm_call(model, messages, tool_defs)
@@ -298,6 +299,7 @@ class RAGAgent:
                     args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError:
                     args = {}
+                self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tc.function.name}", "name": f"调用工具: {tc.function.name}", "status": "running", "tool_name": tc.function.name, "tool_args": args})
                 tool_tasks.append(self._execute_tool(tc.function.name, args))
                 tool_metas.append((tc.id, tc.function.name))
 
@@ -306,7 +308,9 @@ class RAGAgent:
             for (tc_id, tool_name), result in zip(tool_metas, tool_results):
                 if isinstance(result, Exception):
                     result = f"Error executing {tool_name}: {result}"
-                messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
+                result_str = str(result)
+                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": result_str[:3000]})
+                messages.append({"role": "tool", "tool_call_id": tc_id, "content": result_str})
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
         if not (msg.content or "").strip():

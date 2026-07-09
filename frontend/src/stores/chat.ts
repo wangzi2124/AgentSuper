@@ -70,6 +70,7 @@ export const useChatStore = defineStore('chat', () => {
             duration_ms: event.duration_ms,
             tool_name: event.tool_name,
             tool_args: event.tool_args as Record<string, unknown> | undefined,
+            tool_result: event.tool_result,
           }
           if (idx >= 0) {
             currentSteps.value[idx] = step

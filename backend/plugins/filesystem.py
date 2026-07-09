@@ -250,7 +250,9 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
 
 
 def tool_execute(command: str, timeout: int = 30) -> str:
-    """Execute a shell command and return its output.
+    """Execute a shell command on the local filesystem (NOT for fetching web pages or making network requests).
+    Use ONLY for local operations: build, install, run scripts, etc.
+    Do NOT use curl/wget or any network commands — use internet-search tool instead for web queries.
 
     !! WARNING: this executes arbitrary commands on the host system !!
 

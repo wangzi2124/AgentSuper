@@ -32,7 +32,9 @@ def tool_internet_search(
     topic: Literal["general", "news", "finance"] = "general",
     include_raw_content: bool = False,
 ) -> str:
-    """Search the internet for real-time information. Do NOT use for weather queries — use get_weather instead.
+    """Search the internet using keywords. Use this for general web searches, news, or finding information.
+    Do NOT use for fetching content from a specific URL — use tool_extract_urls instead.
+    Do NOT use for weather queries — use get_weather instead.
 
     Parameters:
     - query: the search query string
@@ -40,6 +42,53 @@ def tool_internet_search(
     - topic: search category - 'general', 'news', or 'finance'
     - include_raw_content: include full page content if true
     """
+
+
+def tool_extract_urls(
+    urls: str,
+    extract_depth: Literal["basic", "advanced"] = "advanced",
+    format: Literal["markdown", "text"] = "markdown",
+    timeout: int = 30,
+) -> str:
+    """Fetch and extract the content of one or more specific web pages by URL.
+    Use this when the user wants to read the content of a specific website/URL.
+    Do NOT use tool_execute with curl/wget for fetching web pages.
+
+    Parameters:
+    - urls: one or more URLs separated by commas
+    - extract_depth: 'basic' for quick extraction, 'advanced' for full page content
+    - format: output format - 'markdown' or 'text'
+    - timeout: max wait time in seconds (default 30, max 60)
+    """
+    client = _get_client()
+    url_list = [u.strip() for u in urls.split(",") if u.strip()]
+    if not url_list:
+        return "Error: no valid URLs provided"
+    if timeout > 60:
+        timeout = 60
+    try:
+        response = client.extract(
+            urls=url_list,
+            extract_depth=extract_depth,
+            format=format,
+            timeout=timeout,
+        )
+        results = response.get("results", [])
+        if not results:
+            return f"No content extracted from: {urls}"
+        lines = [f"Extracted content for: {', '.join(url_list)}", ""]
+        for r in results:
+            url = r.get("url", "")
+            title = r.get("title", "Untitled")
+            content = r.get("raw_content", r.get("content", ""))
+            lines.append(f"URL: {url}")
+            lines.append(f"Title: {title}")
+            lines.append("")
+            lines.append(content)
+            lines.append("")
+        return "\n".join(lines).strip()
+    except Exception as e:
+        return f"Error extracting content: {e}"
     client = _get_client()
     response = client.search(
         query=query,
