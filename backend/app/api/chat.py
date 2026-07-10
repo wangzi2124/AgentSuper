@@ -20,22 +20,35 @@ DB_PATH = Path(__file__).resolve().parents[2] / "data" / "conversations.db"
 MAX_HISTORY_TOKENS = 4000
 
 _summarizer: HierarchicalSummarizationMiddleware | None = None
+_summarizer_model: str | None = None
 
 
 def _get_summarizer() -> HierarchicalSummarizationMiddleware | None:
-    global _summarizer
+    global _summarizer, _summarizer_model
+    current_model = settings.summarization_model
+
+    if current_model != _summarizer_model:
+        _summarizer = None
+        _summarizer_model = current_model
+
     if _summarizer is not None:
         return _summarizer
-    if not settings.summarization_model:
+    if not current_model:
         return None
     _summarizer = HierarchicalSummarizationMiddleware(
-        model=settings.summarization_model,
+        model=current_model,
         trigger=("tokens", MAX_HISTORY_TOKENS),
         keep=("messages", settings.summarization_keep_messages),
         api_key=settings.llm_api_key,
         api_base=settings.llm_api_base,
     )
     return _summarizer
+
+
+def reset_summarizer():
+    global _summarizer, _summarizer_model
+    _summarizer = None
+    _summarizer_model = None
 
 
 def _get_db() -> sqlite3.Connection:
