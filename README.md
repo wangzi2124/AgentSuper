@@ -366,6 +366,8 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 | GET | `/api/generated/download/{filename}` | 下载生成的文档（.docx/.pdf/.xlsx 等） |
 | DELETE | `/api/generated/{filename}` | 删除生成的文档 |
 | GET | `/api/monitor/stats` | 系统监控统计（请求量/模型调用/token 用量/耗时） |
+| GET | `/api/config/summarization` | 查看摘要模型配置 |
+| POST | `/api/config/summarization` | 运行时切换摘要模型 |
 
 ---
 
@@ -395,6 +397,8 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 ```ini
 # .env 可选配置
 SUMMARIZATION_MODEL=ollama/qwen2.5:3b     # 摘要用模型（推荐免费方案），不设置则只用截断
+SUMMARIZATION_API_KEY=                    # 摘要模型的 API key（可选，不设置则复用 LLM_API_KEY）
+SUMMARIZATION_API_BASE=                   # 摘要模型的 API base（可选，不设置则复用 LLM_API_BASE）
 SUMMARIZATION_KEEP_MESSAGES=20            # 摘要时保留的最近完整消息数
 CHUNK_PAIRS=10                            # 每批摘要的消息对数量（用户+助手为一对）
 ```
@@ -404,8 +408,30 @@ CHUNK_PAIRS=10                            # 每批摘要的消息对数量（用
 |------|------|------|
 | **本地（推荐）** | `ollama/qwen2.5:3b` | ~1.7GB，中文摘要够用，完全免费，无需 API key |
 | 本地 | `ollama/qwen2.5:7b` | ~4.2GB，中文摘要质量更好，但摘要用小模型即可 |
-| 免费 API | `gemini/gemini-2.0-flash-lite` | 1500 次/天免费，需配 `GEMINI_API_KEY` |
-| 免费 API | `groq/llama3-8b-8192` | 30 req/min，完全免费，需 `GROQ_API_KEY` |
+| 免费 API | `gemini/gemini-2.0-flash-lite` | 1500 次/天免费，需配 `SUMMARIZATION_API_KEY` |
+| 免费 API | `groq/llama3-8b-8192` | 30 req/min，完全免费，需配 `SUMMARIZATION_API_KEY` |
+
+**运行时切换摘要模型：**
+
+```bash
+# 查看当前配置
+curl http://localhost:8000/api/config/summarization
+
+# 切换到 Gemini（免费）
+curl -X POST http://localhost:8000/api/config/summarization \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gemini/gemini-2.0-flash-lite"}'
+
+# 切换到 DeepSeek（复用主 LLM）
+curl -X POST http://localhost:8000/api/config/summarization \
+  -H "Content-Type: application/json" \
+  -d '{"model": "deepseek/deepseek-v4-flash"}'
+
+# 关闭摘要（仅截断）
+curl -X POST http://localhost:8000/api/config/summarization \
+  -H "Content-Type: application/json" \
+  -d '{"model": ""}'
+```
 
 ## 生成文件管理
 

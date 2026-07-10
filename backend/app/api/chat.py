@@ -39,8 +39,8 @@ def _get_summarizer() -> HierarchicalSummarizationMiddleware | None:
         model=current_model,
         trigger=("tokens", MAX_HISTORY_TOKENS),
         keep=("messages", settings.summarization_keep_messages),
-        api_key=settings.llm_api_key,
-        api_base=settings.llm_api_base,
+        api_key=settings.summarization_api_key or settings.llm_api_key,
+        api_base=settings.summarization_api_base or settings.llm_api_base,
     )
     return _summarizer
 

@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     plugins_dir: str = "plugins"
 
     summarization_model: Optional[str] = None
+    summarization_api_key: Optional[str] = None
+    summarization_api_base: Optional[str] = None
     summarization_keep_messages: int = 20
 
 

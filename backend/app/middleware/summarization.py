@@ -120,18 +120,21 @@ class HierarchicalSummarizationMiddleware:
             f"{text}"
         )
         try:
-            resp = await litellm.acompletion(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                api_key=self.api_key,
-                api_base=self.api_base,
-                temperature=0.1,
-                max_tokens=1024,
-                timeout=30,
-            )
+            kwargs = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 1024,
+                "timeout": 30,
+            }
+            if self.api_key:
+                kwargs["api_key"] = self.api_key
+            if self.api_base:
+                kwargs["api_base"] = self.api_base
+            resp = await litellm.acompletion(**kwargs)
             return resp.choices[0].message.content or ""
         except Exception as e:
-            logger.warning("summarization failed at depth %s: %s", text[:50], e)
+            logger.warning("summarization failed: %s", e)
             return ""
 
     def _fallback_truncate(self, history: list[dict], max_tokens: int = 4000) -> list[dict]:
