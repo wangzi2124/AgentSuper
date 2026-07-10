@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import subprocess
+import threading
 import time as tmod
 from pathlib import Path
 from typing import Any, List, Optional, TypedDict, Annotated, Sequence
@@ -199,7 +201,6 @@ class RAGAgent:
             resolved_cwd = Path(WORKSPACE) / resolved_cwd
         resolved_cwd = resolved_cwd.resolve()
 
-        # Permission check for work_dir
         from app.permission import get_manager as _get_perm_mgr, NeedsPermission as _NeedsPermission
         mgr = _get_perm_mgr()
         decision = mgr.check(str(resolved_cwd), "execute")
@@ -211,88 +212,66 @@ class RAGAgent:
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         start_time = tmod.time()
-        last_heartbeat = 0.0
+        last_heartbeat = tmod.time()
 
         async def _push(event: dict):
             event_queue.put_nowait(event)
 
-        try:
-            process = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
-            )
-        except Exception as e:
-            await _push({
-                "type": "tool_output",
-                "tool_name": "tool_execute",
-                "source": "stderr",
-                "line": f"[streaming error] create_subprocess_shell failed: {e}",
-                "elapsed_seconds": 0,
-            })
-            await _push({
-                "type": "tool_output",
-                "tool_name": "tool_execute",
-                "source": "stderr",
-                "line": f"[fallback] retrying via sync subprocess.run...",
-                "elapsed_seconds": 0,
-            })
-            # Fallback to sync subprocess.run
-            from app.tools.filesystem import tool_execute as _sync_execute
-            result = await asyncio.to_thread(_sync_execute, **args)
-            return str(result)
-
-        async def _read_stream(stream, storage: list[str], source: str):
+        def _read_pipe(pipe, storage: list[str], source: str):
             nonlocal last_heartbeat
-            while True:
+            for raw_line in iter(pipe.readline, b""):
                 now = tmod.time()
                 if now - last_heartbeat >= 5:
                     last_heartbeat = now
-                    await _push({
-                        "type": "tool_heartbeat",
-                        "tool_name": "tool_execute",
-                        "elapsed_seconds": int(now - start_time),
-                        "command": command[:200],
-                    })
-                try:
-                    line = await asyncio.wait_for(stream.readline(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    if process.returncode is not None:
-                        break
-                    continue
-                if not line:
-                    break
-                decoded = line.decode("utf-8", errors="replace").rstrip()
+                    try:
+                        event_queue.put_nowait({
+                            "type": "tool_heartbeat",
+                            "tool_name": "tool_execute",
+                            "elapsed_seconds": int(now - start_time),
+                            "command": command[:200],
+                        })
+                    except Exception:
+                        pass
+                decoded = raw_line.decode("utf-8", errors="replace").rstrip()
                 storage.append(decoded)
-                await _push({
-                    "type": "tool_output",
-                    "tool_name": "tool_execute",
-                    "source": source,
-                    "line": decoded,
-                    "elapsed_seconds": int(tmod.time() - start_time),
-                })
+                try:
+                    event_queue.put_nowait({
+                        "type": "tool_output",
+                        "tool_name": "tool_execute",
+                        "source": source,
+                        "line": decoded,
+                        "elapsed_seconds": int(tmod.time() - start_time),
+                    })
+                except Exception:
+                    pass
+            pipe.close()
 
         try:
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(_read_stream(process.stdout, stdout_lines, "stdout"))
-                tg.create_task(_read_stream(process.stderr, stderr_lines, "stderr"))
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
+            )
         except Exception as e:
-            logger.warning("Streaming read error: %s", e)
+            return f"Error starting command: {e}"
+
+        t_out = threading.Thread(target=_read_pipe, args=(process.stdout, stdout_lines, "stdout"), daemon=True)
+        t_err = threading.Thread(target=_read_pipe, args=(process.stderr, stderr_lines, "stderr"), daemon=True)
+        t_out.start()
+        t_err.start()
 
         timed_out = False
-        elapsed = tmod.time() - start_time
-        if elapsed >= timeout:
-            try:
-                process.kill()
-            except Exception:
-                pass
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
             timed_out = True
 
-        try:
-            await process.wait()
-        except Exception as e:
-            logger.warning("process.wait error: %s", e)
+        t_out.join(timeout=2)
+        t_err.join(timeout=2)
 
         if timed_out:
             return f"Error: command timed out after {timeout}s"
@@ -301,7 +280,7 @@ class RAGAgent:
         if stdout_lines:
             parts.append("\n".join(stdout_lines))
         if stderr_lines:
-            parts.append(f"[stderr]\n{'\n'.join(stderr_lines)}")
+            parts.append(f"[stderr]\n" + "\n".join(stderr_lines))
         output = "\n".join(parts)
         rc = process.returncode or 0
         header = f"Exit code: {rc}"

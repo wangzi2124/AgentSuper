@@ -20,7 +20,7 @@
 | **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如搜索、天气、生成文档），Agent 按需调用 |
 | **Vector DB 开关** | 用户可在聊天界面手动控制是否启用向量库检索，关闭后 Agent 仅凭自身知识回答 |
-| **生成文件管理** | Agent 创建的文档（.docx/.pdf/.xlsx/.pptx）可在独立页面查看、搜索、下载和删除 |
+| **生成文件管理** | Agent 创建的文档（.docx/.pdf/.xlsx/.pptx）可在独立页面查看、搜索、下载和删除，PDF 支持中文显示 |
 | **本地 Embedding** | 使用 sentence-transformers 本地运行，通过 ModelScope 下载模型 |
 | **检索重排序** | Cross-encoder 对检索结果重打分（top-3），显著提升回答精度 |
 | **上下文管理** | 滑动窗口截断历史（4000 tokens），防止 context 溢出 |
@@ -214,7 +214,7 @@ _retrieve(state)
 | **路由** | Vue Router 4 |
 | **文档解析** | pypdf（PDF）, 原生文本解析（TXT/MD） |
 | **关键词检索** | BM25（rank_bm25）+ jieba 中文分词 |
-| **文档生成** | python-docx（Word）、reportlab（PDF）、openpyxl（Excel）三大生成引擎 |
+| **文档生成** | python-docx（Word）、reportlab（PDF，微软雅黑字体）、openpyxl（Excel）三大生成引擎 |
 | **互联网搜索** | Tavily API 实时搜索新闻、网页、财经信息 |
 | **天气查询** | Open-Meteo API（免费，无需 key）获取天气实况和预报 |
 | **生成文件管理** | Web 页面浏览/搜索/下载/删除 Agent 生成的 .docx/.pdf/.xlsx 文件 |
@@ -492,7 +492,7 @@ Agent 创建的文档（通过 docx-generator、pdf-generator、excel-generator�
 | | `tool_get_current_time(format)` — 获取当前时间 | *"现在几点了？"* · *"获取当前日期和时间"* |
 | | `tool_hello(name)` — 返回问候语 | *"跟张三打个招呼"* |
 | **docx-generator** | `tool_create_docx(title, sections)` — 创建 Word 文档 | *"帮我创建一个 Word 文档，内容是产品介绍"* · *"把这段内容导出为 .docx"* |
-| **pdf-generator** | `tool_create_pdf(title, sections)` — 创建 PDF 文档 | *"把这份报告导出为 PDF"* · *"帮我创建一个 PDF 文档"* |
+| **pdf-generator** | `tool_create_pdf(title, sections)` — 创建 PDF 文档（支持中文，内置微软雅黑字体） | *"把这份报告导出为 PDF"* · *"帮我创建一个 PDF 文档"* |
 | **excel-generator** | `tool_create_excel(sheets)` — 创建 Excel 表格 | *"创建一个 Excel 表格，包含销售数据"* · *"导出数据为 .xlsx"* |
 | **pptx-generator** | `tool_create_pptx(title, slides)` — 创建 PPT 演示文稿 | *"帮我创建一个 PPT，主题是新能源"* · *"把这份大纲变成幻灯片"* |
 | **kb-export** | `tool_export_kb_to_docx(query, title)` — 知识库导出为 Word | *"把知识库中关于 XX 的内容导出为 Word"* |
@@ -502,6 +502,8 @@ Agent 创建的文档（通过 docx-generator、pdf-generator、excel-generator�
 | **weather** | `tool_get_weather(city, forecast_days)` — 查询天气 | *"今天北京天气怎么样？"* · *"伦敦未来三天的天气预报"* |
 
 在聊天框中直接输入需求，Agent 会自动判断需要调用哪些工具来完成你的请求。
+
+**PDF 中文支持**：pdf-generator 插件内置微软雅黑字体（`backend/fonts/msyh.ttc` + `msyhbd.ttc`），支持中文、日文、韩文及常见 Unicode 符号（天气图标、数学符号等）正常显示。
 
 支持两种文件格式：
 
@@ -643,6 +645,17 @@ Agent 在每一轮工具调用循环中，所有工具通过 `asyncio.gather()` 
 - 文件读写、网络搜索等 IO 密集型工具可并行运行
 
 实现路径：`backend/app/agent/graph.py:259` — `asyncio.gather(*tool_tasks)`
+
+### Shell 命令流式执行
+
+`tool_execute` 使用 `subprocess.Popen` + 线程读取 stdout/stderr，替代 `asyncio.create_subprocess_shell`：
+
+| 旧行为 | 新行为 |
+|--------|--------|
+| `asyncio.create_subprocess_shell` 在 Windows ProactorEventLoop 偶发失败 | `subprocess.Popen` 全平台稳定 |
+| 失败时 fallback 到同步 `subprocess.run`，丢失流式输出 | 始终保持流式输出 |
+
+实现路径：`backend/app/agent/graph.py` — `_execute_tool_streaming()`
 
 ### 启动不阻塞
 
