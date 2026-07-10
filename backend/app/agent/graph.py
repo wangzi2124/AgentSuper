@@ -305,7 +305,7 @@ class RAGAgent:
 
         timed_out = False
         try:
-            process.wait(timeout=timeout)
+            await asyncio.to_thread(process.wait, timeout=timeout)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
