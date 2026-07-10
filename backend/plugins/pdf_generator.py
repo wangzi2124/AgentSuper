@@ -13,10 +13,31 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, ListFlowable, ListItem, PageBreak
 from reportlab.platypus.flowables import HRFlowable
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 PLUGIN_NAME = "pdf-generator"
 PLUGIN_VERSION = "0.1.0"
 PLUGIN_DESCRIPTION = "Creates PDF documents from structured content"
+
+_FONT_DIR = Path(__file__).resolve().parents[1] / "fonts"
+_FONT_REGISTERED = False
+
+
+def _register_fonts():
+    global _FONT_REGISTERED
+    if _FONT_REGISTERED:
+        return
+    try:
+        pdfmetrics.getFont("ChineseFont")
+    except KeyError:
+        regular = _FONT_DIR / "msyh.ttc"
+        bold = _FONT_DIR / "msyhbd.ttc"
+        if regular.exists():
+            pdfmetrics.registerFont(TTFont("ChineseFont", str(regular), subfontIndex=0))
+        if bold.exists():
+            pdfmetrics.registerFont(TTFont("ChineseFont-Bold", str(bold), subfontIndex=0))
+    _FONT_REGISTERED = True
 
 
 def tool_create_pdf(title: str = "Document", sections: str = "[]", output_path: str = "") -> str:
@@ -33,6 +54,8 @@ def tool_create_pdf(title: str = "Document", sections: str = "[]", output_path: 
         {"type": "horizontal_rule"}
     - output_path: optional absolute path to save (auto-generated if empty)
     """
+    _register_fonts()
+
     base_dir = Path(__file__).resolve().parents[1]
     output_dir = base_dir / "data" / "generated"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -70,6 +93,7 @@ def tool_create_pdf(title: str = "Document", sections: str = "[]", output_path: 
     title_style = ParagraphStyle(
         "CustomTitle",
         parent=styles["Title"],
+        fontName="ChineseFont-Bold",
         fontSize=24,
         leading=30,
         textColor=HexColor("#4472C4"),
@@ -77,13 +101,14 @@ def tool_create_pdf(title: str = "Document", sections: str = "[]", output_path: 
         spaceAfter=40,
     )
     heading_styles = {
-        1: ParagraphStyle("H1", parent=styles["Heading1"], fontSize=18, leading=22, spaceBefore=16, spaceAfter=8),
-        2: ParagraphStyle("H2", parent=styles["Heading2"], fontSize=14, leading=18, spaceBefore=12, spaceAfter=6),
-        3: ParagraphStyle("H3", parent=styles["Heading3"], fontSize=12, leading=15, spaceBefore=8, spaceAfter=4),
+        1: ParagraphStyle("H1", parent=styles["Heading1"], fontName="ChineseFont-Bold", fontSize=18, leading=22, spaceBefore=16, spaceAfter=8),
+        2: ParagraphStyle("H2", parent=styles["Heading2"], fontName="ChineseFont-Bold", fontSize=14, leading=18, spaceBefore=12, spaceAfter=6),
+        3: ParagraphStyle("H3", parent=styles["Heading3"], fontName="ChineseFont-Bold", fontSize=12, leading=15, spaceBefore=8, spaceAfter=4),
     }
     body_style = ParagraphStyle(
         "CustomBody",
         parent=styles["Normal"],
+        fontName="ChineseFont",
         fontSize=11,
         leading=16,
         spaceAfter=6,
@@ -91,6 +116,7 @@ def tool_create_pdf(title: str = "Document", sections: str = "[]", output_path: 
     bullet_style = ParagraphStyle(
         "CustomBullet",
         parent=styles["Normal"],
+        fontName="ChineseFont",
         fontSize=11,
         leading=16,
         leftIndent=20,
@@ -135,7 +161,8 @@ def tool_create_pdf(title: str = "Document", sections: str = "[]", output_path: 
                 t.setStyle(TableStyle([
                     ("BACKGROUND", (0, 0), (-1, 0), HexColor("#4472C4")),
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "ChineseFont-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "ChineseFont"),
                     ("FONTSIZE", (0, 0), (-1, 0), 11),
                     ("FONTSIZE", (0, 1), (-1, -1), 10),
                     ("ALIGN", (0, 0), (-1, -1), "CENTER"),
