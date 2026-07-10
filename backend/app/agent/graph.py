@@ -11,6 +11,47 @@ logger = logging.getLogger(__name__)
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 
+MAX_CONTEXT_TOKENS = 1000000  # Leave buffer below 1048565 limit
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~2 chars per token for mixed CJK/Latin."""
+    return len(text) // 2
+
+
+def _truncate_messages(messages: list[dict], max_tokens: int = MAX_CONTEXT_TOKENS) -> list[dict]:
+    """Truncate messages to fit within token limit, preserving system prompt and most recent messages."""
+    if not messages:
+        return messages
+
+    total = sum(_estimate_tokens(m.get("content", "")) for m in messages)
+    if total <= max_tokens:
+        return messages
+
+    system_msg = messages[0] if messages[0].get("role") == "system" else None
+    rest = messages[1:] if system_msg else messages
+
+    system_tokens = _estimate_tokens(system_msg.get("content", "")) if system_msg else 0
+    budget = max_tokens - system_tokens - 1000  # Reserve 1000 for response
+
+    kept = []
+    current = 0
+    for msg in reversed(rest):
+        msg_tokens = _estimate_tokens(msg.get("content", ""))
+        if current + msg_tokens > budget:
+            break
+        current += msg_tokens
+        kept.append(msg)
+    kept.reverse()
+
+    result = []
+    if system_msg:
+        result.append(system_msg)
+    if len(kept) < len(rest):
+        result.append({"role": "system", "content": "[earlier messages truncated to fit context window]"})
+    result.extend(kept)
+    return result
+
 import litellm
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
@@ -364,6 +405,8 @@ class RAGAgent:
             elif self.api_base and "openai" in self.api_base:
                 model = f"openai/{model}"
 
+        messages = _truncate_messages(messages)
+
         response = await self._llm_call(model, messages, tool_defs)
         msg = response.choices[0].message
 
@@ -408,13 +451,15 @@ class RAGAgent:
                 if isinstance(result, Exception):
                     result = f"Error executing {tool_name}: {result}"
                 result_str = str(result)
-                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": result_str[:3000]})
+                truncated_result = result_str[:3000]
+                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": truncated_result})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
-                    "content": result_str,
+                    "content": truncated_result,
                 })
 
+            messages = _truncate_messages(messages)
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
 
@@ -455,8 +500,10 @@ class RAGAgent:
                 if isinstance(result, Exception):
                     result = f"Error executing {tool_name}: {result}"
                 result_str = str(result)
-                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": result_str[:3000]})
-                messages.append({"role": "tool", "tool_call_id": tc_id, "content": result_str})
+                truncated_result = result_str[:3000]
+                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": truncated_result})
+                messages.append({"role": "tool", "tool_call_id": tc_id, "content": truncated_result})
+            messages = _truncate_messages(messages)
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
         if not (msg.content or "").strip():
