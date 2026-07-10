@@ -41,8 +41,6 @@ def _resolve(path_str: str) -> Path:
 
 def _ensure_safe(path: Path) -> None:
     resolved = path.resolve()
-    if str(resolved).startswith(str(WORKSPACE)):
-        return
     mgr = get_perm_mgr()
     decision = mgr.check(str(resolved), "write")
     if decision == "allow":
@@ -202,15 +200,12 @@ def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
     if timeout < 1:
         timeout = 5
     resolved_cwd = _resolve(work_dir)
-    try:
-        resolved_cwd.relative_to(WORKSPACE)
-    except ValueError:
-        mgr = get_perm_mgr()
-        decision = mgr.check(str(resolved_cwd), "execute")
-        if decision == "ask":
-            raise NeedsPermission(str(resolved_cwd), "execute", "tool_execute", {"command": command, "timeout": timeout, "work_dir": work_dir})
-        if decision == "deny":
-            return f"Error: access denied to directory '{work_dir}'"
+    mgr = get_perm_mgr()
+    decision = mgr.check(str(resolved_cwd), "execute")
+    if decision == "ask":
+        raise NeedsPermission(str(resolved_cwd), "execute", "tool_execute", {"command": command, "timeout": timeout, "work_dir": work_dir})
+    if decision == "deny":
+        return f"Error: access denied to directory '{work_dir}'"
     try:
         result = subprocess.run(
             command,

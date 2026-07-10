@@ -199,17 +199,14 @@ class RAGAgent:
             resolved_cwd = Path(WORKSPACE) / resolved_cwd
         resolved_cwd = resolved_cwd.resolve()
 
-        # Permission check for work_dir (same logic as tool_execute)
-        try:
-            resolved_cwd.relative_to(WORKSPACE)
-        except ValueError:
-            from app.permission import get_manager as _get_perm_mgr, NeedsPermission as _NeedsPermission
-            mgr = _get_perm_mgr()
-            decision = mgr.check(str(resolved_cwd), "execute")
-            if decision == "deny":
-                return f"Error: access denied to directory '{work_dir}'"
-            if decision == "ask":
-                raise _NeedsPermission(str(resolved_cwd), "execute", "tool_execute", args)
+        # Permission check for work_dir
+        from app.permission import get_manager as _get_perm_mgr, NeedsPermission as _NeedsPermission
+        mgr = _get_perm_mgr()
+        decision = mgr.check(str(resolved_cwd), "execute")
+        if decision == "deny":
+            return f"Error: access denied to directory '{work_dir}'"
+        if decision == "ask":
+            raise _NeedsPermission(str(resolved_cwd), "execute", "tool_execute", args)
 
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
