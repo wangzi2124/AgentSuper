@@ -16,3 +16,5 @@ jieba
 tavily-python
 reportlab
 openpyxl
+ python-docx
+ python-pptx
