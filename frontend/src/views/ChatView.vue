@@ -102,11 +102,8 @@ function handleMessageDelete(messageId: string) {
     </div>
 
     <div class="chat-footer">
-      <button v-if="messages.length > 0" class="btn" @click="chat.clear()" style="margin: 0 24px 8px;" :disabled="chat.loading">
-        Clear conversation
-      </button>
       <button v-if="messages.length > 0" class="btn btn-danger" @click="chat.deleteConversation()" style="margin: 0 24px 8px;" :disabled="chat.loading">
-        Delete conversation
+        Clear conversation
       </button>
       <ChatInput ref="chatInputRef" :loading="chat.loading" @send="handleSend" @cancel="handleCancel" />
     </div>
