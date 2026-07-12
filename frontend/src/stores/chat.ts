@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, shallowRef } from 'vue'
 import type { FileContent, Message, AgentStep, SSEEvent, PermissionRequest } from '../types'
-import { sendMessageStream } from '../api/chat'
+import { sendMessageStream, deleteConversation as apiDeleteConversation, deleteMessage as apiDeleteMessage } from '../api/chat'
 import { usePermissionStore } from './permission'
 
 export const SUPPORTED_MODELS = [
@@ -156,5 +156,32 @@ export const useChatStore = defineStore('chat', () => {
     currentSteps.value = []
   }
 
-  return { messages, conversationId, loading, selectedModel, useVectorDb, currentSteps, send, cancel, clear }
+  async function deleteConversation() {
+    if (conversationId.value) {
+      try {
+        await apiDeleteConversation(conversationId.value)
+      } catch (e) {
+        console.error('Failed to delete conversation from server:', e)
+      }
+    }
+    messages.value = []
+    conversationId.value = undefined
+    currentSteps.value = []
+  }
+
+  async function deleteMessage(messageId: string) {
+    if (conversationId.value) {
+      try {
+        await apiDeleteMessage(conversationId.value, messageId)
+      } catch (e) {
+        console.error('Failed to delete message from server:', e)
+      }
+    }
+    const idx = messages.value.findIndex(m => m.id === messageId)
+    if (idx >= 0) {
+      messages.value.splice(idx, 1)
+    }
+  }
+
+  return { messages, conversationId, loading, selectedModel, useVectorDb, currentSteps, send, cancel, clear, deleteConversation, deleteMessage }
 })

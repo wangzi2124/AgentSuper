@@ -46,6 +46,10 @@ function handleUndo(index: number) {
     nextTick(() => chatInputRef.value?.focus())
   }
 }
+
+function handleMessageDelete(messageId: string) {
+  chat.deleteMessage(messageId)
+}
 </script>
 
 <template>
@@ -86,6 +90,7 @@ function handleUndo(index: number) {
             :index="idx"
             @copy="handleCopy"
             @undo="handleUndo"
+            @delete="handleMessageDelete"
           />
         </div>
         <StepTaskList
@@ -99,6 +104,9 @@ function handleUndo(index: number) {
     <div class="chat-footer">
       <button v-if="messages.length > 0" class="btn" @click="chat.clear()" style="margin: 0 24px 8px;" :disabled="chat.loading">
         Clear conversation
+      </button>
+      <button v-if="messages.length > 0" class="btn btn-danger" @click="chat.deleteConversation()" style="margin: 0 24px 8px;" :disabled="chat.loading">
+        Delete conversation
       </button>
       <ChatInput ref="chatInputRef" :loading="chat.loading" @send="handleSend" @cancel="handleCancel" />
     </div>
@@ -225,4 +233,15 @@ function handleUndo(index: number) {
   min-width: 200px;
 }
 .model-selector select:focus { border-color: var(--primary); }
+.btn-danger {
+  background: #ef4444;
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn-danger:hover { background: #dc2626; }
+.btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

@@ -139,8 +139,8 @@ async def chat(request: Request, body: ChatRequest):
         logger.exception("chat invocation failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    history.append({"role": "user", "content": body.message})
-    history.append({"role": "assistant", "content": result["answer"]})
+    history.append({"id": str(uuid.uuid4()), "role": "user", "content": body.message})
+    history.append({"id": str(uuid.uuid4()), "role": "assistant", "content": result["answer"]})
     _save_conversation(conv_id, history)
 
     return ChatResponse(
@@ -204,13 +204,16 @@ async def chat_stream(request: Request, body: ChatRequest):
             logger.exception("chat stream invocation failed")
             await event_queue.put({"type": "error", "detail": str(e)})
 
-    async def event_generator():
+    async def event_generator(user_msg_id: str, assistant_msg_id: str):
         task = asyncio.create_task(run_agent())
         try:
             while True:
                 event = await event_queue.get()
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event["type"] in ("done", "error"):
+                    if event["type"] == "done":
+                        event["user_msg_id"] = user_msg_id
+                        event["assistant_msg_id"] = assistant_msg_id
                     break
             await task
         finally:
@@ -220,8 +223,42 @@ async def chat_stream(request: Request, body: ChatRequest):
             except (asyncio.CancelledError, Exception):
                 pass
 
-    history.append({"role": "user", "content": body.message})
-    history.append({"role": "assistant", "content": ""})
+    user_msg_id = str(uuid.uuid4())
+    assistant_msg_id = str(uuid.uuid4())
+    history.append({"id": user_msg_id, "role": "user", "content": body.message})
+    history.append({"id": assistant_msg_id, "role": "assistant", "content": ""})
     _save_conversation(conv_id, history)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(event_generator(user_msg_id, assistant_msg_id), media_type="text/event-stream")
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    conn = _get_db()
+    try:
+        conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@router.delete("/conversations/{conversation_id}/messages/{message_id}")
+async def delete_message(conversation_id: str, message_id: str):
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT messages FROM conversations WHERE id = ?", (conversation_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        messages = json.loads(row[0])
+        messages = [m for m in messages if m.get("id") != message_id]
+        conn.execute(
+            "UPDATE conversations SET messages = ? WHERE id = ?",
+            (json.dumps(messages), conversation_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}

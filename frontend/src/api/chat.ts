@@ -53,3 +53,23 @@ export async function sendMessageStream(
     }
   }
 }
+
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}`, {
+    method: 'DELETE',
+  }, 0)
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Delete conversation error: ${err || res.statusText}`)
+  }
+}
+
+export async function deleteMessage(conversationId: string, messageId: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}/messages/${messageId}`, {
+    method: 'DELETE',
+  }, 0)
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Delete message error: ${err || res.statusText}`)
+  }
+}

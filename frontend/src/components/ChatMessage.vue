@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import type { Message } from '../types'
 
-const emit = defineEmits<{ copy: [text: string]; undo: [index: number] }>()
+const emit = defineEmits<{ copy: [text: string]; undo: [index: number]; delete: [id: string] }>()
 const props = defineProps<{ message: Message; index: number }>()
 
 const copied = ref(false)
@@ -24,6 +24,10 @@ async function handleCopy() {
 
 function handleUndo() {
   emit('undo', props.index)
+}
+
+function handleDelete() {
+  emit('delete', props.message.id)
 }
 </script>
 
@@ -51,8 +55,8 @@ function handleUndo() {
       </div>
       <div class="message-footer">
         <span class="time">{{ message.timestamp.toLocaleTimeString() }}</span>
-        <div v-if="message.role === 'user'" class="message-actions">
-          <div class="btn-wrapper">
+        <div class="message-actions">
+          <div v-if="message.role === 'user'" class="btn-wrapper">
             <button class="icon-btn" @click="handleCopy" title="复制">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -61,10 +65,16 @@ function handleUndo() {
             </button>
             <span v-if="copied" class="copy-toast">复制成功</span>
           </div>
-          <button class="icon-btn" @click="handleUndo" title="撤销到此处">
+          <button v-if="message.role === 'user'" class="icon-btn" @click="handleUndo" title="撤销到此处">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M3 7v6h6"></path>
               <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"></path>
+            </svg>
+          </button>
+          <button class="icon-btn delete-btn" @click="handleDelete" title="删除消息">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
             </svg>
           </button>
         </div>
@@ -199,4 +209,7 @@ function handleUndo() {
   background: rgba(255,255,255,0.1);
 }
 .user .icon-btn:hover { background: rgba(255,255,255,0.2); }
+.delete-btn:hover {
+  color: #ef4444 !important;
+}
 </style>
