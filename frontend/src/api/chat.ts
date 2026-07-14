@@ -3,6 +3,17 @@ import { fetchWithTimeout } from './fetch'
 
 const BASE = '/api/chat'
 
+export interface ConversationMeta {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ConversationDetail extends ConversationMeta {
+  messages: Array<{ id: string; role: string; content: string }>
+}
+
 export async function sendMessage(data: ChatRequest): Promise<ChatResponse> {
   const res = await fetchWithTimeout(BASE + '/', {
     method: 'POST',
@@ -51,6 +62,36 @@ export async function sendMessageStream(
         } catch { /* skip malformed */ }
       }
     }
+  }
+}
+
+export async function listConversations(): Promise<ConversationMeta[]> {
+  const res = await fetchWithTimeout(`${BASE}/conversations`, { method: 'GET' }, 0)
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`List conversations error: ${err || res.statusText}`)
+  }
+  return res.json()
+}
+
+export async function getConversation(conversationId: string): Promise<ConversationDetail> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}`, { method: 'GET' }, 0)
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Get conversation error: ${err || res.statusText}`)
+  }
+  return res.json()
+}
+
+export async function renameConversation(conversationId: string, title: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  }, 0)
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Rename conversation error: ${err || res.statusText}`)
   }
 }
 

@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useChatStore, SUPPORTED_MODELS } from '../stores/chat'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
 import StepTaskList from '../components/StepTaskList.vue'
 
+const route = useRoute()
+const router = useRouter()
 const chat = useChatStore()
 const parentRef = ref<HTMLElement>()
 const chatInputRef = ref<any>()
@@ -19,6 +22,21 @@ watch(() => messages.value.length, async () => {
   }
 })
 
+onMounted(() => {
+  const id = route.params.id as string
+  if (id) {
+    chat.loadConversation(id)
+  }
+})
+
+watch(() => route.params.id, (newId) => {
+  if (newId) {
+    chat.loadConversation(newId as string)
+  } else {
+    chat.newChat()
+  }
+})
+
 function onScroll() {
   const el = parentRef.value
   if (!el) return
@@ -27,7 +45,11 @@ function onScroll() {
 }
 
 function handleSend(text: string) {
-  chat.send(text)
+  chat.send(text).then(() => {
+    if (chat.conversationId && route.name !== 'ChatConversation') {
+      router.push({ name: 'ChatConversation', params: { id: chat.conversationId } })
+    }
+  })
 }
 
 function handleCancel() {

@@ -3,6 +3,7 @@ import json
 import logging
 import sqlite3
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -57,9 +58,23 @@ def _get_db() -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS conversations ("
         "  id TEXT PRIMARY KEY,"
-        "  messages TEXT NOT NULL"
+        "  title TEXT NOT NULL DEFAULT '',"
+        "  messages TEXT NOT NULL,"
+        "  created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+        "  updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
         ")"
     )
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+    for col in ["title", "created_at", "updated_at"]:
+        if col not in existing_cols:
+            try:
+                conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+    now = datetime.now().isoformat()
+    conn.execute("UPDATE conversations SET created_at = ? WHERE created_at = ''", (now,))
+    conn.execute("UPDATE conversations SET updated_at = ? WHERE updated_at = ''", (now,))
+    conn.commit()
     return conn
 
 
@@ -76,13 +91,31 @@ def _load_conversation(conv_id: str) -> list[dict]:
         conn.close()
 
 
-def _save_conversation(conv_id: str, messages: list[dict]):
+def _generate_title(messages: list[dict]) -> str:
+    for msg in messages:
+        if msg.get("role") == "user":
+            text = msg.get("content", "")
+            text = text.strip().replace("\n", " ")
+            return text[:20] + ("..." if len(text) > 20 else "")
+    return "新对话"
+
+
+def _save_conversation(conv_id: str, messages: list[dict], title: str | None = None):
     conn = _get_db()
     try:
-        conn.execute(
-            "INSERT OR REPLACE INTO conversations (id, messages) VALUES (?, ?)",
-            (conv_id, json.dumps(messages)),
-        )
+        now = datetime.now().isoformat()
+        if title is not None:
+            conn.execute(
+                "INSERT INTO conversations (id, title, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET title=excluded.title, messages=excluded.messages, updated_at=excluded.updated_at",
+                (conv_id, title, json.dumps(messages), now, now),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO conversations (id, messages, created_at, updated_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET messages=excluded.messages, updated_at=excluded.updated_at",
+                (conv_id, json.dumps(messages), now, now),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -141,7 +174,8 @@ async def chat(request: Request, body: ChatRequest):
 
     history.append({"id": str(uuid.uuid4()), "role": "user", "content": body.message})
     history.append({"id": str(uuid.uuid4()), "role": "assistant", "content": result["answer"]})
-    _save_conversation(conv_id, history)
+    title = _generate_title(history) if not body.conversation_id else None
+    _save_conversation(conv_id, history, title=title)
 
     return ChatResponse(
         answer=result["answer"],
@@ -196,6 +230,7 @@ async def chat_stream(request: Request, body: ChatRequest):
                     for s in result["sources"]
                 ],
                 "conversation_id": conv_id,
+                "title": title,
                 "steps": result.get("steps", []),
             })
         except asyncio.CancelledError:
@@ -209,11 +244,16 @@ async def chat_stream(request: Request, body: ChatRequest):
         try:
             while True:
                 event = await event_queue.get()
+                if event["type"] == "done":
+                    event["user_msg_id"] = user_msg_id
+                    event["assistant_msg_id"] = assistant_msg_id
+                    for msg in history:
+                        if msg["id"] == assistant_msg_id:
+                            msg["content"] = event["answer"]
+                            break
+                    _save_conversation(conv_id, history)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event["type"] in ("done", "error"):
-                    if event["type"] == "done":
-                        event["user_msg_id"] = user_msg_id
-                        event["assistant_msg_id"] = assistant_msg_id
                     break
             await task
         finally:
@@ -227,7 +267,8 @@ async def chat_stream(request: Request, body: ChatRequest):
     assistant_msg_id = str(uuid.uuid4())
     history.append({"id": user_msg_id, "role": "user", "content": body.message})
     history.append({"id": assistant_msg_id, "role": "assistant", "content": ""})
-    _save_conversation(conv_id, history)
+    title = _generate_title(history) if not body.conversation_id else None
+    _save_conversation(conv_id, history, title=title)
 
     return StreamingResponse(event_generator(user_msg_id, assistant_msg_id), media_type="text/event-stream")
 
@@ -255,10 +296,66 @@ async def delete_message(conversation_id: str, message_id: str):
         messages = json.loads(row[0])
         messages = [m for m in messages if m.get("id") != message_id]
         conn.execute(
-            "UPDATE conversations SET messages = ? WHERE id = ?",
+            "UPDATE conversations SET messages = ?, updated_at = datetime('now') WHERE id = ?",
             (json.dumps(messages), conversation_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@router.get("/conversations")
+async def list_conversations():
+    conn = _get_db()
+    try:
+        cursor = conn.execute(
+            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
+        )
+        rows = cursor.fetchall()
+        return [
+            {"id": r[0], "title": r[1] or "新对话", "created_at": r[2], "updated_at": r[3]}
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+@router.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str):
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT title, messages, created_at, updated_at FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return {
+            "id": conversation_id,
+            "title": row[0] or "新对话",
+            "messages": json.loads(row[1]),
+            "created_at": row[2],
+            "updated_at": row[3],
+        }
+    finally:
+        conn.close()
+
+
+@router.put("/conversations/{conversation_id}")
+async def update_conversation(conversation_id: str, body: dict):
+    title = body.get("title")
+    if title is None:
+        raise HTTPException(status_code=400, detail="title is required")
+    conn = _get_db()
+    try:
+        conn.execute(
+            "UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ?",
+            (title, conversation_id),
+        )
+        conn.commit()
+        if conn.total_changes == 0:
+            raise HTTPException(status_code=404, detail="Conversation not found")
     finally:
         conn.close()
     return {"status": "ok"}

@@ -37,6 +37,7 @@ export interface SSEEvent {
   answer?: string
   sources?: Source[]
   conversation_id?: string
+  title?: string
   steps?: AgentStep[]
   error?: string
   request_id?: string
@@ -45,6 +46,8 @@ export interface SSEEvent {
   source?: string
   line?: string
   elapsed_seconds?: number
+  user_msg_id?: string
+  assistant_msg_id?: string
 }
 
 export interface FileContent {

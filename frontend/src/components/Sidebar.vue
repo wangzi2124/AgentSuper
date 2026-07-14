@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router'
+import ChatHistory from './ChatHistory.vue'
 
 const route = useRoute()
 
@@ -32,7 +33,8 @@ const navItems = [
         {{ item.label }}
       </router-link>
     </nav>
-    <div style="padding: 12px 8px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); text-align: center;">
+    <ChatHistory v-if="route.path === '/chat'" class="sidebar-history" />
+    <div class="sidebar-footer">
       v0.1.0
     </div>
   </aside>

@@ -1,7 +1,15 @@
 import { defineStore } from 'pinia'
 import { ref, shallowRef } from 'vue'
 import type { FileContent, Message, AgentStep, SSEEvent, PermissionRequest } from '../types'
-import { sendMessageStream, deleteConversation as apiDeleteConversation, deleteMessage as apiDeleteMessage } from '../api/chat'
+import {
+  sendMessageStream,
+  deleteConversation as apiDeleteConversation,
+  deleteMessage as apiDeleteMessage,
+  listConversations,
+  getConversation,
+  renameConversation as apiRenameConversation,
+  type ConversationMeta,
+} from '../api/chat'
 import { usePermissionStore } from './permission'
 
 export const SUPPORTED_MODELS = [
@@ -25,11 +33,57 @@ function genId(): string {
 export const useChatStore = defineStore('chat', () => {
   const messages = ref<Message[]>([])
   const conversationId = ref<string | undefined>(undefined)
+  const conversationTitle = ref<string>('')
+  const conversations = ref<ConversationMeta[]>([])
   const loading = ref(false)
   const selectedModel = ref(SUPPORTED_MODELS[0].value)
   const useVectorDb = ref(true)
   const currentSteps = ref<AgentStep[]>([])
   const abortController = shallowRef<AbortController | null>(null)
+
+  async function loadConversations() {
+    try {
+      conversations.value = await listConversations()
+    } catch (e) {
+      console.error('Failed to load conversations:', e)
+    }
+  }
+
+  async function loadConversation(id: string) {
+    try {
+      const detail = await getConversation(id)
+      conversationId.value = id
+      conversationTitle.value = detail.title
+      messages.value = detail.messages.map(m => ({
+        id: m.id,
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+        timestamp: new Date(),
+      }))
+    } catch (e) {
+      console.error('Failed to load conversation:', e)
+    }
+  }
+
+  async function renameConversation(id: string, title: string) {
+    try {
+      await apiRenameConversation(id, title)
+      conversationTitle.value = title
+      const idx = conversations.value.findIndex(c => c.id === id)
+      if (idx >= 0) {
+        conversations.value[idx].title = title
+      }
+    } catch (e) {
+      console.error('Failed to rename conversation:', e)
+    }
+  }
+
+  function newChat() {
+    messages.value = []
+    conversationId.value = undefined
+    conversationTitle.value = ''
+    currentSteps.value = []
+  }
 
   async function send(text: string, files: FileContent[] = []) {
     const userMsg: Message = {
@@ -108,8 +162,12 @@ export const useChatStore = defineStore('chat', () => {
           })
         } else if (event.type === 'done') {
           conversationId.value = event.conversation_id
+          if (event.title) {
+            conversationTitle.value = event.title
+            loadConversations()
+          }
           const assistantMsg: Message = {
-            id: genId(),
+            id: event.assistant_msg_id || genId(),
             role: 'assistant',
             content: event.answer || '',
             sources: event.sources,
@@ -118,6 +176,15 @@ export const useChatStore = defineStore('chat', () => {
           }
           messages.value.push(assistantMsg)
           currentSteps.value = []
+          if (event.user_msg_id) {
+            for (let i = messages.value.length - 1; i >= 0; i--) {
+              const m = messages.value[i]
+              if (m.role === 'user' && m.id !== event.user_msg_id) {
+                m.id = event.user_msg_id
+                break
+              }
+            }
+          }
         } else if (event.type === 'error') {
           messages.value.push({
             id: genId(),
@@ -153,6 +220,7 @@ export const useChatStore = defineStore('chat', () => {
   function clear() {
     messages.value = []
     conversationId.value = undefined
+    conversationTitle.value = ''
     currentSteps.value = []
   }
 
@@ -166,7 +234,9 @@ export const useChatStore = defineStore('chat', () => {
     }
     messages.value = []
     conversationId.value = undefined
+    conversationTitle.value = ''
     currentSteps.value = []
+    loadConversations()
   }
 
   async function deleteMessage(messageId: string) {
@@ -183,5 +253,10 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  return { messages, conversationId, loading, selectedModel, useVectorDb, currentSteps, send, cancel, clear, deleteConversation, deleteMessage }
+  return {
+    messages, conversationId, conversationTitle, conversations,
+    loading, selectedModel, useVectorDb, currentSteps,
+    send, cancel, clear, deleteConversation, deleteMessage,
+    loadConversations, loadConversation, newChat, renameConversation,
+  }
 })
