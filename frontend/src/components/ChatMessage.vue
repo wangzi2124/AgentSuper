@@ -14,12 +14,27 @@ const thoughtDuration = computed(() => {
 })
 
 async function handleCopy() {
+  const text = props.message.content
+  if (!text) return
   try {
-    await navigator.clipboard.writeText(props.message.content)
-    emit('copy', props.message.content)
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    emit('copy', text)
     copied.value = true
     setTimeout(() => { copied.value = false }, 1500)
-  } catch {}
+  } catch {
+    copied.value = false
+  }
 }
 
 function handleUndo() {
@@ -56,7 +71,7 @@ function handleDelete() {
       <div class="message-footer">
         <span class="time">{{ message.timestamp.toLocaleTimeString() }}</span>
         <div class="message-actions">
-          <div v-if="message.role === 'user'" class="btn-wrapper">
+          <div class="btn-wrapper">
             <button class="icon-btn" @click="handleCopy" title="复制">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
