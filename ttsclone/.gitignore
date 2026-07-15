@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# 輸出音訊
+outputs/*.wav
+
+# 模型快取
+*.pt
+*.bin
+*.safetensors
+models/
