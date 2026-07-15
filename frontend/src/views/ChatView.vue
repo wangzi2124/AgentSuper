@@ -5,6 +5,7 @@ import { useChatStore, SUPPORTED_MODELS } from '../stores/chat'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
 import StepTaskList from '../components/StepTaskList.vue'
+import WeatherAlert from '../components/WeatherAlert.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -12,6 +13,7 @@ const chat = useChatStore()
 const parentRef = ref<HTMLElement>()
 const chatInputRef = ref<any>()
 const isNearBottom = ref(true)
+const isWeatherEnabled = ref(false)
 
 const messages = computed(() => chat.messages)
 
@@ -22,11 +24,24 @@ watch(() => messages.value.length, async () => {
   }
 })
 
+async function checkWeatherPlugin() {
+  try {
+    const response = await fetch('/api/plugins/weather-alert/status')
+    if (response.ok) {
+      const data = await response.json()
+      isWeatherEnabled.value = data.enabled
+    }
+  } catch (e) {
+    console.error('Failed to check weather plugin status:', e)
+  }
+}
+
 onMounted(() => {
   const id = route.params.id as string
   if (id) {
     chat.loadConversation(id)
   }
+  checkWeatherPlugin()
 })
 
 watch(() => route.params.id, (newId) => {
@@ -82,6 +97,7 @@ function handleMessageDelete(messageId: string) {
         <p>Ask questions and get answers powered by RAG + AI Agent</p>
       </div>
       <div class="header-controls">
+        <WeatherAlert v-if="isWeatherEnabled" />
         <label class="toggle">
           <input type="checkbox" v-model="chat.useVectorDb" :disabled="chat.loading" />
           <span class="toggle-slider"></span>
