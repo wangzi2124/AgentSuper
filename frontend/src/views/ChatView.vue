@@ -62,7 +62,7 @@ function handleCopy(_text: string) {
 function handleUndo(index: number) {
   if (chat.loading) chat.cancel()
   const msgText = messages.value[index]?.content
-  chat.messages.splice(index)
+  chat.undoMessage(index)
   if (msgText) {
     chatInputRef.value?.setText(msgText)
     nextTick(() => chatInputRef.value?.focus())

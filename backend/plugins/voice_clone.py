@@ -19,7 +19,7 @@ PLUGIN_DESCRIPTION = "Voice cloning and TTS via isolated Qwen3-TTS subprocess"
 
 _BASE_DIR = Path(__file__).resolve().parents[1]
 _OUTPUT_DIR = _BASE_DIR / "data" / "generated"
-_VOICECLONE_DIR = _BASE_DIR / "ttsclone"
+_VOICECLONE_DIR = _BASE_DIR.parent / "ttsclone"
 
 
 def _get_python():

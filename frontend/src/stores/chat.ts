@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, shallowRef } from 'vue'
+import { ref, computed } from 'vue'
 import type { FileContent, Message, AgentStep, SSEEvent, PermissionRequest } from '../types'
 import {
   sendMessageStream,
@@ -30,16 +30,46 @@ function genId(): string {
   }
 }
 
+interface SessionState {
+  messages: Message[]
+  conversationId: string | undefined
+  conversationTitle: string
+  currentSteps: AgentStep[]
+  loading: boolean
+  abortController: AbortController | null
+}
+
 export const useChatStore = defineStore('chat', () => {
-  const messages = ref<Message[]>([])
-  const conversationId = ref<string | undefined>(undefined)
-  const conversationTitle = ref<string>('')
+  const sessions = ref<Record<string, SessionState>>({})
+  const activeSessionId = ref<string | undefined>(undefined)
   const conversations = ref<ConversationMeta[]>([])
-  const loading = ref(false)
   const selectedModel = ref(SUPPORTED_MODELS[0].value)
   const useVectorDb = ref(true)
-  const currentSteps = ref<AgentStep[]>([])
-  const abortController = shallowRef<AbortController | null>(null)
+
+  function getOrCreateSession(sessionId: string): SessionState {
+    if (!sessions.value[sessionId]) {
+      sessions.value[sessionId] = {
+        messages: [],
+        conversationId: undefined,
+        conversationTitle: '',
+        currentSteps: [],
+        loading: false,
+        abortController: null,
+      }
+    }
+    return sessions.value[sessionId]
+  }
+
+  const currentSession = computed(() => {
+    if (!activeSessionId.value) return null
+    return sessions.value[activeSessionId.value] || null
+  })
+
+  const messages = computed(() => currentSession.value?.messages || [])
+  const conversationId = computed(() => currentSession.value?.conversationId)
+  const conversationTitle = computed(() => currentSession.value?.conversationTitle)
+  const loading = computed(() => currentSession.value?.loading || false)
+  const currentSteps = computed(() => currentSession.value?.currentSteps || [])
 
   async function loadConversations() {
     try {
@@ -50,25 +80,51 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function loadConversation(id: string) {
+    const session = getOrCreateSession(id)
+    
+    // 始终从服务器获取最新数据，确保机器人消息完整
     try {
       const detail = await getConversation(id)
-      conversationId.value = id
-      conversationTitle.value = detail.title
-      messages.value = detail.messages.map(m => ({
+      session.conversationId = id
+      session.conversationTitle = detail.title
+      
+      // 合并本地正在进行的消息（用户已发送但机器人响应未完成）
+      const serverMessages = detail.messages.map(m => ({
         id: m.id,
         role: m.role as 'user' | 'assistant',
         content: m.content,
         timestamp: new Date(),
       }))
+      
+      // 保留本地未保存的消息（如正在流式接收的消息）
+      const localPending = session.messages.filter(localMsg => {
+        // 保留用户消息（可能服务器还没保存）
+        if (localMsg.role === 'user') {
+          return !serverMessages.some(m => m.id === localMsg.id)
+        }
+        // 保留正在进行的机器人消息（content 为空表示还在接收）
+        if (localMsg.role === 'assistant' && localMsg.content === '') {
+          return true
+        }
+        return false
+      })
+      
+      session.messages = [...serverMessages, ...localPending]
+      activeSessionId.value = id
     } catch (e) {
       console.error('Failed to load conversation:', e)
+      // 服务器获取失败时，至少设置活跃会话
+      activeSessionId.value = id
     }
   }
 
   async function renameConversation(id: string, title: string) {
     try {
       await apiRenameConversation(id, title)
-      conversationTitle.value = title
+      const session = sessions.value[id]
+      if (session) {
+        session.conversationTitle = title
+      }
       const idx = conversations.value.findIndex(c => c.id === id)
       if (idx >= 0) {
         conversations.value[idx].title = title
@@ -79,13 +135,20 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function newChat() {
-    messages.value = []
-    conversationId.value = undefined
-    conversationTitle.value = ''
-    currentSteps.value = []
+    activeSessionId.value = undefined
   }
 
   async function send(text: string, files: FileContent[] = []) {
+    let sessionId = activeSessionId.value
+    if (!sessionId) {
+      sessionId = genId()
+      getOrCreateSession(sessionId)
+      activeSessionId.value = sessionId
+    }
+    
+    const session = sessions.value[sessionId]
+    if (!session) return
+
     const userMsg: Message = {
       id: genId(),
       role: 'user',
@@ -93,20 +156,20 @@ export const useChatStore = defineStore('chat', () => {
       files: files.map(f => ({ filename: f.filename, mime_type: f.mime_type })),
       timestamp: new Date(),
     }
-    messages.value.push(userMsg)
-    loading.value = true
-    currentSteps.value = []
+    session.messages = [...session.messages, userMsg]
+    session.loading = true
+    session.currentSteps = []
 
     const reqData = {
       message: text,
-      conversation_id: conversationId.value,
+      conversation_id: session.conversationId,
       model: selectedModel.value,
       use_vector_db: useVectorDb.value,
       files: files.length > 0 ? files : undefined,
     }
 
     const controller = new AbortController()
-    abortController.value = controller
+    session.abortController = controller
 
     const signal = controller.signal
 
@@ -115,7 +178,7 @@ export const useChatStore = defineStore('chat', () => {
         if (signal.aborted) return
         if (event.type === 'step_start' || event.type === 'step_end' ||
             event.type === 'tool_start' || event.type === 'tool_end') {
-          const idx = currentSteps.value.findIndex(s => s.step_id === event.step_id)
+          const idx = session.currentSteps.findIndex(s => s.step_id === event.step_id)
           const step: AgentStep = {
             type: event.type as AgentStep['type'],
             step_id: event.step_id!,
@@ -128,26 +191,26 @@ export const useChatStore = defineStore('chat', () => {
             tool_result: event.tool_result,
           }
           if (idx >= 0) {
-            currentSteps.value[idx] = step
+            session.currentSteps[idx] = step
           } else {
-            currentSteps.value.push(step)
+            session.currentSteps = [...session.currentSteps, step]
           }
         } else if (event.type === 'tool_output') {
-          const idx = currentSteps.value.findIndex(
+          const idx = session.currentSteps.findIndex(
             s => s.tool_name === 'tool_execute' && s.status === 'running'
           )
           if (idx >= 0) {
-            const step = currentSteps.value[idx]
+            const step = session.currentSteps[idx]
             const prefix = event.source === 'stderr' ? '[stderr] ' : ''
             const line = prefix + (event.line || '')
             step.tool_output = (step.tool_output || '') + line + '\n'
           }
         } else if (event.type === 'tool_heartbeat') {
-          const idx = currentSteps.value.findIndex(
+          const idx = session.currentSteps.findIndex(
             s => s.tool_name === 'tool_execute' && s.status === 'running'
           )
           if (idx >= 0) {
-            const step = currentSteps.value[idx]
+            const step = session.currentSteps[idx]
             step.detail = `运行中 (${event.elapsed_seconds}s)`
           }
         } else if (event.type === 'permission_request') {
@@ -161,9 +224,9 @@ export const useChatStore = defineStore('chat', () => {
             created_at: new Date().toISOString(),
           })
         } else if (event.type === 'done') {
-          conversationId.value = event.conversation_id
+          session.conversationId = event.conversation_id
           if (event.title) {
-            conversationTitle.value = event.title
+            session.conversationTitle = event.title
             loadConversations()
           }
           const assistantMsg: Message = {
@@ -171,14 +234,14 @@ export const useChatStore = defineStore('chat', () => {
             role: 'assistant',
             content: event.answer || '',
             sources: event.sources,
-            steps: event.steps || currentSteps.value,
+            steps: event.steps || session.currentSteps,
             timestamp: new Date(),
           }
-          messages.value.push(assistantMsg)
-          currentSteps.value = []
+          session.messages = [...session.messages, assistantMsg]
+          session.currentSteps = []
           if (event.user_msg_id) {
-            for (let i = messages.value.length - 1; i >= 0; i--) {
-              const m = messages.value[i]
+            for (let i = session.messages.length - 1; i >= 0; i--) {
+              const m = session.messages[i]
               if (m.role === 'user' && m.id !== event.user_msg_id) {
                 m.id = event.user_msg_id
                 break
@@ -186,77 +249,102 @@ export const useChatStore = defineStore('chat', () => {
             }
           }
         } else if (event.type === 'error') {
-          messages.value.push({
+          session.messages = [...session.messages, {
             id: genId(),
             role: 'assistant',
             content: `Error: ${event.error || event.detail || 'Unknown error'}`,
             timestamp: new Date(),
-          })
-          currentSteps.value = []
+          }]
+          session.currentSteps = []
         }
       }, signal)
     } catch (err: any) {
       if (!signal.aborted && err.name !== 'AbortError') {
-        messages.value.push({
+        session.messages = [...session.messages, {
           id: genId(),
           role: 'assistant',
           content: `Error: ${err.message}`,
           timestamp: new Date(),
-        })
-        currentSteps.value = []
+        }]
+        session.currentSteps = []
       }
     } finally {
-      loading.value = false
-      if (abortController.value === controller) {
-        abortController.value = null
+      session.loading = false
+      if (session.abortController === controller) {
+        session.abortController = null
       }
     }
   }
 
   function cancel() {
-    abortController.value?.abort()
+    if (activeSessionId.value) {
+      const session = sessions.value[activeSessionId.value]
+      if (session) {
+        session.abortController?.abort()
+      }
+    }
   }
 
   function clear() {
-    messages.value = []
-    conversationId.value = undefined
-    conversationTitle.value = ''
-    currentSteps.value = []
+    if (activeSessionId.value) {
+      const session = sessions.value[activeSessionId.value]
+      if (session) {
+        session.messages = []
+        session.conversationId = undefined
+        session.conversationTitle = ''
+        session.currentSteps = []
+      }
+    }
+  }
+
+  function undoMessage(index: number) {
+    if (activeSessionId.value) {
+      const session = sessions.value[activeSessionId.value]
+      if (session) {
+        session.messages = session.messages.slice(0, index)
+      }
+    }
   }
 
   async function deleteConversation() {
-    if (conversationId.value) {
-      try {
-        await apiDeleteConversation(conversationId.value)
-      } catch (e) {
-        console.error('Failed to delete conversation from server:', e)
+    if (activeSessionId.value) {
+      const session = sessions.value[activeSessionId.value]
+      if (session?.conversationId) {
+        try {
+          await apiDeleteConversation(session.conversationId)
+        } catch (e) {
+          console.error('Failed to delete conversation from server:', e)
+        }
       }
+      delete sessions.value[activeSessionId.value]
+      activeSessionId.value = undefined
+      loadConversations()
     }
-    messages.value = []
-    conversationId.value = undefined
-    conversationTitle.value = ''
-    currentSteps.value = []
-    loadConversations()
   }
 
   async function deleteMessage(messageId: string) {
-    if (conversationId.value) {
-      try {
-        await apiDeleteMessage(conversationId.value, messageId)
-      } catch (e) {
-        console.error('Failed to delete message from server:', e)
+    if (activeSessionId.value) {
+      const session = sessions.value[activeSessionId.value]
+      if (session?.conversationId) {
+        try {
+          await apiDeleteMessage(session.conversationId, messageId)
+        } catch (e) {
+          console.error('Failed to delete message from server:', e)
+        }
       }
-    }
-    const idx = messages.value.findIndex(m => m.id === messageId)
-    if (idx >= 0) {
-      messages.value.splice(idx, 1)
+      if (session) {
+        const idx = session.messages.findIndex(m => m.id === messageId)
+        if (idx >= 0) {
+          session.messages = session.messages.filter(m => m.id !== messageId)
+        }
+      }
     }
   }
 
   return {
-    messages, conversationId, conversationTitle, conversations,
-    loading, selectedModel, useVectorDb, currentSteps,
-    send, cancel, clear, deleteConversation, deleteMessage,
+    sessions, activeSessionId, conversations, selectedModel, useVectorDb,
+    messages, conversationId, conversationTitle, loading, currentSteps,
+    send, cancel, clear, undoMessage, deleteConversation, deleteMessage,
     loadConversations, loadConversation, newChat, renameConversation,
   }
 })

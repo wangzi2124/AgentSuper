@@ -17,6 +17,7 @@
 | **中文支持** | 内置 `BAAI/bge-small-zh-v1.5` 中文嵌入模型，准确理解中文语义 |
 | **上传进度** | 上传过程实时显示进度条（0-100%）及阶段描述（上传→分块→嵌入→入库） |
 | **多轮对话** | 自动生成 conversation_id，支持同一会话内的上下文连续对话 |
+| **会话隔离** | 每个会话独立消息存储，切换会话时消息互不干扰，后台流式请求继续运行 |
 | **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如搜索、天气、生成文档），Agent 按需调用 |
 | **Vector DB 开关** | 用户可在聊天界面手动控制是否启用向量库检索，关闭后 Agent 仅凭自身知识回答 |
@@ -394,7 +395,66 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 
 实现路径：`backend/app/api/chat.py` — `_load_conversation` / `_truncate_history` / `_save_conversation`，`backend/app/middleware/summarization.py` — `HierarchicalSummarizationMiddleware`
 
+---
+
+## 会话隔离（Session Isolation）
+
+前端采用**按会话隔离**的消息存储架构，确保切换历史会话时消息互不干扰：
+
+### 数据结构
+
+```typescript
+// 每个会话独立存储
+const sessions = ref<Record<string, SessionState>>({
+  'session-id-1': {
+    messages: [...],
+    conversationId: 'conv-123',
+    currentSteps: [],
+    loading: false,
+    abortController: null,
+  },
+  'session-id-2': { ... }
+})
+
+// 当前活跃会话
+const activeSessionId = ref<string | undefined>(undefined)
+```
+
+### 核心优势
+
+| 特性 | 说明 |
+|------|------|
+| **消息隔离** | 切换会话时，每个会话显示自己的消息列表 |
+| **后台请求** | 流式请求在后台继续运行，完成时消息保存到对应会话 |
+| **状态独立** | 每个会话有自己的 loading、currentSteps 状态 |
+| **即时切换** | 已加载的会话切换时无需重新请求服务器 |
+
+### 工作流程
+
+```
+用户在会话A发送消息
+    │
+    ├─ 创建 AbortController (key: session-A)
+    ├─ 开始流式接收
+    │
+    ▼
+用户切换到会话B
+    │
+    ├─ activeSessionId = B
+    ├─ 显示会话B的消息
+    └─ 会话A的流式请求继续在后台运行
+         │
+         ▼
+    会话A请求完成
+         │
+         ├─ 消息保存到 sessions['session-A'].messages
+         └─ 如果用户切回会话A，消息仍在
+```
+
+实现路径：`frontend/src/stores/chat.ts` — `useChatStore`（按会话ID存储消息）
+
 ```ini
+```
 # .env 可选配置
 SUMMARIZATION_MODEL=ollama/qwen2.5:3b     # 摘要用模型（推荐免费方案），不设置则只用截断
 SUMMARIZATION_API_KEY=                    # 摘要模型的 API key（可选，不设置则复用 LLM_API_KEY）
