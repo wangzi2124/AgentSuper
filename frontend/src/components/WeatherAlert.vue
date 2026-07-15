@@ -138,7 +138,7 @@ const globalCities = [
   { name: 'Cairo', region: 'Egypt' },
   { name: 'Cape Town', region: 'South Africa' },
   { name: 'Nairobi', region: 'Kenya' },
-  { name: 'Marrakech', region: 'Morocco' },
+  // { name: 'Marrakech', region: 'Morocco' },
 ]
 
 const currentCities = computed(() => cityTab.value === 'cn' ? cnCities : globalCities)
