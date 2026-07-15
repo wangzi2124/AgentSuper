@@ -50,46 +50,98 @@ const errorMsg = ref('')
 const searchCity = ref('')
 const isSearching = ref(false)
 const searchResults = ref<Array<{name: string, country: string, admin1: string}>>([])
+const cityTab = ref<'cn' | 'global'>('cn')
 
-const cities = [
-  { name: '北京', province: '北京' },
-  { name: '上海', province: '上海' },
-  { name: '广州', province: '广东' },
-  { name: '深圳', province: '广东' },
-  { name: '杭州', province: '浙江' },
-  { name: '成都', province: '四川' },
-  { name: '武汉', province: '湖北' },
-  { name: '西安', province: '陕西' },
-  { name: '南京', province: '江苏' },
-  { name: '重庆', province: '重庆' },
-  { name: '天津', province: '天津' },
-  { name: '苏州', province: '江苏' },
-  { name: '郑州', province: '河南' },
-  { name: '长沙', province: '湖南' },
-  { name: '东莞', province: '广东' },
-  { name: '沈阳', province: '辽宁' },
-  { name: '青岛', province: '山东' },
-  { name: '合肥', province: '安徽' },
-  { name: '佛山', province: '广东' },
-  { name: '宁波', province: '浙江' },
-  { name: '昆明', province: '云南' },
-  { name: '大连', province: '辽宁' },
-  { name: '福州', province: '福建' },
-  { name: '厦门', province: '福建' },
-  { name: '哈尔滨', province: '黑龙江' },
-  { name: '济南', province: '山东' },
-  { name: '温州', province: '浙江' },
-  { name: '石家庄', province: '河北' },
-  { name: '南宁', province: '广西' },
-  { name: '长春', province: '吉林' },
-  { name: '泉州', province: '福建' },
-  { name: '贵阳', province: '贵州' },
-  { name: '南昌', province: '江西' },
-  { name: '无锡', province: '江苏' },
-  { name: '烟台', province: '山东' },
-  { name: '珠海', province: '广东' },
-  { name: '常州', province: '江苏' },
+const cnCities = [
+  { name: '北京', region: '北京' },
+  { name: '上海', region: '上海' },
+  { name: '广州', region: '广东' },
+  { name: '深圳', region: '广东' },
+  { name: '杭州', region: '浙江' },
+  { name: '成都', region: '四川' },
+  { name: '武汉', region: '湖北' },
+  { name: '西安', region: '陕西' },
+  { name: '南京', region: '江苏' },
+  { name: '重庆', region: '重庆' },
+  { name: '天津', region: '天津' },
+  { name: '苏州', region: '江苏' },
+  { name: '郑州', region: '河南' },
+  { name: '长沙', region: '湖南' },
+  { name: '大连', region: '辽宁' },
+  { name: '青岛', region: '山东' },
+  { name: '厦门', region: '福建' },
+  { name: '哈尔滨', region: '黑龙江' },
+  { name: '沈阳', region: '辽宁' },
+  { name: '昆明', region: '云南' },
 ]
+
+const globalCities = [
+  // 亚洲
+  { name: 'Tokyo', region: 'Japan' },
+  { name: 'Seoul', region: 'Korea' },
+  { name: 'Singapore', region: 'Singapore' },
+  { name: 'Bangkok', region: 'Thailand' },
+  { name: 'Kuala Lumpur', region: 'Malaysia' },
+  { name: 'Jakarta', region: 'Indonesia' },
+  { name: 'Manila', region: 'Philippines' },
+  { name: 'Ho Chi Minh', region: 'Vietnam' },
+  { name: 'Mumbai', region: 'India' },
+  { name: 'Delhi', region: 'India' },
+  { name: 'Dubai', region: 'UAE' },
+  { name: 'Doha', region: 'Qatar' },
+  { name: 'Istanbul', region: 'Turkey' },
+  { name: 'Tel Aviv', region: 'Israel' },
+  // 北美
+  { name: 'New York', region: 'USA' },
+  { name: 'Los Angeles', region: 'USA' },
+  { name: 'San Francisco', region: 'USA' },
+  { name: 'Chicago', region: 'USA' },
+  { name: 'Las Vegas', region: 'USA' },
+  { name: 'Miami', region: 'USA' },
+  { name: 'Seattle', region: 'USA' },
+  { name: 'Toronto', region: 'Canada' },
+  { name: 'Vancouver', region: 'Canada' },
+  { name: 'Mexico City', region: 'Mexico' },
+  // 欧洲
+  { name: 'London', region: 'UK' },
+  { name: 'Paris', region: 'France' },
+  { name: 'Berlin', region: 'Germany' },
+  { name: 'Rome', region: 'Italy' },
+  { name: 'Madrid', region: 'Spain' },
+  { name: 'Barcelona', region: 'Spain' },
+  { name: 'Amsterdam', region: 'Netherlands' },
+  { name: 'Brussels', region: 'Belgium' },
+  { name: 'Vienna', region: 'Austria' },
+  { name: 'Zurich', region: 'Switzerland' },
+  { name: 'Munich', region: 'Germany' },
+  { name: 'Prague', region: 'Czech' },
+  { name: 'Warsaw', region: 'Poland' },
+  { name: 'Budapest', region: 'Hungary' },
+  { name: 'Stockholm', region: 'Sweden' },
+  { name: 'Oslo', region: 'Norway' },
+  { name: 'Copenhagen', region: 'Denmark' },
+  { name: 'Helsinki', region: 'Finland' },
+  { name: 'Dublin', region: 'Ireland' },
+  { name: 'Lisbon', region: 'Portugal' },
+  { name: 'Athens', region: 'Greece' },
+  // 大洋洲
+  { name: 'Sydney', region: 'Australia' },
+  { name: 'Melbourne', region: 'Australia' },
+  { name: 'Auckland', region: 'New Zealand' },
+  // 南美
+  { name: 'Sao Paulo', region: 'Brazil' },
+  { name: 'Buenos Aires', region: 'Argentina' },
+  { name: 'Santiago', region: 'Chile' },
+  { name: 'Lima', region: 'Peru' },
+  { name: 'Bogota', region: 'Colombia' },
+  // 非洲
+  { name: 'Cairo', region: 'Egypt' },
+  { name: 'Cape Town', region: 'South Africa' },
+  { name: 'Nairobi', region: 'Kenya' },
+  { name: 'Marrakech', region: 'Morocco' },
+]
+
+const currentCities = computed(() => cityTab.value === 'cn' ? cnCities : globalCities)
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -217,15 +269,23 @@ onMounted(() => {
                 {{ isSearching ? '...' : '搜索' }}
               </button>
             </div>
+            <div class="city-tabs">
+              <button :class="['tab-btn', { active: cityTab === 'cn' }]" @click="cityTab = 'cn'">
+                <span class="tab-icon">🇨🇳</span> 国内
+              </button>
+              <button :class="['tab-btn', { active: cityTab === 'global' }]" @click="cityTab = 'global'">
+                <span class="tab-icon">🌍</span> 国际
+              </button>
+            </div>
             <div class="city-tags">
               <button 
-                v-for="city in cities" 
+                v-for="city in currentCities" 
                 :key="city.name"
                 :class="['city-btn', { active: selectedCity === city.name }]"
                 @click="changeCity(city.name)"
               >
                 <span class="city-name">{{ city.name }}</span>
-                <span class="city-province">{{ city.province }}</span>
+                <span class="city-region">{{ city.region }}</span>
               </button>
             </div>
           </div>
@@ -521,6 +581,43 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
+.city-tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.tab-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tab-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.tab-btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: white;
+}
+
+.tab-icon {
+  font-size: 14px;
+}
+
 .city-tags {
   display: flex;
   flex-wrap: wrap;
@@ -547,7 +644,7 @@ onMounted(() => {
   color: var(--text);
 }
 
-.city-province {
+.city-region {
   font-size: 10px;
   color: var(--text-secondary);
   margin-top: 2px;
@@ -562,6 +659,10 @@ onMounted(() => {
   background: var(--primary);
   border-color: var(--primary);
   color: white;
+}
+
+.city-btn.active .city-region {
+  color: rgba(255, 255, 255, 0.8);
 }
 
 .city-btn.active .city-province {
