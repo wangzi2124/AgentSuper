@@ -7,7 +7,7 @@ CN_NUM_MAP = {
     "十": 10, "百": 100, "千": 1000,
 }
 
-_CHAPTER_CN_RE = re.compile(r"第([一二三四五六七八九十百千\d零]+)[章章节回部集]")
+_CHAPTER_CN_RE = re.compile(r"第?([一二三四五六七八九十百千\d零]+)[章章节回部集]")
 _CHAPTER_EN_RE = re.compile(r"[Cc]hapter\s+(\d+)")
 _CHAPTER_KEYWORD_RE = re.compile(
     r"(?:关于|查找|搜索|找|介绍|说|看|讲|里面).{0,15}(?:章|节|回|部|集)"

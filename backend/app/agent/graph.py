@@ -177,6 +177,10 @@ class RAGAgent:
             "\n\nYou have access to built-in filesystem tools (tool_ls, tool_read_file, tool_write_file, tool_edit_file, tool_glob, tool_grep, tool_execute) for reading/writing files and running shell commands."
             "\nYou also have access to skill tools (load_skill_*) and plugin tools."
             "\nIf the user asks to create/edit/manipulate documents (Word, PDF, PPT, Excel), generate visual designs, build web pages, or use other specialized capabilities, call the relevant skill or plugin tool to get instructions first."
+            "\n\nCharacter Analysis (for novels, scripts, or documents with dialogues):"
+            "\n- plugin_character-analysis_tool_list_characters(): List all characters and their dialogue counts."
+            "\n- plugin_character-analysis_tool_get_character_dialogues(character_name, limit): Get all dialogues spoken by a character."
+            "\n- plugin_character-analysis_tool_analyze_character_interactions(character_name): Find characters who appear in same chapters."
         )
 
     def _build_tool_defs(self) -> Optional[List[dict]]:

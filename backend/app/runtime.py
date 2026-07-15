@@ -66,7 +66,9 @@ def _do_init(app):
     retriever = Retriever(vs, emb, bm25_index=bm25, chapter_store=chapter_store)
 
     from app.rag.plugin_bridge import set_retriever as _bridge_set_retriever
+    from app.rag.plugin_bridge import set_vector_store as _bridge_set_vector_store
     _bridge_set_retriever(retriever)
+    _bridge_set_vector_store(vs)
 
     reranker = Reranker(
         model_name=settings.reranker_model,
