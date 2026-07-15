@@ -19,19 +19,7 @@ PLUGIN_DESCRIPTION = "Voice cloning and TTS via isolated Qwen3-TTS subprocess"
 
 _BASE_DIR = Path(__file__).resolve().parents[1]
 _OUTPUT_DIR = _BASE_DIR / "data" / "generated"
-_VOICECLONE_DIR = Path(os.environ.get("VOICECLONE_DIR", "")).resolve() if os.environ.get("VOICECLONE_DIR") else None
-
-if _VOICECLONE_DIR is None or not _VOICECLONE_DIR.exists():
-    for candidate in [
-        Path(r"E:\voiceclone-main"),
-        Path(__file__).resolve().parents[3] / "voiceclone-main",
-        Path(__file__).resolve().parents[1].parent / "voiceclone-main",
-    ]:
-        if candidate.exists():
-            _VOICECLONE_DIR = candidate.resolve()
-            break
-    else:
-        _VOICECLONE_DIR = Path(r"E:\voiceclone-main")
+_VOICECLONE_DIR = _BASE_DIR / "ttsclone"
 
 
 def _get_python():
