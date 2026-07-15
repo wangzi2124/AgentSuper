@@ -88,13 +88,15 @@ export const useChatStore = defineStore('chat', () => {
       session.conversationId = id
       session.conversationTitle = detail.title
       
-      // 合并本地正在进行的消息（用户已发送但机器人响应未完成）
-      const serverMessages = detail.messages.map(m => ({
-        id: m.id,
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-        timestamp: new Date(),
-      }))
+      // 从服务器消息中过滤掉空的机器人消息（后端占位符）
+      const serverMessages = detail.messages
+        .filter(m => !(m.role === 'assistant' && (!m.content || m.content.trim() === '')))
+        .map(m => ({
+          id: m.id,
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+          timestamp: new Date(),
+        }))
       
       // 保留本地未保存的消息（如正在流式接收的消息）
       const localPending = session.messages.filter(localMsg => {
