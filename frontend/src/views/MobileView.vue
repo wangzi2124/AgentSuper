@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { useMobileChatStore } from '../stores/mobileChat'
 import WeatherPanel from '../mobile/WeatherPanel.vue'
 import SettingsPanel from '../mobile/SettingsPanel.vue'
+import GeneratedFilesPanel from '../mobile/GeneratedFilesPanel.vue'
 
 const route = useRoute()
 const chat = useMobileChatStore()
@@ -12,6 +13,7 @@ const chatContainer = ref<HTMLElement>()
 const isNearBottom = ref(true)
 const showSidebar = ref(false)
 const showSettings = ref(false)
+const showFiles = ref(false)
 const editingTitle = ref('')
 const editingId = ref<string | null>(null)
 
@@ -156,6 +158,12 @@ function formatDate(date: Date | string) {
                 <button v-if="editingId !== conv.id" class="conv-menu" @click.stop="startEdit(conv)">✏️</button>
               </div>
             </div>
+            
+            <div class="sidebar-footer">
+              <button class="menu-link" @click="showSidebar = false; showFiles = true">
+                <span>📁</span> 生成的文件
+              </button>
+            </div>
           </div>
         </div>
       </Transition>
@@ -167,6 +175,21 @@ function formatDate(date: Date | string) {
         <div v-if="showSettings" class="sidebar-overlay" @click="showSettings = false">
           <div class="settings-drawer" @click.stop>
             <SettingsPanel @close="showSettings = false" />
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Generated Files Panel -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="showFiles" class="sidebar-overlay" @click="showFiles = false">
+          <div class="files-drawer" @click.stop>
+            <div class="panel-header">
+              <h3>生成的文件</h3>
+              <button class="close-btn" @click="showFiles = false">×</button>
+            </div>
+            <GeneratedFilesPanel />
           </div>
         </div>
       </Transition>
@@ -363,6 +386,30 @@ function formatDate(date: Date | string) {
   padding: 0 12px 12px;
 }
 
+.sidebar-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border, #e2e8f0);
+}
+
+.menu-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text, #1e293b);
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.menu-link:hover {
+  background: var(--bg, #f1f5f9);
+}
+
 .empty {
   padding: 24px;
   text-align: center;
@@ -440,6 +487,45 @@ function formatDate(date: Date | string) {
   height: 100%;
   background: var(--surface, #fff);
   overflow-y: auto;
+}
+
+/* Files Drawer */
+.files-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 100%;
+  max-width: 400px;
+  height: 100%;
+  background: var(--surface, #fff);
+  overflow-y: auto;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid var(--border, #e2e8f0);
+  position: sticky;
+  top: 0;
+  background: var(--surface, #fff);
+  z-index: 10;
+}
+
+.panel-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.close-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: var(--bg, #f1f5f9);
+  font-size: 18px;
+  cursor: pointer;
 }
 
 /* Chat Container */
