@@ -752,3 +752,87 @@ Agent 在每一轮工具调用循环中，所有工具通过 `asyncio.gather()` 
 - `/health` 在初始化完成前返回 `{"status": "initializing"}`，不 hang
 
 实现路径：`backend/app/runtime.py` — `ensure_runtime_state()` + `_do_init()`
+
+---
+
+## 项目学习指南
+
+### 1. 入口层 — 了解整体启动流程
+
+```
+backend/main.py          → FastAPI 应用入口，lifespan 启动流程
+backend/app/runtime.py   → 运行时初始化（环境变量、向量库、嵌入模型、Agent）
+backend/app/config.py    → 配置项（读 .env）
+```
+
+### 2. Agent 核心 — 理解 AI 对话链路
+
+```
+backend/app/agent/graph.py    ← ⭐ 最核心：LangGraph 工作流（retrieve → rerank → generate）
+backend/app/agent/tools.py    → 工具定义 + 系统 prompt
+```
+
+`graph.py` 是整个大脑，LLM 如何调用、工具如何执行、流式响应如何产生，全在这里。
+
+### 3. RAG 检索链路 — 理解知识库如何工作
+
+```
+backend/app/rag/document_processor.py  → 文档上传后如何分块（章节感知）
+backend/app/rag/embeddings.py          → 文本如何转成向量
+backend/app/rag/vector_store.py        → ChromaDB 向量存储
+backend/app/rag/retriever.py           ← ⭐ 检索核心：混合检索 + RRF 融合
+backend/app/rag/bm25_index.py          → BM25 关键词检索
+backend/app/rag/reranker.py            → 重排序提升精度
+backend/app/rag/intent.py              → 意图识别（章节查询跳过向量检索）
+backend/app/rag/chapter_store.py       → 章节元数据存储
+```
+
+### 4. API 层 — 前后端如何交互
+
+```
+backend/app/api/chat.py       ← ⭐ 聊天接口（SSE 流式）
+backend/app/api/documents.py  → 文档上传 + 异步任务
+```
+
+### 5. 插件系统 — 理解扩展机制
+
+```
+backend/app/plugins/loader.py   → 插件如何加载（扫描 tool_* 函数）
+backend/app/skills/loader.py    → Skill 如何加载（Markdown 文件）
+backend/plugins/example_plugin.py → 最简单的插件示例
+```
+
+### 6. 前端 — Vue 3 SPA
+
+```
+frontend/src/stores/chat.ts      ← ⭐ 状态管理（会话、消息、SSE 流式接收）
+frontend/src/views/ChatView.vue  → 聊天主界面
+frontend/src/api/chat.ts         → 聊天 API 调用
+frontend/src/components/         → 各组件（Sidebar、ChatMessage 等）
+```
+
+### 核心数据流
+
+```
+用户输入
+  → 前端 chat.ts 发送 POST /api/chat/stream
+    → backend api/chat.py 接收
+      → agent/graph.py LangGraph 编排
+        ├─ _retrieve()  → retriever.py 混合检索
+        ├─ _rerank()    → reranker.py 重排序
+        └─ _generate()  → litellm 调 LLM + 工具循环
+      → SSE 逐 token 返回
+    → 前端 ChatView.vue 流式渲染
+```
+
+### 推荐学习顺序
+
+| 优先级 | 模块 | 原因 |
+|--------|------|------|
+| **1** | `agent/graph.py` | 核心链路，理解 Agent 如何思考和执行 |
+| **2** | `rag/retriever.py` + `vector_store.py` | RAG 是项目的核心价值 |
+| **3** | `api/chat.py` | 理解前后端如何通过 SSE 流式通信 |
+| **4** | `stores/chat.ts` | 前端状态管理 + 会话隔离 |
+| **5** | `plugins/loader.py` | 理解插件扩展机制 |
+
+先跑通 `graph.py` 的工作流，再向外扩展到 RAG、API、前端，最后看插件系统。
