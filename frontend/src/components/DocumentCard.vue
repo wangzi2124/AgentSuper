@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import type { Document } from '../types'
 
+// 定义组件属性：文档对象和删除状态
 defineProps<{ doc: Document; deleting?: boolean }>()
+// 定义组件事件：删除文档
 const emit = defineEmits<{ delete: [id: string] }>()
 
+// 格式化文件大小显示
 function formatSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'

@@ -1,9 +1,11 @@
+// 检索来源信息
 export interface Source {
   document_id: string
   content: string
   score: number
 }
 
+// Agent 执行步骤信息
 export interface AgentStep {
   type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end'
   step_id: string
@@ -17,6 +19,7 @@ export interface AgentStep {
   tool_output?: string
 }
 
+// 聊天响应
 export interface ChatResponse {
   answer: string
   sources: Source[]
@@ -24,6 +27,7 @@ export interface ChatResponse {
   steps?: AgentStep[]
 }
 
+// SSE 流式事件
 export interface SSEEvent {
   type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'permission_request' | 'tool_output' | 'tool_heartbeat'
   step_id?: string
@@ -50,12 +54,14 @@ export interface SSEEvent {
   assistant_msg_id?: string
 }
 
+// 文件内容（用于多模态消息）
 export interface FileContent {
   filename: string
   data: string
   mime_type: string
 }
 
+// 权限审批请求
 export interface PermissionRequest {
   id: string
   path: string
@@ -65,6 +71,7 @@ export interface PermissionRequest {
   created_at: string
 }
 
+// 聊天请求参数
 export interface ChatRequest {
   message: string
   conversation_id?: string
@@ -73,6 +80,7 @@ export interface ChatRequest {
   files?: FileContent[]
 }
 
+// 文档信息
 export interface Document {
   id: string
   filename: string
@@ -81,11 +89,13 @@ export interface Document {
   created_at: string
 }
 
+// 文档列表响应
 export interface DocumentListResponse {
   documents: Document[]
   total: number
 }
 
+// 单个文档响应
 export interface DocumentResponse {
   id: string
   filename: string
@@ -94,10 +104,12 @@ export interface DocumentResponse {
   created_at: string
 }
 
+// 上传任务 ID 响应
 export interface UploadResponse {
   task_id: string
 }
 
+// 文档处理任务进度
 export interface TaskProgress {
   task_id: string
   filename: string
@@ -108,16 +120,19 @@ export interface TaskProgress {
   error?: string | null
 }
 
+// 删除操作响应
 export interface DeleteResponse {
   message: string
 }
 
+// 向量分块
 export interface Chunk {
   id: string
   text: string
   metadata: Record<string, unknown>
 }
 
+// 向量分块列表响应
 export interface ChunkListResponse {
   chunks: Chunk[]
   total: number
@@ -125,6 +140,7 @@ export interface ChunkListResponse {
   limit: number
 }
 
+// 技能信息
 export interface Skill {
   name: string
   description: string
@@ -132,6 +148,7 @@ export interface Skill {
   enabled: boolean
 }
 
+// 插件信息
 export interface Plugin {
   name: string
   version: string
@@ -139,17 +156,20 @@ export interface Plugin {
   enabled: boolean
 }
 
+// 生成的文件信息
 export interface GeneratedFile {
   filename: string
   size: number
   created_at: string
 }
 
+// 生成文件列表响应
 export interface GeneratedFileList {
   files: GeneratedFile[]
   total: number
 }
 
+// 监控统计数据
 export interface MonitorStats {
   requests: {
     total: number
@@ -168,6 +188,7 @@ export interface MonitorStats {
   }
 }
 
+// 聊天消息
 export interface Message {
   id: string
   role: 'user' | 'assistant'

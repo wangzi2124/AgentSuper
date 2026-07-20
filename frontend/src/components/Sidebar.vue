@@ -2,8 +2,10 @@
 import { useRoute } from 'vue-router'
 import ChatHistory from './ChatHistory.vue'
 
+// 当前路由信息
 const route = useRoute()
 
+// 侧边栏导航菜单项
 const navItems = [
   { path: '/chat', label: 'Chat', icon: '💬' },
   { path: '/documents', label: 'Documents', icon: '📄' },

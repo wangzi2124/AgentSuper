@@ -3,13 +3,20 @@ import { ref } from 'vue'
 import type { Document } from '../types'
 import { listDocuments, uploadDocument, deleteDocument } from '../api/documents'
 
+// 文档管理 Store
 export const useDocumentStore = defineStore('documents', () => {
+  // 文档列表
   const documents = ref<Document[]>([])
+  // 加载状态
   const loading = ref(false)
+  // 上传进度百分比
   const uploadProgress = ref(0)
+  // 上传阶段描述
   const uploadStage = ref('')
+  // 正在删除的文档 ID
   const deletingId = ref<string | null>(null)
 
+  // 获取所有文档
   async function fetchAll() {
     loading.value = true
     try {
@@ -20,6 +27,7 @@ export const useDocumentStore = defineStore('documents', () => {
     }
   }
 
+  // 上传文档并监听进度
   async function upload(file: File) {
     uploadProgress.value = 0
     uploadStage.value = 'Starting upload'
@@ -35,6 +43,7 @@ export const useDocumentStore = defineStore('documents', () => {
     }
   }
 
+  // 删除指定文档
   async function remove(id: string) {
     deletingId.value = id
     try {

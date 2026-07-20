@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 
+// 天气数据接口定义
 interface WeatherData {
   location: { name: string; country: string; admin1: string }
   current: {
@@ -15,14 +16,22 @@ interface WeatherData {
   }>
 }
 
+// 面板是否可见
 const isVisible = ref(false)
+// 是否正在加载天气数据
 const isLoading = ref(false)
+// 天气数据
 const weatherData = ref<WeatherData | null>(null)
+// 当前选中的城市
 const selectedCity = ref('北京')
+// 错误提示信息
 const errorMsg = ref('')
+// 城市分类标签：cn-国内 global-国际
 const cityTab = ref<'cn' | 'global'>('cn')
+// 搜索框输入内容
 const searchCity = ref('')
 
+// 国内城市列表
 const cnCities = [
   { name: '北京', region: '北京' }, { name: '上海', region: '上海' },
   { name: '广州', region: '广东' }, { name: '深圳', region: '广东' },
@@ -34,6 +43,7 @@ const cnCities = [
   { name: '沈阳', region: '辽宁' }, { name: '昆明', region: '云南' },
 ]
 
+// 国际城市列表
 const globalCities = [
   { name: 'Tokyo', region: 'Japan' }, { name: 'New York', region: 'USA' },
   { name: 'London', region: 'UK' }, { name: 'Paris', region: 'France' },
@@ -43,8 +53,10 @@ const globalCities = [
   { name: 'Bangkok', region: 'Thailand' }, { name: 'Toronto', region: 'Canada' },
 ]
 
+// 根据当前标签返回对应城市列表
 const currentCities = computed(() => cityTab.value === 'cn' ? cnCities : globalCities)
 
+// 从API获取天气数据
 async function fetchWeather() {
   isLoading.value = true
   errorMsg.value = ''
@@ -65,17 +77,20 @@ async function fetchWeather() {
   }
 }
 
+// 搜索城市天气
 async function searchWeather() {
   if (!searchCity.value.trim()) return
   selectedCity.value = searchCity.value.trim()
   await fetchWeather()
 }
 
+// 切换选中城市并获取天气
 function changeCity(city: string) {
   selectedCity.value = city
   fetchWeather()
 }
 
+// 切换面板显示/隐藏状态
 function toggle() {
   isVisible.value = !isVisible.value
   if (isVisible.value && !weatherData.value) {
@@ -83,21 +98,25 @@ function toggle() {
   }
 }
 
+// 关闭面板
 function close() {
   isVisible.value = false
 }
 
+// 根据风向角度返回中文风向
 function getWindDirection(degrees: number) {
   const directions = ['北', '东北', '东', '东南', '南', '西南', '西', '西北']
   return directions[Math.round(degrees / 45) % 8]
 }
 
+// 格式化日期为 "月/日 周几"
 function formatDate(dateStr: string) {
   const date = new Date(dateStr)
   const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
   return `${date.getMonth() + 1}/${date.getDate()} ${weekdays[date.getDay()]}`
 }
 
+// 格式化时间为 "HH:MM"
 function formatTime(timeStr: string) {
   if (!timeStr) return '--'
   const date = new Date(timeStr)

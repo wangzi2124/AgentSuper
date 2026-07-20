@@ -5,16 +5,23 @@ import { useChatStore } from '../stores/chat'
 import { deleteConversation } from '../api/chat'
 import type { ConversationMeta } from '../api/chat'
 
+// 路由实例
 const router = useRouter()
+// 聊天状态管理
 const chat = useChatStore()
+// 搜索关键词
 const searchQuery = ref('')
+// 当前正在编辑的对话ID
 const editingId = ref<string | null>(null)
+// 编辑中的对话标题
 const editingTitle = ref('')
 
+// 组件挂载时加载对话列表
 onMounted(() => {
   chat.loadConversations()
 })
 
+// 按时间分组对话列表
 const groupedConversations = computed(() => {
   const now = new Date()
   const today = now.toDateString()
@@ -52,21 +59,25 @@ const groupedConversations = computed(() => {
   return groups
 })
 
+// 创建新对话
 function handleNewChat() {
   chat.newChat()
   router.push({ name: 'Chat' })
 }
 
+// 选择并加载指定对话
 function selectConversation(id: string) {
   chat.loadConversation(id)
   router.push({ name: 'ChatConversation', params: { id } })
 }
 
+// 开始重命名对话
 function startRename(c: ConversationMeta) {
   editingId.value = c.id
   editingTitle.value = c.title
 }
 
+// 保存重命名
 function saveRename() {
   if (editingId.value && editingTitle.value.trim()) {
     chat.renameConversation(editingId.value, editingTitle.value.trim())
@@ -74,10 +85,12 @@ function saveRename() {
   editingId.value = null
 }
 
+// 取消重命名
 function cancelRename() {
   editingId.value = null
 }
 
+// 删除对话
 function handleDelete(e: Event, id: string) {
   e.stopPropagation()
   if (chat.conversationId === id) {

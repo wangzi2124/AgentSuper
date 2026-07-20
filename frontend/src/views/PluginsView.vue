@@ -2,12 +2,15 @@
 import { onMounted } from 'vue'
 import { usePluginStore } from '../stores/plugins'
 
+// 插件状态管理
 const plugins = usePluginStore()
 
+// 组件挂载时加载所有插件
 onMounted(() => {
   plugins.fetchAll()
 })
 
+// 切换插件启用/禁用状态
 async function handleToggle(name: string, enabled: boolean) {
   try {
     await plugins.toggle(name, !enabled)

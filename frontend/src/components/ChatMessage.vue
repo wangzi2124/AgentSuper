@@ -2,17 +2,22 @@
 import { computed, ref } from 'vue'
 import type { Message } from '../types'
 
+// 定义组件事件：复制、撤销、删除
 const emit = defineEmits<{ copy: [text: string]; undo: [index: number]; delete: [id: string] }>()
+// 定义组件属性：消息对象和索引
 const props = defineProps<{ message: Message; index: number }>()
 
+// 复制成功的状态标记
 const copied = ref(false)
 
+// 计算思考步骤的耗时
 const thoughtDuration = computed(() => {
   if (!props.message.steps) return null
   const genStep = props.message.steps.find(s => s.step_id === 'generate' || s.name === '生成回答')
   return genStep?.duration_ms ?? null
 })
 
+// 复制消息内容到剪贴板
 async function handleCopy() {
   const text = props.message.content
   if (!text) return
@@ -37,10 +42,12 @@ async function handleCopy() {
   }
 }
 
+// 撤销到当前消息
 function handleUndo() {
   emit('undo', props.index)
 }
 
+// 删除当前消息
 function handleDelete() {
   emit('delete', props.message.id)
 }

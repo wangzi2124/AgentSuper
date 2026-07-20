@@ -7,16 +7,25 @@ import ChatInput from '../components/ChatInput.vue'
 import StepTaskList from '../components/StepTaskList.vue'
 import WeatherAlert from '../components/WeatherAlert.vue'
 
+// 路由实例
 const route = useRoute()
+// 路由器实例
 const router = useRouter()
+// 聊天状态管理
 const chat = useChatStore()
+// 消息列表容器引用
 const parentRef = ref<HTMLElement>()
+// 聊天输入框引用
 const chatInputRef = ref<any>()
+// 是否滚动到底部
 const isNearBottom = ref(true)
+// 是否启用天气插件
 const isWeatherEnabled = ref(false)
 
+// 计算属性：当前会话的消息列表
 const messages = computed(() => chat.messages)
 
+// 侦听消息数量变化，自动滚动到底部
 watch(() => messages.value.length, async () => {
   await nextTick()
   if (isNearBottom.value && parentRef.value) {
@@ -24,6 +33,7 @@ watch(() => messages.value.length, async () => {
   }
 })
 
+// 检查天气插件是否启用
 async function checkWeatherPlugin() {
   try {
     const response = await fetch('/api/plugins/weather-alert/status')
@@ -36,6 +46,7 @@ async function checkWeatherPlugin() {
   }
 }
 
+// 组件挂载时加载指定会话或新建会话
 onMounted(() => {
   const id = route.params.id as string
   if (id) {
@@ -44,6 +55,7 @@ onMounted(() => {
   checkWeatherPlugin()
 })
 
+// 侦听路由参数变化，加载对应会话或新建会话
 watch(() => route.params.id, (newId) => {
   if (newId) {
     chat.loadConversation(newId as string)
@@ -52,6 +64,7 @@ watch(() => route.params.id, (newId) => {
   }
 })
 
+// 滚动事件处理：检测是否滚动到底部附近
 function onScroll() {
   const el = parentRef.value
   if (!el) return
@@ -59,6 +72,7 @@ function onScroll() {
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
 }
 
+// 发送消息
 function handleSend(text: string) {
   chat.send(text).then(() => {
     if (chat.conversationId && route.name !== 'ChatConversation') {
@@ -67,13 +81,16 @@ function handleSend(text: string) {
   })
 }
 
+// 取消当前请求
 function handleCancel() {
   chat.cancel()
 }
 
+// 复制消息文本（暂未实现）
 function handleCopy(_text: string) {
 }
 
+// 撤销指定索引的消息，恢复到输入框
 function handleUndo(index: number) {
   if (chat.loading) chat.cancel()
   const msgText = messages.value[index]?.content
@@ -84,6 +101,7 @@ function handleUndo(index: number) {
   }
 }
 
+// 删除指定消息
 function handleMessageDelete(messageId: string) {
   chat.deleteMessage(messageId)
 }

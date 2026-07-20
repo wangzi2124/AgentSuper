@@ -2,13 +2,19 @@
 import { ref, watch } from 'vue'
 import { useMobileChatStore, SUPPORTED_MODELS } from '../stores/mobileChat'
 
+// 移动端聊天 store
 const chat = useMobileChatStore()
+// 本地模型选择（双向同步到 store）
 const localModel = ref(chat.selectedModel)
+// 本地知识库开关（双向同步到 store）
 const localUseVector = ref(chat.useVectorDb)
 
+// 同步本地模型选择到 store
 watch(localModel, (v) => { chat.selectedModel = v })
+// 同步本地知识库开关到 store
 watch(localUseVector, (v) => { chat.useVectorDb = v })
 
+// 定义组件事件
 const emit = defineEmits<{
   (e: 'close'): void
 }>()

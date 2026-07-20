@@ -1,14 +1,20 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 
+// 定义组件事件：上传文件
 const emit = defineEmits<{ upload: [file: File] }>()
+// 定义组件属性：加载状态、进度、阶段
 const props = defineProps<{ loading: boolean; progress?: number; stage?: string }>()
 
+// 拖拽悬停状态
 const dragOver = ref(false)
+// 文件输入元素引用
 const inputRef = ref<HTMLInputElement>()
 
+// 是否正在上传中
 const uploading = computed(() => !!(props.stage) || (props.loading && (props.progress ?? 0) > 0))
 
+// 文件选择事件处理
 function onFileInput(e: Event) {
   const files = (e.target as HTMLInputElement).files
   if (files && files[0]) {
@@ -16,6 +22,7 @@ function onFileInput(e: Event) {
   }
 }
 
+// 拖拽释放事件处理
 function onDrop(e: DragEvent) {
   dragOver.value = false
   const files = e.dataTransfer?.files
@@ -24,6 +31,7 @@ function onDrop(e: DragEvent) {
   }
 }
 
+// 触发文件选择对话框
 function triggerInput() {
   inputRef.value?.click()
 }

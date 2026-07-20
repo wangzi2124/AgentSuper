@@ -3,10 +3,14 @@ import { onMounted, ref } from 'vue'
 import { fetchStats } from '../api/monitor'
 import type { MonitorStats } from '../types'
 
+// 监控统计数据
 const stats = ref<MonitorStats | null>(null)
+// 加载状态
 const loading = ref(true)
+// 错误信息
 const error = ref('')
 
+// 组件挂载时获取监控统计数据
 onMounted(async () => {
   try {
     stats.value = await fetchStats()
@@ -17,12 +21,13 @@ onMounted(async () => {
   }
 })
 
-function ms(v: number): string {
+// 格式化毫秒为人类可读时间
   if (v >= 60000) return (v / 60000).toFixed(1) + ' min'
   if (v >= 1000) return (v / 1000).toFixed(1) + ' s'
   return Math.round(v) + ' ms'
 }
 
+// 格式化数字为本地化字符串
 function num(v: number): string {
   return v.toLocaleString()
 }

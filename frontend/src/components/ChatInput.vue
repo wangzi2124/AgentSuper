@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
+// 定义组件事件：发送消息、取消请求
 const emit = defineEmits<{ send: [text: string]; cancel: [] }>()
+// 定义组件属性：加载状态
 const props = defineProps<{ loading: boolean }>()
 
+// 输入框文本内容
 const text = ref('')
 
+// 发送消息
 function handleSend() {
   const msg = text.value.trim()
   if (!msg || props.loading) return
@@ -13,10 +17,12 @@ function handleSend() {
   text.value = ''
 }
 
+// 取消当前请求
 function handleCancel() {
   emit('cancel')
 }
 
+// 键盘事件处理：回车发送，Shift+回车换行
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
@@ -24,12 +30,15 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
+// 设置输入框文本（供父组件调用）
 function setText(val: string) {
   text.value = val
 }
 
+// 暴露方法供父组件调用
 defineExpose({ setText, focus: () => textareaRef.value?.focus() })
 
+// 文本域元素引用
 const textareaRef = ref<HTMLTextAreaElement>()
 </script>
 

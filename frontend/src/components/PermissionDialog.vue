@@ -2,15 +2,19 @@
 import { computed } from 'vue'
 import { usePermissionStore } from '../stores/permission'
 
+// 权限状态管理
 const perm = usePermissionStore()
 
+// 当前待处理的权限请求
 const currentRequest = computed(() => perm.pendingRequests[0] ?? null)
 
+// 允许权限请求
 function allow(remember: boolean = false) {
   if (!currentRequest.value) return
   perm.respond(currentRequest.value.id, 'allowed', remember)
 }
 
+// 拒绝权限请求
 function deny() {
   if (!currentRequest.value) return
   perm.respond(currentRequest.value.id, 'denied')

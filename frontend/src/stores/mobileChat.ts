@@ -11,6 +11,7 @@ import {
   type ConversationMeta,
 } from '../api/chat'
 
+// 支持的模型列表
 export const SUPPORTED_MODELS = [
   { value: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { value: 'deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
@@ -18,6 +19,7 @@ export const SUPPORTED_MODELS = [
   { value: 'openai/gpt-4o-mini', label: 'OpenAI GPT-4o-mini' },
 ] as const
 
+// 生成唯一 ID（优先使用 crypto.randomUUID）
 function genId(): string {
   try {
     return crypto.randomUUID()
@@ -29,6 +31,7 @@ function genId(): string {
   }
 }
 
+// 会话状态接口
 interface SessionState {
   messages: Message[]
   conversationId: string | undefined
@@ -39,14 +42,22 @@ interface SessionState {
 }
 
 export const useMobileChatStore = defineStore('mobileChat', () => {
+  // 所有会话的映射（sessionId -> SessionState）
   const sessions = ref<Record<string, SessionState>>({})
+  // 当前活跃会话 ID
   const activeSessionId = ref<string | undefined>(undefined)
+  // 会话列表
   const conversations = ref<ConversationMeta[]>([])
+  // 当前选中的模型
   const selectedModel = ref(SUPPORTED_MODELS[0].value)
+  // 是否启用向量数据库检索
   const useVectorDb = ref(true)
+  // 是否显示侧边栏
   const showSidebar = ref(false)
+  // 是否显示设置面板
   const showSettings = ref(false)
 
+  // 获取或创建指定 ID 的会话
   function getOrCreateSession(sessionId: string): SessionState {
     if (!sessions.value[sessionId]) {
       sessions.value[sessionId] = {
@@ -61,17 +72,24 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     return sessions.value[sessionId]
   }
 
+  // 当前活跃会话的响应式引用
   const currentSession = computed(() => {
     if (!activeSessionId.value) return null
     return sessions.value[activeSessionId.value] || null
   })
 
+  // 当前会话的消息列表
   const messages = computed(() => currentSession.value?.messages || [])
+  // 当前会话的 ID
   const conversationId = computed(() => currentSession.value?.conversationId)
+  // 当前会话的标题
   const conversationTitle = computed(() => currentSession.value?.conversationTitle)
+  // 当前会话的加载状态
   const loading = computed(() => currentSession.value?.loading || false)
+  // 当前会话的 Agent 执行步骤
   const currentSteps = computed(() => currentSession.value?.currentSteps || [])
 
+  // 加载会话列表
   async function loadConversations() {
     try {
       conversations.value = await listConversations()
@@ -80,6 +98,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     }
   }
 
+  // 加载指定会话的消息
   async function loadConversation(id: string) {
     const session = getOrCreateSession(id)
     
@@ -117,6 +136,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     }
   }
 
+  // 重命名会话
   async function renameConversation(id: string, title: string) {
     try {
       await apiRenameConversation(id, title)
@@ -133,11 +153,13 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     }
   }
 
+  // 创建新会话
   function newChat() {
     activeSessionId.value = undefined
     showSidebar.value = false
   }
 
+  // 发送消息（支持 SSE 流式响应）
   async function send(text: string) {
     let sessionId = activeSessionId.value
     if (!sessionId) {
@@ -264,6 +286,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     }
   }
 
+  // 取消当前正在发送的消息
   function cancel() {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
@@ -273,6 +296,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     }
   }
 
+  // 清空当前会话的消息
   function clear() {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
@@ -285,6 +309,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     }
   }
 
+  // 删除当前会话
   async function deleteConversation() {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
@@ -301,6 +326,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     }
   }
 
+  // 删除指定消息
   async function deleteMessage(messageId: string) {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]

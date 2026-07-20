@@ -1,14 +1,17 @@
 import type { DocumentListResponse, DocumentResponse, DeleteResponse, UploadResponse, TaskProgress } from '../types'
 import { fetchWithTimeout } from './fetch'
 
+// 文档 API 基础路径
 const BASE = '/api/documents'
 
+// 获取所有已上传文档列表
 export async function listDocuments(): Promise<DocumentListResponse> {
   const res = await fetchWithTimeout(BASE + '/')
   if (!res.ok) throw new Error(`Failed to list documents: ${res.statusText}`)
   return res.json()
 }
 
+// 上传文档，支持上传进度回调和任务轮询
 export function uploadDocument(
   file: File,
   onProgress?: (pct: number, stage: string) => void,
@@ -61,6 +64,7 @@ export function uploadDocument(
   })
 }
 
+// 轮询文档处理任务状态，直到完成或失败
 async function pollTask(
   taskId: string,
   onProgress?: (pct: number, stage: string) => void,
@@ -94,6 +98,7 @@ async function pollTask(
   return poll()
 }
 
+// 根据 ID 删除文档
 export async function deleteDocument(id: string): Promise<DeleteResponse> {
   const res = await fetchWithTimeout(BASE + '/' + id, { method: 'DELETE' })
   if (!res.ok) throw new Error(`Delete failed: ${res.statusText}`)

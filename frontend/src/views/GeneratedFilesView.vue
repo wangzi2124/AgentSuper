@@ -3,16 +3,23 @@ import { onMounted, ref } from 'vue'
 import { useGeneratedStore } from '../stores/generated'
 import { getGeneratedContent } from '../api/generated'
 
+// 生成文件状态管理
 const store = useGeneratedStore()
+// 正在删除的文件名集合
 const deleting = ref<Set<string>>(new Set())
+// 当前正在运行的文件名
 const runningFile = ref<string | null>(null)
+// 运行输出内容
 const runOutput = ref<string | null>(null)
+// 运行错误信息
 const runError = ref<string | null>(null)
 
+// 组件挂载时加载所有生成文件
 onMounted(() => {
   store.fetchAll()
 })
 
+// 删除指定生成文件
 async function handleDelete(filename: string) {
   if (!confirm(`Delete "${filename}"?`)) return
   deleting.value.add(filename)
@@ -25,14 +32,17 @@ async function handleDelete(filename: string) {
   }
 }
 
+// 判断是否为JavaScript文件
 function isJsFile(filename: string): boolean {
   return filename.endsWith('.js')
 }
 
+// 获取文件下载URL
 function getFileUrl(filename: string): string {
   return `/api/generated/download/${encodeURIComponent(filename)}`
 }
 
+// 在浏览器沙箱中运行JavaScript文件
 async function handleRun(filename: string) {
   runningFile.value = filename
   runOutput.value = null
@@ -88,6 +98,7 @@ async function handleRun(filename: string) {
   }
 }
 
+// 关闭输出弹窗
 function closeOutput() {
   runningFile.value = null
   runOutput.value = null

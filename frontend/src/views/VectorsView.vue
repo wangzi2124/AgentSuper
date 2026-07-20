@@ -3,31 +3,41 @@ import { onMounted, ref, computed } from 'vue'
 import { useVectorStore } from '../stores/vectors'
 import { useDocumentStore } from '../stores/documents'
 
+// 向量存储状态管理
 const vs = useVectorStore()
+// 文档状态管理
 const ds = useDocumentStore()
 
+// 选中的文档ID（用于筛选）
 const selectedDocId = ref('')
+// 搜索关键词
 const searchText = ref('')
+// 当前页码
 const currentPage = ref(1)
 
+// 计算属性：总页数
 const totalPages = computed(() => Math.ceil(vs.total / vs.limit))
 
+// 组件挂载时加载文档和向量数据
 onMounted(() => {
   ds.fetchAll()
   vs.fetch()
 })
 
+// 筛选条件变化时重置分页并刷新
 function onFilterChange() {
   currentPage.value = 1
   vs.reset(selectedDocId.value, searchText.value)
 }
 
+// 执行搜索
 function onSearch() {
   currentPage.value = 1
   vs.offset = 0
   vs.reset(selectedDocId.value, searchText.value)
 }
 
+// 跳转到指定页码
 function goToPage(page: number) {
   if (page < 1 || page > totalPages.value) return
   currentPage.value = page

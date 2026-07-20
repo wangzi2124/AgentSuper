@@ -1,8 +1,10 @@
 import type { ChatRequest, ChatResponse, SSEEvent } from '../types'
 import { fetchWithTimeout } from './fetch'
 
+// 聊天 API 基础路径
 const BASE = '/api/chat'
 
+// 对话元信息
 export interface ConversationMeta {
   id: string
   title: string
@@ -10,10 +12,12 @@ export interface ConversationMeta {
   updated_at: string
 }
 
+// 对话详情，包含完整消息列表
 export interface ConversationDetail extends ConversationMeta {
   messages: Array<{ id: string; role: string; content: string }>
 }
 
+// 发送聊天消息（非流式）
 export async function sendMessage(data: ChatRequest): Promise<ChatResponse> {
   const res = await fetchWithTimeout(BASE + '/', {
     method: 'POST',
@@ -27,6 +31,7 @@ export async function sendMessage(data: ChatRequest): Promise<ChatResponse> {
   return res.json()
 }
 
+// 通过 SSE 流式发送聊天消息，逐步回调事件
 export async function sendMessageStream(
   data: ChatRequest,
   onEvent: (event: SSEEvent) => void,
@@ -65,6 +70,7 @@ export async function sendMessageStream(
   }
 }
 
+// 获取所有对话列表
 export async function listConversations(): Promise<ConversationMeta[]> {
   const res = await fetchWithTimeout(`${BASE}/conversations`, { method: 'GET' }, 0)
   if (!res.ok) {
@@ -74,6 +80,7 @@ export async function listConversations(): Promise<ConversationMeta[]> {
   return res.json()
 }
 
+// 根据 ID 获取对话详情
 export async function getConversation(conversationId: string): Promise<ConversationDetail> {
   const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}`, { method: 'GET' }, 0)
   if (!res.ok) {
@@ -83,6 +90,7 @@ export async function getConversation(conversationId: string): Promise<Conversat
   return res.json()
 }
 
+// 重命名对话
 export async function renameConversation(conversationId: string, title: string): Promise<void> {
   const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}`, {
     method: 'PUT',
@@ -95,6 +103,7 @@ export async function renameConversation(conversationId: string, title: string):
   }
 }
 
+// 删除对话
 export async function deleteConversation(conversationId: string): Promise<void> {
   const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}`, {
     method: 'DELETE',
@@ -105,6 +114,7 @@ export async function deleteConversation(conversationId: string): Promise<void> 
   }
 }
 
+// 删除对话中的单条消息
 export async function deleteMessage(conversationId: string, messageId: string): Promise<void> {
   const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}/messages/${messageId}`, {
     method: 'DELETE',

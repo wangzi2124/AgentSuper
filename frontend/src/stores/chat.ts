@@ -19,6 +19,7 @@ export const SUPPORTED_MODELS = [
   { value: 'openai/gpt-4o-mini', label: 'OpenAI GPT-4o-mini' },
 ] as const
 
+// 生成唯一 ID（优先使用 crypto.randomUUID）
 function genId(): string {
   try {
     return crypto.randomUUID()
@@ -30,6 +31,7 @@ function genId(): string {
   }
 }
 
+// 会话状态接口
 interface SessionState {
   messages: Message[]
   conversationId: string | undefined
@@ -40,12 +42,18 @@ interface SessionState {
 }
 
 export const useChatStore = defineStore('chat', () => {
+  // 所有会话的映射（sessionId -> SessionState）
   const sessions = ref<Record<string, SessionState>>({})
+  // 当前活跃会话 ID
   const activeSessionId = ref<string | undefined>(undefined)
+  // 会话列表
   const conversations = ref<ConversationMeta[]>([])
+  // 当前选中的模型
   const selectedModel = ref(SUPPORTED_MODELS[0].value)
+  // 是否启用向量数据库检索
   const useVectorDb = ref(true)
 
+  // 获取或创建指定 ID 的会话
   function getOrCreateSession(sessionId: string): SessionState {
     if (!sessions.value[sessionId]) {
       sessions.value[sessionId] = {
@@ -60,17 +68,24 @@ export const useChatStore = defineStore('chat', () => {
     return sessions.value[sessionId]
   }
 
+  // 当前活跃会话的响应式引用
   const currentSession = computed(() => {
     if (!activeSessionId.value) return null
     return sessions.value[activeSessionId.value] || null
   })
 
+  // 当前会话的消息列表
   const messages = computed(() => currentSession.value?.messages || [])
+  // 当前会话的 ID
   const conversationId = computed(() => currentSession.value?.conversationId)
+  // 当前会话的标题
   const conversationTitle = computed(() => currentSession.value?.conversationTitle)
+  // 当前会话的加载状态
   const loading = computed(() => currentSession.value?.loading || false)
+  // 当前会话的 Agent 执行步骤
   const currentSteps = computed(() => currentSession.value?.currentSteps || [])
 
+  // 加载会话列表
   async function loadConversations() {
     try {
       conversations.value = await listConversations()
@@ -79,6 +94,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // 加载指定会话的消息
   async function loadConversation(id: string) {
     const session = getOrCreateSession(id)
     
@@ -89,6 +105,7 @@ export const useChatStore = defineStore('chat', () => {
       session.conversationTitle = detail.title
       
       // 从服务器消息中过滤掉空的机器人消息（后端占位符）
+
       const serverMessages = detail.messages
         .filter(m => !(m.role === 'assistant' && (!m.content || m.content.trim() === '')))
         .map(m => ({
@@ -120,6 +137,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // 重命名会话
   async function renameConversation(id: string, title: string) {
     try {
       await apiRenameConversation(id, title)
@@ -136,10 +154,12 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // 创建新会话
   function newChat() {
     activeSessionId.value = undefined
   }
 
+  // 发送消息（支持 SSE 流式响应）
   async function send(text: string, files: FileContent[] = []) {
     let sessionId = activeSessionId.value
     if (!sessionId) {
@@ -278,6 +298,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // 取消当前正在发送的消息
   function cancel() {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
@@ -287,6 +308,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // 清空当前会话的消息
   function clear() {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
@@ -299,6 +321,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // 撤回到指定索引处的消息
   function undoMessage(index: number) {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
@@ -308,6 +331,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // 删除当前会话
   async function deleteConversation() {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
@@ -324,6 +348,7 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // 删除指定消息
   async function deleteMessage(messageId: string) {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]

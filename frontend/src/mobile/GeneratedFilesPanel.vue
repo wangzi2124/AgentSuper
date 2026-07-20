@@ -3,17 +3,25 @@ import { onMounted, ref } from 'vue'
 import { useGeneratedStore } from '../stores/generated'
 import { getGeneratedContent } from '../api/generated'
 
+// 生成文件 store
 const store = useGeneratedStore()
+// 正在删除的文件名集合
 const deleting = ref<Set<string>>(new Set())
+// 当前正在运行的文件名
 const runningFile = ref<string | null>(null)
+// 运行输出内容
 const runOutput = ref<string | null>(null)
+// 运行错误信息
 const runError = ref<string | null>(null)
+// 是否显示输出弹窗
 const showOutput = ref(false)
 
+// 挂载时加载文件列表
 onMounted(() => {
   store.fetchAll()
 })
 
+// 删除指定文件
 async function handleDelete(filename: string) {
   if (!confirm(`删除 "${filename}"?`)) return
   deleting.value.add(filename)
@@ -26,6 +34,7 @@ async function handleDelete(filename: string) {
   }
 }
 
+// 下载指定文件
 async function handleDownload(filename: string) {
   try {
     const url = `/api/generated/download/${encodeURIComponent(filename)}`
@@ -44,10 +53,12 @@ async function handleDownload(filename: string) {
   }
 }
 
+// 判断是否为JS文件（可运行）
 function isJsFile(filename: string): boolean {
   return filename.endsWith('.js')
 }
 
+// 根据文件扩展名返回对应图标
 function getFileIcon(filename: string): string {
   if (filename.endsWith('.docx')) return '📝'
   if (filename.endsWith('.pdf')) return '📕'
@@ -59,6 +70,7 @@ function getFileIcon(filename: string): string {
   return '📄'
 }
 
+// 在沙箱环境中运行JS文件并显示输出
 async function handleRun(filename: string) {
   runningFile.value = filename
   runOutput.value = null
@@ -113,6 +125,7 @@ async function handleRun(filename: string) {
   }
 }
 
+// 关闭输出弹窗并重置状态
 function closeOutput() {
   showOutput.value = false
   runningFile.value = null

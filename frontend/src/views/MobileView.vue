@@ -6,19 +6,31 @@ import WeatherPanel from '../mobile/WeatherPanel.vue'
 import SettingsPanel from '../mobile/SettingsPanel.vue'
 import GeneratedFilesPanel from '../mobile/GeneratedFilesPanel.vue'
 
+// 路由实例
 const route = useRoute()
+// 移动端聊天状态管理
 const chat = useMobileChatStore()
+// 输入框文本
 const inputText = ref('')
+// 聊天容器引用
 const chatContainer = ref<HTMLElement>()
+// 是否滚动到底部
 const isNearBottom = ref(true)
+// 是否显示侧边栏
 const showSidebar = ref(false)
+// 是否显示设置面板
 const showSettings = ref(false)
+// 是否显示文件面板
 const showFiles = ref(false)
+// 正在编辑的会话标题
 const editingTitle = ref('')
+// 正在编辑的会话ID
 const editingId = ref<string | null>(null)
 
+// 计算属性：当前会话的消息列表
 const messages = computed(() => chat.messages)
 
+// 侦听消息数量变化，自动滚动到底部
 watch(() => messages.value.length, async () => {
   await nextTick()
   if (isNearBottom.value && chatContainer.value) {
@@ -26,6 +38,7 @@ watch(() => messages.value.length, async () => {
   }
 })
 
+// 组件挂载时加载会话列表和指定会话
 onMounted(() => {
   chat.loadConversations()
   const id = route.params.id as string
@@ -34,6 +47,7 @@ onMounted(() => {
   }
 })
 
+// 发送消息
 async function sendMessage() {
   if (!inputText.value.trim() || chat.loading) return
   const text = inputText.value.trim()
@@ -43,24 +57,28 @@ async function sendMessage() {
   scrollToBottom()
 }
 
+// 滚动事件处理：检测是否滚动到底部附近
 function handleScroll() {
   if (!chatContainer.value) return
   const { scrollTop, scrollHeight, clientHeight } = chatContainer.value
   isNearBottom.value = scrollHeight - scrollTop - clientHeight < 100
 }
 
+// 滚动到底部
 function scrollToBottom() {
   if (chatContainer.value) {
     chatContainer.value.scrollTop = chatContainer.value.scrollHeight
   }
 }
 
+// 自动调整文本框高度
 function autoResize(e: Event) {
   const textarea = e.target as HTMLTextAreaElement
   textarea.style.height = 'auto'
   textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px'
 }
 
+// 格式化消息内容：转义HTML并添加简单Markdown支持
 function formatMessage(content: string) {
   if (!content) return ''
   return content
@@ -72,17 +90,20 @@ function formatMessage(content: string) {
     .replace(/`(.*?)`/g, '<code>$1</code>')
 }
 
+// 格式化时间为时分格式
 function formatTime(timestamp: Date) {
   if (!timestamp) return ''
   const date = timestamp instanceof Date ? timestamp : new Date(timestamp)
   return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
 }
 
+// 开始编辑会话标题
 function startEdit(conv: any) {
   editingId.value = conv.id
   editingTitle.value = conv.title
 }
 
+// 保存编辑后的会话标题
 async function saveEdit() {
   if (editingId.value && editingTitle.value.trim()) {
     await chat.renameConversation(editingId.value, editingTitle.value.trim())
@@ -91,6 +112,7 @@ async function saveEdit() {
   editingTitle.value = ''
 }
 
+// 格式化日期：今天显示时分，其他显示月日
 function formatDate(date: Date | string) {
   const d = new Date(date)
   const now = new Date()

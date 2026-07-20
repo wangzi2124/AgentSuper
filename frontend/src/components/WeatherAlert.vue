@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 
+// 天气数据接口定义
 interface WeatherData {
   location: {
     name: string
@@ -33,6 +34,7 @@ interface WeatherData {
   }>
 }
 
+// 台风信息接口定义
 interface Typhoon {
   id: string
   name: string
@@ -41,17 +43,28 @@ interface Typhoon {
   status: string
 }
 
+// 弹窗显示状态
 const isVisible = ref(false)
+// 加载状态
 const isLoading = ref(false)
+// 天气数据
 const weatherData = ref<WeatherData | null>(null)
+// 台风列表
 const typhoons = ref<Typhoon[]>([])
+// 当前选中的城市
 const selectedCity = ref('北京')
+// 错误信息
 const errorMsg = ref('')
+// 搜索城市关键词
 const searchCity = ref('')
+// 搜索中状态
 const isSearching = ref(false)
+// 搜索结果
 const searchResults = ref<Array<{name: string, country: string, admin1: string}>>([])
+// 城市分类标签
 const cityTab = ref<'cn' | 'global'>('cn')
 
+// 国内主要城市列表
 const cnCities = [
   { name: '北京', region: '北京' },
   { name: '上海', region: '上海' },
@@ -75,6 +88,7 @@ const cnCities = [
   { name: '昆明', region: '云南' },
 ]
 
+// 国际城市列表
 const globalCities = [
   // 亚洲
   { name: 'Tokyo', region: 'Japan' },
@@ -141,12 +155,15 @@ const globalCities = [
   // { name: 'Marrakech', region: 'Morocco' },
 ]
 
+// 根据当前标签返回对应城市列表
 const currentCities = computed(() => cityTab.value === 'cn' ? cnCities : globalCities)
 
+// 定义组件事件：关闭
 const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
+// 切换弹窗显示状态
 function toggle() {
   isVisible.value = !isVisible.value
   if (isVisible.value && !weatherData.value) {
@@ -154,10 +171,12 @@ function toggle() {
   }
 }
 
+// 关闭弹窗
 function close() {
   isVisible.value = false
 }
 
+// 获取天气数据
 async function fetchWeather() {
   isLoading.value = true
   errorMsg.value = ''
@@ -186,6 +205,7 @@ async function fetchWeather() {
   }
 }
 
+// 搜索城市天气
 async function searchCityWeather() {
   if (!searchCity.value.trim()) return
   
@@ -195,6 +215,7 @@ async function searchCityWeather() {
   isSearching.value = false
 }
 
+// 获取台风信息
 async function fetchTyphoons() {
   try {
     const response = await fetch(`/api/plugins/weather-alert/call/tool_get_typhoon_info`, {
@@ -212,29 +233,34 @@ async function fetchTyphoons() {
   }
 }
 
+// 切换城市并获取天气
 async function changeCity(city: string) {
   selectedCity.value = city
   await fetchWeather()
 }
 
+// 格式化日期显示
 function formatDate(dateStr: string) {
   const date = new Date(dateStr)
   const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
   return `${date.getMonth() + 1}/${date.getDate()} ${weekdays[date.getDay()]}`
 }
 
+// 格式化时间显示
 function formatTime(timeStr: string) {
   if (!timeStr) return '--'
   const date = new Date(timeStr)
   return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`
 }
 
+// 根据角度获取风向
 function getWindDirection(degrees: number) {
   const directions = ['北', '东北', '东', '东南', '南', '西南', '西', '西北']
   const index = Math.round(degrees / 45) % 8
   return directions[index]
 }
 
+// 组件挂载时获取台风信息
 onMounted(() => {
   fetchTyphoons()
 })

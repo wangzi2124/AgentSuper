@@ -2,15 +2,19 @@
 import { computed, ref } from 'vue'
 import type { AgentStep } from '../types'
 
+// 定义组件事件：撤销
 const emit = defineEmits<{ undo: [] }>()
+// 定义组件属性：步骤列表、运行状态、撤销回调
 const props = defineProps<{
   steps: AgentStep[]
   isRunning: boolean
   onUndo?: () => void
 }>()
 
+// 步骤执行顺序
 const stepOrder = ['retrieve', 'rerank', 'generate']
 
+// 按顺序排序步骤列表
 const sortedSteps = computed(() => {
   return [...props.steps].sort((a, b) => {
     const ai = stepOrder.indexOf(a.step_id)
@@ -22,18 +26,22 @@ const sortedSteps = computed(() => {
   })
 })
 
+// 展开/收起结果的状态记录
 const expandedResults = ref<Record<string, boolean>>({})
 
+// 切换步骤结果的展开状态
 function toggleResult(stepId: string) {
   expandedResults.value[stepId] = !expandedResults.value[stepId]
 }
 
+// 根据状态返回对应图标
 function getStatusIcon(status: string): string {
   if (status === 'completed') return '✅'
   if (status === 'failed') return '❌'
   return '⏳'
 }
 
+// 格式化耗时显示
 function formatDuration(ms?: number): string {
   if (ms == null) return ''
   if (ms < 1000) return `${ms.toFixed(0)}ms`

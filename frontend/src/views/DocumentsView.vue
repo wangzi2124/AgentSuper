@@ -4,12 +4,15 @@ import { useDocumentStore } from '../stores/documents'
 import DocumentCard from '../components/DocumentCard.vue'
 import FileUpload from '../components/FileUpload.vue'
 
+// 文档状态管理
 const docs = useDocumentStore()
 
+// 组件挂载时加载所有文档
 onMounted(() => {
   docs.fetchAll()
 })
 
+// 处理文件上传
 async function handleUpload(file: File) {
   try {
     await docs.upload(file)
@@ -18,6 +21,7 @@ async function handleUpload(file: File) {
   }
 }
 
+// 删除指定文档
 async function handleDelete(id: string) {
   if (confirm('Delete this document?')) {
     try {

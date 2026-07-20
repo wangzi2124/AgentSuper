@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
+// 应用路由配置
 const router = createRouter({
   history: createWebHistory(),
   routes: [

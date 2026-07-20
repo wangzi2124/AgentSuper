@@ -2,12 +2,15 @@
 import { onMounted } from 'vue'
 import { useSkillStore } from '../stores/skills'
 
+// 技能状态管理
 const skills = useSkillStore()
 
+// 组件挂载时加载所有技能
 onMounted(() => {
   skills.fetchAll()
 })
 
+// 切换技能启用/禁用状态
 async function handleToggle(name: string, enabled: boolean) {
   try {
     await skills.toggle(name, !enabled)
