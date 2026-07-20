@@ -1,3 +1,8 @@
+"""聊天 API 路由模块。
+
+提供聊天对话的创建、流式响应、历史记录管理等功能。
+"""
+
 import asyncio
 import json
 import logging
@@ -25,6 +30,7 @@ _summarizer_model: str | None = None
 
 
 def _get_summarizer() -> HierarchicalSummarizationMiddleware | None:
+    """获取或初始化摘要中间件单例。"""
     global _summarizer, _summarizer_model
     current_model = settings.summarization_model
 
@@ -47,12 +53,14 @@ def _get_summarizer() -> HierarchicalSummarizationMiddleware | None:
 
 
 def reset_summarizer():
+    """重置摘要中间件状态。"""
     global _summarizer, _summarizer_model
     _summarizer = None
     _summarizer_model = None
 
 
 def _get_db() -> sqlite3.Connection:
+    """获取对话数据库连接并初始化表结构。"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
@@ -79,6 +87,7 @@ def _get_db() -> sqlite3.Connection:
 
 
 def _load_conversation(conv_id: str) -> list[dict]:
+    """从数据库加载指定对话的历史消息。"""
     conn = _get_db()
     try:
         row = conn.execute(
@@ -92,6 +101,7 @@ def _load_conversation(conv_id: str) -> list[dict]:
 
 
 def _generate_title(messages: list[dict]) -> str:
+    """根据用户第一条消息生成对话标题。"""
     for msg in messages:
         if msg.get("role") == "user":
             text = msg.get("content", "")
@@ -101,6 +111,7 @@ def _generate_title(messages: list[dict]) -> str:
 
 
 def _save_conversation(conv_id: str, messages: list[dict], title: str | None = None):
+    """保存对话历史到数据库。"""
     conn = _get_db()
     try:
         now = datetime.now().isoformat()
@@ -122,6 +133,7 @@ def _save_conversation(conv_id: str, messages: list[dict], title: str | None = N
 
 
 def _truncate_history(history: list[dict], max_tokens: int = MAX_HISTORY_TOKENS) -> list[dict]:
+    """截断对话历史以控制token数量。"""
     if not history:
         return []
     total = 0
@@ -139,6 +151,7 @@ def _truncate_history(history: list[dict], max_tokens: int = MAX_HISTORY_TOKENS)
 
 @router.post("/", response_model=ChatResponse)
 async def chat(request: Request, body: ChatRequest):
+    """处理非流式聊天请求，返回完整响应。"""
     agent = request.app.state.agent
 
     conv_id = body.conversation_id or str(uuid.uuid4())
@@ -194,6 +207,7 @@ async def chat(request: Request, body: ChatRequest):
 
 @router.post("/stream")
 async def chat_stream(request: Request, body: ChatRequest):
+    """处理流式聊天请求，返回SSE事件流。"""
     agent = request.app.state.agent
 
     conv_id = body.conversation_id or str(uuid.uuid4())
@@ -215,6 +229,7 @@ async def chat_stream(request: Request, body: ChatRequest):
     event_queue: asyncio.Queue = asyncio.Queue()
 
     async def run_agent():
+        """异步运行Agent并收集结果。"""
         try:
             result = await agent.invoke(
                 body.message, model=body.model, history=compressed,
@@ -240,6 +255,7 @@ async def chat_stream(request: Request, body: ChatRequest):
             await event_queue.put({"type": "error", "detail": str(e)})
 
     async def event_generator(user_msg_id: str, assistant_msg_id: str):
+        """生成SSE事件流。"""
         task = asyncio.create_task(run_agent())
         try:
             while True:
@@ -275,6 +291,7 @@ async def chat_stream(request: Request, body: ChatRequest):
 
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str):
+    """删除指定对话及其所有消息。"""
     conn = _get_db()
     try:
         conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
@@ -286,6 +303,7 @@ async def delete_conversation(conversation_id: str):
 
 @router.delete("/conversations/{conversation_id}/messages/{message_id}")
 async def delete_message(conversation_id: str, message_id: str):
+    """删除对话中的指定消息。"""
     conn = _get_db()
     try:
         row = conn.execute(
@@ -307,6 +325,7 @@ async def delete_message(conversation_id: str, message_id: str):
 
 @router.get("/conversations")
 async def list_conversations():
+    """获取所有对话的列表，按更新时间倒序排列。"""
     conn = _get_db()
     try:
         cursor = conn.execute(
@@ -323,6 +342,7 @@ async def list_conversations():
 
 @router.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str):
+    """获取指定对话的详细信息和消息历史。"""
     conn = _get_db()
     try:
         row = conn.execute(
@@ -344,6 +364,7 @@ async def get_conversation(conversation_id: str):
 
 @router.put("/conversations/{conversation_id}")
 async def update_conversation(conversation_id: str, body: dict):
+    """更新对话标题。"""
     title = body.get("title")
     if title is None:
         raise HTTPException(status_code=400, detail="title is required")

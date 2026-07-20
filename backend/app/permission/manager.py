@@ -13,6 +13,7 @@ _manager: Optional["PermissionManager"] = None
 
 
 def get_manager() -> "PermissionManager":
+    """获取全局权限管理器单例实例。"""
     global _manager
     if _manager is None:
         _manager = PermissionManager()
@@ -20,11 +21,14 @@ def get_manager() -> "PermissionManager":
 
 
 def set_manager(m: "PermissionManager"):
+    """设置全局权限管理器实例。"""
     global _manager
     _manager = m
 
 
 class NeedsPermission(Exception):
+    """当文件操作需要用户授权时抛出的异常。"""
+
     def __init__(self, path: str, operation: str, tool_name: str = "", tool_args: Optional[dict] = None):
         self.path = path
         self.operation = operation
@@ -34,6 +38,8 @@ class NeedsPermission(Exception):
 
 
 class PermissionRequest:
+    """表示一个待审批的权限请求，包含操作路径、类型及异步等待机制。"""
+
     def __init__(self, path: str, operation: str, tool_name: str, tool_args: dict, session_id: str = ""):
         self.id = str(uuid.uuid4())
         self.path = path
@@ -49,7 +55,10 @@ class PermissionRequest:
 
 
 class PermissionManager:
+    """文件系统权限管理器，负责路径分类、权限检查、白名单管理和审批流程。"""
+
     def __init__(self, workspace: str = "", whitelist_path: str = ""):
+        """初始化权限管理器，设置工作目录和白名单文件路径。"""
         self.workspace = Path(workspace).resolve() if workspace else Path.cwd()
         whitelist_dir = Path(whitelist_path) if whitelist_path else self.workspace.parent / "data"
         self.whitelist_path = whitelist_dir / "permissions.json" if whitelist_dir.is_dir() else whitelist_dir
@@ -58,6 +67,7 @@ class PermissionManager:
         self._load_whitelist()
 
     def _load_whitelist(self):
+        """从JSON文件加载已授权的路径白名单。"""
         self._whitelist: list[str] = []
         try:
             if self.whitelist_path.exists():
@@ -68,6 +78,7 @@ class PermissionManager:
             logger.warning("Failed to load whitelist: %s", e)
 
     def _save_whitelist(self):
+        """将当前白名单持久化保存到JSON文件。"""
         try:
             self.whitelist_path.parent.mkdir(parents=True, exist_ok=True)
             self.whitelist_path.write_text(
@@ -78,6 +89,7 @@ class PermissionManager:
             logger.warning("Failed to save whitelist: %s", e)
 
     def classify_path(self, path_str: str) -> str:
+        """将路径分类为workspace/system/temp/external之一。"""
         p = Path(path_str).resolve()
         try:
             p.relative_to(self.workspace)
@@ -102,6 +114,7 @@ class PermissionManager:
         return "external"
 
     def check(self, path_str: str, operation: str) -> str:
+        """检查指定路径的操作权限，返回allow/deny/ask。"""
         cls = self.classify_path(path_str)
         if cls == "workspace":
             return "allow"
@@ -123,16 +136,19 @@ class PermissionManager:
         return "ask"
 
     def add_temp_approval(self, path_str: str):
+        """临时授权指定路径（及其父目录），无需写入白名单。"""
         p = Path(path_str).resolve()
         self._temp_approvals.add(str(p))
         self._temp_approvals.add(str(p.parent))
 
     def create_request(self, path: str, operation: str, tool_name: str = "", tool_args: Optional[dict] = None, session_id: str = "") -> PermissionRequest:
+        """创建一条新的权限审批请求并返回。"""
         req = PermissionRequest(path, operation, tool_name, tool_args or {}, session_id)
         self._requests[req.id] = req
         return req
 
     async def await_decision(self, request_id: str, timeout: int = 120) -> str:
+        """异步等待用户对权限请求的审批结果，超时返回expired。"""
         req = self._requests.get(request_id)
         if not req:
             return "expired"
@@ -144,6 +160,7 @@ class PermissionManager:
             return "expired"
 
     def respond(self, request_id: str, decision: str, remember: bool = False) -> bool:
+        """响应权限请求：设置审批决定，可选记住该路径到白名单。"""
         req = self._requests.get(request_id)
         if not req or req.status != "pending":
             return False
@@ -159,12 +176,15 @@ class PermissionManager:
         return True
 
     def get_pending_requests(self) -> list[PermissionRequest]:
+        """获取所有待审批的权限请求列表。"""
         return [r for r in self._requests.values() if r.status == "pending"]
 
     def get_request(self, request_id: str) -> Optional[PermissionRequest]:
+        """根据请求ID获取权限请求详情。"""
         return self._requests.get(request_id)
 
     def cleanup_expired(self):
+        """清理所有已处理（允许/拒绝/过期）的权限请求记录。"""
         expired = [rid for rid, r in self._requests.items() if r.status in ("allowed", "denied", "expired")]
         for rid in expired:
             self._requests.pop(rid, None)

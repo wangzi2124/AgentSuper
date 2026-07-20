@@ -18,6 +18,7 @@ def _reciprocal_rank_fusion(
     bm25_results: List[Tuple[dict, float]],
     k: int = 60,
 ) -> List[Tuple[dict, float]]:
+    """使用倒数排名融合（RRF）合并向量搜索和 BM25 搜索结果。"""
     scores: dict[int, float] = {}
     docs: list[dict] = []
 
@@ -46,6 +47,7 @@ def _dialogue_rrf(
     dialogue_results: List[Tuple[dict, float]],
     k: int = 60,
 ) -> List[Tuple[dict, float]]:
+    """将主搜索结果与对话多召回结果进行 RRF 融合。"""
     if not dialogue_results:
         return main_results
     scores: dict[int, float] = {}
@@ -72,6 +74,8 @@ def _dialogue_rrf(
 
 
 class Retriever:
+    """混合检索器，整合向量搜索、BM25、对话召回和章节检索。"""
+
     def __init__(
         self,
         vector_store: VectorStore,
@@ -85,6 +89,7 @@ class Retriever:
         self.chapter_store = chapter_store
 
     def invoke(self, query: str, k: int = 5) -> List[Tuple[dict, float]]:
+        """执行混合检索：章节意图检测 → 向量+BM25 融合 → 对话多召回 → 章节信息丰富。"""
         # Step 1: detect chapter intent
         intent = detect_chapter_intent(query)
         if intent and self.chapter_store:
@@ -115,6 +120,7 @@ class Retriever:
         return results
 
     def _dialogue_search(self, query_embedding: List[float], k: int = 3) -> List[Tuple[dict, float]]:
+        """检索对话类型的文档块，用于多召回融合。"""
         return self.vector_store.similarity_search(
             query_embedding, k=k * 2, where={"is_dialogue": True}
         )
@@ -173,6 +179,7 @@ class Retriever:
         return results
 
     def _enrich_with_parent(self, results: List[Tuple[dict, float]]) -> List[Tuple[dict, float]]:
+        """为检索结果补充父章节摘要信息。"""
         chapter_titles = list({
             doc["metadata"]["chapter_title"]
             for doc, _ in results
@@ -189,4 +196,5 @@ class Retriever:
 
     @property
     def is_empty(self) -> bool:
+        """判断向量库是否为空。"""
         return self.vector_store.count == 0

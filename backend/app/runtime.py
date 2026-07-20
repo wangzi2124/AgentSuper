@@ -24,6 +24,7 @@ _init_lock = threading.Lock()
 
 
 def _load_env_to_os():
+    """将 .env 文件中的配置注入到 os.environ，供插件等模块读取。"""
     env_path = Path(__file__).resolve().parents[1] / ".env"
     if env_path.exists():
         for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -37,6 +38,7 @@ def _load_env_to_os():
 
 
 def _build_bm25_index(vs: VectorStore) -> BM25Index:
+    """从向量库中提取所有文档并构建 BM25 索引。"""
     idx = BM25Index()
     try:
         texts, metadatas = vs.get_all()
@@ -48,6 +50,7 @@ def _build_bm25_index(vs: VectorStore) -> BM25Index:
 
 
 def ensure_runtime_state(app) -> object:
+    """确保运行时状态已初始化（双检锁，线程安全），已初始化则跳过。"""
     if hasattr(app.state, "vector_store") and hasattr(app.state, "file_store"):
         return app.state
 
@@ -59,6 +62,7 @@ def ensure_runtime_state(app) -> object:
 
 
 def _do_init(app):
+    """执行完整的运行时初始化：加载向量库、嵌入模型、检索器、技能、插件、Agent 等。"""
     vs = VectorStore.load(settings.vector_store_path)
     emb = LocalEmbeddings(settings.embedding_model)
     bm25 = _build_bm25_index(vs)

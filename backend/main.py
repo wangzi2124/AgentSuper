@@ -18,6 +18,7 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """应用生命周期管理，启动时初始化运行时状态。"""
     await asyncio.to_thread(ensure_runtime_state, app)
     try:
         yield
@@ -54,6 +55,7 @@ app.include_router(config.router, prefix="/api/config", tags=["Config"])
 
 @app.get("/")
 async def root():
+    """根路径，返回服务基本信息。"""
     return {
         "service": "Knowledge Base System",
         "version": "0.1.0",
@@ -63,6 +65,7 @@ async def root():
 
 @app.get("/health")
 async def health():
+    """健康检查接口，返回服务状态和向量库大小。"""
     if not hasattr(app.state, "vector_store"):
         return {"status": "initializing"}
     return {"status": "ok", "vector_store_size": app.state.vector_store.count}
@@ -70,4 +73,5 @@ async def health():
 
 @app.get("/api/monitor/stats")
 async def monitor_stats():
+    """获取系统监控统计信息。"""
     return get_stats()

@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 class FileStore:
+    """文件存储管理器，负责文件的保存、删除和元数据管理。"""
+
     def __init__(self, upload_dir: str):
         self.upload_dir = Path(upload_dir)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
@@ -17,6 +19,7 @@ class FileStore:
         self._load_metadata()
 
     def _load_metadata(self):
+        """从JSON文件加载文档元数据。"""
         if self.meta_path.exists():
             try:
                 with open(self.meta_path, "r", encoding="utf-8") as f:
@@ -26,6 +29,7 @@ class FileStore:
                 self.metadata = {}
 
     def _save_metadata(self):
+        """将文档元数据保存到JSON文件。"""
         try:
             with open(self.meta_path, "w", encoding="utf-8") as f:
                 json.dump(self.metadata, f, ensure_ascii=False, indent=2)
@@ -33,6 +37,7 @@ class FileStore:
             logger.error("Failed to save metadata to %s: %s", self.meta_path, e)
 
     def save(self, filename: str, content: bytes) -> tuple[str, str]:
+        """保存文件并更新元数据，返回文档ID和文件路径。"""
         doc_id = str(uuid.uuid4())
         safe_name = f"{doc_id}_{filename}"
         file_path = self.upload_dir / safe_name
@@ -48,6 +53,7 @@ class FileStore:
         return doc_id, str(file_path)
 
     def delete(self, doc_id: str):
+        """删除指定文档的文件和元数据。"""
         if doc_id not in self.metadata:
             return
         path = Path(self.metadata[doc_id]["path"])
@@ -57,14 +63,17 @@ class FileStore:
         self._save_metadata()
 
     def update_meta(self, doc_id: str, updates: dict):
+        """更新指定文档的元数据。"""
         if doc_id in self.metadata:
             self.metadata[doc_id].update(updates)
             self._save_metadata()
 
     def get(self, doc_id: str) -> Optional[dict]:
+        """获取指定文档的元数据。"""
         return self.metadata.get(doc_id)
 
     def list_all(self) -> list[dict]:
+        """列出所有文档的元数据信息。"""
         return [
             {"id": doc_id, **meta}
             for doc_id, meta in self.metadata.items()

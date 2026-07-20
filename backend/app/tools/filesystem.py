@@ -33,6 +33,7 @@ _MIME_MAP = {
 
 
 def _resolve(path_str: str) -> Path:
+    """将路径字符串解析为绝对路径，相对路径基于工作目录解析。"""
     p = Path(path_str)
     if not p.is_absolute():
         p = WORKSPACE / p
@@ -40,6 +41,7 @@ def _resolve(path_str: str) -> Path:
 
 
 def _ensure_safe(path: Path) -> None:
+    """检查路径访问权限，不允许时抛出PermissionError或NeedsPermission异常。"""
     resolved = path.resolve()
     mgr = get_perm_mgr()
     decision = mgr.check(str(resolved), "write")
@@ -51,6 +53,7 @@ def _ensure_safe(path: Path) -> None:
 
 
 def tool_ls(path: str = ".") -> str:
+    """列出指定目录下的文件和子目录，显示类型、大小和修改时间。"""
     target = _resolve(path)
     _ensure_safe(target)
     if not target.is_dir():
@@ -69,6 +72,7 @@ def tool_ls(path: str = ".") -> str:
 
 
 def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
+    """读取文件内容，文本文件支持按行偏移和限制，多模态文件返回base64编码。"""
     target = _resolve(path)
     _ensure_safe(target)
     if not target.is_file():
@@ -100,6 +104,7 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
 
 
 def tool_write_file(path: str, content: str) -> str:
+    """创建新文件并写入内容，文件已存在时返回错误。"""
     target = _resolve(path)
     _ensure_safe(target)
     if target.exists():
@@ -113,6 +118,7 @@ def tool_write_file(path: str, content: str) -> str:
 
 
 def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+    """在文件中查找并替换指定字符串，支持单次替换或全部替换。"""
     target = _resolve(path)
     _ensure_safe(target)
     if not target.is_file():
@@ -139,6 +145,7 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
 
 
 def tool_glob(pattern: str) -> str:
+    """在工作目录中按glob模式搜索文件，返回匹配的相对路径列表。"""
     matches = sorted(WORKSPACE.glob(pattern))
     if not matches:
         return f"No matches for: {pattern}"
@@ -147,6 +154,7 @@ def tool_glob(pattern: str) -> str:
 
 
 def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: bool = False, files_only: bool = False) -> str:
+    """在工作目录的文本文件中按正则表达式搜索内容，支持文件过滤和上下文显示。"""
     import re
     use_re = re.compile(pattern, re.MULTILINE | re.DOTALL)
     file_pattern = include if include else "**/*"
@@ -195,6 +203,7 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
 
 
 def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
+    """执行shell命令并返回标准输出、标准错误和退出码。"""
     if timeout > 600:
         timeout = 600
     if timeout < 1:

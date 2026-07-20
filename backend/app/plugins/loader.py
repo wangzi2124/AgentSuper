@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 class Plugin:
+    """插件数据模型，封装插件的元信息、启用状态和工具函数。"""
+
     def __init__(
         self,
         name: str,
@@ -28,6 +30,7 @@ class Plugin:
         self.functions_meta = functions_meta or {}
 
     def to_dict(self) -> dict:
+        """将插件信息序列化为字典格式。"""
         return {
             "name": self.name,
             "version": self.version,
@@ -39,12 +42,15 @@ class Plugin:
 
 
 class PluginLoader:
+    """插件加载器，负责从指定目录扫描、加载和管理所有Python插件。"""
+
     def __init__(self, plugins_dir: str = "plugins"):
         self.plugins_dir = Path(plugins_dir)
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
         self._plugins: dict[str, Plugin] = {}
 
     def load_all(self) -> List[Plugin]:
+        """扫描插件目录并加载所有有效的Python插件文件。"""
         self._plugins.clear()
         for f in self.plugins_dir.glob("*.py"):
             if f.name.startswith("_"):
@@ -55,6 +61,7 @@ class PluginLoader:
         return self.list()
 
     def _load_plugin_file(self, path: Path) -> Optional[Plugin]:
+        """加载单个插件文件，提取tool_*函数及其元信息。"""
         try:
             module_name = path.stem
             spec = importlib.util.spec_from_file_location(module_name, str(path))
@@ -108,12 +115,15 @@ class PluginLoader:
             return None
 
     def get(self, name: str) -> Optional[Plugin]:
+        """根据插件名称获取插件实例。"""
         return self._plugins.get(name)
 
     def list(self) -> List[Plugin]:
+        """返回所有已加载的插件列表。"""
         return list(self._plugins.values())
 
     def toggle(self, name: str, enabled: bool) -> bool:
+        """启用或禁用指定插件，通过创建/删除.enabled文件持久化状态。"""
         plugin = self._plugins.get(name)
         if not plugin:
             return False
@@ -126,9 +136,11 @@ class PluginLoader:
         return True
 
     def get_enabled_plugins(self) -> List[Plugin]:
+        """获取所有已启用的插件列表。"""
         return [p for p in self._plugins.values() if p.enabled]
 
     def call_function(self, plugin_name: str, func_name: str, **kwargs) -> Any:
+        """调用指定插件中的函数，插件不存在或已禁用时抛出异常。"""
         plugin = self._plugins.get(plugin_name)
         if not plugin or not plugin.enabled:
             raise ValueError(f"Plugin '{plugin_name}' not found or disabled")

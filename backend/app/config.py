@@ -4,6 +4,8 @@ from typing import Optional
 
 
 class Settings(BaseSettings):
+    """应用配置，从 .env 文件读取环境变量。"""
+
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parents[1] / ".env",
         env_file_encoding="utf-8",

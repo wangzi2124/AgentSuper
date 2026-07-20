@@ -15,12 +15,12 @@ MAX_CONTEXT_TOKENS = 1000000  # Leave buffer below 1048565 limit
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~2 chars per token for mixed CJK/Latin."""
+    """粗略估算文本的token数量（约2个字符对应1个token）。"""
     return len(text) // 2
 
 
 def _truncate_messages(messages: list[dict], max_tokens: int = MAX_CONTEXT_TOKENS) -> list[dict]:
-    """Truncate messages to fit within token limit, preserving system prompt and most recent messages."""
+    """截断消息列表以适应token限制，保留系统提示和最近的消息。"""
     if not messages:
         return messages
 
@@ -72,6 +72,7 @@ from app.permission import NeedsPermission, get_manager as get_perm_mgr
 
 
 class AgentState(TypedDict):
+    """代理状态类型定义，包含对话过程中的所有状态信息。"""
     messages: Annotated[Sequence[BaseMessage], "messages"]
     question: str
     context: list[dict]
@@ -86,6 +87,8 @@ class AgentState(TypedDict):
 
 
 class RAGAgent:
+    """RAG（检索增强生成）代理，负责协调检索、重排序和生成回答的流程。"""
+
     def __init__(
         self,
         retriever: Retriever,
@@ -117,12 +120,14 @@ class RAGAgent:
         self.graph = self._build_graph()
 
     def _push_event(self, state: AgentState, event: dict):
+        """将事件推送到状态和事件队列中，用于实时通知前端。"""
         state["steps"].append(event)
         eq = state.get("_event_queue")
         if eq:
             eq.put_nowait(event)
 
     async def _retrieve(self, state: AgentState) -> dict:
+        """从知识库中检索与问题相关的文档片段。"""
         start = tmod.time()
         self._push_event(state, {"type": "step_start", "step_id": "retrieve", "name": "检索中", "status": "running"})
 
@@ -151,6 +156,7 @@ class RAGAgent:
         return {"context": context, "sources": sources}
 
     async def _rerank(self, state: AgentState) -> dict:
+        """对检索结果进行相关性重排序，筛选最相关的片段。"""
         if not self.reranker or not state.get("context"):
             if state.get("context"):
                 self._push_event(state, {"type": "step_end", "step_id": "rerank", "name": "相关性重排序", "status": "completed", "detail": "重排序已禁用"})
@@ -167,6 +173,7 @@ class RAGAgent:
         return {"context": context}
 
     def _system_prompt_with_kb(self) -> str:
+        """构建包含知识库上下文的系统提示词。"""
         return (
             "You are a knowledgeable AI assistant with access to a knowledge base."
             "\n\nUse the retrieved context below to answer the user's question."
@@ -184,11 +191,13 @@ class RAGAgent:
         )
 
     def _build_tool_defs(self) -> Optional[List[dict]]:
+        """构建OpenAI格式的工具定义列表。"""
         if not self.tools:
             return None
         return [t.to_openai_tool() for t in self.tools]
 
     async def _execute_tool(self, name: str, args: dict, state: Optional[dict] = None) -> str:
+        """执行指定的工具函数，处理权限检查和错误。"""
         for t in self.tools:
             if t.name == name:
                 try:
@@ -237,6 +246,7 @@ class RAGAgent:
         return f"Tool '{name}' not found"
 
     async def _execute_tool_streaming(self, args: dict, event_queue: asyncio.Queue) -> str:
+        """流式执行shell命令，实时推送输出到事件队列。"""
         command = args.get("command", "")
         timeout = min(args.get("timeout", 300), 600)
         work_dir = args.get("work_dir", ".")
@@ -334,6 +344,7 @@ class RAGAgent:
         return header
 
     async def _llm_call(self, model: str, messages: list, tool_defs: list) -> litellm.ModelResponse:
+        """调用大语言模型API并记录调用指标。"""
         start = tmod.time()
         try:
             response = await litellm.acompletion(
@@ -363,6 +374,7 @@ class RAGAgent:
         return response
 
     async def _generate(self, state: AgentState) -> dict:
+        """调用LLM生成回答，支持多轮工具调用。"""
         _gen_start = tmod.time()
         self._push_event(state, {"type": "step_start", "step_id": "generate", "name": "生成回答", "status": "running"})
 
@@ -523,6 +535,7 @@ class RAGAgent:
         }
 
     def _build_graph(self):
+        """构建LangGraph状态图，定义检索、重排序和生成的流程。"""
         builder = StateGraph(AgentState)
         builder.add_node("retrieve", self._retrieve)
         if self.reranker:
@@ -538,6 +551,7 @@ class RAGAgent:
         return builder.compile()
 
     def refresh_tools(self):
+        """刷新工具列表和系统提示，用于热更新技能和插件。"""
         self.tools = []
         self.tools.extend(create_filesystem_tools())
         if self.skill_loader:
@@ -552,6 +566,7 @@ class RAGAgent:
         self.graph = self._build_graph()
 
     async def invoke(self, question: str, model: Optional[str] = None, history: Optional[list[dict]] = None, use_vector_db: bool = True, files: Optional[list[dict]] = None, event_queue: Optional[asyncio.Queue] = None) -> dict:
+        """执行完整的RAG流程，返回回答和相关源。"""
         state = AgentState(
             messages=[HumanMessage(content=question)],
             question=question,

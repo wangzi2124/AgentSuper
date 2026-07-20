@@ -36,11 +36,14 @@ PARENT_SUMMARY_LENGTH = 300
 
 
 class DocumentProcessor:
+    """文档处理器，负责加载、分章、分块和对话提取。"""
+
     def __init__(self, chunk_size: int = MAX_CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
     def _read_text_file(self, file_path: str) -> str:
+        """读取文本文件，自动尝试多种编码。"""
         with open(file_path, "rb") as f:
             data = f.read()
 
@@ -53,6 +56,7 @@ class DocumentProcessor:
         return data.decode("utf-8", errors="ignore")
 
     def load(self, file_path: str) -> str:
+        """加载文件内容，支持 txt/md/pdf 格式。"""
         ext = Path(file_path).suffix.lower()
         if ext in (".txt", ".md"):
             return self._read_text_file(file_path)
@@ -73,6 +77,7 @@ class DocumentProcessor:
             raise ValueError(f"Unsupported file type: {ext}")
 
     def _split_chapters(self, text: str) -> List[Tuple[str, str]]:
+        """按章节标题分割文本，返回 [(章节内容, 章节标题), ...]。"""
         matches = list(CHAPTER_PATTERN.finditer(text))
         if not matches:
             return [(text, "")]
@@ -88,6 +93,7 @@ class DocumentProcessor:
         return chapters
 
     def _parse_chapter_number(self, chapter_title: str) -> Tuple[int, str]:
+        """从章节标题中解析章节序号，支持阿拉伯数字和中文数字。"""
         raw = chapter_title
         num_str = re.sub(r'[^\d]', '', raw)
         if num_str:
@@ -120,6 +126,7 @@ class DocumentProcessor:
         return result if result > 0 else 0, chapter_title
 
     def _chunk_text(self, text: str, metadata: dict) -> List[Tuple[str, dict]]:
+        """将文本按固定大小和重叠进行分块。"""
         chunks = []
         start = 0
         text_len = len(text)
@@ -140,6 +147,7 @@ class DocumentProcessor:
         return chunks
 
     def _extract_dialogues(self, text: str, base_meta: dict) -> List[Tuple[str, dict]]:
+        """从文本中提取对话片段，生成对话锚点文档块。"""
         anchors: List[Tuple[str, dict]] = []
         seen: set[str] = set()
 

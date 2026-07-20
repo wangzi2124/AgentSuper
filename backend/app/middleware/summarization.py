@@ -7,10 +7,12 @@ logger = logging.getLogger(__name__)
 
 
 def _estimate_tokens(text: str) -> int:
+    """粗略估算文本的token数量，按字符数除以2计算。"""
     return len(text) // 2
 
 
 def _total_tokens(messages: list[dict]) -> int:
+    """计算消息列表中所有消息内容的总token估算值。"""
     return sum(_estimate_tokens(m.get("content", "")) for m in messages)
 
 
@@ -58,6 +60,7 @@ class HierarchicalSummarizationMiddleware:
         api_key: str | None = None,
         api_base: str | None = None,
     ):
+        """初始化分层摘要中间件，配置触发条件、保留策略和LLM参数。"""
         self.model = model
         self.trigger_key, self.trigger_value = trigger
         self.keep_key, self.keep_value = keep
@@ -66,6 +69,7 @@ class HierarchicalSummarizationMiddleware:
         self.api_base = api_base
 
     async def apply(self, history: list[dict]) -> list[dict]:
+        """对对话历史执行分层摘要压缩，超出触发阈值时压缩旧消息并保留最近消息。"""
         if not history:
             return history
 
@@ -88,6 +92,7 @@ class HierarchicalSummarizationMiddleware:
         ]
 
     async def _hierarchical_summarize(self, messages: list[dict], depth: int = 0) -> str:
+        """递归分层摘要：将消息分块摘要，若摘要仍超预算则继续递归压缩。"""
         if depth > 5:
             return ""
 
@@ -112,6 +117,7 @@ class HierarchicalSummarizationMiddleware:
         return await self._hierarchical_summarize(summary_messages, depth + 1)
 
     async def _summarize(self, messages: list[dict]) -> str:
+        """调用LLM对一批消息生成简洁摘要，保留关键事实和决策。"""
         text = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
         prompt = (
             "Condense the following conversation into a concise summary "
@@ -138,6 +144,7 @@ class HierarchicalSummarizationMiddleware:
             return ""
 
     def _fallback_truncate(self, history: list[dict], max_tokens: int = 4000) -> list[dict]:
+        """摘要失败时的兜底策略：从最新消息向前保留，截断超出token预算的旧消息。"""
         total = 0
         result = []
         for msg in reversed(history):

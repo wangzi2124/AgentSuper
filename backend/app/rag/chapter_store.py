@@ -5,6 +5,8 @@ from typing import Optional
 
 
 class ChapterStore:
+    """基于 SQLite 的章节元数据存储，支持按关键词和章节号查询。"""
+
     def __init__(self, db_path: str):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -12,6 +14,7 @@ class ChapterStore:
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
+        """获取数据库连接，支持 WAL 模式和超时配置。"""
         if self._conn is None:
             self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -19,6 +22,7 @@ class ChapterStore:
         return self._conn
 
     def _init_db(self):
+        """初始化数据库表和索引。"""
         conn = self._get_conn()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chapters (
@@ -50,6 +54,7 @@ class ChapterStore:
         chapter_number: Optional[int], chapter_title: str,
         summary: str, parent_chunk_text: str,
     ) -> str:
+        """添加章节记录，返回生成的章节 ID。"""
         chapter_id = str(uuid.uuid4())
         conn = self._get_conn()
         conn.execute(
@@ -60,6 +65,7 @@ class ChapterStore:
         return chapter_id
 
     def find_by_keyword(self, keyword: str) -> list[dict]:
+        """按关键词模糊匹配章节标题。"""
         conn = self._get_conn()
         cursor = conn.execute(
             "SELECT * FROM chapters WHERE chapter_title LIKE ? ORDER BY document_id, chapter_number",
@@ -70,6 +76,7 @@ class ChapterStore:
         return [dict(zip(cols, r)) for r in rows]
 
     def find_by_keywords(self, keywords: list[str]) -> list[dict]:
+        """按多个关键词模糊匹配章节标题（OR 关系）。"""
         if not keywords:
             return []
         conn = self._get_conn()
@@ -84,6 +91,7 @@ class ChapterStore:
         return [dict(zip(cols, r)) for r in rows]
 
     def find_by_number(self, document_id: Optional[str], chapter_number: int) -> list[dict]:
+        """按章节序号查找，可限定文档 ID。"""
         conn = self._get_conn()
         if document_id:
             cursor = conn.execute(
@@ -100,6 +108,7 @@ class ChapterStore:
         return [dict(zip(cols, r)) for r in rows]
 
     def get_all(self, document_id: Optional[str] = None, limit: int = 500) -> list[dict]:
+        """获取所有章节记录，可按文档 ID 过滤。"""
         conn = self._get_conn()
         if document_id:
             cursor = conn.execute(
@@ -116,6 +125,7 @@ class ChapterStore:
         return [dict(zip(cols, r)) for r in rows]
 
     def delete_by_document(self, document_id: str):
+        """删除指定文档的所有章节记录。"""
         conn = self._get_conn()
         conn.execute("DELETE FROM chapters WHERE document_id = ?", (document_id,))
         conn.commit()

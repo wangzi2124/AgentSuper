@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 
 class ProcessingTask:
+    """文档处理任务，跟踪任务状态和进度。"""
+
     def __init__(self, task_id: str, filename: str):
         self.task_id = task_id
         self.filename = filename
@@ -25,6 +27,7 @@ class ProcessingTask:
         self.error: Optional[str] = None
 
     def to_dict(self):
+        """将任务状态转换为字典格式。"""
         return {
             "task_id": self.task_id,
             "filename": self.filename,
@@ -37,15 +40,19 @@ class ProcessingTask:
 
 
 class TaskManager:
+    """任务管理器，负责创建和管理文档处理任务。"""
+
     def __init__(self):
         self._tasks: dict[str, ProcessingTask] = {}
 
     def create(self, filename: str) -> str:
+        """创建新的处理任务，返回任务ID。"""
         task_id = str(uuid.uuid4())
         self._tasks[task_id] = ProcessingTask(task_id, filename)
         return task_id
 
     def get(self, task_id: str) -> Optional[ProcessingTask]:
+        """根据任务ID获取任务对象。"""
         return self._tasks.get(task_id)
 
     async def process_document(
@@ -60,6 +67,7 @@ class TaskManager:
         bm25: Optional[BM25Index] = None,
         chapter_store: Optional["ChapterStore"] = None,
     ):
+        """异步处理文档：保存、分块、生成向量并存储。"""
         task = self._tasks.get(task_id)
         if not task:
             return

@@ -1,3 +1,8 @@
+"""文档管理 API 路由模块。
+
+提供文档上传、进度查询、列表获取和删除功能。
+"""
+
 from datetime import datetime
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Request
@@ -15,6 +20,7 @@ router = APIRouter()
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_document(request: Request, file: UploadFile = File(...)):
+    """上传文档并启动异步处理任务。"""
     content = await file.read()
 
     if not content:
@@ -45,6 +51,7 @@ async def upload_document(request: Request, file: UploadFile = File(...)):
 
 @router.get("/tasks/{task_id}", response_model=TaskProgressResponse)
 async def get_task_progress(request: Request, task_id: str):
+    """查询文档处理任务的进度状态。"""
     tm = request.app.state.task_manager
     task = tm.get(task_id)
     if not task:
@@ -77,10 +84,12 @@ async def get_task_progress(request: Request, task_id: str):
 
 @router.get("/", response_model=DocumentListResponse)
 async def list_documents(request: Request):
+    """获取所有已上传文档的列表。"""
     fs = request.app.state.file_store
     docs = fs.list_all()
 
     def safe_dt(doc: dict):
+        """安全解析文档创建时间。"""
         try:
             return datetime.fromisoformat(doc["created_at"])
         except Exception:
@@ -103,6 +112,7 @@ async def list_documents(request: Request):
 
 @router.delete("/{doc_id}", response_model=DeleteResponse)
 async def delete_document(request: Request, doc_id: str):
+    """删除指定文档及其关联的向量数据。"""
     fs = request.app.state.file_store
     vs = request.app.state.vector_store
 

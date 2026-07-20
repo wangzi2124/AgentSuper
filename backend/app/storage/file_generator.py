@@ -12,6 +12,7 @@ GENERATED_DIR = Path(__file__).resolve().parents[2] / "data" / "generated"
 
 
 def save_file(content: str | bytes, filename: str = "") -> str:
+    """将内容保存到生成文件目录，返回文件路径。"""
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
     if not filename:

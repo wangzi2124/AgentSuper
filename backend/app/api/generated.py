@@ -1,3 +1,8 @@
+"""生成文件管理 API 路由模块。
+
+提供生成文件的列表查询、下载和删除功能。
+"""
+
 import os
 import mimetypes
 from pathlib import Path
@@ -12,18 +17,21 @@ router = APIRouter()
 
 
 class GeneratedFile(BaseModel):
+    """生成文件信息模型。"""
     filename: str
     size: int
     created_at: str
 
 
 class GeneratedFileList(BaseModel):
+    """生成文件列表响应模型。"""
     files: list[GeneratedFile]
     total: int
 
 
 @router.get("/", response_model=GeneratedFileList)
 async def list_generated(q: Optional[str] = None):
+    """获取生成目录下所有文件的列表，支持按文件名搜索。"""
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
     files: list[GeneratedFile] = []
     for f in sorted(GENERATED_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -41,6 +49,7 @@ async def list_generated(q: Optional[str] = None):
 
 @router.get("/download/{filename}")
 async def download_generated(filename: str):
+    """下载指定的生成文件。"""
     filepath = GENERATED_DIR / filename
     if not filepath.exists() or not filepath.is_file():
         raise HTTPException(status_code=404, detail="File not found")
@@ -54,6 +63,7 @@ async def download_generated(filename: str):
 
 @router.delete("/{filename}")
 async def delete_generated(filename: str):
+    """删除指定的生成文件。"""
     filepath = GENERATED_DIR / filename
     if not filepath.exists() or not filepath.is_file():
         raise HTTPException(status_code=404, detail="File not found")

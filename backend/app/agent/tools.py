@@ -6,6 +6,7 @@ from app.skills.loader import SkillLoader
 from app.plugins.loader import PluginLoader
 
 
+# Python类型到JSON Schema类型的映射表
 _TYPE_MAP: Dict[str, str] = {
     "str": "string",
     "int": "integer",
@@ -19,6 +20,7 @@ _TYPE_MAP: Dict[str, str] = {
 
 
 def _annotation_to_json_type(annotation: str) -> str:
+    """将Python类型注解转换为JSON Schema类型。"""
     low = annotation.lower().replace("typing.", "").replace("optional[", "").removesuffix("]")
     for k, v in _TYPE_MAP.items():
         if k in low:
@@ -27,6 +29,7 @@ def _annotation_to_json_type(annotation: str) -> str:
 
 
 def _build_parameters_schema(params: List[dict]) -> dict:
+    """根据参数列表构建OpenAI工具的参数Schema。"""
     properties: Dict[str, dict] = {}
     required: List[str] = []
     for p in params:
@@ -44,12 +47,14 @@ def _build_parameters_schema(params: List[dict]) -> dict:
 
 @dataclass
 class ToolDef:
+    """工具定义数据类，包含工具的名称、描述、参数和执行函数。"""
     name: str
     description: str
     parameters: dict
     fn: Callable
 
     def to_openai_tool(self) -> dict:
+        """将工具定义转换为OpenAI函数调用格式。"""
         return {
             "type": "function",
             "function": {
@@ -61,6 +66,7 @@ class ToolDef:
 
 
 def create_skill_tools(skill_loader: SkillLoader) -> List[ToolDef]:
+    """根据技能加载器创建技能工具列表。"""
     tools: List[ToolDef] = []
     for skill in skill_loader.get_enabled_skills():
         content = skill_loader.get_skill_content(skill.name)
@@ -85,6 +91,7 @@ def create_skill_tools(skill_loader: SkillLoader) -> List[ToolDef]:
 
 
 def create_filesystem_tools() -> List[ToolDef]:
+    """创建文件系统操作工具列表（ls、read、write、edit等）。"""
     from app.tools.filesystem import (
         tool_ls, tool_read_file, tool_write_file, tool_edit_file,
         tool_glob, tool_grep, tool_execute,
@@ -136,6 +143,7 @@ def create_filesystem_tools() -> List[ToolDef]:
 
 
 def create_plugin_tools(plugin_loader: PluginLoader) -> List[ToolDef]:
+    """根据插件加载器创建插件工具列表。"""
     tools: List[ToolDef] = []
     for plugin in plugin_loader.get_enabled_plugins():
         for func_name, func in plugin.functions.items():
@@ -167,6 +175,7 @@ def create_plugin_tools(plugin_loader: PluginLoader) -> List[ToolDef]:
 def build_system_prompt_no_kb(
     skill_loader: SkillLoader, plugin_loader: PluginLoader, include_filesystem: bool = True
 ) -> str:
+    """构建无知识库时的系统提示词，包含可用工具说明。"""
     enabled_skills = skill_loader.get_enabled_skills()
     enabled_plugins = plugin_loader.get_enabled_plugins()
 

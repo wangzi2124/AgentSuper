@@ -17,6 +17,7 @@ _CHAPTER_KEYWORD_RE = re.compile(
 
 
 def _cn_to_int(s: str) -> int:
+    """将中文数字字符串转换为整数。"""
     result = 0
     temp = 0
     for ch in s:

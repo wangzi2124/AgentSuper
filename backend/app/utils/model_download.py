@@ -8,6 +8,7 @@ MODELSCOPE_MAP = {
 
 
 def download_model(model_name: str, cache_dir: Optional[Path] = None) -> Path:
+    """下载嵌入模型，优先从ModelScope下载，失败后回退到HuggingFace。"""
     if cache_dir is None:
         cache_dir = Path("data/models")
     cache_dir = cache_dir.resolve()

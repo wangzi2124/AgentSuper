@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 class LocalEmbeddings:
+    """本地嵌入模型封装，支持本地缓存和远程下载。"""
+
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self.model_name = model_name
         self.backend_dir = Path(__file__).resolve().parents[2]
@@ -16,6 +18,7 @@ class LocalEmbeddings:
         self.model = self._load_model(model_name)
 
     def _resolve_local_model(self, model_name: str) -> Optional[Path]:
+        """查找本地缓存的嵌入模型路径。"""
         candidates = []
 
         model_path = Path(model_name)
@@ -41,6 +44,7 @@ class LocalEmbeddings:
         return None
 
     def _load_model(self, model_name: str) -> SentenceTransformer:
+        """加载 SentenceTransformer 模型，优先本地，失败后远程下载。"""
         local_model = self._resolve_local_model(model_name)
         if local_model:
             return SentenceTransformer(str(local_model), device="cpu", local_files_only=True)
@@ -63,6 +67,7 @@ class LocalEmbeddings:
         self, texts: List[str], batch_size: int = 32,
         on_progress: Optional[callable] = None,
     ) -> List[List[float]]:
+        """批量生成文档文本的嵌入向量。"""
         if not texts:
             return []
 
@@ -80,4 +85,5 @@ class LocalEmbeddings:
         return all_embeddings
 
     def embed_query(self, text: str) -> List[float]:
+        """生成单条查询文本的嵌入向量。"""
         return self.model.encode([text], show_progress_bar=False)[0].tolist()

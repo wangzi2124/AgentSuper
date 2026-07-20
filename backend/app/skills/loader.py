@@ -7,6 +7,8 @@ logger = logging.getLogger(__name__)
 
 
 class Skill:
+    """技能数据模型，封装技能的名称、描述、文件路径和启用状态。"""
+
     def __init__(self, name: str, description: str, path: str, enabled: bool = True):
         self.name = name
         self.description = description
@@ -14,6 +16,7 @@ class Skill:
         self.enabled = enabled
 
     def to_dict(self) -> dict:
+        """将技能信息序列化为字典格式。"""
         return {
             "name": self.name,
             "description": self.description,
@@ -23,12 +26,15 @@ class Skill:
 
 
 class SkillLoader:
+    """技能加载器，负责从Markdown文件扫描、解析和管理所有技能。"""
+
     def __init__(self, skills_dir: str = "skills"):
         self.skills_dir = Path(skills_dir)
         self.skills_dir.mkdir(parents=True, exist_ok=True)
         self._skills: dict[str, Skill] = {}
 
     def load_all(self) -> List[Skill]:
+        """扫描技能目录，加载所有.md格式的技能文件（含子目录中的SKILL.md）。"""
         self._skills.clear()
 
         for f in self.skills_dir.glob("*.md"):
@@ -49,6 +55,7 @@ class SkillLoader:
         return self.list()
 
     def _load_skill_file(self, path: Path) -> Optional[Skill]:
+        """解析单个技能Markdown文件，提取YAML frontmatter中的元信息。"""
         try:
             content = path.read_text(encoding="utf-8")
             parts = content.split("---", 2)
@@ -71,12 +78,15 @@ class SkillLoader:
             return None
 
     def get(self, name: str) -> Optional[Skill]:
+        """根据技能名称获取技能实例。"""
         return self._skills.get(name)
 
     def list(self) -> List[Skill]:
+        """返回所有已加载的技能列表。"""
         return list(self._skills.values())
 
     def toggle(self, name: str, enabled: bool) -> bool:
+        """启用或禁用指定技能，并将状态写回Markdown文件。"""
         skill = self._skills.get(name)
         if not skill:
             return False
@@ -88,6 +98,7 @@ class SkillLoader:
         return True
 
     def _save_skill_file(self, skill: Skill) -> None:
+        """将技能的元信息（含启用状态）写回其Markdown文件的YAML frontmatter。"""
         path = Path(skill.path)
         content = path.read_text(encoding="utf-8")
         parts = content.split("---", 2)
@@ -106,9 +117,11 @@ class SkillLoader:
         path.write_text(new_content, encoding="utf-8")
 
     def get_enabled_skills(self) -> List[Skill]:
+        """获取所有已启用的技能列表。"""
         return [s for s in self._skills.values() if s.enabled]
 
     def get_skill_content(self, name: str) -> Optional[str]:
+        """读取指定技能文件的完整文本内容。"""
         skill = self._skills.get(name)
         if not skill:
             return None

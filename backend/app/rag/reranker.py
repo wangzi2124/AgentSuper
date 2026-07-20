@@ -8,6 +8,8 @@ logger = logging.getLogger(__name__)
 
 
 class Reranker:
+    """基于 CrossEncoder 模型的重排序器，对检索结果进行精排。"""
+
     def __init__(
         self,
         model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
@@ -19,6 +21,7 @@ class Reranker:
         self.model = self._load_model(model_name)
 
     def _resolve_local_model(self, model_name: str) -> Optional[Path]:
+        """查找本地缓存的重排序模型路径。"""
         candidates = [
             Path(model_name),
             self.backend_dir / model_name,
@@ -36,6 +39,7 @@ class Reranker:
         return None
 
     def _load_model(self, model_name: str) -> CrossEncoder:
+        """加载 CrossEncoder 模型，优先使用本地缓存。"""
         local_model = self._resolve_local_model(model_name)
         if local_model:
             logger.info("Loading reranker from local path: %s", local_model)
@@ -50,6 +54,7 @@ class Reranker:
         documents: List[dict],
         top_k: int = 3,
     ) -> List[Tuple[dict, float]]:
+        """对文档列表按 query 相关性重新排序，返回 top_k 结果。"""
         if not documents:
             return []
 

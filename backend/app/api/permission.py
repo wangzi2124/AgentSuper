@@ -1,3 +1,8 @@
+"""权限管理 API 路由模块。
+
+提供待处理权限请求的查询和响应功能。
+"""
+
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -10,11 +15,13 @@ router = APIRouter()
 
 
 class RespondRequest(BaseModel):
+    """权限响应请求模型。"""
     decision: str  # "allowed" | "denied"
     remember: bool = False
 
 
 class PendingResponse(BaseModel):
+    """待处理权限请求响应模型。"""
     id: str
     path: str
     operation: str
@@ -25,6 +32,7 @@ class PendingResponse(BaseModel):
 
 @router.get("/permission/pending", tags=["Permission"])
 async def list_pending():
+    """获取所有待处理的权限请求列表。"""
     mgr = get_manager()
     requests = mgr.get_pending_requests()
     return {
@@ -44,6 +52,7 @@ async def list_pending():
 
 @router.post("/permission/request/{request_id}/respond", tags=["Permission"])
 async def respond(request_id: str, body: RespondRequest):
+    """响应指定的权限请求，允许或拒绝操作。"""
     mgr = get_manager()
     ok = mgr.respond(request_id, body.decision, remember=body.remember)
     if not ok:
