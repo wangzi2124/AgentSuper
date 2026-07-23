@@ -22,6 +22,7 @@ onMounted(async () => {
 })
 
 // 格式化毫秒为人类可读时间
+function ms(v: number): string {
   if (v >= 60000) return (v / 60000).toFixed(1) + ' min'
   if (v >= 1000) return (v / 1000).toFixed(1) + ' s'
   return Math.round(v) + ' ms'

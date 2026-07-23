@@ -52,7 +52,7 @@ const weatherData = ref<WeatherData | null>(null)
 // 台风列表
 const typhoons = ref<Typhoon[]>([])
 // 当前选中的城市
-const selectedCity = ref('北京')
+const selectedCity = ref('')
 // 错误信息
 const errorMsg = ref('')
 // 搜索城市关键词
@@ -86,6 +86,9 @@ const cnCities = [
   { name: '哈尔滨', region: '黑龙江' },
   { name: '沈阳', region: '辽宁' },
   { name: '昆明', region: '云南' },
+  { name: '香港', region: '香港' },
+  { name: '澳门', region: '澳门' },
+  { name: '台北', region: '台湾' },
 ]
 
 // 国际城市列表
@@ -182,11 +185,14 @@ async function fetchWeather() {
   errorMsg.value = ''
   
   try {
-    const response = await fetch(`/api/plugins/weather-alert/call/tool_get_weather_alert`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ args: { city: selectedCity.value } }),
-    })
+    // 未选择城市时直接读缓存（启动时已自动加载）
+    const useCache = !selectedCity.value
+    const url = useCache ? '/api/weather' : '/api/weather/refresh'
+    const init: RequestInit = useCache
+      ? { method: 'GET' }
+      : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ city: selectedCity.value }) }
+    
+    const response = await fetch(url, init)
     
     if (!response.ok) {
       throw new Error('Failed to fetch weather')
@@ -197,7 +203,10 @@ async function fetchWeather() {
       throw new Error(result.error)
     }
     
-    weatherData.value = result
+    weatherData.value = result.weather
+    if (result.city) {
+      selectedCity.value = result.city
+    }
   } catch (e: any) {
     errorMsg.value = e.message || '获取天气失败'
   } finally {

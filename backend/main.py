@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config
+from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config, weather
 from app.monitor import RequestLogMiddleware, get_stats
 from app.runtime import ensure_runtime_state
 
@@ -20,6 +20,7 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     """应用生命周期管理，启动时初始化运行时状态。"""
     await asyncio.to_thread(ensure_runtime_state, app)
+    weather.load_weather_on_startup()
     try:
         yield
     except asyncio.CancelledError:
@@ -51,6 +52,7 @@ app.include_router(vectors.router, prefix="/api/vectors", tags=["Vectors"])
 app.include_router(generated.router, prefix="/api/generated", tags=["Generated"])
 app.include_router(perm_api.router, prefix="/api", tags=["Permission"])
 app.include_router(config.router, prefix="/api/config", tags=["Config"])
+app.include_router(weather.router, prefix="/api", tags=["Weather"])
 
 
 @app.get("/")
