@@ -28,10 +28,34 @@ const sortedSteps = computed(() => {
 
 // 展开/收起结果的状态记录
 const expandedResults = ref<Record<string, boolean>>({})
+// 展开/收起参数的状态记录
+const expandedArgs = ref<Record<string, boolean>>({})
 
 // 切换步骤结果的展开状态
 function toggleResult(stepId: string) {
   expandedResults.value[stepId] = !expandedResults.value[stepId]
+}
+
+// 切换步骤参数的展开状态
+function toggleArgs(stepId: string) {
+  expandedArgs.value[stepId] = !expandedArgs.value[stepId]
+}
+
+// 格式化参数为可读 JSON
+function formatArgs(args: Record<string, unknown>): string {
+  return JSON.stringify(args, null, 2)
+}
+
+// 获取参数摘要（简短预览）
+function argsSummary(args: Record<string, unknown>): string {
+  const keys = Object.keys(args)
+  if (keys.length === 0) return '()'
+  const parts = keys.map(k => {
+    const v = args[k]
+    if (typeof v === 'string') return v.length > 30 ? v.slice(0, 30) + '...' : v
+    return String(v)
+  })
+  return '(' + parts.join(', ').slice(0, 60) + ')'
 }
 
 // 根据状态返回对应图标
@@ -67,7 +91,12 @@ function formatDuration(ms?: number): string {
         <div class="task-content">
           <span class="task-name">{{ s.name }}</span>
           <span v-if="s.detail" class="task-detail">{{ s.detail }}</span>
-          <span v-if="s.tool_name" class="task-tool">🔧 {{ s.tool_name }}{{ s.tool_args ? '(' + JSON.stringify(s.tool_args).slice(0, 50) + ')' : '' }}</span>
+          <span v-if="s.tool_name" class="task-tool">
+            🔧 {{ s.tool_name }}
+            <span v-if="s.tool_args && Object.keys(s.tool_args).length" class="task-args-toggle" @click.stop="toggleArgs(s.step_id)">
+              {{ expandedArgs[s.step_id] ? '收起参数' : argsSummary(s.tool_args) }}
+            </span>
+          </span>
           <span v-if="s.tool_result && s.status === 'completed'" class="task-view-result" @click.stop="toggleResult(s.step_id)">
             {{ expandedResults[s.step_id] ? '收起' : '查看结果' }}
           </span>
@@ -76,6 +105,10 @@ function formatDuration(ms?: number): string {
         <span v-else-if="isRunning && s.status === 'running'" class="task-duration spinning">...</span>
         <div v-if="s.tool_output" class="task-output" @click.stop>
           <pre>{{ s.tool_output }}</pre>
+        </div>
+        <div v-if="s.tool_args && expandedArgs[s.step_id]" class="task-args" @click.stop>
+          <div class="task-args-label">参数</div>
+          <pre>{{ formatArgs(s.tool_args) }}</pre>
         </div>
         <div v-if="s.tool_result && expandedResults[s.step_id]" class="task-result" @click.stop>
           <pre>{{ s.tool_result }}</pre>
@@ -186,6 +219,42 @@ function formatDuration(ms?: number): string {
 .task-tool {
   font-size: 11px;
   color: var(--primary);
+  font-family: monospace;
+}
+.task-args-toggle {
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-decoration: underline;
+  margin-left: 4px;
+  font-family: inherit;
+}
+.task-args-toggle:hover {
+  color: var(--primary);
+}
+.task-args {
+  margin: 4px 0 0 24px;
+  padding: 8px 10px;
+  background: #f8f9fa;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+  width: calc(100% - 24px);
+}
+.task-args-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.task-args pre {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
   font-family: monospace;
 }
 .task-duration {

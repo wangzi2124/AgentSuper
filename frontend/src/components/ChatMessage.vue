@@ -9,6 +9,12 @@ const props = defineProps<{ message: Message; index: number }>()
 
 // 复制成功的状态标记
 const copied = ref(false)
+// 步骤列表展开/折叠状态
+const stepsExpanded = ref(false)
+// 单个步骤结果展开状态
+const expandedResults = ref<Record<string, boolean>>({})
+// 单个步骤参数展开状态
+const expandedArgs = ref<Record<string, boolean>>({})
 
 // 计算思考步骤的耗时
 const thoughtDuration = computed(() => {
@@ -51,6 +57,60 @@ function handleUndo() {
 function handleDelete() {
   emit('delete', props.message.id)
 }
+
+// 切换步骤列表展开状态
+function toggleSteps() {
+  stepsExpanded.value = !stepsExpanded.value
+}
+
+// 切换单个步骤结果展开状态
+function toggleResult(stepId: string) {
+  expandedResults.value[stepId] = !expandedResults.value[stepId]
+}
+
+// 切换单个步骤参数展开状态
+function toggleArgs(stepId: string) {
+  expandedArgs.value[stepId] = !expandedArgs.value[stepId]
+}
+
+// 获取状态图标
+function getStatusIcon(status: string): string {
+  if (status === 'completed') return '✅'
+  if (status === 'failed') return '❌'
+  return '⏳'
+}
+
+// 格式化耗时
+function formatDuration(ms?: number): string {
+  if (ms == null) return ''
+  if (ms < 1000) return `${ms.toFixed(0)}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+// 格式化参数为可读 JSON
+function formatArgs(args: Record<string, unknown>): string {
+  return JSON.stringify(args, null, 2)
+}
+
+// 获取参数摘要
+function argsSummary(args: Record<string, unknown>): string {
+  const keys = Object.keys(args)
+  if (keys.length === 0) return ''
+  const parts = keys.map(k => {
+    const v = args[k]
+    if (typeof v === 'string') return v.length > 25 ? v.slice(0, 25) + '...' : v
+    return String(v)
+  })
+  return parts.join(', ').slice(0, 50)
+}
+
+// 只显示有意义的步骤（工具调用或有耗时的步骤）
+const meaningfulSteps = computed(() => {
+  if (!props.message.steps) return []
+  return props.message.steps.filter(s =>
+    s.tool_name || s.duration_ms || s.detail
+  )
+})
 </script>
 
 <template>
@@ -59,8 +119,37 @@ function handleDelete() {
       {{ message.role === 'user' ? '👤' : '🤖' }}
     </div>
     <div class="bubble">
-      <div v-if="message.role === 'assistant' && thoughtDuration != null" class="thought-duration">
-        Thought: {{ thoughtDuration }}ms
+      <div v-if="message.role === 'assistant' && meaningfulSteps.length > 0" class="steps-section">
+        <div class="steps-header" @click="toggleSteps">
+          <span class="steps-toggle">{{ stepsExpanded ? '▾' : '▸' }}</span>
+          <span class="steps-label">执行步骤 ({{ meaningfulSteps.length }})</span>
+          <span v-if="thoughtDuration != null" class="steps-duration">{{ formatDuration(thoughtDuration) }}</span>
+        </div>
+        <div v-if="stepsExpanded" class="steps-list">
+          <div v-for="s in meaningfulSteps" :key="s.step_id" class="step-item" :class="s.status">
+            <div class="step-row">
+              <span class="step-icon">{{ getStatusIcon(s.status) }}</span>
+              <span class="step-name">{{ s.name }}</span>
+              <span v-if="s.detail" class="step-detail">{{ s.detail }}</span>
+              <span v-if="s.duration_ms != null" class="step-time">{{ formatDuration(s.duration_ms) }}</span>
+            </div>
+            <div v-if="s.tool_name" class="step-tool">
+              🔧 {{ s.tool_name }}
+              <span v-if="s.tool_args && Object.keys(s.tool_args).length" class="step-args-toggle" @click.stop="toggleArgs(s.step_id)">
+                {{ expandedArgs[s.step_id] ? '收起参数' : argsSummary(s.tool_args) }}
+              </span>
+            </div>
+            <div v-if="s.tool_args && expandedArgs[s.step_id]" class="step-args" @click.stop>
+              <pre>{{ formatArgs(s.tool_args) }}</pre>
+            </div>
+            <div v-if="s.tool_result" class="step-result-toggle" @click.stop="toggleResult(s.step_id)">
+              {{ expandedResults[s.step_id] ? '收起结果' : '查看结果' }}
+            </div>
+            <div v-if="s.tool_result && expandedResults[s.step_id]" class="step-result" @click.stop>
+              <pre>{{ s.tool_result }}</pre>
+            </div>
+          </div>
+        </div>
       </div>
       <div v-if="message.content" class="content">{{ message.content }}</div>
       <div v-if="message.files && message.files.length > 0" class="attachments">
@@ -137,6 +226,142 @@ function handleDelete() {
   border-color: var(--primary);
 }
 .content { white-space: pre-wrap; word-break: break-word; }
+.steps-section {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.steps-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  background: var(--bg);
+  font-size: 12px;
+  user-select: none;
+  transition: background 0.15s;
+}
+.steps-header:hover {
+  background: rgba(99, 102, 241, 0.05);
+}
+.steps-toggle {
+  color: var(--text-secondary);
+  font-size: 10px;
+  width: 12px;
+}
+.steps-label {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.steps-duration {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.steps-list {
+  padding: 4px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.step-item {
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.step-item.completed { background: rgba(16, 185, 129, 0.04); }
+.step-item.failed { background: rgba(239, 68, 68, 0.04); }
+.step-item.running { background: rgba(99, 102, 241, 0.04); }
+.step-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.step-icon { font-size: 11px; flex-shrink: 0; }
+.step-name {
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.step-detail {
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.step-time {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 11px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.step-tool {
+  font-size: 11px;
+  color: var(--primary);
+  font-family: monospace;
+  margin-top: 2px;
+  padding-left: 17px;
+}
+.step-args-toggle {
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-decoration: underline;
+  margin-left: 4px;
+  font-family: inherit;
+}
+.step-args-toggle:hover { color: var(--primary); }
+.step-args {
+  margin: 4px 0 0 17px;
+  padding: 6px 8px;
+  background: #f8f9fa;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.step-args pre {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  font-family: monospace;
+}
+.step-result-toggle {
+  font-size: 11px;
+  color: var(--primary);
+  cursor: pointer;
+  text-decoration: underline;
+  margin-top: 2px;
+  padding-left: 17px;
+}
+.step-result-toggle:hover { opacity: 0.8; }
+.step-result {
+  margin: 4px 0 0 17px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.step-result pre {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+  font-family: monospace;
+}
 .attachments {
   display: flex;
   gap: 6px;

@@ -33,6 +33,29 @@ watch(() => messages.value.length, async () => {
   }
 })
 
+// 侦听步骤变化（工具调用过程中），自动滚动到底部
+watch(() => chat.currentSteps.length, async () => {
+  await nextTick()
+  if (isNearBottom.value && parentRef.value) {
+    parentRef.value.scrollTo({ top: parentRef.value.scrollHeight, behavior: 'smooth' })
+  }
+})
+
+// 侦听最后一条消息的内容变化（流式输出），自动滚动到底部
+watch(
+  () => {
+    const msgs = messages.value
+    if (msgs.length === 0) return ''
+    return msgs[msgs.length - 1].content
+  },
+  async () => {
+    await nextTick()
+    if (isNearBottom.value && parentRef.value) {
+      parentRef.value.scrollTo({ top: parentRef.value.scrollHeight, behavior: 'smooth' })
+    }
+  }
+)
+
 // 检查天气插件是否启用
 async function checkWeatherPlugin() {
   try {
@@ -218,6 +241,20 @@ function handleMessageDelete(messageId: string) {
   overflow-y: auto;
   padding: 20px 24px;
   position: relative;
+  scroll-behavior: smooth;
+}
+.message-list::-webkit-scrollbar {
+  width: 6px;
+}
+.message-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.message-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+.message-list::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
 }
 .loading-indicator {
   display: flex;
