@@ -20,6 +20,7 @@
 | **会话隔离** | 每个会话独立消息存储，切换会话时消息互不干扰，后台流式请求继续运行 |
 | **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如搜索、天气、生成文档），Agent 按需调用 |
+| **HTTP 客户端** | Agent 可直接发起 HTTP 请求测试 API 接口（GET/POST/PUT/DELETE），支持自定义 headers 和 body |
 | **Vector DB 开关** | 用户可在聊天界面手动控制是否启用向量库检索，关闭后 Agent 仅凭自身知识回答 |
 | **生成文件管理** | Agent 创建的文档（.docx/.pdf/.xlsx/.pptx）可在独立页面查看、搜索、下载和删除，PDF 支持中文显示 |
 | **本地 Embedding** | 使用 sentence-transformers 本地运行，通过 ModelScope 下载模型 |
@@ -586,6 +587,27 @@ Agent 创建的文档（通过 docx-generator、pdf-generator、excel-generator�
 | **internet-search** | `tool_internet_search(query, max_results, topic)` — 搜索互联网 | *"今天有什么新闻？"* · *"搜索一下 Python 的最新动态"* |
 | | `tool_extract_urls(urls, format)` — 按 URL 提取页面内容 | *"打开这篇文章看看"* · *"查看某个网站的具体内容"* |
 | **weather** | `tool_get_weather(city, forecast_days)` — 查询天气 | *"今天北京天气怎么样？"* · *"伦敦未来三天的天气预报"* |
+| **http-client** | `tool_http_request(method, url, headers, body)` — 发送 HTTP 请求 | *"测试一下 localhost:8000 的 health 接口"* · *"帮我调用这个 API"* |
+| | `tool_http_get(url, headers)` — 快捷 GET 请求 | *"GET 请求这个地址"* · *"查看这个 API 的返回"* |
+| | `tool_http_post(url, body, headers)` — 快捷 POST 请求 | *"POST 一段 JSON 到这个接口"* · *"提交表单数据"* |
+
+**HTTP 客户端能力与限制：**
+
+| 能力 | 说明 |
+|------|------|
+| 支持方法 | GET / POST / PUT / DELETE / PATCH / HEAD / OPTIONS |
+| 自定义 Headers | Authorization、Content-Type 等任意 header |
+| 请求体 | JSON Body、Form 表单（`application/x-www-form-urlencoded`） |
+| 目标地址 | 本地接口（`localhost`）、外部 API 均可 |
+| SSL 证书 | 跳过验证，支持自签名证书的本地/开发环境 |
+
+| 限制 | 说明 |
+|------|------|
+| 响应截断 | 超过 5000 字符自动截断，防止 token 爆炸 |
+| 不支持文件上传 | 无 `multipart/form-data` 编码 |
+| 不支持流式响应 | SSE / chunked 响应一次性读取 |
+| 不支持 WebSocket | urllib 不支持 |
+| 超时 | 默认 30 秒，可调整 |
 
 在聊天框中直接输入需求，Agent 会自动判断需要调用哪些工具来完成你的请求。
 
