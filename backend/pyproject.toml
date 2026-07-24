@@ -3,7 +3,7 @@ name = "backend"
 version = "0.1.0"
 description = "Knowledge Base System with RAG + AI Agent"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 dependencies = [
     "chromadb",
     "fastapi>=0.138.0",
