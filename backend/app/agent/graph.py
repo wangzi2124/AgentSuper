@@ -342,6 +342,12 @@ class RAGAgent:
         """调用LLM生成回答，支持多轮工具调用。"""
         _gen_start = tmod.time()
         dedup = ToolResultDedup()
+        from app.context.compaction import ContextCompactor
+        compactor = ContextCompactor(
+            model=settings.summarization_model or self.model,
+            api_key=settings.summarization_api_key or settings.llm_api_key,
+            api_base=settings.summarization_api_base or settings.llm_api_base,
+        )
         self._push_event(state, {"type": "step_start", "step_id": "generate", "name": "生成回答", "status": "running"})
 
         if state["context"]:
@@ -392,10 +398,18 @@ class RAGAgent:
         response = await self._llm_call(model, messages, tool_defs)
         msg = response.choices[0].message
 
-        max_tool_rounds = 20
+        max_tool_rounds = 50
         rounds = 0
         while msg.tool_calls and rounds < max_tool_rounds:
             rounds += 1
+
+            # Compaction: compress old messages when context grows large
+            if compactor.should_compact(messages):
+                self._push_event(state, {"type": "step_start", "step_id": "compaction", "name": "压缩上下文", "status": "running"})
+                old_count = len(messages)
+                messages = await compactor.compact(messages)
+                self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
+
             messages.append({
                 "role": "assistant",
                 "content": msg.content or "",

@@ -31,6 +31,8 @@
 | **系统监控** | 请求级日志（方法/路径/状态/耗时）+ LLM 调用统计（模型/token/耗时/工具轮数），Web 页面可视化展示 |
 | **虚拟滚动** | 聊天消息列表使用 `@tanstack/vue-virtual`，只渲染可视区域节点，长对话 DOM 不臃肿 |
 | **权限系统** | AI Agent 写外部路径时前端弹窗审批，支持白名单持久化 |
+| **任务执行引擎** | 参考 OpenCode 双层循环架构，任务持续执行直到完成，支持上下文压缩和最大步数限制 |
+| **上下文压缩** | 消息超 80K tokens 时自动压缩旧消息为结构化 checkpoint，保留关键工作状态 |
 
 ---
 
@@ -885,6 +887,90 @@ LLM 调用 tool_read_file(path="b.py")  → 新调用，正常执行
 
 实现路径：`backend/app/context/` — 整个包
 
+### 任务执行引擎（Task Runner）
+
+参考 OpenCode 的双层 while 循环架构，解决「任务未完成就提前终止」的问题。
+
+#### 核心设计
+
+| 机制 | 说明 |
+|------|------|
+| **双层循环** | 内层：LLM + 工具调用持续到 LLM 不再返回 tool_calls；外层：检查是否有用户追加输入 |
+| **最大步数** | 默认 50 步，超限后注入强制总结 prompt，让 LLM 输出完成报告后结束 |
+| **上下文压缩** | 每步检查 token 总量，超 80K 自动压缩旧消息为结构化 checkpoint |
+| **任务状态持久化** | SQLite 持久化 step/token/compaction 状态，支持崩溃恢复 |
+| **工具结果去重** | 相同 `(tool_name, args)` 的调用复用缓存结果 |
+| **智能输出边界** | 按行数+字节截断大输出，附带 truncation notice |
+
+#### 任务流转
+
+```
+用户消息
+  │
+  ▼
+TaskRunner.run()  ← 创建 TaskState，持久化到 SQLite
+  │
+  ├── Phase 1: LangGraph RAG 流水线（retrieve → rerank → generate）
+  │     └── _generate 内层循环（最多 50 轮工具调用）
+  │           ├── 每轮: compaction 检查 → dedup → bound_output
+  │           └── LLM 返回无 tool_calls → 内层结束
+  │
+  ├── Phase 2: 检查 LLM 是否还想继续
+  │     ├── 有 tool_calls → 继续循环（最多 50 步）
+  │     │     ├── compaction: 压缩旧消息
+  │     │     ├── 工具执行: dedup + bound_output
+  │     │     └── 记录 token/step 到 SQLite
+  │     └── 无 tool_calls → 任务完成
+  │
+  └── TaskState.mark_completed()
+        │
+        ▼
+      返回 {answer, sources, steps, task}
+```
+
+#### 对比旧架构
+
+| 维度 | 旧架构 | 新架构（Task Runner） |
+|------|--------|---------------------|
+| 执行模型 | 单次 invoke，最多 20 轮工具调用 | 双层循环，最多 50 步 |
+| 任务完成判定 | `rounds >= 20` 或空内容 → 强制结束 | LLM 不再返回 tool_calls → 自然结束 |
+| 上下文膨胀 | 被动截断（1M tokens 丢弃旧消息） | 主动压缩（80K tokens 时 LLM 总结） |
+| 状态持久化 | 无 | SQLite 持久化 step/token/compaction |
+| 崩溃恢复 | 不支持 | 可从 SQLite 恢复任务状态 |
+
+#### 模块架构
+
+```
+backend/app/context/
+  ├── token_counter.py     ← tiktoken 精确计数
+  ├── tool_output.py       ← 智能输出边界
+  ├── tool_dedup.py        ← 工具结果去重
+  ├── compaction.py        ← 上下文压缩（LLM 总结）
+  ├── task_state.py        ← 任务状态持久化（SQLite）
+  └── task_runner.py       ← 核心执行引擎（双层循环）
+```
+
+#### 关键参数
+
+| 参数 | 默认值 | 配置方式 |
+|------|--------|----------|
+| `MAX_STEPS` | 50 | `task_runner.py` 常量 |
+| `COMPACTION_THRESHOLD` | 80,000 tokens | `task_runner.py` 常量 |
+| `keep_recent` | 6 条 | `compaction.py` 常量 |
+| `max_tool_rounds` | 50 | `graph.py` 常量 |
+
+#### 前端适配
+
+| 文件 | 改动 |
+|------|------|
+| `StepTaskList.vue` | `stepOrder` 加入 `compaction`，排在 `rerank` 和 `generate` 之间 |
+| `types/index.ts` | `SSEEvent` 加 `task` 字段（task_id/status/step/total_tokens/tool_calls_count） |
+| compaction `step_end` 事件 | 包含 `detail`："X 条消息压缩为 Y 条" |
+
+实现路径：`backend/app/context/task_runner.py` — 核心引擎
+`backend/app/context/compaction.py` — 上下文压缩
+`backend/app/context/task_state.py` — 任务状态持久化
+
 ---
 
 ## 项目学习指南
@@ -912,6 +998,9 @@ backend/app/agent/tools.py    → 工具定义 + 系统 prompt
 backend/app/context/token_counter.py  → tiktoken 精确计数 + 截断策略
 backend/app/context/tool_output.py    → 工具输出智能边界控制
 backend/app/context/tool_dedup.py     → 工具结果去重缓存
+backend/app/context/compaction.py     → 上下文压缩（LLM 总结旧消息）
+backend/app/context/task_state.py     → 任务状态持久化（SQLite）
+backend/app/context/task_runner.py    ← ⭐ 核心：双层循环任务执行引擎
 ```
 
 ### 4. RAG 检索链路 — 理解知识库如何工作
@@ -957,11 +1046,20 @@ frontend/src/components/         → 各组件（Sidebar、ChatMessage 等）
 用户输入
   → 前端 chat.ts 发送 POST /api/chat/stream
     → backend api/chat.py 接收
-      → agent/graph.py LangGraph 编排
-        ├─ _retrieve()  → retriever.py 混合检索
-        ├─ _rerank()    → reranker.py 重排序
-        └─ _generate()  → litellm 调 LLM + 工具循环
-      → SSE 逐 token 返回
+      → TaskRunner.run()  ← 任务执行引擎
+        │
+        ├── Phase 1: agent/graph.py LangGraph 编排
+        │     ├─ _retrieve()  → retriever.py 混合检索
+        │     ├─ _rerank()    → reranker.py 重排序
+        │     └─ _generate()  → litellm 调 LLM + 工具循环（最多 50 轮）
+        │
+        ├── Phase 2: 持续循环（直到 LLM 不再调用工具）
+        │     ├─ compaction: 超 80K tokens 自动压缩
+        │     ├─ dedup: 相同工具调用复用缓存
+        │     └─ bound_output: 大输出智能截断
+        │
+        └── TaskState → SQLite 持久化
+      → SSE 事件流返回
     → 前端 ChatView.vue 流式渲染
 ```
 
@@ -970,10 +1068,11 @@ frontend/src/components/         → 各组件（Sidebar、ChatMessage 等）
 | 优先级 | 模块 | 原因 |
 |--------|------|------|
 | **1** | `agent/graph.py` | 核心链路，理解 Agent 如何思考和执行 |
-| **2** | `rag/retriever.py` + `vector_store.py` | RAG 是项目的核心价值 |
-| **3** | `context/` | 理解 token 控制策略，防止上下文膨胀 |
-| **4** | `api/chat.py` | 理解前后端如何通过 SSE 流式通信 |
-| **5** | `stores/chat.ts` | 前端状态管理 + 会话隔离 |
-| **6** | `plugins/loader.py` | 理解插件扩展机制 |
+| **2** | `context/task_runner.py` | 任务执行引擎，理解双层循环如何保证任务完成 |
+| **3** | `rag/retriever.py` + `vector_store.py` | RAG 是项目的核心价值 |
+| **4** | `context/compaction.py` | 理解上下文压缩策略 |
+| **5** | `api/chat.py` | 理解前后端如何通过 SSE 流式通信 |
+| **6** | `stores/chat.ts` | 前端状态管理 + 会话隔离 |
+| **7** | `plugins/loader.py` | 理解插件扩展机制 |
 
-先跑通 `graph.py` 的工作流，再向外扩展到 RAG、API、前端，最后看插件系统。
+先跑通 `graph.py` 的工作流，再看 `task_runner.py` 的双层循环，然后向外扩展到 RAG、API、前端，最后看插件系统。

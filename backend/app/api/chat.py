@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 
 from app.config import settings
 from app.context.token_counter import estimate_tokens
+from app.context.task_runner import TaskRunner
 from app.middleware.summarization import HierarchicalSummarizationMiddleware
 from app.models.schemas import ChatRequest, ChatResponse, Source, StepEvent
 
@@ -181,7 +182,8 @@ async def chat(request: Request, body: ChatRequest):
             })
 
     try:
-        result = await agent.invoke(body.message, model=body.model, history=compressed, use_vector_db=body.use_vector_db, files=[f.model_dump() for f in body.files])
+        runner = TaskRunner(agent)
+        result = await runner.run(body.message, model=body.model, history=compressed, use_vector_db=body.use_vector_db, files=[f.model_dump() for f in body.files], conversation_id=conv_id)
     except Exception as e:
         logger.exception("chat invocation failed")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -230,13 +232,15 @@ async def chat_stream(request: Request, body: ChatRequest):
     event_queue: asyncio.Queue = asyncio.Queue()
 
     async def run_agent():
-        """异步运行Agent并收集结果。"""
+        """异步运行Agent并收集结果，使用TaskRunner执行持久化任务循环。"""
         try:
-            result = await agent.invoke(
+            runner = TaskRunner(agent)
+            result = await runner.run(
                 body.message, model=body.model, history=compressed,
                 use_vector_db=body.use_vector_db,
                 files=[f.model_dump() for f in body.files],
                 event_queue=event_queue,
+                conversation_id=conv_id,
             )
             await event_queue.put({
                 "type": "done",
@@ -248,6 +252,7 @@ async def chat_stream(request: Request, body: ChatRequest):
                 "conversation_id": conv_id,
                 "title": title,
                 "steps": result.get("steps", []),
+                "task": result.get("task", {}),
             })
         except asyncio.CancelledError:
             pass

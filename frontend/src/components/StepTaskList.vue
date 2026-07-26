@@ -12,7 +12,7 @@ const props = defineProps<{
 }>()
 
 // 步骤执行顺序
-const stepOrder = ['retrieve', 'rerank', 'generate']
+const stepOrder = ['retrieve', 'rerank', 'compaction', 'generate']
 
 // 按顺序排序步骤列表
 const sortedSteps = computed(() => {

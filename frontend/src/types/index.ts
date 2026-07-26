@@ -52,6 +52,13 @@ export interface SSEEvent {
   elapsed_seconds?: number
   user_msg_id?: string
   assistant_msg_id?: string
+  task?: {
+    task_id: string
+    status: string
+    step: number
+    total_tokens: number
+    tool_calls_count: number
+  }
 }
 
 // 文件内容（用于多模态消息）
