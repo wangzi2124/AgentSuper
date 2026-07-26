@@ -426,7 +426,7 @@ class RAGAgent:
         response = await self._llm_call(model, messages, tool_defs)
         msg = response.choices[0].message
 
-        max_tool_rounds = 10
+        max_tool_rounds = 20
         rounds = 0
         while msg.tool_calls and rounds < max_tool_rounds:
             rounds += 1
@@ -445,29 +445,33 @@ class RAGAgent:
 
             tool_tasks = []
             tool_metas = []
+            early_results: dict[str, str] = {}
             for tc in msg.tool_calls:
                 tool_name = tc.function.name
                 try:
                     args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError as e:
-                    result = f"Error parsing arguments for '{tool_name}': {e}"
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result,
-                    })
+                    early_results[tc.id] = f"Error parsing arguments for '{tool_name}': {e}"
                     continue
                 self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
                 tool_tasks.append(self._execute_tool(tool_name, args, state))
                 tool_metas.append((tc.id, tool_name))
 
-            tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)
+            if tool_tasks:
+                tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)
+            else:
+                tool_results = []
 
             for (tc_id, tool_name), result in zip(tool_metas, tool_results):
                 if isinstance(result, Exception):
                     result = f"Error executing {tool_name}: {result}"
-                result_str = str(result)
+                early_results[tc_id] = str(result)
+
+            for tc in msg.tool_calls:
+                tc_id = tc.id
+                result_str = early_results.get(tc_id, f"Error: no result for tool call {tc_id}")
                 truncated_result = result_str[:3000]
+                tool_name = tc.function.name
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": truncated_result})
                 messages.append({
                     "role": "tool",
@@ -486,6 +490,7 @@ class RAGAgent:
 
         # If tool calls remain (max rounds reached) or content is empty, force a final answer
         if msg.tool_calls:
+            logger.warning("Max tool rounds (%d) reached, executing final batch and forcing answer", max_tool_rounds)
             # Must include tool_calls in assistant message for DeepSeek/OpenAI compatibility
             messages.append({
                 "role": "assistant",
