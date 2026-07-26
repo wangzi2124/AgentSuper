@@ -25,7 +25,7 @@
 | **生成文件管理** | Agent 创建的文档（.docx/.pdf/.xlsx/.pptx）可在独立页面查看、搜索、下载和删除，PDF 支持中文显示 |
 | **本地 Embedding** | 使用 sentence-transformers 本地运行，通过 ModelScope 下载模型 |
 | **检索重排序** | Cross-encoder 对检索结果重打分（top-3），显著提升回答精度 |
-| **上下文管理** | 滑动窗口截断历史（4000 tokens），防止 context 溢出 |
+| **上下文管理** | tiktoken 精确 token 计数 + 工具输出智能边界控制 + 工具结果去重，防止 context 膨胀 |
 | **对话持久化** | SQLite 存储对话历史，服务重启不丢失 |
 | **来源引用** | 回答时标注检索到的文档来源及相似度分数 |
 | **系统监控** | 请求级日志（方法/路径/状态/耗时）+ LLM 调用统计（模型/token/耗时/工具轮数），Web 页面可视化展示 |
@@ -775,6 +775,116 @@ Agent 在每一轮工具调用循环中，所有工具通过 `asyncio.gather()` 
 
 实现路径：`backend/app/runtime.py` — `ensure_runtime_state()` + `_do_init()`
 
+### 上下文管理系统（Context Management）
+
+参考 OpenCode 的 ACP/DCP/DCM 插件生态，实现了一套模块化的上下文管理系统，将上下文控制从「被动截断」升级为「主动策略」。
+
+#### 模块架构
+
+```
+backend/app/context/
+  ├── __init__.py           # 包入口，导出公共 API
+  ├── token_counter.py      # tiktoken 精确 token 计数 + fallback
+  ├── tool_output.py        # 工具输出智能边界控制
+  └── tool_dedup.py         # 工具结果去重缓存
+```
+
+#### 1. Token 计数（token_counter.py）
+
+| 特性 | 说明 |
+|------|------|
+| **精确计数** | 使用 tiktoken `cl100k_base` 编码（GPT-3.5/4 系列通用） |
+| **Fallback** | tiktoken 不可用时降级为 `len(text) // 4` 启发式估算 |
+| **消息级计数** | `estimate_tokens_messages()` 支持文本和多模态消息 |
+| **统一截断** | `truncate_messages()` 保留系统提示 + 最新消息，插入截断哨兵 |
+
+对比旧实现：
+
+| 指标 | 旧（`len//2`） | 新（tiktoken） |
+|------|----------------|----------------|
+| 英文误差 | ~2x 过估 | 精确 |
+| 中文误差 | ~准确 | 精确 |
+| 统一性 | 3 处各自实现 | 单一模块 |
+
+#### 2. 工具输出边界（tool_output.py）
+
+防止大输出（文件读取、shell 命令）撑爆上下文窗口：
+
+| 策略 | 默认值 | 说明 |
+|------|--------|------|
+| **行数限制** | 200 行 | 超出截断，保留开头 |
+| **字节限制** | 32 KB | 超出截断，保留开头 |
+| **工具特定限制** | grep: 100 行/16KB | 高产出工具使用更紧的限制 |
+
+截断后附加通知：`[output truncated: showed 200/1500 lines, 32768/98304 bytes]`
+
+对比旧实现：
+
+| 旧行为 | 新行为 |
+|--------|--------|
+| 硬截断 `result[:3000]` 字符 | 按行数 + 字节双重截断 |
+| 无截断通知 | 附加 truncation notice |
+| 所有工具统一限制 | 按工具类型差异化限制 |
+
+#### 3. 工具结果去重（tool_dedup.py）
+
+检测并跳过重复的工具调用，节省 token 和执行时间：
+
+```
+LLM 调用 tool_read_file(path="a.py")  → 执行，缓存结果
+LLM 再次调用 tool_read_file(path="a.py") → 直接返回缓存，跳过执行
+LLM 调用 tool_read_file(path="b.py")  → 新调用，正常执行
+```
+
+- 使用 `(tool_name, sorted_args)` 的 MD5 哈希作为去重键
+- 缓存作用域为单次 `_generate()` 调用（跨轮次生效）
+- 每次调用记录命中率统计（hits/misses/cached_entries）
+
+#### 集成点
+
+| 模块 | 改动 |
+|------|------|
+| `agent/graph.py` | `_generate()` 中工具循环集成去重 + 输出边界；删除旧 `_estimate_tokens`/`_truncate_messages` |
+| `api/chat.py` | `_truncate_history()` 改用 `estimate_tokens` |
+| `middleware/summarization.py` | 删除本地 token 估算，改用 `context.token_counter` |
+
+#### 上下文流转全景
+
+```
+[完整历史 SQLite]
+    │
+    ▼
+[API 层: Summarization(可选) / Truncation(4000 tokens)]
+    │  ← estimate_tokens() 精确计数
+    ▼
+[Agent._generate(): 构建 messages]
+    │
+    ├── [System prompt] (~1000-3500 chars)
+    │       └── [RAG context] (按相关性分数排序)
+    │
+    ├── [History] (API 层预截断)
+    ├── [User message]
+    │
+    ▼
+[truncate_messages() 安全网] ← 1M tokens
+    │
+    ▼
+[LLM 调用 #1]
+    │
+    ▼
+[工具调用循环, 最多 20 轮]
+  每轮:
+    ├── Dedup 检查 → 命中则跳过执行
+    ├── 执行工具 → bound_tool_output() 智能截断
+    ├── 结果存入 early_results (按 tool_call_id 索引)
+    └── truncate_messages() → LLM 调用 #N
+        │
+        ▼
+    [最终回答]
+```
+
+实现路径：`backend/app/context/` — 整个包
+
 ---
 
 ## 项目学习指南
@@ -796,7 +906,15 @@ backend/app/agent/tools.py    → 工具定义 + 系统 prompt
 
 `graph.py` 是整个大脑，LLM 如何调用、工具如何执行、流式响应如何产生，全在这里。
 
-### 3. RAG 检索链路 — 理解知识库如何工作
+### 3. 上下文管理 — 理解 token 控制策略
+
+```
+backend/app/context/token_counter.py  → tiktoken 精确计数 + 截断策略
+backend/app/context/tool_output.py    → 工具输出智能边界控制
+backend/app/context/tool_dedup.py     → 工具结果去重缓存
+```
+
+### 4. RAG 检索链路 — 理解知识库如何工作
 
 ```
 backend/app/rag/document_processor.py  → 文档上传后如何分块（章节感知）
@@ -809,14 +927,14 @@ backend/app/rag/intent.py              → 意图识别（章节查询跳过向�
 backend/app/rag/chapter_store.py       → 章节元数据存储
 ```
 
-### 4. API 层 — 前后端如何交互
+### 5. API 层 — 前后端如何交互
 
 ```
 backend/app/api/chat.py       ← ⭐ 聊天接口（SSE 流式）
 backend/app/api/documents.py  → 文档上传 + 异步任务
 ```
 
-### 5. 插件系统 — 理解扩展机制
+### 6. 插件系统 — 理解扩展机制
 
 ```
 backend/app/plugins/loader.py   → 插件如何加载（扫描 tool_* 函数）
@@ -824,7 +942,7 @@ backend/app/skills/loader.py    → Skill 如何加载（Markdown 文件）
 backend/plugins/example_plugin.py → 最简单的插件示例
 ```
 
-### 6. 前端 — Vue 3 SPA
+### 7. 前端 — Vue 3 SPA
 
 ```
 frontend/src/stores/chat.ts      ← ⭐ 状态管理（会话、消息、SSE 流式接收）
@@ -853,8 +971,9 @@ frontend/src/components/         → 各组件（Sidebar、ChatMessage 等）
 |--------|------|------|
 | **1** | `agent/graph.py` | 核心链路，理解 Agent 如何思考和执行 |
 | **2** | `rag/retriever.py` + `vector_store.py` | RAG 是项目的核心价值 |
-| **3** | `api/chat.py` | 理解前后端如何通过 SSE 流式通信 |
-| **4** | `stores/chat.ts` | 前端状态管理 + 会话隔离 |
-| **5** | `plugins/loader.py` | 理解插件扩展机制 |
+| **3** | `context/` | 理解 token 控制策略，防止上下文膨胀 |
+| **4** | `api/chat.py` | 理解前后端如何通过 SSE 流式通信 |
+| **5** | `stores/chat.ts` | 前端状态管理 + 会话隔离 |
+| **6** | `plugins/loader.py` | 理解插件扩展机制 |
 
 先跑通 `graph.py` 的工作流，再向外扩展到 RAG、API、前端，最后看插件系统。

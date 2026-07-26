@@ -3,17 +3,9 @@ from typing import Any
 
 import litellm
 
+from app.context.token_counter import estimate_tokens, estimate_tokens_messages
+
 logger = logging.getLogger(__name__)
-
-
-def _estimate_tokens(text: str) -> int:
-    """粗略估算文本的token数量，按字符数除以2计算。"""
-    return len(text) // 2
-
-
-def _total_tokens(messages: list[dict]) -> int:
-    """计算消息列表中所有消息内容的总token估算值。"""
-    return sum(_estimate_tokens(m.get("content", "")) for m in messages)
 
 
 def _split_into_chunks(messages: list[dict], pairs_per_chunk: int = 10) -> list[list[dict]]:
@@ -73,7 +65,7 @@ class HierarchicalSummarizationMiddleware:
         if not history:
             return history
 
-        if self.trigger_key == "tokens" and _total_tokens(history) <= self.trigger_value:
+        if self.trigger_key == "tokens" and estimate_tokens_messages(history) <= self.trigger_value:
             return history
         if self.trigger_key == "messages" and len(history) <= self.trigger_value:
             return history
@@ -109,7 +101,7 @@ class HierarchicalSummarizationMiddleware:
 
         # Check if combined summaries fit within token budget
         combined = "\n\n".join(summaries)
-        if _estimate_tokens(combined) <= self.trigger_value:
+        if estimate_tokens(combined) <= self.trigger_value:
             return combined
 
         # Recursively compress
@@ -148,7 +140,7 @@ class HierarchicalSummarizationMiddleware:
         total = 0
         result = []
         for msg in reversed(history):
-            tokens = _estimate_tokens(msg.get("content", ""))
+            tokens = estimate_tokens(msg.get("content", ""))
             if total + tokens > max_tokens:
                 result.insert(0, {"role": "system", "content": "[earlier history truncated]"})
                 break

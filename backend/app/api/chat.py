@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
+from app.context.token_counter import estimate_tokens
 from app.middleware.summarization import HierarchicalSummarizationMiddleware
 from app.models.schemas import ChatRequest, ChatResponse, Source, StepEvent
 
@@ -139,7 +140,7 @@ def _truncate_history(history: list[dict], max_tokens: int = MAX_HISTORY_TOKENS)
     total = 0
     truncated = []
     for msg in reversed(history):
-        tokens = len(msg.get("content", "")) // 2
+        tokens = estimate_tokens(msg.get("content", ""))
         if total + tokens > max_tokens:
             truncated.append({"role": "system", "content": "[earlier history truncated]"})
             break

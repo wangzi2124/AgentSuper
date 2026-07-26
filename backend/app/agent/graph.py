@@ -11,46 +11,11 @@ logger = logging.getLogger(__name__)
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 
-MAX_CONTEXT_TOKENS = 1000000  # Leave buffer below 1048565 limit
+from app.context.token_counter import estimate_tokens, truncate_messages as _truncate_messages
+from app.context.tool_output import bound_tool_output
+from app.context.tool_dedup import ToolResultDedup
 
-
-def _estimate_tokens(text: str) -> int:
-    """粗略估算文本的token数量（约2个字符对应1个token）。"""
-    return len(text) // 2
-
-
-def _truncate_messages(messages: list[dict], max_tokens: int = MAX_CONTEXT_TOKENS) -> list[dict]:
-    """截断消息列表以适应token限制，保留系统提示和最近的消息。"""
-    if not messages:
-        return messages
-
-    total = sum(_estimate_tokens(m.get("content", "")) for m in messages)
-    if total <= max_tokens:
-        return messages
-
-    system_msg = messages[0] if messages[0].get("role") == "system" else None
-    rest = messages[1:] if system_msg else messages
-
-    system_tokens = _estimate_tokens(system_msg.get("content", "")) if system_msg else 0
-    budget = max_tokens - system_tokens - 1000  # Reserve 1000 for response
-
-    kept = []
-    current = 0
-    for msg in reversed(rest):
-        msg_tokens = _estimate_tokens(msg.get("content", ""))
-        if current + msg_tokens > budget:
-            break
-        current += msg_tokens
-        kept.append(msg)
-    kept.reverse()
-
-    result = []
-    if system_msg:
-        result.append(system_msg)
-    if len(kept) < len(rest):
-        result.append({"role": "system", "content": "[earlier messages truncated to fit context window]"})
-    result.extend(kept)
-    return result
+MAX_CONTEXT_TOKENS = 1_000_000  # Leave buffer below model limit
 
 import litellm
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
@@ -376,6 +341,7 @@ class RAGAgent:
     async def _generate(self, state: AgentState) -> dict:
         """调用LLM生成回答，支持多轮工具调用。"""
         _gen_start = tmod.time()
+        dedup = ToolResultDedup()
         self._push_event(state, {"type": "step_start", "step_id": "generate", "name": "生成回答", "status": "running"})
 
         if state["context"]:
@@ -453,30 +419,41 @@ class RAGAgent:
                 except json.JSONDecodeError as e:
                     early_results[tc.id] = f"Error parsing arguments for '{tool_name}': {e}"
                     continue
+
+                # Dedup: skip re-execution for identical tool+args
+                dedup_key = dedup.make_key(tool_name, args)
+                cached = dedup.get(dedup_key)
+                if cached is not None:
+                    early_results[tc.id] = cached
+                    self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
+                    continue
+
                 self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
                 tool_tasks.append(self._execute_tool(tool_name, args, state))
-                tool_metas.append((tc.id, tool_name))
+                tool_metas.append((tc.id, tool_name, dedup_key))
 
             if tool_tasks:
                 tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)
             else:
                 tool_results = []
 
-            for (tc_id, tool_name), result in zip(tool_metas, tool_results):
+            for (tc_id, tool_name, dkey), result in zip(tool_metas, tool_results):
                 if isinstance(result, Exception):
                     result = f"Error executing {tool_name}: {result}"
-                early_results[tc_id] = str(result)
+                result_str = str(result)
+                dedup.set(dkey, result_str)
+                early_results[tc_id] = result_str
 
             for tc in msg.tool_calls:
                 tc_id = tc.id
                 result_str = early_results.get(tc_id, f"Error: no result for tool call {tc_id}")
-                truncated_result = result_str[:3000]
+                bounded_result = bound_tool_output(result_str, tc.function.name)
                 tool_name = tc.function.name
-                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": truncated_result})
+                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
-                    "content": truncated_result,
+                    "content": bounded_result,
                 })
 
             messages = _truncate_messages(messages)
@@ -521,9 +498,9 @@ class RAGAgent:
                 if isinstance(result, Exception):
                     result = f"Error executing {tool_name}: {result}"
                 result_str = str(result)
-                truncated_result = result_str[:3000]
-                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": truncated_result})
-                messages.append({"role": "tool", "tool_call_id": tc_id, "content": truncated_result})
+                bounded_result = bound_tool_output(result_str, tool_name)
+                self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
+                messages.append({"role": "tool", "tool_call_id": tc_id, "content": bounded_result})
             messages = _truncate_messages(messages)
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
