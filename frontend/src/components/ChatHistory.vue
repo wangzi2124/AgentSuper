@@ -99,6 +99,18 @@ function handleDelete(e: Event, id: string) {
   }
   deleteConversation(id).then(() => chat.loadConversations())
 }
+
+// 获取会话的流式阶段
+function getSessionPhase(id: string): 'idle' | 'queued' | 'running' {
+  const session = chat.sessions[id]
+  return session?.streamPhase || 'idle'
+}
+
+// 获取会话的排队位置
+function getSessionQueuePosition(id: string): number | null {
+  const session = chat.sessions[id]
+  return session?.queuePosition ?? null
+}
 </script>
 
 <template>
@@ -144,6 +156,12 @@ function handleDelete(e: Event, id: string) {
             </template>
             <template v-else>
               <span class="item-title" @dblclick.stop="startRename(c)">{{ c.title }}</span>
+              <span v-if="getSessionPhase(c.id) === 'queued'" class="session-badge queued">
+                ⏳ #{{ getSessionQueuePosition(c.id) }}
+              </span>
+              <span v-else-if="getSessionPhase(c.id) === 'running'" class="session-badge running">
+                ● streaming
+              </span>
             </template>
           </div>
           <div class="item-actions">
@@ -268,6 +286,29 @@ function handleDelete(e: Event, id: string) {
   white-space: nowrap;
   font-size: 13px;
   color: var(--text);
+}
+.session-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-left: 4px;
+  vertical-align: middle;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.session-badge.queued {
+  background: rgba(251, 191, 36, 0.15);
+  color: #f59e0b;
+}
+.session-badge.running {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  animation: pulse-badge 1.5s ease-in-out infinite;
+}
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 .item-actions {
   display: flex;

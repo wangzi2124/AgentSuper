@@ -138,6 +138,12 @@ function handleMessageDelete(messageId: string) {
         <p>Ask questions and get answers powered by RAG + AI Agent</p>
       </div>
       <div class="header-controls">
+        <span v-if="chat.streamPhase === 'queued'" class="stream-badge queued">
+          ⏳ 排队中 #{{ chat.queuePosition }}
+        </span>
+        <span v-else-if="chat.streamPhase === 'running'" class="stream-badge running">
+          ● 流式传输中
+        </span>
         <WeatherAlert v-if="isWeatherEnabled" />
         <label class="toggle">
           <input type="checkbox" v-model="chat.useVectorDb" :disabled="chat.loading" />
@@ -218,6 +224,25 @@ function handleMessageDelete(messageId: string) {
   align-items: center;
   gap: 16px;
   flex-shrink: 0;
+}
+.stream-badge {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.stream-badge.queued {
+  background: rgba(251, 191, 36, 0.12);
+  color: #f59e0b;
+}
+.stream-badge.running {
+  background: rgba(34, 197, 94, 0.12);
+  color: #22c55e;
+  animation: pulse-stream 1.5s ease-in-out infinite;
+}
+@keyframes pulse-stream {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 .chat-body {
   flex: 1;

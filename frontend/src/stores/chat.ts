@@ -39,6 +39,8 @@ interface SessionState {
   currentSteps: AgentStep[]
   loading: boolean
   abortController: AbortController | null
+  streamPhase: 'idle' | 'queued' | 'running'  // 流式阶段
+  queuePosition: number | null                 // 排队位置
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -54,15 +56,17 @@ export const useChatStore = defineStore('chat', () => {
   const useVectorDb = ref(true)
 
   // 获取或创建指定 ID 的会话
-  function getOrCreateSession(sessionId: string): SessionState {
+  function getOrCreateSession(sessionId: string, title?: string): SessionState {
     if (!sessions.value[sessionId]) {
       sessions.value[sessionId] = {
         messages: [],
         conversationId: undefined,
-        conversationTitle: '',
+        conversationTitle: title || '',
         currentSteps: [],
         loading: false,
         abortController: null,
+        streamPhase: 'idle',
+        queuePosition: null,
       }
     }
     return sessions.value[sessionId]
@@ -84,6 +88,10 @@ export const useChatStore = defineStore('chat', () => {
   const loading = computed(() => currentSession.value?.loading || false)
   // 当前会话的 Agent 执行步骤
   const currentSteps = computed(() => currentSession.value?.currentSteps || [])
+  // 当前会话的流式阶段
+  const streamPhase = computed(() => currentSession.value?.streamPhase || 'idle')
+  // 当前会话的排队位置
+  const queuePosition = computed(() => currentSession.value?.queuePosition)
 
   // 加载会话列表
   async function loadConversations() {
@@ -96,15 +104,26 @@ export const useChatStore = defineStore('chat', () => {
 
   // 加载指定会话的消息
   async function loadConversation(id: string) {
-    const session = getOrCreateSession(id)
-    
-    // 始终从服务器获取最新数据，确保机器人消息完整
+    // 从会话列表获取标题
+    const meta = conversations.value.find(c => c.id === id)
+    const session = getOrCreateSession(id, meta?.title)
+
+    // 设置会话元数据
+    session.conversationId = id
+    if (meta) {
+      session.conversationTitle = meta.title
+    }
+
+    // 如果本地已有消息（正在 streaming 或已加载），只补充元数据，不覆盖消息
+    if (session.messages.length > 0) {
+      activeSessionId.value = id
+      return
+    }
+
+    // 首次加载：从服务器获取
     try {
       const detail = await getConversation(id)
-      session.conversationId = id
       session.conversationTitle = detail.title
-      
-      // 从服务器消息中过滤掉空的机器人消息（后端占位符）
 
       const serverMessages = detail.messages
         .filter(m => !(m.role === 'assistant' && (!m.content || m.content.trim() === '')))
@@ -114,25 +133,11 @@ export const useChatStore = defineStore('chat', () => {
           content: m.content,
           timestamp: new Date(),
         }))
-      
-      // 保留本地未保存的消息（如正在流式接收的消息）
-      const localPending = session.messages.filter(localMsg => {
-        // 保留用户消息（可能服务器还没保存）
-        if (localMsg.role === 'user') {
-          return !serverMessages.some(m => m.id === localMsg.id)
-        }
-        // 保留正在进行的机器人消息（content 为空表示还在接收）
-        if (localMsg.role === 'assistant' && localMsg.content === '') {
-          return true
-        }
-        return false
-      })
-      
-      session.messages = [...serverMessages, ...localPending]
+
+      session.messages = serverMessages
       activeSessionId.value = id
     } catch (e) {
       console.error('Failed to load conversation:', e)
-      // 服务器获取失败时，至少设置活跃会话
       activeSessionId.value = id
     }
   }
@@ -192,12 +197,26 @@ export const useChatStore = defineStore('chat', () => {
 
     const controller = new AbortController()
     session.abortController = controller
+    session.streamPhase = 'queued'
 
     const signal = controller.signal
 
     try {
       await sendMessageStream(reqData, (event: SSEEvent) => {
         if (signal.aborted) return
+
+        // 排队事件：更新排队位置，等待实际执行
+        if (event.type === 'queued') {
+          session.queuePosition = event.queue_position ?? null
+          return
+        }
+
+        // 收到任何执行事件 → 进入运行阶段
+        if (session.streamPhase !== 'running') {
+          session.streamPhase = 'running'
+          session.queuePosition = null
+        }
+
         if (event.type === 'step_start' || event.type === 'step_end' ||
             event.type === 'tool_start' || event.type === 'tool_end') {
           const idx = session.currentSteps.findIndex(s => s.step_id === event.step_id)
@@ -247,6 +266,8 @@ export const useChatStore = defineStore('chat', () => {
           })
         } else if (event.type === 'done') {
           session.conversationId = event.conversation_id
+          session.streamPhase = 'idle'
+          session.queuePosition = null
           if (event.title) {
             session.conversationTitle = event.title
             loadConversations()
@@ -271,6 +292,8 @@ export const useChatStore = defineStore('chat', () => {
             }
           }
         } else if (event.type === 'error') {
+          session.streamPhase = 'idle'
+          session.queuePosition = null
           session.messages = [...session.messages, {
             id: genId(),
             role: 'assistant',
@@ -281,6 +304,8 @@ export const useChatStore = defineStore('chat', () => {
         }
       }, signal)
     } catch (err: any) {
+      session.streamPhase = 'idle'
+      session.queuePosition = null
       if (!signal.aborted && err.name !== 'AbortError') {
         session.messages = [...session.messages, {
           id: genId(),
@@ -292,6 +317,8 @@ export const useChatStore = defineStore('chat', () => {
       }
     } finally {
       session.loading = false
+      session.streamPhase = 'idle'
+      session.queuePosition = null
       if (session.abortController === controller) {
         session.abortController = null
       }
@@ -371,6 +398,7 @@ export const useChatStore = defineStore('chat', () => {
   return {
     sessions, activeSessionId, conversations, selectedModel, useVectorDb,
     messages, conversationId, conversationTitle, loading, currentSteps,
+    streamPhase, queuePosition,
     send, cancel, clear, undoMessage, deleteConversation, deleteMessage,
     loadConversations, loadConversation, newChat, renameConversation,
   }

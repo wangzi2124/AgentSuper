@@ -29,7 +29,7 @@ export interface ChatResponse {
 
 // SSE 流式事件
 export interface SSEEvent {
-  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'permission_request' | 'tool_output' | 'tool_heartbeat'
+  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'permission_request' | 'tool_output' | 'tool_heartbeat' | 'queued'
   step_id?: string
   name?: string
   status?: string
@@ -52,6 +52,7 @@ export interface SSEEvent {
   elapsed_seconds?: number
   user_msg_id?: string
   assistant_msg_id?: string
+  queue_position?: number
   task?: {
     task_id: string
     status: string

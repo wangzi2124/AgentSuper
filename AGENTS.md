@@ -63,6 +63,8 @@ npm run preview
 - **Chapter intent detection** (`backend/app/rag/intent.py`): regex matches `第X章`/`Chapter X` → skips vector search, queries `ChapterStore` directly
 - **Toggling skills/plugins** at runtime calls `agent.refresh_tools()` which rebuilds LangGraph
 - **Monitoring** (`backend/app/monitor.py`): in-memory stats (`record_request`/`record_model_call`), exposed at `GET /api/monitor/stats`. Resets on restart. `RequestLogMiddleware` logs every HTTP request. `_llm_call` wrapper records model, tokens, duration, and tool-rounds.
+- **Concurrency control** (`backend/app/api/chat.py`): `asyncio.Semaphore(2)` limits concurrent Agent tasks. When all slots are full, new requests queue and receive a `queued` SSE event with `queue_position`. Frontend displays queue status in sidebar and ChatView header. `GET /api/chat/stream/status` returns current active/queue depth.
+- **Session content preservation** (`frontend/src/stores/chat.ts`): `loadConversation()` checks if local messages exist before fetching from server. If a session has messages (from streaming or prior load), switching back preserves them without server round-trip. `SessionState` tracks `streamPhase` (`idle`/`queued`/`running`) and `queuePosition` per session.
 - **No test framework or test commands** configured.
 
 ### Frontend

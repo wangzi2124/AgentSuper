@@ -24,6 +24,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# --- 并发控制：限制同时运行的 Agent 任务数 ---
+MAX_CONCURRENT_AGENTS = 2
+_agent_semaphore: asyncio.Semaphore | None = None
+_queue_counter = 0  # 正在等待 slot 的请求数
+
+
+def _get_agent_semaphore() -> asyncio.Semaphore:
+    global _agent_semaphore
+    if _agent_semaphore is None:
+        _agent_semaphore = asyncio.Semaphore(MAX_CONCURRENT_AGENTS)
+    return _agent_semaphore
+
 DB_PATH = Path(__file__).resolve().parents[2] / "data" / "conversations.db"
 MAX_HISTORY_TOKENS = 4000
 
@@ -230,35 +242,49 @@ async def chat_stream(request: Request, body: ChatRequest):
         compressed = _truncate_history(history)
 
     event_queue: asyncio.Queue = asyncio.Queue()
+    sem = _get_agent_semaphore()
 
     async def run_agent():
         """异步运行Agent并收集结果，使用TaskRunner执行持久化任务循环。"""
-        try:
-            runner = TaskRunner(agent)
-            result = await runner.run(
-                body.message, model=body.model, history=compressed,
-                use_vector_db=body.use_vector_db,
-                files=[f.model_dump() for f in body.files],
-                event_queue=event_queue,
-                conversation_id=conv_id,
-            )
-            await event_queue.put({
-                "type": "done",
-                "answer": result["answer"],
-                "sources": [
-                    {"document_id": s["document_id"], "content": s["content"], "score": s["score"]}
-                    for s in result["sources"]
-                ],
-                "conversation_id": conv_id,
-                "title": title,
-                "steps": result.get("steps", []),
-                "task": result.get("task", {}),
-            })
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.exception("chat stream invocation failed")
-            await event_queue.put({"type": "error", "detail": str(e)})
+        global _queue_counter
+        # 如果当前并发已满，先通知前端排队位置
+        if sem.locked():
+            _queue_counter += 1
+            try:
+                await event_queue.put({
+                    "type": "queued",
+                    "queue_position": _queue_counter,
+                })
+            finally:
+                _queue_counter -= 1
+
+        async with sem:
+            try:
+                runner = TaskRunner(agent)
+                result = await runner.run(
+                    body.message, model=body.model, history=compressed,
+                    use_vector_db=body.use_vector_db,
+                    files=[f.model_dump() for f in body.files],
+                    event_queue=event_queue,
+                    conversation_id=conv_id,
+                )
+                await event_queue.put({
+                    "type": "done",
+                    "answer": result["answer"],
+                    "sources": [
+                        {"document_id": s["document_id"], "content": s["content"], "score": s["score"]}
+                        for s in result["sources"]
+                    ],
+                    "conversation_id": conv_id,
+                    "title": title,
+                    "steps": result.get("steps", []),
+                    "task": result.get("task", {}),
+                })
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.exception("chat stream invocation failed")
+                await event_queue.put({"type": "error", "detail": str(e)})
 
     async def event_generator(user_msg_id: str, assistant_msg_id: str):
         """生成SSE事件流。"""
@@ -327,6 +353,18 @@ async def delete_message(conversation_id: str, message_id: str):
     finally:
         conn.close()
     return {"status": "ok"}
+
+
+@router.get("/stream/status")
+async def stream_status():
+    """返回当前并发状态，前端可轮询。"""
+    sem = _get_agent_semaphore()
+    active = MAX_CONCURRENT_AGENTS - sem._value
+    return {
+        "max_concurrent": MAX_CONCURRENT_AGENTS,
+        "active": active,
+        "queue_depth": _queue_counter,
+    }
 
 
 @router.get("/conversations")

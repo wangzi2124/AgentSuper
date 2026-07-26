@@ -18,6 +18,7 @@
 | **上传进度** | 上传过程实时显示进度条（0-100%）及阶段描述（上传→分块→嵌入→入库） |
 | **多轮对话** | 自动生成 conversation_id，支持同一会话内的上下文连续对话 |
 | **会话隔离** | 每个会话独立消息存储，切换会话时消息互不干扰，后台流式请求继续运行 |
+| **并发控制** | 后端 Semaphore 限制同时运行的 Agent 任务数（默认 2），超出自动排队，前端实时显示排队/流式状态 |
 | **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如搜索、天气、生成文档），Agent 按需调用 |
 | **HTTP 客户端** | Agent 可直接发起 HTTP 请求测试 API 接口（GET/POST/PUT/DELETE），支持自定义 headers 和 body |
@@ -357,6 +358,8 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 | GET | `/` | 服务信息 |
 | GET | `/health` | 健康检查 |
 | POST | `/api/chat/` | 发送聊天消息 |
+| POST | `/api/chat/stream` | 流式聊天（SSE），支持 queued/step_start/step_end/done 事件 |
+| GET | `/api/chat/stream/status` | 查询并发状态（active/queue_depth） |
 | POST | `/api/documents/upload` | 上传文档（multipart），返回 task_id 异步处理 |
 | GET | `/api/documents/tasks/{task_id}` | 查询上传任务进度（progress + stage） |
 | GET | `/api/documents/` | 文档列表 |
@@ -381,6 +384,7 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 |--------|------|
 | **Vector DB 开关** | 控制是否启用向量库检索。开启后 Agent 会检索上传的文档内容辅助回答；关闭后仅凭 LLM 自身知识回答，适合闲聊或通用问题。 |
 | **模型选择** | 下拉切换 DeepSeek / OpenAI 等 LLM 模型。 |
+| **流式状态** | Header 实时显示当前会话状态：排队中（⏳ #N）或流式传输中（● streaming）。Sidebar 每个会话旁也有状态标签。 |
 
 ---
 
@@ -412,9 +416,12 @@ const sessions = ref<Record<string, SessionState>>({
   'session-id-1': {
     messages: [...],
     conversationId: 'conv-123',
+    conversationTitle: '第一章讲了什么...',
     currentSteps: [],
     loading: false,
     abortController: null,
+    streamPhase: 'running',   // 'idle' | 'queued' | 'running'
+    queuePosition: null,       // 排队位置，null 表示不在排队
   },
   'session-id-2': { ... }
 })
@@ -429,8 +436,9 @@ const activeSessionId = ref<string | undefined>(undefined)
 |------|------|
 | **消息隔离** | 切换会话时，每个会话显示自己的消息列表 |
 | **后台请求** | 流式请求在后台继续运行，完成时消息保存到对应会话 |
-| **状态独立** | 每个会话有自己的 loading、currentSteps 状态 |
-| **即时切换** | 已加载的会话切换时无需重新请求服务器 |
+| **状态独立** | 每个会话有自己的 loading、currentSteps、streamPhase 状态 |
+| **即时切换** | 已加载的会话切换时无需重新请求服务器，本地消息完整保留 |
+| **内容不丢失** | 切换会话时，正在 streaming 的消息保留在本地，切回时立即可见 |
 
 ### 工作流程
 
@@ -438,26 +446,65 @@ const activeSessionId = ref<string | undefined>(undefined)
 用户在会话A发送消息
     │
     ├─ 创建 AbortController (key: session-A)
+    ├─ streamPhase = 'queued' → 等待并发 slot
+    ├─ 收到执行事件 → streamPhase = 'running'
     ├─ 开始流式接收
     │
     ▼
 用户切换到会话B
     │
     ├─ activeSessionId = B
+    ├─ 会话A的本地消息保留（不从服务器覆盖）
     ├─ 显示会话B的消息
     └─ 会话A的流式请求继续在后台运行
          │
          ▼
     会话A请求完成
          │
+         ├─ streamPhase = 'idle'
          ├─ 消息保存到 sessions['session-A'].messages
-         └─ 如果用户切回会话A，消息仍在
+         └─ 如果用户切回会话A，消息仍在（无需重新加载）
 ```
 
 实现路径：`frontend/src/stores/chat.ts` — `useChatStore`（按会话ID存储消息）
 
-```ini
+### 并发控制
+
+后端使用 `asyncio.Semaphore(2)` 限制同时运行的 Agent 任务数，防止多会话同时 streaming 导致资源争抢：
+
 ```
+Session A 发消息 → 获取 slot #1 → 开始执行
+Session B 发消息 → 获取 slot #2 → 开始执行
+Session C 发消息 → slot 已满 → 排队等待
+    │
+    ├─ SSE 事件: {type: "queued", queue_position: 1}
+    ├─ 前 Sidebar 显示 "⏳ #1"
+    ├─ ChatView Header 显示 "排队中 #1"
+    │
+    ▼
+Session A 完成 → slot #1 释放 → Session C 获得 slot
+    │
+    ├─ SSE 事件: {type: "step_start"} → 进入 running 阶段
+    ├─ Sidebar 显示 "● streaming"
+    └─ 开始流式输出
+```
+
+| 配置 | 默认值 | 说明 |
+|------|--------|------|
+| `MAX_CONCURRENT_AGENTS` | 2 | 同时运行的最大 Agent 任务数 |
+
+状态 API：`GET /api/chat/stream/status` 返回 `{max_concurrent, active, queue_depth}`
+
+实现路径：
+- 后端：`backend/app/api/chat.py` — `chat_stream()` 中 `_get_agent_semaphore()` + `run_agent()` 的 `async with sem`
+- 前端状态：`frontend/src/stores/chat.ts` — `SessionState.streamPhase` / `queuePosition`
+- 前端显示：`frontend/src/components/ChatHistory.vue`（Sidebar 标签）、`frontend/src/views/ChatView.vue`（Header 标签）
+
+---
+
+## 摘要模型配置（可选）
+
+```ini
 # .env 可选配置
 SUMMARIZATION_MODEL=ollama/qwen2.5:3b     # 摘要用模型（推荐免费方案），不设置则只用截断
 SUMMARIZATION_API_KEY=                    # 摘要模型的 API key（可选，不设置则复用 LLM_API_KEY）
