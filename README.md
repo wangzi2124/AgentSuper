@@ -18,6 +18,8 @@
 | **上传进度** | 上传过程实时显示进度条（0-100%）及阶段描述（上传→分块→嵌入→入库） |
 | **多轮对话** | 自动生成 conversation_id，支持同一会话内的上下文连续对话 |
 | **会话隔离** | 每个会话独立消息存储，切换会话时消息互不干扰，后台流式请求继续运行 |
+| **会话持久化** | IndexedDB 本地缓存 + 服务器 SQLite 双重持久化，页面刷新/SSE 中断不丢失消息 |
+| **错误重试机制** | 三层重试架构：litellm 内置重试 → TaskRunner 指数退避 → 前端自动重试倒计时 + 手动重试按钮 |
 | **并发控制** | 后端 Semaphore 限制同时运行的 Agent 任务数（默认 2），超出自动排队，前端实时显示排队/流式状态 |
 | **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如搜索、天气、生成文档），Agent 按需调用 |
@@ -440,6 +442,43 @@ const activeSessionId = ref<string | undefined>(undefined)
 | **即时切换** | 已加载的会话切换时无需重新请求服务器，本地消息完整保留 |
 | **内容不丢失** | 切换会话时，正在 streaming 的消息保留在本地，切回时立即可见 |
 
+### 双重持久化（IndexedDB + 服务器）
+
+解决 SSE 中断/页面刷新时消息丢失的问题：
+
+```
+发送消息
+  │
+  ├─ 1. 立即写入 IndexedDB（防 SSE 中断丢失 user 消息）
+  ├─ 2. SSE 流式接收 → 消息在前端内存中累积
+  ├─ 3. done 事件 → 写入 assistant 消息
+  │     ├─ 写入 IndexedDB（本地缓存）
+  │     └─ 后端写入 SQLite（持久化，含 sources/steps）
+  │
+  ▼
+切换会话 → loadConversation()
+  │
+  ├─ 始终从服务器获取最新数据（不再跳过）
+  ├─ 从 IndexedDB 加载本地缓存
+  └─ 合并策略：
+       ├─ 服务器有、缓存没有 → 用服务器数据
+       ├─ 缓存有、服务器没有 → 补入（SSE 中断时的 user 消息）
+       └─ 两端都有 → 取 content 更长或有 sources/steps 的版本
+```
+
+**解决的场景：**
+
+| 场景 | 旧行为 | 新行为 |
+|------|--------|--------|
+| SSE 中途断开 | user 消息丢失，assistant 为空 | IndexedDB 保留 user 消息，下次加载时从服务器合并 |
+| 页面刷新 | 内存清空，服务器 assistant 为空 | 从 IndexedDB 恢复 + 服务器合并 |
+| 切换会话再切回 | 有时消息丢失 | 始终从服务器同步，合并本地缓存 |
+
+实现路径：
+- 缓存层：`frontend/src/api/session-cache.ts` — IndexedDB CRUD + 合并逻辑
+- Store 集成：`frontend/src/stores/chat.ts` — `loadConversation()` / `persistSession()`
+- 后端持久化：`backend/app/api/chat.py` — `done` 事件时保存 `sources`/`steps` 到 SQLite
+
 ### 工作流程
 
 ```
@@ -499,6 +538,91 @@ Session A 完成 → slot #1 释放 → Session C 获得 slot
 - 后端：`backend/app/api/chat.py` — `chat_stream()` 中 `_get_agent_semaphore()` + `run_agent()` 的 `async with sem`
 - 前端状态：`frontend/src/stores/chat.ts` — `SessionState.streamPhase` / `queuePosition`
 - 前端显示：`frontend/src/components/ChatHistory.vue`（Sidebar 标签）、`frontend/src/views/ChatView.vue`（Header 标签）
+
+---
+
+## 错误重试机制（Error Retry）
+
+参考 OpenCode 的重试架构，实现三层重试机制，覆盖 LLM API 故障、网络中断、SSE 断连等场景：
+
+### 三层重试架构
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    前端层                             │
+│  SSE 断连检测 + 重试按钮 + 自动重试倒计时(5s×2次)     │
+└──────────────────────┬──────────────────────────────┘
+                       │ SSE error / 断连
+┌──────────────────────▼──────────────────────────────┐
+│                   API 层                             │
+│  错误分类(retryable/non-retryable) + 用户提示        │
+└──────────────────────┬──────────────────────────────┘
+                       │ 429/500/503
+┌──────────────────────▼──────────────────────────────┐
+│                 后端层                                │
+│  litellm num_retries=2 + TaskRunner 指数退避(3次)    │
+└─────────────────────────────────────────────────────┘
+```
+
+### 错误分类
+
+| 错误类型 | 分类依据 | 可重试 | 后端重试 | 前端自动重试 |
+|----------|----------|--------|----------|-------------|
+| 429 Rate Limit | `RateLimitError` / `429` | ✅ | litellm 2次 + TaskRunner 3次 | 5s 倒计时，最多 2 次 |
+| 500/502/503 | `InternalServerError` / `5xx` | ✅ | litellm 2次 + TaskRunner 3次 | 5s 倒计时，最多 2 次 |
+| 网络断开 | `Failed to fetch` / SSE 断连 | ✅ | — | 5s 倒计时，最多 2 次 |
+| 超时 | `timeout` / `timed out` | ✅ | litellm 2次 | 5s 倒计时，最多 2 次 |
+| Context Overflow | `context_length_exceeded` | ❌ | — | — |
+| 401/403 | 认证失败 | ❌ | — | — |
+| 用户取消 | `AbortError` | ❌ | — | — |
+
+### 退避策略
+
+```
+retryAfter header → 使用 header 值（上限 60s）
+无 header → 2s → 4s → 8s（上限 30s）
+最大重试次数: 3
+```
+
+### 重试流程
+
+```
+LLM API 报错 (429/500)
+  │
+  ├─ 1. litellm num_retries=2（自动，~1s/2s 间隔）
+  │
+  ├─ 2. TaskRunner 指数退避（2s→4s→8s，最多 3 次）
+  │     └─ 每次重试推送 step 事件 → 前端显示 "重试中..."
+  │
+  └─ 3. 如果仍然失败 → SSE error 事件（retryable=true）
+        │
+        ├─ 前端显示红色错误消息 + ⚠️ 图标 + 重试按钮
+        │
+        └─ 自动重试倒计时（5s）
+              ├─ 倒计时结束 → 自动重新发送
+              ├─ 用户点击"取消" → 停止自动重试
+              └─ 超过 2 次 → 停止自动重试，只保留手动重试按钮
+```
+
+### SSE 断连检测
+
+前端 `sendMessageStream()` 追踪是否收到 `done`/`error` 终端事件：
+- 收到终端事件 → 正常结束
+- 未收到终端事件就断开 → 抛出 `network` 类型错误，触发重试
+
+### 前端 UI
+
+- **错误消息**：红色边框 + ⚠️ 图标，区别于正常 assistant 消息
+- **重试按钮**：仅对 `retryable=true` 的错误显示
+- **自动重试横幅**：底部显示倒计时 + 取消按钮
+
+实现路径：
+- 后端重试：`backend/app/agent/graph.py` — `_llm_call()` num_retries
+- 后端重试：`backend/app/context/task_runner.py` — `_run_loop()` 指数退避
+- 后端分类：`backend/app/api/chat.py` — SSE error 事件携带 retryable/statusCode
+- 前端分类：`frontend/src/api/chat.ts` — `classifyNetworkError()` + SSE 断连检测
+- 前端重试：`frontend/src/stores/chat.ts` — `retryLastMessage()` / `manualRetry()` / `cancelAutoRetry()`
+- 前端 UI：`frontend/src/components/ChatMessage.vue` — 错误样式 + 重试按钮
 
 ---
 
@@ -1135,10 +1259,12 @@ backend/plugins/example_plugin.py → 最简单的插件示例
 ### 7. 前端 — Vue 3 SPA
 
 ```
-frontend/src/stores/chat.ts      ← ⭐ 状态管理（会话、消息、SSE 流式接收）
+frontend/src/stores/chat.ts      ← ⭐ 状态管理（会话、消息、SSE 流式接收、重试逻辑）
 frontend/src/views/ChatView.vue  → 聊天主界面
-frontend/src/api/chat.ts         → 聊天 API 调用
+frontend/src/api/chat.ts         → 聊天 API 调用 + SSE 断连检测 + 错误分类
+frontend/src/api/session-cache.ts → IndexedDB 会话缓存（双重持久化）
 frontend/src/components/         → 各组件（Sidebar、ChatMessage 等）
+frontend/src/types/index.ts      → 类型定义（Message、ChatError、SSEEvent）
 ```
 
 ### 核心数据流

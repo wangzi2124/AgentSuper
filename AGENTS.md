@@ -39,7 +39,7 @@ npm run preview
   modelscope download --model AI-ModelScope/bge-small-zh-v1.5 --local_dir data/models/BAAI/bge-small-zh-v1.5
   ```
 - **ChatRequest** includes `use_vector_db: bool = True`; frontend toggle controls this per-message. Also accepts `files: list[FileContent]` for multimodal, but frontend does not yet send files.
-- **Chat SSE streaming**: frontend calls `POST /api/chat/stream`; backend emits SSE events: `step_start`, `step_end`, `tool_start`, `tool_end`, `done`, `error`. Non-streaming fallback at `POST /api/chat/`.
+- **Chat SSE streaming**: frontend calls `POST /api/chat/stream`; backend emits SSE events: `step_start`, `step_end`, `tool_start`, `tool_end`, `done`, `error`. SSE error events include `retryable`, `status_code`, `error_type` fields for frontend retry logic. Non-streaming fallback at `POST /api/chat/`.
 - **Model name auto-prefixing** (`graph.py:216-220`): if `model` has no `/`, prepends `deepseek/` or `openai/` based on `api_base` — always use full names like `deepseek/deepseek-v4-flash`
 - **AgentState.use_vector_db** (`graph.py:78`): when `false`, `_retrieve` returns empty context immediately — no KB search
 - **Tool call JSON error handling** (`graph.py:244-246`): `json.loads(tc.function.arguments)` wrapped in try/except — malformed args return error to LLM instead of crashing
@@ -64,7 +64,8 @@ npm run preview
 - **Toggling skills/plugins** at runtime calls `agent.refresh_tools()` which rebuilds LangGraph
 - **Monitoring** (`backend/app/monitor.py`): in-memory stats (`record_request`/`record_model_call`), exposed at `GET /api/monitor/stats`. Resets on restart. `RequestLogMiddleware` logs every HTTP request. `_llm_call` wrapper records model, tokens, duration, and tool-rounds.
 - **Concurrency control** (`backend/app/api/chat.py`): `asyncio.Semaphore(2)` limits concurrent Agent tasks. When all slots are full, new requests queue and receive a `queued` SSE event with `queue_position`. Frontend displays queue status in sidebar and ChatView header. `GET /api/chat/stream/status` returns current active/queue depth.
-- **Session content preservation** (`frontend/src/stores/chat.ts`): `loadConversation()` checks if local messages exist before fetching from server. If a session has messages (from streaming or prior load), switching back preserves them without server round-trip. `SessionState` tracks `streamPhase` (`idle`/`queued`/`running`) and `queuePosition` per session.
+- **Session content preservation** (`frontend/src/stores/chat.ts`): `loadConversation()` always fetches from server and merges with IndexedDB cache (`frontend/src/api/session-cache.ts`). SSE streaming messages are persisted to IndexedDB on send/done/error events. Messages survive page refresh and SSE disconnection. `SessionState` tracks `streamPhase` (`idle`/`queued`/`running`) and `queuePosition` per session.
+- **Error retry mechanism**: Three-layer retry — litellm `num_retries=2` → TaskRunner exponential backoff (2s/4s/8s, max 3 attempts) → frontend auto-retry countdown (5s, max 2 times) + manual retry button. Errors classified as retryable (429/5xx/network/timeout) vs non-retryable (401/context_overflow). `ChatError` type carries `retryable`/`statusCode` for UI decisions.
 - **No test framework or test commands** configured.
 
 ### Frontend
@@ -74,6 +75,7 @@ npm run preview
 - **Model list** hardcoded in `frontend/src/stores/chat.ts` (`SUPPORTED_MODELS` constant)
 - **Vector DB toggle** in `frontend/src/views/ChatView.vue`: checkbox bound to `chat.useVectorDb`, sent as `use_vector_db` in ChatRequest
 - **Generated Files view**: shows all files in `data/generated/`. Has "Run" button for `.js` files (browser sandbox with mock `fs`/`require`). Not for `.docx`/`.pdf`/`.xlsx`.
+- **Session cache** (`frontend/src/api/session-cache.ts`): IndexedDB layer for persisting chat messages. `saveSessionToCache()`/`loadSessionFromCache()`/`mergeServerAndCache()` handle dual persistence with server SQLite. Messages saved on send/done/error events; loaded and merged on `loadConversation()`.
 
 ### When adding new API routes
 - Add backend router in `backend/app/api/`, include via `app.include_router()` in `backend/main.py`
