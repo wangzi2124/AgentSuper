@@ -31,6 +31,73 @@ MAX_STEPS = 50
 # Compaction threshold
 COMPACTION_THRESHOLD = 80_000
 
+# --- Retry constants (inspired by OpenCode) ---
+RETRY_MAX_ATTEMPTS = 3
+RETRY_INITIAL_DELAY = 2.0  # seconds
+RETRY_BACKOFF_FACTOR = 2
+RETRY_MAX_DELAY = 30.0  # seconds
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """Determine if an exception represents a transient, retryable error.
+
+    Retryable: 429 (rate limit), 5xx (server error), network timeout, connection errors.
+    Non-retryable: 401/403 (auth), context overflow, invalid prompt, etc.
+    """
+    exc_str = str(exc).lower()
+    exc_type = type(exc).__name__
+
+    # Rate limit errors (429)
+    if "ratelimit" in exc_type or "rate_limit" in exc_str or "429" in exc_str:
+        return True
+    if "too many requests" in exc_str or "rate limit" in exc_str:
+        return True
+
+    # Server errors (5xx)
+    if "internalserversrror" in exc_type or "500" in exc_str or "502" in exc_str or "503" in exc_str:
+        return True
+    if "server" in exc_str and ("error" in exc_str or "unavailable" in exc_str):
+        return True
+
+    # Overloaded / service unavailable
+    if "overloaded" in exc_str or "service_unavailable" in exc_str or "exhausted" in exc_str:
+        return True
+
+    # Network / timeout errors
+    if "timeout" in exc_str or "timed out" in exc_str:
+        return True
+    if "connection" in exc_str and ("error" in exc_str or "refused" in exc_str or "reset" in exc_str):
+        return True
+    if "network" in exc_str:
+        return True
+
+    # litellm specific
+    if "litellm" in exc_type.lower():
+        # litellm wraps provider errors; check for transient patterns
+        if any(code in exc_str for code in ("429", "500", "502", "503", "504")):
+            return True
+
+    return False
+
+
+def _compute_retry_delay(attempt: int, exc: Exception) -> float:
+    """Compute delay before next retry using exponential backoff.
+
+    Respects Retry-After header if present in the error message.
+    """
+    exc_str = str(exc).lower()
+
+    # Check for Retry-After header in error
+    import re
+    retry_after_match = re.search(r'retry[-_]?after[:\s]*(\d+)', exc_str)
+    if retry_after_match:
+        delay = float(retry_after_match.group(1))
+        return min(delay, RETRY_MAX_DELAY)
+
+    # Exponential backoff: 2s, 4s, 8s, ...
+    delay = RETRY_INITIAL_DELAY * (RETRY_BACKOFF_FACTOR ** (attempt - 1))
+    return min(delay, RETRY_MAX_DELAY)
+
 # Forced summary prompt (injected when max_steps is reached)
 MAX_STEPS_PROMPT = (
     "You have reached the maximum number of steps for this task. "
@@ -189,11 +256,36 @@ class TaskRunner:
             # Truncate messages before LLM call
             messages = truncate_messages(messages)
 
-            # LLM call
-            try:
-                response = await self.agent._llm_call(resolved_model, messages, tool_defs if not is_last_step else None)
-            except Exception as e:
-                logger.error("Task %s: LLM call failed at step %d: %s", task.task_id, task.step, e)
+            # LLM call with retry
+            response = None
+            last_exc = None
+            for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+                try:
+                    response = await self.agent._llm_call(resolved_model, messages, tool_defs if not is_last_step else None)
+                    break
+                except Exception as e:
+                    last_exc = e
+                    if not _is_retryable_error(e) or attempt >= RETRY_MAX_ATTEMPTS:
+                        logger.error("Task %s: LLM call failed at step %d (attempt %d/%d): %s",
+                                     task.task_id, task.step, attempt, RETRY_MAX_ATTEMPTS, e)
+                        break
+                    delay = _compute_retry_delay(attempt, e)
+                    logger.warning("Task %s: LLM call failed at step %d (attempt %d/%d), retrying in %.1fs: %s",
+                                   task.task_id, task.step, attempt, RETRY_MAX_ATTEMPTS, delay, e)
+                    self._push_event(event_queue, {
+                        "type": "step_start", "step_id": "retry", "name": "重试中",
+                        "status": "running", "detail": f"第 {attempt} 次重试，{delay:.0f}s 后重试",
+                    })
+                    await asyncio.sleep(delay)
+                    self._push_event(event_queue, {
+                        "type": "step_end", "step_id": "retry", "name": "重试中",
+                        "status": "completed", "detail": f"正在重试（第 {attempt + 1} 次）",
+                    })
+
+            if response is None:
+                # All retries exhausted or non-retryable error
+                if last_exc:
+                    raise last_exc
                 break
 
             msg = response.choices[0].message

@@ -2,8 +2,8 @@
 import { computed, ref } from 'vue'
 import type { Message } from '../types'
 
-// 定义组件事件：复制、撤销、删除
-const emit = defineEmits<{ copy: [text: string]; undo: [index: number]; delete: [id: string] }>()
+// 定义组件事件：复制、撤销、删除、重试
+const emit = defineEmits<{ copy: [text: string]; undo: [index: number]; delete: [id: string]; retry: [id: string] }>()
 // 定义组件属性：消息对象和索引
 const props = defineProps<{ message: Message; index: number }>()
 
@@ -56,6 +56,11 @@ function handleUndo() {
 // 删除当前消息
 function handleDelete() {
   emit('delete', props.message.id)
+}
+
+// 重试当前消息
+function handleRetry() {
+  emit('retry', props.message.id)
 }
 
 // 切换步骤列表展开状态
@@ -114,11 +119,18 @@ const meaningfulSteps = computed(() => {
 </script>
 
 <template>
-  <div class="chat-message" :class="message.role">
+  <div class="chat-message" :class="[message.role, { 'is-error': message.isError }]">
     <div class="avatar">
-      {{ message.role === 'user' ? '👤' : '🤖' }}
+      {{ message.role === 'user' ? '👤' : (message.isError ? '⚠️' : '🤖') }}
     </div>
     <div class="bubble">
+      <div v-if="message.isError" class="error-banner">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="12" y1="8" x2="12" y2="12"></line>
+          <line x1="12" y1="16" x2="12.01" y2="16"></line>
+        </svg>
+      </div>
       <div v-if="message.role === 'assistant' && meaningfulSteps.length > 0" class="steps-section">
         <div class="steps-header" @click="toggleSteps">
           <span class="steps-toggle">{{ stepsExpanded ? '▾' : '▸' }}</span>
@@ -167,6 +179,13 @@ const meaningfulSteps = computed(() => {
       <div class="message-footer">
         <span class="time">{{ message.timestamp.toLocaleTimeString() }}</span>
         <div class="message-actions">
+          <button v-if="message.isError && message.errorInfo?.retryable" class="retry-btn" @click="handleRetry" title="重试">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+            <span>重试</span>
+          </button>
           <div class="btn-wrapper">
             <button class="icon-btn" @click="handleCopy" title="复制">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -458,5 +477,39 @@ const meaningfulSteps = computed(() => {
 .user .icon-btn:hover { background: rgba(255,255,255,0.2); }
 .delete-btn:hover {
   color: #ef4444 !important;
+}
+/* Error message styling */
+.is-error .bubble {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #ef4444;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: rgba(239, 68, 68, 0.06);
+  color: #ef4444;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.retry-btn:hover {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.5);
+}
+.retry-btn svg {
+  flex-shrink: 0;
 }
 </style>

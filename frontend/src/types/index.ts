@@ -44,6 +44,9 @@ export interface SSEEvent {
   title?: string
   steps?: AgentStep[]
   error?: string
+  retryable?: boolean
+  status_code?: number
+  error_type?: string
   request_id?: string
   path?: string
   operation?: string
@@ -196,6 +199,14 @@ export interface MonitorStats {
   }
 }
 
+// 聊天错误分类
+export interface ChatError {
+  type: 'rate_limit' | 'server_error' | 'network' | 'timeout' | 'unknown'
+  message: string
+  retryable: boolean
+  statusCode?: number
+}
+
 // 聊天消息
 export interface Message {
   id: string
@@ -205,4 +216,6 @@ export interface Message {
   steps?: AgentStep[]
   files?: { filename: string; mime_type: string }[]
   timestamp: Date
+  isError?: boolean
+  errorInfo?: ChatError
 }

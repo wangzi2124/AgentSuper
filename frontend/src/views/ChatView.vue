@@ -128,6 +128,11 @@ function handleUndo(index: number) {
 function handleMessageDelete(messageId: string) {
   chat.deleteMessage(messageId)
 }
+
+// 重试指定消息
+function handleMessageRetry(messageId: string) {
+  chat.manualRetry(messageId)
+}
 </script>
 
 <template>
@@ -176,6 +181,7 @@ function handleMessageDelete(messageId: string) {
             @copy="handleCopy"
             @undo="handleUndo"
             @delete="handleMessageDelete"
+            @retry="handleMessageRetry"
           />
         </div>
         <StepTaskList
@@ -187,6 +193,14 @@ function handleMessageDelete(messageId: string) {
     </div>
 
     <div class="chat-footer">
+      <div v-if="chat.retryCountdown > 0" class="auto-retry-banner">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"></polyline>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+        </svg>
+        <span>自动重试中... {{ chat.retryCountdown }}s</span>
+        <button class="cancel-retry-btn" @click="chat.cancelAutoRetry()">取消</button>
+      </div>
       <button v-if="messages.length > 0" class="btn btn-danger" @click="chat.deleteConversation()" style="margin: 0 24px 8px;" :disabled="chat.loading">
         Clear conversation
       </button>
@@ -359,4 +373,38 @@ function handleMessageDelete(messageId: string) {
 }
 .btn-danger:hover { background: #dc2626; }
 .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+.auto-retry-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 16px;
+  margin: 0 24px 8px;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: #ef4444;
+}
+.auto-retry-banner svg {
+  flex-shrink: 0;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.cancel-retry-btn {
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: transparent;
+  color: #ef4444;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.cancel-retry-btn:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
 </style>

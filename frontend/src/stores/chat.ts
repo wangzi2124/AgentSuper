@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { FileContent, Message, AgentStep, SSEEvent, PermissionRequest } from '../types'
+import type { FileContent, Message, AgentStep, SSEEvent, ChatError, PermissionRequest } from '../types'
 import {
   sendMessageStream,
   deleteConversation as apiDeleteConversation,
@@ -61,6 +61,14 @@ export const useChatStore = defineStore('chat', () => {
   // 是否启用向量数据库检索
   const useVectorDb = ref(true)
 
+  // --- 重试机制 ---
+  const AUTO_RETRY_DELAY = 5 // 秒
+  const MAX_AUTO_RETRIES = 2
+  let autoRetryTimer: ReturnType<typeof setTimeout> | null = null
+  const retryCountdown = ref(0)
+  const autoRetrySessionId = ref<string | undefined>(undefined)
+  const retryMessageText = ref('')
+
   // 获取或创建指定 ID 的会话
   function getOrCreateSession(sessionId: string, title?: string): SessionState {
     if (!sessions.value[sessionId]) {
@@ -88,6 +96,144 @@ export const useChatStore = defineStore('chat', () => {
       session.conversationId,
       session.conversationTitle,
     )
+  }
+
+  // --- 错误分类与格式化 ---
+
+  function classifySSEError(event: SSEEvent): ChatError {
+    const detail = event.detail || event.error || 'Unknown error'
+    if (event.retryable) {
+      if (event.status_code === 429) return { type: 'rate_limit', message: detail, retryable: true, statusCode: 429 }
+      if (event.status_code === 503) return { type: 'server_error', message: detail, retryable: true, statusCode: 503 }
+      if (event.status_code && event.status_code >= 500) return { type: 'server_error', message: detail, retryable: true, statusCode: event.status_code }
+      return { type: 'network', message: detail, retryable: true }
+    }
+    return { type: 'unknown', message: detail, retryable: false }
+  }
+
+  function classifyNetworkError(err: unknown): ChatError {
+    const msg = err instanceof Error ? err.message : String(err)
+    const lower = msg.toLowerCase()
+    if (lower.includes('abort') || lower.includes('aborted')) {
+      return { type: 'unknown', message: msg, retryable: false }
+    }
+    if (lower.includes('timeout') || lower.includes('timed out')) {
+      return { type: 'timeout', message: msg, retryable: true }
+    }
+    if (lower.includes('rate limit') || lower.includes('429') || lower.includes('too many requests')) {
+      return { type: 'rate_limit', message: msg, retryable: true }
+    }
+    if (lower.includes('failed to fetch') || lower.includes('networkerror')) {
+      return { type: 'network', message: msg, retryable: true }
+    }
+    if (lower.includes('500') || lower.includes('502') || lower.includes('503') || lower.includes('504')) {
+      return { type: 'server_error', message: msg, retryable: true }
+    }
+    return { type: 'unknown', message: msg, retryable: false }
+  }
+
+  function formatErrorMessage(info: ChatError): string {
+    switch (info.type) {
+      case 'rate_limit': return `请求过于频繁（${info.statusCode || 429}），请稍后重试`
+      case 'server_error': return `服务器错误（${info.statusCode || 500}），请稍后重试`
+      case 'network': return `网络连接中断，请检查网络后重试`
+      case 'timeout': return `请求超时，请稍后重试`
+      default: return `出错了: ${info.message}`
+    }
+  }
+
+  // --- 自动重试 ---
+
+  function startAutoRetry(sessionId: string, text: string) {
+    const session = sessions.value[sessionId]
+    if (!session) return
+
+    // 检查自动重试次数（通过计算连续 error 消息数）
+    let consecutiveErrors = 0
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+      if (session.messages[i].isError) consecutiveErrors++
+      else break
+    }
+    if (consecutiveErrors >= MAX_AUTO_RETRIES) {
+      cancelAutoRetry()
+      return
+    }
+
+    cancelAutoRetry() // 清除之前的计时器
+    retryCountdown.value = AUTO_RETRY_DELAY
+    autoRetrySessionId.value = sessionId
+    retryMessageText.value = text
+
+    autoRetryTimer = setInterval(() => {
+      retryCountdown.value--
+      if (retryCountdown.value <= 0) {
+        cancelAutoRetry()
+        // 执行重试
+        retryLastMessage()
+      }
+    }, 1000)
+  }
+
+  function cancelAutoRetry() {
+    if (autoRetryTimer) {
+      clearInterval(autoRetryTimer)
+      autoRetryTimer = null
+    }
+    retryCountdown.value = 0
+    autoRetrySessionId.value = undefined
+    retryMessageText.value = ''
+  }
+
+  // 重试最后一条用户消息
+  async function retryLastMessage() {
+    const sessionId = autoRetrySessionId.value || activeSessionId.value
+    if (!sessionId) return
+    const session = sessions.value[sessionId]
+    if (!session) return
+
+    // 找到最后一条 user 消息
+    const lastUserMsg = [...session.messages].reverse().find(m => m.role === 'user')
+    if (!lastUserMsg) return
+
+    // 删除最后一条 error 消息（如果有）
+    const lastMsg = session.messages[session.messages.length - 1]
+    if (lastMsg?.isError) {
+      session.messages = session.messages.slice(0, -1)
+    }
+
+    // 重新发送
+    await send(lastUserMsg.content)
+  }
+
+  // 手动重试（从 UI 触发）
+  async function manualRetry(messageId: string) {
+    if (!activeSessionId.value) return
+    const session = sessions.value[activeSessionId.value]
+    if (!session) return
+
+    cancelAutoRetry()
+
+    // 找到这条 error 消息的前一条 user 消息
+    const errorIdx = session.messages.findIndex(m => m.id === messageId)
+    if (errorIdx < 0) return
+
+    // 向前找最近的 user 消息
+    let userIdx = -1
+    for (let i = errorIdx - 1; i >= 0; i--) {
+      if (session.messages[i].role === 'user') {
+        userIdx = i
+        break
+      }
+    }
+    if (userIdx < 0) return
+
+    const userMsg = session.messages[userIdx]
+
+    // 删除 error 消息及之后的所有消息
+    session.messages = session.messages.slice(0, errorIdx)
+
+    // 重新发送
+    await send(userMsg.content)
   }
 
   // 当前活跃会话的响应式引用
@@ -227,6 +373,10 @@ export const useChatStore = defineStore('chat', () => {
     session.loading = true
     session.currentSteps = []
 
+    // 设置自动重试的 session ID（用于错误时自动重试）
+    autoRetrySessionId.value = sessionId
+    retryMessageText.value = text
+
     // 发送消息后立即持久化到 IndexedDB（防止 SSE 中断丢失 user 消息）
     persistSession(sessionId)
 
@@ -336,33 +486,51 @@ export const useChatStore = defineStore('chat', () => {
           }
           // 完成后持久化到 IndexedDB
           persistSession(sessionId)
+          // 成功则取消自动重试
+          cancelAutoRetry()
         } else if (event.type === 'error') {
           session.streamPhase = 'idle'
           session.queuePosition = null
+          const errorInfo: ChatError = classifySSEError(event)
           session.messages = [...session.messages, {
             id: genId(),
             role: 'assistant',
-            content: `Error: ${event.error || event.detail || 'Unknown error'}`,
+            content: formatErrorMessage(errorInfo),
             timestamp: new Date(),
+            isError: true,
+            errorInfo,
           }]
           session.currentSteps = []
-          // 出错也持久化，保留 error 消息
           persistSession(sessionId)
+          // 自动重试：仅对可重试错误且未超过最大次数
+          if (errorInfo.retryable && autoRetrySessionId.value === sessionId) {
+            startAutoRetry(sessionId, text)
+          }
         }
       }, signal)
     } catch (err: any) {
       session.streamPhase = 'idle'
       session.queuePosition = null
-      if (!signal.aborted && err.name !== 'AbortError') {
+      // 判断是否为 ChatError（从 API 层抛出的结构化错误）
+      const isChatError = err && typeof err === 'object' && 'retryable' in err && 'type' in err
+      const errorInfo: ChatError = isChatError
+        ? err as ChatError
+        : classifyNetworkError(err)
+      if (!signal.aborted && errorInfo.retryable !== false) {
         session.messages = [...session.messages, {
           id: genId(),
           role: 'assistant',
-          content: `Error: ${err.message}`,
+          content: formatErrorMessage(errorInfo),
           timestamp: new Date(),
+          isError: true,
+          errorInfo,
         }]
         session.currentSteps = []
-        // 网络错误也持久化
         persistSession(sessionId)
+        // 自动重试
+        if (errorInfo.retryable && autoRetrySessionId.value === sessionId) {
+          startAutoRetry(sessionId, text)
+        }
       }
     } finally {
       session.loading = false
@@ -454,7 +622,9 @@ export const useChatStore = defineStore('chat', () => {
     sessions, activeSessionId, conversations, selectedModel, useVectorDb,
     messages, conversationId, conversationTitle, loading, currentSteps,
     streamPhase, queuePosition,
+    retryCountdown,
     send, cancel, clear, undoMessage, deleteConversation, deleteMessage,
     loadConversations, loadConversation, newChat, renameConversation,
+    retryLastMessage, manualRetry, cancelAutoRetry,
   }
 })

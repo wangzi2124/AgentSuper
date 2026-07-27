@@ -321,6 +321,7 @@ class RAGAgent:
                 temperature=0.1,
                 max_tokens=4096,
                 timeout=500,
+                num_retries=2,
             )
         except Exception as e:
             dur = (tmod.time() - start) * 1000

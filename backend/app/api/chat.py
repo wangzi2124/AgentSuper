@@ -284,7 +284,41 @@ async def chat_stream(request: Request, body: ChatRequest):
                 pass
             except Exception as e:
                 logger.exception("chat stream invocation failed")
-                await event_queue.put({"type": "error", "detail": str(e)})
+                # Classify error for frontend retry logic
+                error_str = str(e).lower()
+                error_type = type(e).__name__
+                retryable = False
+                status_code = None
+
+                # Rate limit (429)
+                if "ratelimit" in error_type or "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                    retryable = True
+                    status_code = 429
+                # Server errors (5xx)
+                elif "500" in error_str or "502" in error_str or "503" in error_str or "504" in error_str:
+                    retryable = True
+                    status_code = 500
+                elif "internalserverserror" in error_type or "internal server error" in error_str:
+                    retryable = True
+                    status_code = 500
+                # Timeout
+                elif "timeout" in error_str or "timed out" in error_str:
+                    retryable = True
+                # Connection errors
+                elif "connection" in error_str and ("error" in error_str or "refused" in error_str or "reset" in error_str):
+                    retryable = True
+                # Overloaded / service unavailable
+                elif "overloaded" in error_str or "service_unavailable" in error_str:
+                    retryable = True
+                    status_code = 503
+
+                await event_queue.put({
+                    "type": "error",
+                    "detail": str(e),
+                    "retryable": retryable,
+                    "status_code": status_code,
+                    "error_type": error_type,
+                })
 
     async def event_generator(user_msg_id: str, assistant_msg_id: str):
         """生成SSE事件流。"""
