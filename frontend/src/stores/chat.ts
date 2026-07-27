@@ -10,6 +10,12 @@ import {
   renameConversation as apiRenameConversation,
   type ConversationMeta,
 } from '../api/chat'
+import {
+  saveSessionToCache,
+  loadSessionFromCache,
+  deleteSessionFromCache,
+  mergeServerAndCache,
+} from '../api/session-cache'
 import { usePermissionStore } from './permission'
 
 export const SUPPORTED_MODELS = [
@@ -72,6 +78,18 @@ export const useChatStore = defineStore('chat', () => {
     return sessions.value[sessionId]
   }
 
+  // 将会话消息持久化到 IndexedDB
+  async function persistSession(sessionId: string) {
+    const session = sessions.value[sessionId]
+    if (!session) return
+    await saveSessionToCache(
+      sessionId,
+      session.messages,
+      session.conversationId,
+      session.conversationTitle,
+    )
+  }
+
   // 当前活跃会话的响应式引用
   const currentSession = computed(() => {
     if (!activeSessionId.value) return null
@@ -102,25 +120,30 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  // 加载指定会话的消息
+  /**
+   * 加载指定会话的消息 — 始终从服务器同步，与本地缓存合并
+   *
+   * 修复会话切换丢失问题：
+   * 1. 如果会话正在 streaming（有 abortController），不覆盖本地消息，直接切过去
+   * 2. 否则始终从服务器获取最新数据
+   * 3. 与 IndexedDB 缓存合并，解决 SSE 中断时 assistant 内容为空的问题
+   */
   async function loadConversation(id: string) {
-    // 从会话列表获取标题
     const meta = conversations.value.find(c => c.id === id)
     const session = getOrCreateSession(id, meta?.title)
 
-    // 设置会话元数据
     session.conversationId = id
     if (meta) {
       session.conversationTitle = meta.title
     }
 
-    // 如果本地已有消息（正在 streaming 或已加载），只补充元数据，不覆盖消息
-    if (session.messages.length > 0) {
+    // 如果会话正在 streaming，保留本地消息，不覆盖
+    if (session.loading || session.streamPhase !== 'idle') {
       activeSessionId.value = id
       return
     }
 
-    // 首次加载：从服务器获取
+    // 始终从服务器获取最新数据
     try {
       const detail = await getConversation(id)
       session.conversationTitle = detail.title
@@ -131,13 +154,30 @@ export const useChatStore = defineStore('chat', () => {
           id: m.id,
           role: m.role as 'user' | 'assistant',
           content: m.content,
+          sources: m.sources,
+          steps: m.steps,
           timestamp: new Date(),
         }))
 
-      session.messages = serverMessages
+      // 从 IndexedDB 加载本地缓存（可能有 SSE 中断时的不完整数据）
+      const cached = await loadSessionFromCache(id)
+      const cachedMessages = cached?.messages || []
+
+      // 合并：服务器数据为基准，本地缓存补入服务器没有的消息或更完整的 assistant 内容
+      session.messages = mergeServerAndCache(serverMessages, cachedMessages)
+
+      // 用合并后的数据更新 IndexedDB 缓存
+      await saveSessionToCache(id, session.messages, id, detail.title)
+
       activeSessionId.value = id
     } catch (e) {
       console.error('Failed to load conversation:', e)
+      // 服务器获取失败，尝试从 IndexedDB 恢复
+      const cached = await loadSessionFromCache(id)
+      if (cached) {
+        session.messages = cached.messages
+        session.conversationTitle = cached.conversationTitle || session.conversationTitle
+      }
       activeSessionId.value = id
     }
   }
@@ -186,6 +226,9 @@ export const useChatStore = defineStore('chat', () => {
     session.messages = [...session.messages, userMsg]
     session.loading = true
     session.currentSteps = []
+
+    // 发送消息后立即持久化到 IndexedDB（防止 SSE 中断丢失 user 消息）
+    persistSession(sessionId)
 
     const reqData = {
       message: text,
@@ -291,6 +334,8 @@ export const useChatStore = defineStore('chat', () => {
               }
             }
           }
+          // 完成后持久化到 IndexedDB
+          persistSession(sessionId)
         } else if (event.type === 'error') {
           session.streamPhase = 'idle'
           session.queuePosition = null
@@ -301,6 +346,8 @@ export const useChatStore = defineStore('chat', () => {
             timestamp: new Date(),
           }]
           session.currentSteps = []
+          // 出错也持久化，保留 error 消息
+          persistSession(sessionId)
         }
       }, signal)
     } catch (err: any) {
@@ -314,6 +361,8 @@ export const useChatStore = defineStore('chat', () => {
           timestamp: new Date(),
         }]
         session.currentSteps = []
+        // 网络错误也持久化
+        persistSession(sessionId)
       }
     } finally {
       session.loading = false
@@ -344,6 +393,8 @@ export const useChatStore = defineStore('chat', () => {
         session.conversationId = undefined
         session.conversationTitle = ''
         session.currentSteps = []
+        // 清空后删除 IndexedDB 缓存
+        deleteSessionFromCache(activeSessionId.value)
       }
     }
   }
@@ -354,6 +405,7 @@ export const useChatStore = defineStore('chat', () => {
       const session = sessions.value[activeSessionId.value]
       if (session) {
         session.messages = session.messages.slice(0, index)
+        persistSession(activeSessionId.value)
       }
     }
   }
@@ -369,6 +421,8 @@ export const useChatStore = defineStore('chat', () => {
           console.error('Failed to delete conversation from server:', e)
         }
       }
+      // 删除 IndexedDB 缓存
+      deleteSessionFromCache(activeSessionId.value)
       delete sessions.value[activeSessionId.value]
       activeSessionId.value = undefined
       loadConversations()
@@ -390,6 +444,7 @@ export const useChatStore = defineStore('chat', () => {
         const idx = session.messages.findIndex(m => m.id === messageId)
         if (idx >= 0) {
           session.messages = session.messages.filter(m => m.id !== messageId)
+          persistSession(activeSessionId.value)
         }
       }
     }

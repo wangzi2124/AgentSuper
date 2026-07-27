@@ -298,6 +298,11 @@ async def chat_stream(request: Request, body: ChatRequest):
                     for msg in history:
                         if msg["id"] == assistant_msg_id:
                             msg["content"] = event["answer"]
+                            # 持久化 sources 和 steps，前端恢复会话时可用
+                            if event.get("sources"):
+                                msg["sources"] = event["sources"]
+                            if event.get("steps"):
+                                msg["steps"] = event["steps"]
                             break
                     _save_conversation(conv_id, history)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
