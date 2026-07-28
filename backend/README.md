@@ -27,7 +27,7 @@
 | 层 | 技术 |
 |---|---|
 | **后端框架** | Python 3.14+, FastAPI, Uvicorn |
-| **AI Agent** | LangGraph（retrieve → rerank → generate 工作流）, LangChain |
+| **AI Agent** | litellm 直接调用（retrieve → rerank → generate 工作流）, CrewAI（独立多Agent任务） |
 | **LLM 调用** | LiteLLM（统一 DeepSeek / OpenAI / Ollama API） |
 | **向量数据库** | ChromaDB（本地持久化，余弦相似度） |
 | **文本嵌入** | sentence-transformers（all-MiniLM-L6-v2，通过 ModelScope 下载） |

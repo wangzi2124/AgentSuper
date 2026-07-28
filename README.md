@@ -210,7 +210,7 @@ _retrieve(state)
 | 层 | 技术 |
 |---|---|
 | **后端框架** | Python 3.14+, FastAPI, Uvicorn |
-| **AI Agent** | LangGraph（retrieve → rerank → generate 工作流）, LangChain |
+| **AI Agent** | litellm 直接调用（retrieve → rerank → generate 工作流）, CrewAI（独立多Agent任务） |
 | **LLM 调用** | LiteLLM（统一 DeepSeek / OpenAI / Ollama API） |
 | **向量数据库** | ChromaDB（本地持久化，余弦相似度） |
 | **文本嵌入** | sentence-transformers（all-MiniLM-L6-v2，通过 ModelScope 下载） |
@@ -1135,7 +1135,7 @@ LLM 调用 tool_read_file(path="b.py")  → 新调用，正常执行
   ▼
 TaskRunner.run()  ← 创建 TaskState，持久化到 SQLite
   │
-  ├── Phase 1: LangGraph RAG 流水线（retrieve → rerank → generate）
+  ├── Phase 1: RAG 流水线（retrieve → rerank → generate）
   │     └── _generate 内层循环（最多 50 轮工具调用）
   │           ├── 每轮: compaction 检查 → dedup → bound_output
   │           └── LLM 返回无 tool_calls → 内层结束
@@ -1198,6 +1198,39 @@ backend/app/context/
 
 ---
 
+## CrewAI 多Agent模块
+
+独立的多Agent协作模块，用于执行复杂的多步骤任务（研究、分析、写作等），与主聊天流水线分离。
+
+### 架构设计
+
+| 组件 | 说明 |
+|------|------|
+| **主聊天** | litellm 直接调用工具循环（可靠，经验证） |
+| **CrewAI 任务** | 独立的 CrewAI Crew 执行（研究/分析/自定义任务） |
+
+### API 端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/crew/status` | GET | 获取 CrewAI 状态（agents/tools/templates） |
+| `/api/crew/run` | POST | 执行 CrewAI 任务（research/analysis/custom） |
+| `/api/crew/refresh` | POST | 刷新 CrewAI agents 和 tools |
+
+### 模块结构
+
+```
+backend/app/crew/
+  ├── __init__.py           # 导出 CrewManager
+  ├── agents.py             # 4 个预定义 Agent（researcher/writer/analyst/coordinator）
+  ├── tasks.py              # 任务模板（research/analysis/custom）
+  ├── tools.py              # ToolDef → CrewAI BaseTool 桥接
+  └── crew_manager.py       # CrewAI 执行管理器（单例）
+```
+
+实现路径：`backend/app/crew/` — CrewAI 模块
+`backend/app/api/crew.py` — API 路由
+
 ## 项目学习指南
 
 ### 1. 入口层 — 了解整体启动流程
@@ -1211,7 +1244,7 @@ backend/app/config.py    → 配置项（读 .env）
 ### 2. Agent 核心 — 理解 AI 对话链路
 
 ```
-backend/app/agent/graph.py    ← ⭐ 最核心：LangGraph 工作流（retrieve → rerank → generate）
+backend/app/agent/graph.py    ← ⭐ 最核心：litellm 工具调用循环（retrieve → rerank → generate）
 backend/app/agent/tools.py    → 工具定义 + 系统 prompt
 ```
 
@@ -1275,7 +1308,7 @@ frontend/src/types/index.ts      → 类型定义（Message、ChatError、SSEEve
     → backend api/chat.py 接收
       → TaskRunner.run()  ← 任务执行引擎
         │
-        ├── Phase 1: agent/graph.py LangGraph 编排
+        ├── Phase 1: agent/graph.py litellm 编排
         │     ├─ _retrieve()  → retriever.py 混合检索
         │     ├─ _rerank()    → reranker.py 重排序
         │     └─ _generate()  → litellm 调 LLM + 工具循环（最多 50 轮）

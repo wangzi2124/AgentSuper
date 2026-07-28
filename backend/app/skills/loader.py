@@ -1,3 +1,25 @@
+"""技能加载器 — 加载和管理 Markdown 技能文件。
+
+负责：
+- 扫描 backend/skills/ 目录下的 .md 文件和子目录
+- 解析 YAML frontmatter（name, description, enabled）
+- 支持两种格式：
+  1. 单文件：backend/skills/<name>.md
+  2. 子目录：backend/skills/<name>/SKILL.md（兼容 Anthropic Agent Skills 标准）
+- 运行时启用/禁用技能
+- 生成 load_skill_<name>() 工具供 Agent 调用
+
+技能文件格式：
+```yaml
+---
+name: my-skill
+description: 技能描述
+enabled: true
+---
+技能内容 Markdown ...
+```
+"""
+
 import logging
 from pathlib import Path
 from typing import List, Optional

@@ -1,3 +1,19 @@
+"""权限管理模块 — Agent 写操作审批。
+
+负责：
+- 检测 Agent 写入工作区外路径的操作
+- 通过前端弹窗请求用户授权
+- 白名单持久化（用户批准的路径不再重复询问）
+- 支持 allow/deny/ask 三种决策
+
+使用流程：
+1. Agent 调用 tool_write_file/tool_execute 等写操作
+2. PermissionManager.check() 检查路径权限
+3. 返回 allow → 直接执行
+4. 返回 deny → 拒绝执行
+5. 返回 ask → 发送权限请求事件，等待用户批准/拒绝
+"""
+
 import asyncio
 import json
 import logging

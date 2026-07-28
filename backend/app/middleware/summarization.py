@@ -1,5 +1,18 @@
+"""上下文压缩中间件 — 对话历史的分层摘要。
+
+负责：
+- 对长对话历史进行分层压缩（LLM 总结）
+- 保留关键信息，丢弃冗余细节
+- 分块处理：将对话按轮次分块，逐块压缩
+- 支持可选启用（通过 SUMMARIZATION_MODEL 环境变量）
+
+使用场景：
+- 对话历史超过 token 限制时自动触发
+- 保留最近 N 条消息不压缩
+- 压缩后的摘要注入 LLM 上下文
+"""
+
 import logging
-from typing import Any
 
 import litellm
 

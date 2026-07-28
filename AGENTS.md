@@ -2,10 +2,10 @@
 
 ## Architecture
 
-- **Two-tier app**: `backend/` (FastAPI + LangGraph + ChromaDB) + `frontend/` (Vue 3 + Pinia + Vite SPA)
+- **Two-tier app**: `backend/` (FastAPI + litellm + ChromaDB) + `frontend/` (Vue 3 + Pinia + Vite SPA)
 - **Backend entrypoint**: `backend/main.py` — FastAPI app, lifespan calls `ensure_runtime_state`
 - **Runtime wiring** (`backend/app/runtime.py`): `_load_env_to_os()` → VectorStore → LocalEmbeddings → Retriever → Reranker → SkillLoader → PluginLoader → RAGAgent
-- **Agent flow** (`backend/app/agent/graph.py`): LangGraph StateGraph — `retrieve` → `rerank` (optional) → `generate`
+- **Agent flow** (`backend/app/agent/graph.py`): litellm direct tool-call loop — `retrieve` → `rerank` (optional) → `generate`
   - `retrieve` checks `state.use_vector_db`; if `false`, skips retrieval entirely
   - `generate` calls `litellm.acompletion`, supports tool-call loops (max 10 rounds)
 - **Config**: `backend/app/config.py` reads `backend/.env` via pydantic-settings with `extra="allow"` (non-Settings env vars allowed)
@@ -61,7 +61,7 @@ npm run preview
 - **ChromaDB batch limit**: batching at 5000 per call in `vector_store.py` to avoid `ValueError`
 - **Hybrid search**: vector + BM25 fused via RRF (weights 0.7/0.3). BM25 index auto-built on startup and updated on each upload. Requires `rank_bm25` + `jieba`
 - **Chapter intent detection** (`backend/app/rag/intent.py`): regex matches `第X章`/`Chapter X` → skips vector search, queries `ChapterStore` directly
-- **Toggling skills/plugins** at runtime calls `agent.refresh_tools()` which rebuilds LangGraph
+- **Toggling skills/plugins** at runtime calls `agent.refresh_tools()` which rebuilds tools list
 - **Monitoring** (`backend/app/monitor.py`): in-memory stats (`record_request`/`record_model_call`), exposed at `GET /api/monitor/stats`. Resets on restart. `RequestLogMiddleware` logs every HTTP request. `_llm_call` wrapper records model, tokens, duration, and tool-rounds.
 - **Concurrency control** (`backend/app/api/chat.py`): `asyncio.Semaphore(2)` limits concurrent Agent tasks. When all slots are full, new requests queue and receive a `queued` SSE event with `queue_position`. Frontend displays queue status in sidebar and ChatView header. `GET /api/chat/stream/status` returns current active/queue depth.
 - **Session content preservation** (`frontend/src/stores/chat.ts`): `loadConversation()` always fetches from server and merges with IndexedDB cache (`frontend/src/api/session-cache.ts`). SSE streaming messages are persisted to IndexedDB on send/done/error events. Messages survive page refresh and SSE disconnection. `SessionState` tracks `streamPhase` (`idle`/`queued`/`running`) and `queuePosition` per session.

@@ -1,3 +1,15 @@
+"""运行时初始化模块。
+
+负责应用启动时的组件初始化和依赖注入：
+- 加载 .env 环境变量到 os.environ
+- 初始化向量存储、嵌入模型、检索器、重排序器
+- 加载技能(Skills)和插件(Plugins)
+- 创建 RAGAgent 实例
+- 管理文档处理和文件存储服务
+
+使用双检锁确保线程安全的单例初始化。
+"""
+
 import logging
 import os
 import threading
@@ -21,6 +33,15 @@ from app.storage.file_store import FileStore
 logger = logging.getLogger(__name__)
 
 _init_lock = threading.Lock()
+_app_state = None
+
+
+def get_plugin_loader() -> PluginLoader:
+    """Get the plugin loader from the global app state."""
+    if _app_state and hasattr(_app_state, "plugin_loader"):
+        return _app_state.plugin_loader
+    # Fallback: create a new loader
+    return PluginLoader(settings.plugins_dir)
 
 
 def _load_env_to_os():
@@ -63,6 +84,8 @@ def ensure_runtime_state(app) -> object:
 
 def _do_init(app):
     """执行完整的运行时初始化：加载向量库、嵌入模型、检索器、技能、插件、Agent 等。"""
+    global _app_state
+    _app_state = app.state
     vs = VectorStore.load(settings.vector_store_path)
     emb = LocalEmbeddings(settings.embedding_model)
     bm25 = _build_bm25_index(vs)
@@ -106,4 +129,8 @@ def _do_init(app):
     app.state.skill_loader = skill_loader
     app.state.plugin_loader = plugin_loader
     app.state.task_manager = TaskManager()
+
+    # CrewAI multi-agent module (lazy init, tools bridged on first use)
+    app.state.crew_manager = None
+
     return app.state

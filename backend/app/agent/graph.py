@@ -1,3 +1,11 @@
+"""RAG Agent — direct litellm tool-call loop (replaces LangGraph).
+
+Architecture:
+  1. Pre-processing: retrieve → rerank (same as before)
+  2. Generation: litellm direct tool-call loop with compaction/dedup/retry
+  3. CrewAI is used only for standalone multi-agent tasks (crew_manager.py)
+"""
+
 import asyncio
 import json
 import logging
@@ -5,21 +13,19 @@ import subprocess
 import threading
 import time as tmod
 from pathlib import Path
-from typing import Any, List, Optional, TypedDict, Annotated, Sequence
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 
-from app.context.token_counter import estimate_tokens, truncate_messages as _truncate_messages
+from app.context.token_counter import truncate_messages as _truncate_messages
 from app.context.tool_output import bound_tool_output
 from app.context.tool_dedup import ToolResultDedup
 
-MAX_CONTEXT_TOKENS = 1_000_000  # Leave buffer below model limit
+MAX_CONTEXT_TOKENS = 1_000_000
 
 import litellm
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from langgraph.graph import StateGraph, END
 from app.rag.retriever import Retriever
 from app.rag.reranker import Reranker
 from app.skills.loader import SkillLoader
@@ -35,24 +41,16 @@ from app.agent.tools import (
 from app.monitor import record_model_call
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
 
+# CrewAI is used only for standalone multi-agent tasks (crew_manager.py),
+# not for the main chat pipeline. Main chat uses direct litellm tool loop.
 
-class AgentState(TypedDict):
-    """代理状态类型定义，包含对话过程中的所有状态信息。"""
-    messages: Annotated[Sequence[BaseMessage], "messages"]
-    question: str
-    context: list[dict]
-    answer: str
-    sources: list[dict]
-    model: Optional[str]
-    history: list[dict]
-    use_vector_db: bool
-    files: list[dict]
-    steps: list[dict]
-    _event_queue: Optional[asyncio.Queue]
 
+# ---------------------------------------------------------------------------
+# RAGAgent
+# ---------------------------------------------------------------------------
 
 class RAGAgent:
-    """RAG（检索增强生成）代理，负责协调检索、重排序和生成回答的流程。"""
+    """RAG Agent powered by CrewAI — retrieve → rerank → generate via CrewAI crew."""
 
     def __init__(
         self,
@@ -82,17 +80,19 @@ class RAGAgent:
             include_filesystem=True,
         )
 
-        self.graph = self._build_graph()
+        # No more LangGraph — tools are called directly via litellm
 
-    def _push_event(self, state: AgentState, event: dict):
-        """将事件推送到状态和事件队列中，用于实时通知前端。"""
-        state["steps"].append(event)
+    # -- SSE event helper ---------------------------------------------------
+
+    def _push_event(self, state: dict, event: dict):
+        state.setdefault("steps", []).append(event)
         eq = state.get("_event_queue")
         if eq:
             eq.put_nowait(event)
 
-    async def _retrieve(self, state: AgentState) -> dict:
-        """从知识库中检索与问题相关的文档片段。"""
+    # -- RAG pre-processing (unchanged) ------------------------------------
+
+    async def _retrieve(self, state: dict) -> dict:
         start = tmod.time()
         self._push_event(state, {"type": "step_start", "step_id": "retrieve", "name": "检索中", "status": "running"})
 
@@ -120,8 +120,7 @@ class RAGAgent:
         self._push_event(state, {"type": "step_end", "step_id": "retrieve", "name": "检索中", "status": "completed", "detail": f"找到 {len(results)} 个相关片段", "duration_ms": round(dur, 1)})
         return {"context": context, "sources": sources}
 
-    async def _rerank(self, state: AgentState) -> dict:
-        """对检索结果进行相关性重排序，筛选最相关的片段。"""
+    async def _rerank(self, state: dict) -> dict:
         if not self.reranker or not state.get("context"):
             if state.get("context"):
                 self._push_event(state, {"type": "step_end", "step_id": "rerank", "name": "相关性重排序", "status": "completed", "detail": "重排序已禁用"})
@@ -137,8 +136,9 @@ class RAGAgent:
         self._push_event(state, {"type": "step_end", "step_id": "rerank", "name": "相关性重排序", "status": "completed", "detail": f"筛选出 {len(reranked)} 个最相关片段", "duration_ms": round(dur, 1)})
         return {"context": context}
 
+    # -- System prompts -----------------------------------------------------
+
     def _system_prompt_with_kb(self) -> str:
-        """构建包含知识库上下文的系统提示词。"""
         return (
             "You are a knowledgeable AI assistant with access to a knowledge base."
             "\n\nUse the retrieved context below to answer the user's question."
@@ -156,13 +156,13 @@ class RAGAgent:
         )
 
     def _build_tool_defs(self) -> Optional[List[dict]]:
-        """构建OpenAI格式的工具定义列表。"""
         if not self.tools:
             return None
         return [t.to_openai_tool() for t in self.tools]
 
+    # -- System prompts -----------------------------------------------------
+
     async def _execute_tool(self, name: str, args: dict, state: Optional[dict] = None) -> str:
-        """执行指定的工具函数，处理权限检查和错误。"""
         for t in self.tools:
             if t.name == name:
                 try:
@@ -202,7 +202,7 @@ class RAGAgent:
                             except NeedsPermission:
                                 pass
                             except Exception as e2:
-                                logger.warning("tool_execute streaming failed on retry, falling back: %s", e2)
+                                logger.warning("tool_execute streaming failed on retry, falling back to sync: %s", e2)
                         result = await asyncio.to_thread(t.fn, **args)
                         return str(result)
                     return f"Permission denied: {e.path}"
@@ -211,7 +211,6 @@ class RAGAgent:
         return f"Tool '{name}' not found"
 
     async def _execute_tool_streaming(self, args: dict, event_queue: asyncio.Queue) -> str:
-        """流式执行shell命令，实时推送输出到事件队列。"""
         command = args.get("command", "")
         timeout = min(args.get("timeout", 300), 600)
         work_dir = args.get("work_dir", ".")
@@ -268,10 +267,8 @@ class RAGAgent:
 
         try:
             process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                command, shell=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
             )
         except Exception as e:
@@ -304,25 +301,27 @@ class RAGAgent:
         output = "\n".join(parts)
         rc = process.returncode or 0
         header = f"Exit code: {rc}"
-        if output:
-            return f"{header}\n{output}"
-        return header
+        return f"{header}\n{output}" if output else header
 
-    async def _llm_call(self, model: str, messages: list, tool_defs: list) -> litellm.ModelResponse:
-        """调用大语言模型API并记录调用指标。"""
+    # -- LLM call (direct, for TaskRunner continuation) ---------------------
+
+    async def _llm_call(self, model: str, messages: list, tool_defs: list | None) -> litellm.ModelResponse:
         start = tmod.time()
+        kwargs: dict = dict(
+            model=model,
+            messages=messages,
+            api_key=self.api_key,
+            api_base=self.api_base,
+            temperature=0.1,
+            max_tokens=4096,
+            timeout=500,
+            num_retries=2,
+        )
+        if tool_defs:
+            kwargs["tools"] = tool_defs
+
         try:
-            response = await litellm.acompletion(
-                model=model,
-                messages=messages,
-                tools=tool_defs,
-                api_key=self.api_key,
-                api_base=self.api_base,
-                temperature=0.1,
-                max_tokens=4096,
-                timeout=500,
-                num_retries=2,
-            )
+            response = await litellm.acompletion(**kwargs)
         except Exception as e:
             dur = (tmod.time() - start) * 1000
             record_model_call(model, duration_ms=dur)
@@ -333,14 +332,17 @@ class RAGAgent:
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
         record_model_call(model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
-        logger.info(
-            "LLM call | model=%s pt=%d ct=%d dur=%.0fms",
-            model, pt, ct, dur,
-        )
+        logger.info("LLM call | model=%s pt=%d ct=%d dur=%.0fms", model, pt, ct, dur)
         return response
 
-    async def _generate(self, state: AgentState) -> dict:
-        """调用LLM生成回答，支持多轮工具调用。"""
+    # -- Generate: direct litellm tool loop (proven reliable) ----------------
+
+    async def _generate(self, state: dict) -> dict:
+        """Generate answer using litellm with tool calling loop.
+
+        Flow: LLM → tool_calls → execute → LLM → ... until no more tool calls.
+        This is the proven reliable approach (same as original LangGraph version).
+        """
         _gen_start = tmod.time()
         dedup = ToolResultDedup()
         from app.context.compaction import ContextCompactor
@@ -351,7 +353,8 @@ class RAGAgent:
         )
         self._push_event(state, {"type": "step_start", "step_id": "generate", "name": "生成回答", "status": "running"})
 
-        if state["context"]:
+        # Build system prompt with KB context
+        if state.get("context"):
             context_parts = [
                 f"[Source {i+1}]: {c['content']}"
                 for i, c in enumerate(state["context"])
@@ -367,13 +370,11 @@ class RAGAgent:
 
         tool_defs = self._build_tool_defs()
 
-        messages = [
-            {"role": "system", "content": full_system_prompt},
-        ]
+        messages = [{"role": "system", "content": full_system_prompt}]
         if state.get("history"):
             messages.extend(state["history"])
 
-        # Build user content: text only or multimodal if files attached
+        # Build user content
         user_files = state.get("files", [])
         if user_files:
             user_content: list[dict] = [{"type": "text", "text": state["question"]}]
@@ -395,16 +396,16 @@ class RAGAgent:
                 model = f"openai/{model}"
 
         messages = _truncate_messages(messages)
-
         response = await self._llm_call(model, messages, tool_defs)
         msg = response.choices[0].message
 
+        # Tool call loop
         max_tool_rounds = 50
         rounds = 0
         while msg.tool_calls and rounds < max_tool_rounds:
             rounds += 1
 
-            # Compaction: compress old messages when context grows large
+            # Compaction
             if compactor.should_compact(messages):
                 self._push_event(state, {"type": "step_start", "step_id": "compaction", "name": "压缩上下文", "status": "running"})
                 old_count = len(messages)
@@ -435,7 +436,6 @@ class RAGAgent:
                     early_results[tc.id] = f"Error parsing arguments for '{tool_name}': {e}"
                     continue
 
-                # Dedup: skip re-execution for identical tool+args
                 dedup_key = dedup.make_key(tool_name, args)
                 cached = dedup.get(dedup_key)
                 if cached is not None:
@@ -475,24 +475,16 @@ class RAGAgent:
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
 
-        record_model_call(
-            model, duration_ms=(tmod.time() - _gen_start) * 1000,
-            tool_rounds=rounds,
-        )
+        record_model_call(model, duration_ms=(tmod.time() - _gen_start) * 1000, tool_rounds=rounds)
 
-        # If tool calls remain (max rounds reached) or content is empty, force a final answer
+        # If tool calls remain (max rounds reached), force final answer
         if msg.tool_calls:
-            logger.warning("Max tool rounds (%d) reached, executing final batch and forcing answer", max_tool_rounds)
-            # Must include tool_calls in assistant message for DeepSeek/OpenAI compatibility
+            logger.warning("Max tool rounds (%d) reached, forcing answer", max_tool_rounds)
             messages.append({
                 "role": "assistant",
                 "content": msg.content or "",
                 "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                    }
+                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
                     for tc in msg.tool_calls
                 ],
             })
@@ -506,49 +498,29 @@ class RAGAgent:
                 self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tc.function.name}", "name": f"调用工具: {tc.function.name}", "status": "running", "tool_name": tc.function.name, "tool_args": args})
                 tool_tasks.append(self._execute_tool(tc.function.name, args, state))
                 tool_metas.append((tc.id, tc.function.name))
-
             tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)
-
             for (tc_id, tool_name), result in zip(tool_metas, tool_results):
                 if isinstance(result, Exception):
                     result = f"Error executing {tool_name}: {result}"
-                result_str = str(result)
-                bounded_result = bound_tool_output(result_str, tool_name)
+                bounded_result = bound_tool_output(str(result), tool_name)
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tc_id, "content": bounded_result})
             messages = _truncate_messages(messages)
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
+
         if not (msg.content or "").strip():
-            # Last resort: LLM still returned empty, use a summary
             msg.content = "任务已完成，请查看结果。"
 
         answer = msg.content or ""
         gen_dur = (tmod.time() - _gen_start) * 1000
         self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "completed", "detail": f"完成（{rounds} 轮工具调用）" if rounds else "完成", "duration_ms": round(gen_dur, 1)})
-        return {
-            "answer": answer,
-            "messages": [AIMessage(content=answer)],
-        }
+        return {"answer": answer}
 
-    def _build_graph(self):
-        """构建LangGraph状态图，定义检索、重排序和生成的流程。"""
-        builder = StateGraph(AgentState)
-        builder.add_node("retrieve", self._retrieve)
-        if self.reranker:
-            builder.add_node("rerank", self._rerank)
-        builder.add_node("generate", self._generate)
-        builder.set_entry_point("retrieve")
-        if self.reranker:
-            builder.add_edge("retrieve", "rerank")
-            builder.add_edge("rerank", "generate")
-        else:
-            builder.add_edge("retrieve", "generate")
-        builder.add_edge("generate", END)
-        return builder.compile()
+    # -- Public interface ---------------------------------------------------
 
     def refresh_tools(self):
-        """刷新工具列表和系统提示，用于热更新技能和插件。"""
+        """Refresh tools list and system prompt."""
         self.tools = []
         self.tools.extend(create_filesystem_tools())
         if self.skill_loader:
@@ -560,27 +532,47 @@ class RAGAgent:
             self.plugin_loader or PluginLoader(""),
             include_filesystem=True,
         )
-        self.graph = self._build_graph()
 
-    async def invoke(self, question: str, model: Optional[str] = None, history: Optional[list[dict]] = None, use_vector_db: bool = True, files: Optional[list[dict]] = None, event_queue: Optional[asyncio.Queue] = None) -> dict:
-        """执行完整的RAG流程，返回回答和相关源。"""
-        state = AgentState(
-            messages=[HumanMessage(content=question)],
-            question=question,
-            context=[],
-            answer="",
-            sources=[],
-            model=model,
-            history=history or [],
-            use_vector_db=use_vector_db,
-            files=files or [],
-            steps=[],
-            _event_queue=event_queue,
-        )
-        result = await self.graph.ainvoke(state)
+    async def invoke(
+        self,
+        question: str,
+        model: Optional[str] = None,
+        history: Optional[list[dict]] = None,
+        use_vector_db: bool = True,
+        files: Optional[list[dict]] = None,
+        event_queue: Optional[asyncio.Queue] = None,
+    ) -> dict:
+        """Execute full RAG pipeline: retrieve → rerank → generate (via CrewAI)."""
+        state: dict = {
+            "question": question,
+            "context": [],
+            "answer": "",
+            "sources": [],
+            "model": model,
+            "history": history or [],
+            "use_vector_db": use_vector_db,
+            "files": files or [],
+            "steps": [],
+            "_event_queue": event_queue,
+        }
+
+        # Phase 1: RAG retrieval
+        retrieve_result = await self._retrieve(state)
+        state["context"] = retrieve_result.get("context", [])
+        state["sources"] = retrieve_result.get("sources", [])
+
+        # Phase 2: Rerank (optional)
+        if self.reranker:
+            rerank_result = await self._rerank(state)
+            if rerank_result.get("context"):
+                state["context"] = rerank_result["context"]
+
+        # Phase 3: Generate via CrewAI
+        gen_result = await self._generate(state)
+        state["answer"] = gen_result.get("answer", "")
+
         return {
-            "answer": result.get("answer", ""),
-            "sources": result.get("sources", []),
-            "steps": result.get("steps", []),
-            "messages": result.get("messages", []),
+            "answer": state["answer"],
+            "sources": state["sources"],
+            "steps": state["steps"],
         }

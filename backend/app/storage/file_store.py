@@ -1,3 +1,12 @@
+"""文件存储管理 — 文档文件的持久化和元数据管理。
+
+负责：
+- 文件保存到 data/uploads/ 目录
+- 文件元数据管理（文件名、大小、上传时间、状态等）
+- 文件删除和查询
+- metadata.json 持久化元数据
+"""
+
 import json
 import logging
 import uuid

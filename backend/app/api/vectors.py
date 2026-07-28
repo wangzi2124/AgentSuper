@@ -3,7 +3,7 @@
 提供向量数据库中文档分块的查询功能。
 """
 
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, Request, Query
 
 from app.models.schemas import ChunkListResponse
 

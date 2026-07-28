@@ -1,104 +1,80 @@
-"""Task runner — persistent agent execution engine.
+"""任务执行引擎 — 持久化 Agent 执行引擎。
 
-Inspired by OpenCode's double-while-loop architecture:
-- Inner loop: LLM + tool calls until LLM stops requesting tools
-- Outer loop: check for user steer input or continuation
-- Compaction: compress old messages when context grows too large
-- Max steps: force summary when step limit is reached
+参考 OpenCode 的双层 while 循环架构：
+- 内层循环：LLM + 工具调用持续到 LLM 不再返回 tool_calls
+- 外层循环：检查是否有用户追加输入
+- 上下文压缩：消息超 80K tokens 时自动压缩旧消息
+- 最大步数：超限后注入强制总结 prompt
 
-This module orchestrates multi-turn agent execution with state persistence,
-ensuring tasks run to completion without premature termination.
+核心功能：
+- 任务状态持久化到 SQLite，支持崩溃恢复
+- 工具结果去重，避免重复执行相同调用
+- 智能输出边界控制，防止大输出撑爆上下文
+- 指数退避重试机制
+
+Rewritten to remove LangGraph dependency — now uses direct LLM calls
+and the RAGAgent's tool execution for the continuation loop.
 """
 
 import asyncio
 import json
 import logging
-import time as tmod
-from typing import Any, Optional
+from typing import Any
 
 from app.context.compaction import ContextCompactor
 from app.context.task_state import TaskState
-from app.context.token_counter import estimate_tokens, truncate_messages
+from app.context.token_counter import truncate_messages
 from app.context.tool_output import bound_tool_output
 from app.context.tool_dedup import ToolResultDedup
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Max steps before forced summary
 MAX_STEPS = 50
-
-# Compaction threshold
 COMPACTION_THRESHOLD = 80_000
 
-# --- Retry constants (inspired by OpenCode) ---
 RETRY_MAX_ATTEMPTS = 3
-RETRY_INITIAL_DELAY = 2.0  # seconds
+RETRY_INITIAL_DELAY = 2.0
 RETRY_BACKOFF_FACTOR = 2
-RETRY_MAX_DELAY = 30.0  # seconds
+RETRY_MAX_DELAY = 30.0
 
 
 def _is_retryable_error(exc: Exception) -> bool:
-    """Determine if an exception represents a transient, retryable error.
-
-    Retryable: 429 (rate limit), 5xx (server error), network timeout, connection errors.
-    Non-retryable: 401/403 (auth), context overflow, invalid prompt, etc.
-    """
     exc_str = str(exc).lower()
     exc_type = type(exc).__name__
-
-    # Rate limit errors (429)
     if "ratelimit" in exc_type or "rate_limit" in exc_str or "429" in exc_str:
         return True
     if "too many requests" in exc_str or "rate limit" in exc_str:
         return True
-
-    # Server errors (5xx)
     if "internalserversrror" in exc_type or "500" in exc_str or "502" in exc_str or "503" in exc_str:
         return True
     if "server" in exc_str and ("error" in exc_str or "unavailable" in exc_str):
         return True
-
-    # Overloaded / service unavailable
     if "overloaded" in exc_str or "service_unavailable" in exc_str or "exhausted" in exc_str:
         return True
-
-    # Network / timeout errors
     if "timeout" in exc_str or "timed out" in exc_str:
         return True
     if "connection" in exc_str and ("error" in exc_str or "refused" in exc_str or "reset" in exc_str):
         return True
     if "network" in exc_str:
         return True
-
-    # litellm specific
     if "litellm" in exc_type.lower():
-        # litellm wraps provider errors; check for transient patterns
         if any(code in exc_str for code in ("429", "500", "502", "503", "504")):
             return True
-
     return False
 
 
 def _compute_retry_delay(attempt: int, exc: Exception) -> float:
-    """Compute delay before next retry using exponential backoff.
-
-    Respects Retry-After header if present in the error message.
-    """
     exc_str = str(exc).lower()
-
-    # Check for Retry-After header in error
     import re
     retry_after_match = re.search(r'retry[-_]?after[:\s]*(\d+)', exc_str)
     if retry_after_match:
         delay = float(retry_after_match.group(1))
         return min(delay, RETRY_MAX_DELAY)
-
-    # Exponential backoff: 2s, 4s, 8s, ...
     delay = RETRY_INITIAL_DELAY * (RETRY_BACKOFF_FACTOR ** (attempt - 1))
     return min(delay, RETRY_MAX_DELAY)
 
-# Forced summary prompt (injected when max_steps is reached)
+
 MAX_STEPS_PROMPT = (
     "You have reached the maximum number of steps for this task. "
     "Please provide a comprehensive summary of:\n"
@@ -110,11 +86,12 @@ MAX_STEPS_PROMPT = (
 
 
 class TaskRunner:
-    """Persistent task execution engine.
+    """Persistent task execution engine (CrewAI version).
 
-    Wraps the agent's LLM call + tool execution into a loop that continues
-    until the task is naturally complete (LLM stops calling tools) or
-    the max step limit is reached.
+    Flow:
+    1. Run RAG pipeline via agent.invoke() (retrieve → rerank → generate with CrewAI)
+    2. If LLM produced tool calls in the continuation loop, keep going
+    3. Handle compaction and max steps
     """
 
     def __init__(self, agent: "RAGAgent"):
@@ -136,19 +113,9 @@ class TaskRunner:
         event_queue: asyncio.Queue | None = None,
         conversation_id: str = "",
     ) -> dict:
-        """Execute a full task with persistent agent loop.
-
-        This is the main entry point. It:
-        1. Runs the initial RAG pipeline (retrieve → rerank → generate)
-        2. If the LLM produced tool calls, continues the loop
-        3. Handles compaction when context grows large
-        4. Persists task state throughout
-
-        Returns the same dict as agent.invoke(): {answer, sources, steps, messages}
-        """
+        """Execute a full task with persistent agent loop."""
         task = TaskState(conversation_id=conversation_id)
         task.save()
-
         logger.info("Task %s started for conversation %s", task.task_id, conversation_id)
 
         try:
@@ -168,7 +135,6 @@ class TaskRunner:
             )
             result["task"] = task.to_dict()
             return result
-
         except Exception as e:
             task.mark_failed(str(e))
             raise
@@ -183,41 +149,43 @@ class TaskRunner:
         event_queue: asyncio.Queue | None,
         task: TaskState,
     ) -> dict:
-        """Core execution loop — the double-while pattern.
+        """Core execution loop.
 
-        Inner: LLM call + tool execution until LLM stops calling tools
-        Outer: check for continuation (currently single-pass, extendable)
+        Phase 1: Run full RAG pipeline via agent.invoke()
+        Phase 2: Continue if LLM produced tool calls (continuation loop)
         """
         dedup = ToolResultDedup()
         all_steps: list[dict] = []
         all_sources: list[dict] = []
 
-        # --- Phase 1: Initial RAG pipeline (retrieve → rerank → generate) ---
-        # Run the LangGraph workflow for the first turn
-        agent_state = await self._run_initial_rag(
-            question, model, history, use_vector_db, files, event_queue, task
+        # --- Phase 1: RAG pipeline (retrieve → rerank → CrewAI generate) ---
+        rag_result = await self.agent.invoke(
+            question=question,
+            model=model,
+            history=history,
+            use_vector_db=use_vector_db,
+            files=files,
+            event_queue=event_queue,
         )
 
-        # Extract results from the initial turn
-        messages = agent_state.get("_llm_messages", [])
-        answer = agent_state.get("answer", "")
-        all_sources = agent_state.get("sources", [])
-        all_steps = agent_state.get("steps", [])
+        answer = rag_result.get("answer", "")
+        all_sources = rag_result.get("sources", [])
+        all_steps = rag_result.get("steps", [])
 
-        # If the initial turn didn't produce messages, we're done
+        # Rebuild LLM messages for continuation loop
+        messages = self._build_messages(question, model, history, files, answer, rag_result)
+
         if not messages:
             return {"answer": answer, "sources": all_sources, "steps": all_steps}
 
-        # --- Phase 2: Continue if LLM wants more tool calls ---
-        # Check if the last assistant message has unfinished tool calls
+        # --- Phase 2: Continuation loop (if LLM wants more tool calls) ---
+        # Check if there are pending tool calls in the last assistant message
         last_msg = messages[-1] if messages else None
         needs_continuation = (
             last_msg
             and last_msg.get("role") == "assistant"
             and last_msg.get("tool_calls")
         )
-
-        # Also continue if answer is empty (LLM returned nothing useful)
         if not answer.strip() and not needs_continuation:
             needs_continuation = True
 
@@ -226,7 +194,7 @@ class TaskRunner:
             turn += 1
             task.increment_step()
 
-            # Check for compaction
+            # Compaction check
             if self.compactor.should_compact(messages):
                 event = {"type": "step_start", "step_id": "compaction", "name": "压缩上下文", "status": "running"}
                 self._push_event(event_queue, event)
@@ -236,16 +204,12 @@ class TaskRunner:
                 event = {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"}
                 self._push_event(event_queue, event)
 
-            # Build tool definitions
             tool_defs = self.agent._build_tool_defs()
-
-            # Check if this is the last step — force text-only response
             is_last_step = task.step >= MAX_STEPS - 1
             if is_last_step:
                 logger.warning("Task %s: max steps (%d) reached, forcing summary", task.task_id, MAX_STEPS)
                 messages.append({"role": "user", "content": MAX_STEPS_PROMPT})
 
-            # Resolve model name
             resolved_model = model or self.agent.model
             if "/" not in resolved_model:
                 if self.agent.api_base and "deepseek" in self.agent.api_base:
@@ -253,7 +217,6 @@ class TaskRunner:
                 elif self.agent.api_base and "openai" in self.agent.api_base:
                     resolved_model = f"openai/{resolved_model}"
 
-            # Truncate messages before LLM call
             messages = truncate_messages(messages)
 
             # LLM call with retry
@@ -261,7 +224,10 @@ class TaskRunner:
             last_exc = None
             for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
                 try:
-                    response = await self.agent._llm_call(resolved_model, messages, tool_defs if not is_last_step else None)
+                    response = await self.agent._llm_call(
+                        resolved_model, messages,
+                        tool_defs if not is_last_step else None,
+                    )
                     break
                 except Exception as e:
                     last_exc = e
@@ -270,7 +236,7 @@ class TaskRunner:
                                      task.task_id, task.step, attempt, RETRY_MAX_ATTEMPTS, e)
                         break
                     delay = _compute_retry_delay(attempt, e)
-                    logger.warning("Task %s: LLM call failed at step %d (attempt %d/%d), retrying in %.1fs: %s",
+                    logger.warning("Task %s: retrying step %d (attempt %d/%d) in %.1fs: %s",
                                    task.task_id, task.step, attempt, RETRY_MAX_ATTEMPTS, delay, e)
                     self._push_event(event_queue, {
                         "type": "step_start", "step_id": "retry", "name": "重试中",
@@ -283,21 +249,18 @@ class TaskRunner:
                     })
 
             if response is None:
-                # All retries exhausted or non-retryable error
                 if last_exc:
                     raise last_exc
                 break
 
             msg = response.choices[0].message
 
-            # Record token usage
             usage = getattr(response, "usage", None)
             if usage:
                 pt = getattr(usage, "prompt_tokens", 0) or 0
                 ct = getattr(usage, "completion_tokens", 0) or 0
                 task.add_tokens(pt + ct)
 
-            # If no tool calls, we're done
             if not msg.tool_calls:
                 answer = msg.content or answer
                 messages.append({"role": "assistant", "content": answer})
@@ -366,12 +329,9 @@ class TaskRunner:
                     "content": bounded_result,
                 })
 
-            # Truncate after tool results
             messages = truncate_messages(messages)
 
-        # If we exited the loop with tool_calls still pending, force a final answer
         if needs_continuation and task.step >= MAX_STEPS:
-            # Remove any trailing tool_calls from messages (incompatible with final answer)
             while messages and messages[-1].get("role") in ("tool",):
                 messages.pop()
 
@@ -379,77 +339,29 @@ class TaskRunner:
             "answer": answer,
             "sources": all_sources,
             "steps": all_steps,
-            "_llm_messages": messages,
         }
 
-    async def _run_initial_rag(
+    def _build_messages(
         self,
         question: str,
         model: str | None,
         history: list[dict],
-        use_vector_db: bool,
         files: list[dict],
-        event_queue: asyncio.Queue | None,
-        task: TaskState,
-    ) -> dict:
-        """Run the initial RAG pipeline via LangGraph and return the full state."""
-        from langchain_core.messages import HumanMessage
-
-        state = {
-            "messages": [HumanMessage(content=question)],
-            "question": question,
-            "context": [],
-            "answer": "",
-            "sources": [],
-            "model": model,
-            "history": history,
-            "use_vector_db": use_vector_db,
-            "files": files,
-            "steps": [],
-            "_event_queue": event_queue,
-        }
-
-        # Run the graph
-        result = await self.agent.graph.ainvoke(state)
-
-        # Extract the LLM messages from the graph execution
-        # The _generate node builds messages internally; we need to reconstruct
-        # by running _generate's message-building logic again with state capture
-        llm_messages = await self._capture_llm_messages(result, question, model, history, files)
-
-        return {
-            "answer": result.get("answer", ""),
-            "sources": result.get("sources", []),
-            "steps": result.get("steps", []),
-            "_llm_messages": llm_messages,
-        }
-
-    async def _capture_llm_messages(
-        self,
-        graph_result: dict,
-        question: str,
-        model: str | None,
-        history: list[dict],
-        files: list[dict],
+        answer: str,
+        rag_result: dict,
     ) -> list[dict]:
-        """Reconstruct the LLM message list from graph execution.
-
-        Since LangGraph doesn't expose the internal messages array,
-        we rebuild it from the known state.
-        """
-        from app.context.token_counter import estimate_tokens
-
-        # Build system prompt
-        if graph_result.get("context"):
+        """Build the LLM message list from the RAG result for continuation."""
+        # System prompt
+        context = rag_result.get("context", []) if hasattr(rag_result, 'get') else []
+        if context:
             context_parts = [
                 f"[Source {i+1}]: {c['content']}"
-                for i, c in enumerate(graph_result["context"])
+                for i, c in enumerate(context)
             ]
             context_text = "\n\n".join(context_parts)
             system_prompt = (
                 self.agent._system_prompt_with_kb()
-                + "\n\n"
-                + f"Retrieved Context:\n{context_text}"
+                + "\n\nRetrieved Context:\n" + context_text
             )
         else:
             system_prompt = self.agent.system_prompt
@@ -459,7 +371,6 @@ class TaskRunner:
         if history:
             messages.extend(history)
 
-        # User message
         if files:
             user_content: list[dict] = [{"type": "text", "text": question}]
             for f in files:
@@ -472,15 +383,12 @@ class TaskRunner:
         else:
             messages.append({"role": "user", "content": question})
 
-        # Add the assistant's answer
-        answer = graph_result.get("answer", "")
         if answer:
             messages.append({"role": "assistant", "content": answer})
 
         return messages
 
     def _push_event(self, event_queue: asyncio.Queue | None, event: dict):
-        """Push an event to the queue if available."""
         if event_queue:
             try:
                 event_queue.put_nowait(event)

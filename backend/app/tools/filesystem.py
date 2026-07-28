@@ -1,3 +1,20 @@
+"""文件系统工具 — Agent 的文件操作能力。
+
+提供 7 个核心工具函数：
+- tool_ls: 列出目录内容
+- tool_read_file: 读取文件内容（文本/多模态）
+- tool_write_file: 写入文件内容
+- tool_edit_file: 编辑文件（单次替换/全局替换）
+- tool_glob: 文件模式匹配搜索
+- tool_grep: 文件内容搜索（正则表达式）
+- tool_execute: 执行 shell 命令（最长 120 秒）
+
+安全机制：
+- 所有路径相对于 backend/ 工作区解析
+- 访问工作区外路径需权限审批（PermissionManager）
+- shell 命令仅允许 build/install/test 类操作
+"""
+
 import base64
 import json
 import os
@@ -6,7 +23,6 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from app.permission import get_manager as get_perm_mgr, NeedsPermission
 

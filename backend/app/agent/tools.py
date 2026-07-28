@@ -1,6 +1,17 @@
+"""Agent 工具定义和系统提示构建。
+
+负责：
+- 定义 ToolDef 数据结构（工具名称、描述、参数schema、执行函数）
+- 从 Python 函数自动生成 JSON Schema 参数定义
+- 创建文件系统工具（读写文件、执行命令、glob/grep搜索）
+- 创建技能工具（加载 SKILL.md 内容）
+- 创建插件工具（动态加载 tool_* 函数）
+- 构建 LLM 系统提示（包含工具列表和使用说明）
+"""
+
 import inspect
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List
 
 from app.skills.loader import SkillLoader
 from app.plugins.loader import PluginLoader

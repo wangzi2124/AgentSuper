@@ -13,7 +13,6 @@ Compaction produces a structured summary with:
 """
 
 import logging
-from typing import Optional
 
 import litellm
 
