@@ -2,6 +2,8 @@ fastapi
 uvicorn[standard]
 pydantic
 pydantic-settings
+langchain-core
+langgraph
 litellm
 pyyaml
 python-multipart
@@ -14,6 +16,5 @@ jieba
 tavily-python
 reportlab
 openpyxl
-python-docx
-python-pptx
-crewai
+ python-docx
+ python-pptx

@@ -1,16 +1,3 @@
-"""章节元数据存储 — SQLite 章节映射表。
-
-负责：
-- 存储文档的章节元数据（章节号、标题、内容、来源文件）
-- 支持按章节号精确查询
-- 支持按关键词模糊搜索
-- 章节意图检测时直接查此表，跳过向量检索
-
-使用场景：
-- 用户问"第一章讲了什么" → 直接查 ChapterStore
-- 用户问"关于XX的章节" → 关键词搜索 ChapterStore
-"""
-
 import sqlite3
 import uuid
 from pathlib import Path

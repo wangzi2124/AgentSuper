@@ -1,19 +1,6 @@
-"""系统监控模块 — 请求日志、模型调用追踪、使用统计。
-
-负责：
-- 记录所有 HTTP 请求（方法、路径、状态、耗时）
-- 追踪 LLM 调用（模型、token 用量、耗时、工具轮数）
-- 提供使用统计 API（GET /api/monitor/stats）
-- 支持按路径/模型/状态分组统计
-
-统计数据：
-- 请求总数、按路径/状态分布
-- 模型调用总数、按模型分布
-- Token 用量（prompt + completion）
-- 工具调用轮数
 """
-
-import time
+System monitoring: request logging, model call tracking, usage stats.
+"""
 import time
 import logging
 from collections import defaultdict

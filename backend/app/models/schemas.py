@@ -1,15 +1,3 @@
-"""API 数据模型 — Pydantic 请求/响应模型定义。
-
-定义所有 API 接口的请求和响应数据结构，包括：
-- 文档管理：上传、列表、删除
-- 聊天对话：请求、响应、SSE 事件
-- 向量库：分块查询
-- 技能和插件：状态、启用/禁用
-- 配置管理：摘要配置
-- 生成文件：文件列表、删除
-- 监控统计：请求/模型调用统计
-"""
-
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime

@@ -7,7 +7,7 @@ export interface Source {
 
 // Agent 执行步骤信息
 export interface AgentStep {
-  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'subagent_start' | 'subagent_end'
+  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end'
   step_id: string
   name: string
   status: 'running' | 'completed' | 'failed'
@@ -17,13 +17,6 @@ export interface AgentStep {
   tool_args?: Record<string, unknown>
   tool_result?: string
   tool_output?: string
-  subagent_name?: string
-  subagent_model?: string
-  subagent_metrics?: {
-    tool_rounds: number
-    prompt_tokens: number
-    completion_tokens: number
-  }
 }
 
 // 聊天响应
@@ -36,7 +29,7 @@ export interface ChatResponse {
 
 // SSE 流式事件
 export interface SSEEvent {
-  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'subagent_start' | 'subagent_end' | 'done' | 'error' | 'permission_request' | 'tool_output' | 'tool_heartbeat' | 'queued'
+  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'permission_request' | 'tool_output' | 'tool_heartbeat' | 'queued'
   step_id?: string
   name?: string
   status?: string
@@ -63,16 +56,6 @@ export interface SSEEvent {
   user_msg_id?: string
   assistant_msg_id?: string
   queue_position?: number
-  subagent_name?: string
-  subagent_model?: string
-  subagent_metrics?: {
-    tool_rounds: number
-    prompt_tokens: number
-    completion_tokens: number
-  }
-  tool_rounds?: number
-  prompt_tokens?: number
-  completion_tokens?: number
   task?: {
     task_id: string
     status: string

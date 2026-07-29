@@ -411,8 +411,7 @@ export const useChatStore = defineStore('chat', () => {
         }
 
         if (event.type === 'step_start' || event.type === 'step_end' ||
-            event.type === 'tool_start' || event.type === 'tool_end' ||
-            event.type === 'subagent_start' || event.type === 'subagent_end') {
+            event.type === 'tool_start' || event.type === 'tool_end') {
           const idx = session.currentSteps.findIndex(s => s.step_id === event.step_id)
           const step: AgentStep = {
             type: event.type as AgentStep['type'],
@@ -420,17 +419,13 @@ export const useChatStore = defineStore('chat', () => {
             name: event.name!,
             status: event.status as AgentStep['status'],
             detail: event.detail,
-            duration_ms: event.duration_ms ?? (event.type === 'subagent_end' ? event.duration_ms : undefined),
+            duration_ms: event.duration_ms,
             tool_name: event.tool_name,
             tool_args: event.tool_args as Record<string, unknown> | undefined,
             tool_result: event.tool_result,
-            subagent_name: event.subagent_name,
-            subagent_model: event.subagent_model,
-            subagent_metrics: event.subagent_metrics,
           }
           if (idx >= 0) {
-            // Update existing step, preserving subagent info
-            session.currentSteps[idx] = { ...session.currentSteps[idx], ...step }
+            session.currentSteps[idx] = step
           } else {
             session.currentSteps = [...session.currentSteps, step]
           }

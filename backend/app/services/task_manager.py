@@ -1,23 +1,3 @@
-"""文档处理任务管理器 — 异步文档上传和处理。
-
-负责：
-- 接收文档上传请求，创建处理任务
-- 异步执行：保存文件 → 分块 → 嵌入 → 入库
-- 进度追踪和状态查询（前端轮询）
-- 支持并行处理多个文档
-
-处理流程：
-1. POST /api/documents/upload → 返回 { task_id }
-2. TaskManager.process_document() 后台执行：
-   - 保存文件到 data/uploads/
-   - DocumentProcessor 分块（章节感知）
-   - LocalEmbeddings 生成向量
-   - VectorStore 存入 ChromaDB
-   - BM25Index 更新关键词索引
-3. 前端轮询 GET /api/documents/tasks/{task_id}
-4. 返回 { progress: 0-100, stage: "描述" }
-"""
-
 import asyncio
 import uuid
 from typing import Optional, TYPE_CHECKING

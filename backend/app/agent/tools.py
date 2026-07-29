@@ -1,17 +1,6 @@
-"""Agent 工具定义和系统提示构建。
-
-负责：
-- 定义 ToolDef 数据结构（工具名称、描述、参数schema、执行函数）
-- 从 Python 函数自动生成 JSON Schema 参数定义
-- 创建文件系统工具（读写文件、执行命令、glob/grep搜索）
-- 创建技能工具（加载 SKILL.md 内容）
-- 创建插件工具（动态加载 tool_* 函数）
-- 构建 LLM 系统提示（包含工具列表和使用说明）
-"""
-
 import inspect
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
 
 from app.skills.loader import SkillLoader
 from app.plugins.loader import PluginLoader
@@ -248,11 +237,6 @@ def build_system_prompt_no_kb(
         "  - For simple POST with JSON body, prefer plugin_http-client_tool_http_post.",
         "- CRITICAL: tool_execute is ONLY for building/testing projects (npm install, npm run build, etc.). NEVER use tool_execute for curl, wget, ping, or any network/web operations. Use the http-client plugin instead.",
         "- For knowledge base export, use kb-export tools.",
-        "- For delegating sub-tasks to a sub-agent with its own model and tool-call loop, use tool_delegate_task. The sub-agent runs independently and returns results.",
-        "  Example: tool_delegate_task(name='research_topic', instruction='Research quantum computing...', model='deepseek/deepseek-chat')",
-        "- For complex multi-step tasks that benefit from multiple role-specialised agents working together, use tool_delegate_crew to spawn a CrewAI multi-agent team (researcher, analyst, writer, coordinator).",
-        "  task_type can be 'research' (researcher+writer), 'analysis' (analyst+writer), or 'orchestrated' (coordinator+researcher+analyst+writer).",
-        "  Example: tool_delegate_crew(task_type='research', topic='RAG vs GraphRAG comparison')",
         "- If the user's request doesn't match any tool's purpose, answer directly without calling tools.",
         "",
         "IMPORTANT - Skill loading before code/design tasks:",
@@ -285,127 +269,3 @@ def build_system_prompt_no_kb(
     ])
 
     return "\n".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# delegate_task tool (intercepted by RAGAgent._execute_tool)
-# ---------------------------------------------------------------------------
-
-DELEGATE_TASK_SCHEMA: dict = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string",
-            "description": "Short label for the sub-task (e.g. 'research_topic', 'write_section')",
-        },
-        "instruction": {
-            "type": "string",
-            "description": "Detailed instruction for the sub-agent — what to do and how to do it",
-        },
-        "context": {
-            "type": "string",
-            "description": "Extra context or background information the sub-agent needs",
-        },
-        "model": {
-            "type": "string",
-            "description": "Model override (e.g. 'deepseek/deepseek-chat', 'openai/gpt-4o'). Leave empty to use the parent agent's model.",
-        },
-        "temperature": {
-            "type": "number",
-            "description": "LLM temperature (0.0-1.0, default 0.1)",
-        },
-        "max_tool_rounds": {
-            "type": "integer",
-            "description": "Max tool-call rounds before forcing an answer (default 20)",
-        },
-    },
-    "required": ["name", "instruction"],
-}
-
-
-def _delegate_task_placeholder(**kwargs) -> str:
-    """Placeholder — never called directly; intercepted by RAGAgent."""
-    return (
-        "Error: delegate_task must be executed by the agent runtime, "
-        "not called as a regular tool."
-    )
-
-
-def create_delegate_tool() -> ToolDef:
-    """Create the ToolDef for tool_delegate_task.
-
-    The actual execution is handled by RAGAgent._execute_tool which
-    intercepts this tool name and delegates to SubAgent.run().
-    """
-    return ToolDef(
-        name="tool_delegate_task",
-        description=(
-            "Delegate a sub-task to a sub-agent. The sub-agent runs "
-            "independently with its own model and tool-call loop. "
-            "Use for parallel research, complex multi-step analysis, "
-            "or tasks that benefit from a separate context."
-        ),
-        parameters=DELEGATE_TASK_SCHEMA,
-        fn=_delegate_task_placeholder,
-    )
-
-
-# ---------------------------------------------------------------------------
-# delegate_crew tool — spawn a CrewAI multi-agent team
-# ---------------------------------------------------------------------------
-
-DELEGATE_CREW_SCHEMA: dict = {
-    "type": "object",
-    "properties": {
-        "task_type": {
-            "type": "string",
-            "description": (
-                "Workflow type: 'research' (researcher+writer), "
-                "'analysis' (analyst+writer), "
-                "'orchestrated' (coordinator+researcher+analyst+writer)"
-            ),
-            "enum": ["research", "analysis", "orchestrated"],
-        },
-        "topic": {
-            "type": "string",
-            "description": "The main topic, query, or data description for the crew to work on",
-        },
-        "context": {
-            "type": "string",
-            "description": "Additional background context or instructions for the crew",
-        },
-        "model": {
-            "type": "string",
-            "description": "Model override for all crew agents (e.g. 'deepseek/deepseek-chat'). Leave empty to use the parent agent's model.",
-        },
-    },
-    "required": ["task_type", "topic"],
-}
-
-
-def _delegate_crew_placeholder(**kwargs) -> str:
-    """Placeholder — never called directly; intercepted by RAGAgent."""
-    return (
-        "Error: delegate_crew must be executed by the agent runtime, "
-        "not called as a regular tool."
-    )
-
-
-def create_delegate_crew_tool() -> ToolDef:
-    """Create the ToolDef for tool_delegate_crew.
-
-    Spawns a CrewAI multi-agent team (coordinator, researcher, analyst, writer)
-    to handle complex tasks that benefit from role-specialised agents.
-    """
-    return ToolDef(
-        name="tool_delegate_crew",
-        description=(
-            "Spawn a CrewAI multi-agent team with specialised roles "
-            "(researcher, analyst, writer, coordinator). "
-            "Use for complex tasks that benefit from multiple perspectives "
-            "and role-specialised agents working together. "
-            "For simpler sub-tasks, use tool_delegate_task instead."
-        ),
-        parameters=DELEGATE_CREW_SCHEMA,
-        fn=_delegate_crew_placeholder,
-    )

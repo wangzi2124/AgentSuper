@@ -6,6 +6,7 @@ Tracks task execution state across the agent loop, enabling:
 - Crash recovery (resume from last checkpoint)
 """
 
+import json
 import logging
 import sqlite3
 import uuid

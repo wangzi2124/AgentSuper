@@ -1,16 +1,3 @@
-"""检索重排序器 — CrossEncoder 精排。
-
-负责：
-- 对初始检索结果（向量+BM25）进行精排
-- 使用 CrossEncoder 模型计算 query-document 相关性分数
-- 返回 top-K 最相关结果（默认 top-3）
-
-使用场景：
-- 向量检索召回候选文档
-- Reranker 精排，提升最终回答精度
-- 模型：cross-encoder/ms-marco-MiniLM-L-6-v2
-"""
-
 import logging
 from pathlib import Path
 from typing import List, Optional, Tuple

@@ -1,17 +1,3 @@
-"""本地嵌入模型 — sentence-transformers 封装。
-
-负责：
-- 加载本地缓存的嵌入模型（BAAI/bge-small-zh-v1.5）
-- 模型不存在时通过 ModelScope 自动下载
-- 文本向量化（encode）
-- 批量向量化支持
-
-模型路径：
-- 本地缓存：backend/data/models/
-- 默认模型：BAAI/bge-small-zh-v1.5（中文优化）
-- 英文备选：all-MiniLM-L6-v2
-"""
-
 import logging
 from pathlib import Path
 from sentence_transformers import SentenceTransformer

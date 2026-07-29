@@ -1,18 +1,3 @@
-"""插件加载器 — 动态加载和管理 Python 插件。
-
-负责：
-- 扫描 backend/plugins/ 目录下的 .py 文件
-- 动态导入插件模块，提取 tool_* 函数作为工具
-- 通过 .enabled 文件控制插件启用/禁用状态
-- 插件工具命名格式：plugin_<PLUGIN_NAME>_<func_name>
-- 支持运行时刷新插件列表
-
-插件开发规范：
-- 函数名以 tool_ 开头会被自动注册为工具
-- 函数 docstring 会作为工具描述
-- 函数参数签名会自动生成 JSON Schema
-"""
-
 import importlib
 import importlib.util
 import inspect

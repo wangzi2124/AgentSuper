@@ -85,16 +85,6 @@ function getStatusIcon(status: string): string {
   return '⏳'
 }
 
-// 步骤是否为子任务
-function isSubtask(s: { subagent_name?: string }): boolean {
-  return !!s.subagent_name
-}
-
-// 格式化模型名称成短标签
-function shortModel(model: string): string {
-  return model.replace(/^deepseek\//, '').replace(/^openai\//, '')
-}
-
 // 格式化耗时
 function formatDuration(ms?: number): string {
   if (ms == null) return ''
@@ -119,11 +109,11 @@ function argsSummary(args: Record<string, unknown>): string {
   return parts.join(', ').slice(0, 50)
 }
 
-// 只显示有意义的步骤（工具调用、子任务、或有耗时的步骤）
+// 只显示有意义的步骤（工具调用或有耗时的步骤）
 const meaningfulSteps = computed(() => {
   if (!props.message.steps) return []
   return props.message.steps.filter(s =>
-    s.tool_name || s.duration_ms || s.detail || s.subagent_name
+    s.tool_name || s.duration_ms || s.detail
   )
 })
 </script>
@@ -148,11 +138,10 @@ const meaningfulSteps = computed(() => {
           <span v-if="thoughtDuration != null" class="steps-duration">{{ formatDuration(thoughtDuration) }}</span>
         </div>
         <div v-if="stepsExpanded" class="steps-list">
-          <div v-for="s in meaningfulSteps" :key="s.step_id" class="step-item" :class="[s.status, { 'is-subtask': isSubtask(s) }]">
+          <div v-for="s in meaningfulSteps" :key="s.step_id" class="step-item" :class="s.status">
             <div class="step-row">
-              <span class="step-icon">{{ isSubtask(s) ? '🔄' : getStatusIcon(s.status) }}</span>
+              <span class="step-icon">{{ getStatusIcon(s.status) }}</span>
               <span class="step-name">{{ s.name }}</span>
-              <span v-if="s.subagent_model" class="step-model-badge">{{ shortModel(s.subagent_model) }}</span>
               <span v-if="s.detail" class="step-detail">{{ s.detail }}</span>
               <span v-if="s.duration_ms != null" class="step-time">{{ formatDuration(s.duration_ms) }}</span>
             </div>
@@ -161,9 +150,6 @@ const meaningfulSteps = computed(() => {
               <span v-if="s.tool_args && Object.keys(s.tool_args).length" class="step-args-toggle" @click.stop="toggleArgs(s.step_id)">
                 {{ expandedArgs[s.step_id] ? '收起参数' : argsSummary(s.tool_args) }}
               </span>
-            </div>
-            <div v-if="s.subagent_metrics" class="step-subagent-metrics">
-              🔄 {{ s.subagent_metrics.tool_rounds }} 轮 · {{ s.subagent_metrics.prompt_tokens }}+{{ s.subagent_metrics.completion_tokens }} tokens
             </div>
             <div v-if="s.tool_args && expandedArgs[s.step_id]" class="step-args" @click.stop>
               <pre>{{ formatArgs(s.tool_args) }}</pre>
@@ -308,7 +294,6 @@ const meaningfulSteps = computed(() => {
 .step-item.completed { background: rgba(16, 185, 129, 0.04); }
 .step-item.failed { background: rgba(239, 68, 68, 0.04); }
 .step-item.running { background: rgba(99, 102, 241, 0.04); }
-.step-item.is-subtask { background: rgba(139, 92, 246, 0.04); }
 .step-row {
   display: flex;
   align-items: center;
@@ -341,23 +326,6 @@ const meaningfulSteps = computed(() => {
   color: var(--primary);
   font-family: monospace;
   margin-top: 2px;
-  padding-left: 17px;
-}
-.step-model-badge {
-  font-size: 10px;
-  padding: 0 5px;
-  border-radius: 6px;
-  background: rgba(139, 92, 246, 0.12);
-  color: #8b5cf6;
-  font-family: monospace;
-  flex-shrink: 0;
-  margin-left: 2px;
-}
-.step-subagent-metrics {
-  font-size: 10px;
-  color: #8b5cf6;
-  font-family: monospace;
-  margin-top: 1px;
   padding-left: 17px;
 }
 .step-args-toggle {

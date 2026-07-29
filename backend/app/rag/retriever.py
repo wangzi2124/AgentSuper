@@ -1,14 +1,3 @@
-"""RAG 检索器 — 混合检索和重排序。
-
-实现向量检索 + BM25 关键词检索的融合：
-- 向量检索：语义相似度匹配
-- BM25：关键词精确匹配
-- RRF (Reciprocal Rank Fusion)：融合两种排序结果
-- 章节意图检测：识别"第X章"等章节查询，直接查章节元数据
-- 对话检索：识别对话格式内容，进行对话级检索
-- 父文档增强：检索子文档时携带父文档标题注入上下文
-"""
-
 from typing import List, Tuple, Optional, TYPE_CHECKING
 
 from app.rag.vector_store import VectorStore

@@ -1,9 +1,3 @@
-"""应用配置模块。
-
-从 backend/.env 文件读取环境变量，通过 pydantic-settings 提供类型安全的配置访问。
-所有配置项都可通过环境变量覆盖，LLM API Key、向量库路径、嵌入模型等核心配置均在此定义。
-"""
-
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
