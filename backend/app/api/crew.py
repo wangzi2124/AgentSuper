@@ -58,7 +58,14 @@ _crew_manager: Optional[CrewManager] = None
 def _get_manager() -> CrewManager:
     global _crew_manager
     if _crew_manager is None:
-        _crew_manager = CrewManager()
+        from app.runtime import get_app_state
+        state = get_app_state()
+        plugin_loader = getattr(state, "plugin_loader", None) if state else None
+        skill_loader = getattr(state, "skill_loader", None) if state else None
+        _crew_manager = CrewManager(
+            plugin_loader=plugin_loader,
+            skill_loader=skill_loader,
+        )
     return _crew_manager
 
 

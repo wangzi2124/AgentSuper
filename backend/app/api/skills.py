@@ -28,5 +28,6 @@ async def toggle_skill(name: str, body: ToggleSkillRequest, request: Request):
     if not loader.toggle(name, body.enabled):
         raise HTTPException(status_code=404, detail="Skill not found")
     loader.load_all()
-    request.app.state.agent.refresh_tools()
+    if hasattr(request.app.state, "crew_manager") and request.app.state.crew_manager:
+        request.app.state.crew_manager.refresh_tools()
     return {"message": f"Skill '{name}' {'enabled' if body.enabled else 'disabled'}"}

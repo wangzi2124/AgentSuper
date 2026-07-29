@@ -7,16 +7,17 @@ from crewai import Agent, LLM
 from app.config import settings
 
 
-def _get_llm() -> LLM:
-    """Create LLM instance from project config."""
+def _get_llm(model_override: Optional[str] = None) -> LLM:
+    """Create LLM instance from project config, optionally overriding the model."""
+    model = model_override or settings.llm_model
     return LLM(
-        model=settings.llm_model,
+        model=model,
         api_key=settings.llm_api_key or "",
         base_url=settings.llm_api_base,
     )
 
 
-def create_researcher(tools: Optional[List] = None) -> Agent:
+def create_researcher(tools: Optional[List] = None, model: Optional[str] = None) -> Agent:
     """Research Analyst - deep topic research and information gathering."""
     return Agent(
         role="Research Analyst",
@@ -31,13 +32,13 @@ def create_researcher(tools: Optional[List] = None) -> Agent:
             "detail-oriented, and always cite your sources."
         ),
         tools=tools or [],
-        llm=_get_llm(),
+        llm=_get_llm(model),
         allow_delegation=False,
         verbose=True,
     )
 
 
-def create_writer(tools: Optional[List] = None) -> Agent:
+def create_writer(tools: Optional[List] = None, model: Optional[str] = None) -> Agent:
     """Content Writer - produce high-quality written content."""
     return Agent(
         role="Content Writer",
@@ -52,13 +53,13 @@ def create_writer(tools: Optional[List] = None) -> Agent:
             "style to match the audience and purpose."
         ),
         tools=tools or [],
-        llm=_get_llm(),
+        llm=_get_llm(model),
         allow_delegation=False,
         verbose=True,
     )
 
 
-def create_analyst(tools: Optional[List] = None) -> Agent:
+def create_analyst(tools: Optional[List] = None, model: Optional[str] = None) -> Agent:
     """Data Analyst - analyze data and generate insights."""
     return Agent(
         role="Data Analyst",
@@ -72,13 +73,13 @@ def create_analyst(tools: Optional[List] = None) -> Agent:
             "practical recommendations."
         ),
         tools=tools or [],
-        llm=_get_llm(),
+        llm=_get_llm(model),
         allow_delegation=False,
         verbose=True,
     )
 
 
-def create_coordinator(tools: Optional[List] = None) -> Agent:
+def create_coordinator(tools: Optional[List] = None, model: Optional[str] = None) -> Agent:
     """Coordinator/Manager - orchestrate multi-agent workflows."""
     return Agent(
         role="Project Coordinator",
@@ -92,7 +93,7 @@ def create_coordinator(tools: Optional[List] = None) -> Agent:
             "the authority to delegate work and validate results."
         ),
         tools=tools or [],
-        llm=_get_llm(),
+        llm=_get_llm(model),
         allow_delegation=True,
         verbose=True,
     )
@@ -106,9 +107,9 @@ AGENT_FACTORY = {
 }
 
 
-def create_agent(role: str, tools: Optional[List] = None) -> Agent:
+def create_agent(role: str, tools: Optional[List] = None, model: Optional[str] = None) -> Agent:
     """Create an agent by role name."""
     factory = AGENT_FACTORY.get(role)
     if not factory:
         raise ValueError(f"Unknown agent role: {role}. Available: {list(AGENT_FACTORY.keys())}")
-    return factory(tools)
+    return factory(tools, model=model)

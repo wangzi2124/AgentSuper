@@ -36,12 +36,25 @@ _init_lock = threading.Lock()
 _app_state = None
 
 
+def get_app_state():
+    """Get the global app state (for CrewManager etc.)."""
+    return _app_state
+
+
 def get_plugin_loader() -> PluginLoader:
     """Get the plugin loader from the global app state."""
     if _app_state and hasattr(_app_state, "plugin_loader"):
         return _app_state.plugin_loader
     # Fallback: create a new loader
     return PluginLoader(settings.plugins_dir)
+
+
+def get_skill_loader() -> SkillLoader:
+    """Get the skill loader from the global app state."""
+    if _app_state and hasattr(_app_state, "skill_loader"):
+        return _app_state.skill_loader
+    # Fallback: create a new loader
+    return SkillLoader(settings.skills_dir)
 
 
 def _load_env_to_os():
@@ -130,7 +143,11 @@ def _do_init(app):
     app.state.plugin_loader = plugin_loader
     app.state.task_manager = TaskManager()
 
-    # CrewAI multi-agent module (lazy init, tools bridged on first use)
-    app.state.crew_manager = None
+    # CrewAI multi-agent module (tools bridged from app's loaders)
+    from app.crew.crew_manager import CrewManager
+    app.state.crew_manager = CrewManager(
+        plugin_loader=plugin_loader,
+        skill_loader=skill_loader,
+    )
 
     return app.state

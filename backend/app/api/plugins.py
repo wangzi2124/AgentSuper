@@ -34,7 +34,8 @@ async def toggle_plugin(name: str, body: TogglePluginRequest, request: Request):
     if not loader.toggle(name, body.enabled):
         raise HTTPException(status_code=404, detail="Plugin not found")
     loader.load_all()
-    request.app.state.agent.refresh_tools()
+    if hasattr(request.app.state, "crew_manager") and request.app.state.crew_manager:
+        request.app.state.crew_manager.refresh_tools()
     return {"message": f"Plugin '{name}' {'enabled' if body.enabled else 'disabled'}"}
 
 
