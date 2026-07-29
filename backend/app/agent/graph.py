@@ -31,11 +31,14 @@ from app.rag.reranker import Reranker
 from app.skills.loader import SkillLoader
 from app.plugins.loader import PluginLoader
 from app.config import settings
+from app.agent.sub_agent import SubAgent
 from app.agent.tools import (
     ToolDef,
     create_filesystem_tools,
     create_skill_tools,
     create_plugin_tools,
+    create_delegate_tool,
+    create_delegate_crew_tool,
     build_system_prompt_no_kb,
 )
 from app.monitor import record_model_call
@@ -73,6 +76,9 @@ class RAGAgent:
             self.tools.extend(create_skill_tools(skill_loader))
         if plugin_loader:
             self.tools.extend(create_plugin_tools(plugin_loader))
+        self.tools.append(create_delegate_tool())
+        self.tools.append(create_delegate_crew_tool())
+        self._delegate_depth: int = 0
 
         self.system_prompt = build_system_prompt_no_kb(
             skill_loader or SkillLoader(""),
@@ -147,7 +153,10 @@ class RAGAgent:
             "\n- If a source has 'chapter_summary', it is a chapter overview — use it to describe the chapter's content."
             "\n- If you don't have enough information, say so."
             "\n\nYou have access to built-in filesystem tools (tool_ls, tool_read_file, tool_write_file, tool_edit_file, tool_glob, tool_grep, tool_execute) for reading/writing files and running shell commands."
-            "\nYou also have access to skill tools (load_skill_*) and plugin tools."
+            "\nYou also have access to skill tools (load_skill_*), plugin tools, tool_delegate_task, and tool_delegate_crew."
+            "\n- Use tool_delegate_task to delegate sub-tasks to a sub-agent for parallel execution or independent analysis."
+            "\n- Use tool_delegate_crew to spawn a multi-agent team (researcher/analyst/writer/coordinator) for complex tasks."
+            "\n- Multiple delegate_task calls in the same round run in parallel."
             "\nIf the user asks to create/edit/manipulate documents (Word, PDF, PPT, Excel), generate visual designs, build web pages, or use other specialized capabilities, call the relevant skill or plugin tool to get instructions first."
             "\n\nCharacter Analysis (for novels, scripts, or documents with dialogues):"
             "\n- plugin_character-analysis_tool_list_characters(): List all characters and their dialogue counts."
@@ -163,6 +172,11 @@ class RAGAgent:
     # -- System prompts -----------------------------------------------------
 
     async def _execute_tool(self, name: str, args: dict, state: Optional[dict] = None) -> str:
+        if name == "tool_delegate_task":
+            return await self._execute_delegate(args, state)
+        if name == "tool_delegate_crew":
+            return await self._execute_delegate_crew(args, state)
+
         for t in self.tools:
             if t.name == name:
                 try:
@@ -209,6 +223,225 @@ class RAGAgent:
                 except Exception as e:
                     return f"Error executing {name}: {e}"
         return f"Tool '{name}' not found"
+
+    async def _execute_delegate(self, args: dict, state: Optional[dict] = None) -> str:
+        """Execute a delegated sub-task by spawning a SubAgent."""
+        name = args.get("name", "unnamed")
+        instruction = args.get("instruction", "")
+        context = args.get("context", "")
+        model_override = args.get("model", "")
+        temperature = args.get("temperature", 0.1)
+        max_tool_rounds = args.get("max_tool_rounds", 20)
+
+        # Prevent infinite nesting
+        max_depth = 3
+        self._delegate_depth = getattr(self, "_delegate_depth", 0)
+        if self._delegate_depth >= max_depth:
+            return f"Error: max delegate depth ({max_depth}) reached"
+
+        eq = state.get("_event_queue") if state else None
+
+        # Resolve model (with auto-prefixing)
+        model = model_override or self.model
+        if "/" not in model:
+            if self.api_base and "deepseek" in self.api_base:
+                model = f"deepseek/{model}"
+            elif self.api_base and "openai" in self.api_base:
+                model = f"openai/{model}"
+
+        # Build sub-agent: same tools (minus delegate_task to prevent recursion)
+        sub_tools = [t for t in self.tools if t.name != "tool_delegate_task"]
+
+        # Build a focused system prompt
+        system_prompt = (
+            "You are a focused sub-agent executing a delegated task. "
+            "Complete the task below using the available tools. "
+            "Return a clear, complete result to the parent agent."
+        )
+
+        sub = SubAgent(
+            name=name,
+            system_prompt=system_prompt,
+            tools=sub_tools,
+            model=model,
+            api_key=self.api_key,
+            api_base=self.api_base,
+            temperature=temperature,
+            max_tokens=4096,
+            max_tool_rounds=max_tool_rounds,
+        )
+
+        # Emit start event
+        if eq:
+            self._push_event(state, {
+                "type": "step_start",
+                "step_id": f"delegate_{name}",
+                "name": f"子任务: {name}",
+                "status": "running",
+                "subagent_name": name,
+                "subagent_model": model,
+            })
+
+        self._delegate_depth += 1
+        try:
+            result = await sub.run(
+                task=instruction,
+                context=context,
+                event_queue=eq,
+            )
+        except Exception as e:
+            logger.exception("subagent '%s' failed", name)
+            if eq:
+                self._push_event(state, {
+                    "type": "step_end",
+                    "step_id": f"delegate_{name}",
+                    "name": f"子任务: {name}",
+                    "status": "failed",
+                    "detail": str(e),
+                })
+            return f"Sub-agent '{name}' failed: {e}"
+        finally:
+            self._delegate_depth -= 1
+
+        # Emit end event
+        if eq:
+            self._push_event(state, {
+                "type": "step_end",
+                "step_id": f"delegate_{name}",
+                "name": f"子任务: {name}",
+                "status": "completed",
+                "detail": f"完成（{result['tool_rounds']} 轮工具调用, {result['prompt_tokens']}+{result['completion_tokens']} tokens, {result['duration_ms']}ms）",
+                "duration_ms": result["duration_ms"],
+                "subagent_metrics": {
+                    "tool_rounds": result["tool_rounds"],
+                    "prompt_tokens": result["prompt_tokens"],
+                    "completion_tokens": result["completion_tokens"],
+                },
+            })
+
+        return (
+            f"[Sub-agent '{name}' completed]\n"
+            f"Result: {result['result']}\n"
+            f"Metrics: {result['tool_rounds']} tool rounds, "
+            f"{result['prompt_tokens']}+{result['completion_tokens']} tokens, "
+            f"{result['duration_ms']}ms"
+        )
+
+    async def _execute_delegate_crew(self, args: dict, state: Optional[dict] = None) -> str:
+        """Execute a task using a CrewAI multi-agent team."""
+        task_type = args.get("task_type", "research")
+        topic = args.get("topic", "")
+        context = args.get("context", "")
+        model_override = args.get("model", "")
+
+        eq = state.get("_event_queue") if state else None
+
+        model = model_override or self.model
+        if "/" not in model:
+            if self.api_base and "deepseek" in self.api_base:
+                model = f"deepseek/{model}"
+            elif self.api_base and "openai" in self.api_base:
+                model = f"openai/{model}"
+
+        if eq:
+            self._push_event(state, {
+                "type": "step_start",
+                "step_id": f"crew_{task_type}",
+                "name": f"Crew: {task_type}",
+                "status": "running",
+                "detail": f"{topic[:100]}",
+            })
+
+        try:
+            from crewai import Crew, Process
+            from app.crew.agents import create_agent, AGENT_FACTORY
+            from app.crew.tasks import (
+                create_research_tasks,
+                create_analysis_tasks,
+                create_custom_tasks,
+            )
+            from app.crew.tools import create_crewai_tools
+            from app.crew.crew_manager import TASK_CONFIGS
+
+            config = TASK_CONFIGS.get(task_type)
+            if not config:
+                return f"Unknown crew task_type: {task_type}"
+
+            # Build CrewAI-compatible tools from parent's loaders
+            crew_tools = create_crewai_tools(
+                plugin_loader=self.plugin_loader,
+                skill_loader=self.skill_loader,
+            )
+
+            # Override LLM for all agents if model specified
+            _original_llm = None
+            if model_override:
+                from crewai import LLM
+                _original_llm = LLM
+                # Monkey-patch: not needed; we pass llm to each agent below
+
+            agents = {}
+            for role in config["agents"]:
+                agents[role] = create_agent(role, crew_tools)
+            agent_list = [agents[r] for r in config["agents"]]
+
+            input_data = {"topic": topic, "query": topic, "data_description": topic}
+            if context:
+                input_data["context"] = context
+
+            if "researcher" in agents and "writer" in agents and len(agent_list) == 2:
+                tasks = create_research_tasks(topic, agents["researcher"], agents["writer"])
+            elif "analyst" in agents and "writer" in agents and len(agent_list) == 2:
+                tasks = create_analysis_tasks(topic, agents["analyst"], agents["writer"])
+            else:
+                from app.crew.crew_manager import CrewManager
+                cm = CrewManager()
+                tasks = cm._create_generic_tasks(agent_list, input_data)
+
+            crew = Crew(
+                agents=agent_list,
+                tasks=tasks,
+                process=config["process"],
+                manager_agent=agents.get("coordinator"),
+                verbose=True,
+            )
+
+            result = await asyncio.to_thread(
+                lambda: crew.kickoff(inputs=input_data)
+            )
+
+            raw_output = result.raw if hasattr(result, "raw") else str(result)
+
+            if eq:
+                self._push_event(state, {
+                    "type": "step_end",
+                    "step_id": f"crew_{task_type}",
+                    "name": f"Crew: {task_type}",
+                    "status": "completed",
+                    "detail": f"团队协作完成",
+                    "duration_ms": 0,
+                })
+
+            return (
+                f"[Crew '{task_type}' completed]\n"
+                f"Topic: {topic}\n"
+                f"Agents: {', '.join(config['agents'])}\n"
+                f"Result:\n{raw_output}"
+            )
+
+        except ImportError as e:
+            return f"CrewAI is not installed: {e}"
+        except Exception as e:
+            logger.exception("crew task '%s' failed", task_type)
+            if eq:
+                self._push_event(state, {
+                    "type": "step_end",
+                    "step_id": f"crew_{task_type}",
+                    "name": f"Crew: {task_type}",
+                    "status": "failed",
+                    "detail": str(e)[:200],
+                })
+            return f"Crew task '{task_type}' failed: {e}"
 
     async def _execute_tool_streaming(self, args: dict, event_queue: asyncio.Queue) -> str:
         command = args.get("command", "")
@@ -527,6 +760,8 @@ class RAGAgent:
             self.tools.extend(create_skill_tools(self.skill_loader))
         if self.plugin_loader:
             self.tools.extend(create_plugin_tools(self.plugin_loader))
+        self.tools.append(create_delegate_tool())
+        self.tools.append(create_delegate_crew_tool())
         self.system_prompt = build_system_prompt_no_kb(
             self.skill_loader or SkillLoader(""),
             self.plugin_loader or PluginLoader(""),

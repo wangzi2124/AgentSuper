@@ -36,6 +36,9 @@
 | **权限系统** | AI Agent 写外部路径时前端弹窗审批，支持白名单持久化 |
 | **任务执行引擎** | 参考 OpenCode 双层循环架构，任务持续执行直到完成，支持上下文压缩和最大步数限制 |
 | **上下文压缩** | 消息超 80K tokens 时自动压缩旧消息为结构化 checkpoint，保留关键工作状态 |
+| **子 Agent 委托** | 主 Agent 可委托子任务给 `SubAgent`，独立 model/tool-call 循环，同一轮可并行执行多个子 Agent |
+| **CrewAI 多 Agent 协作** | 主 Agent 可召唤 CrewAI 团队（coordinator/researcher/analyst/writer）处理复杂多步骤任务 |
+| **子 Agent 事件可视化** | 子 Agent 执行过程（开始/结束/指标）通过 SSE 实时推送到前端步骤列表，紫色标识区分 |
 
 ---
 
@@ -210,7 +213,7 @@ _retrieve(state)
 | 层 | 技术 |
 |---|---|
 | **后端框架** | Python 3.14+, FastAPI, Uvicorn |
-| **AI Agent** | litellm 直接调用（retrieve → rerank → generate 工作流）, CrewAI（独立多Agent任务） |
+| **AI Agent** | litellm 直接调用（retrieve → rerank → generate 工作流）, SubAgent 子任务委托, CrewAI 多 Agent 协作 |
 | **LLM 调用** | LiteLLM（统一 DeepSeek / OpenAI / Ollama API） |
 | **向量数据库** | ChromaDB（本地持久化，余弦相似度） |
 | **文本嵌入** | sentence-transformers（all-MiniLM-L6-v2，通过 ModelScope 下载） |
@@ -1198,38 +1201,140 @@ backend/app/context/
 
 ---
 
-## CrewAI 多Agent模块
+## 多 Agent 系统
 
-独立的多Agent协作模块，用于执行复杂的多步骤任务（研究、分析、写作等），与主聊天流水线分离。
+系统提供两套多 Agent 机制，均深度集成到主聊天管线：
 
-### 架构设计
+### 1. SubAgent 委托（Agent-as-Tool）
 
-| 组件 | 说明 |
+主 Agent 通过 `tool_delegate_task` 工具将子任务委托给独立的 SubAgent，在同一轮中支持并行执行多个子任务。
+
+#### 工作机制
+
+```
+User → RAGAgent (主Agent, tool-call loop)
+         │
+         ├─ tool_retrieve()          ← RAG 检索
+         ├─ tool_execute()           ← 命令执行
+         ├─ plugin_*()               ← 插件工具
+         └─ tool_delegate_task()     ← 委托子任务
+              │
+              ├─ SubAgent-1 (研究型, model=A, 独立 tool-call 循环)
+              ├─ SubAgent-2 (分析型, model=B, 独立 tool-call 循环)
+              └─ SubAgent-3 (写作型, model=C, 独立 tool-call 循环)
+                     → asyncio.gather 并行执行
+                     → 结果返回主 Agent
+```
+
+#### 特点
+
+| 特性 | 说明 |
 |------|------|
-| **主聊天** | litellm 直接调用工具循环（可靠，经验证） |
-| **CrewAI 任务** | 独立的 CrewAI Crew 执行（研究/分析/自定义任务） |
+| **独立上下文** | 每个 SubAgent 有独立的 system prompt、model、工具集、tool-call 循环 |
+| **并行执行** | 同一轮多个 `delegate_task` 通过 `asyncio.gather` 自动并行 |
+| **嵌套限制** | 最大嵌套深度 3 层，防止无限递归 |
+| **模型切换** | 子 Agent 可使用与父 Agent 不同的模型（如子任务用更便宜的模型） |
+| **SSE 可视化** | 子 Agent 的开始、结束、指标（轮数/tokens/耗时）通过 SSE 实时推送到前端 |
+| **监控集成** | 子 Agent 的 LLM 调用计入全局 `record_model_call` 统计 |
+
+#### 典型场景
+
+```
+# 并行调研 — 同一轮自动并行
+tool_delegate_task(name="research_tech", instruction="调查量子计算技术进展...", model="deepseek/deepseek-chat")
+tool_delegate_task(name="research_market", instruction="调查量子计算产业应用...")
+
+# 分层写作 — 先列大纲，再并行写各章节
+tool_delegate_task(name="outline", instruction="为文章写大纲...")
+→ 拿到大纲后:
+tool_delegate_task(name="section1", instruction="写引言部分...")
+tool_delegate_task(name="section2", instruction="写技术原理...")
+tool_delegate_task(name="section3", instruction="写实践案例...")
+```
+
+#### 前端显示
+
+子 Agent 步骤在实时步骤列表和历史消息中显示为紫色条目：
+- 🔄 子任务: research — `deepseek-chat` — `3 轮 · 150+200 tokens`
+
+---
+
+### 2. CrewAI 多 Agent 协作
+
+主 Agent 通过 `tool_delegate_crew` 工具召唤 CrewAI 多角色团队处理复杂任务。
+
+#### 预定义工作流
+
+| 工作流 | 角色 | 说明 |
+|--------|------|------|
+| **research** | researcher → writer | 先研究再撰写报告 |
+| **analysis** | analyst → writer | 先分析数据再输出报告 |
+| **orchestrated** | coordinator → researcher + analyst + writer | 协调者管理专业团队 |
+
+#### 特点
+
+| 特性 | 说明 |
+|------|------|
+| **角色分工** | 预定义 researcher/analyst/writer/coordinator 四种角色 |
+| **工具桥接** | CrewAI Agent 自动获得本系统的 plugin/skill/filesystem 工具 |
+| **SSE 事件** | Crew 执行状态通过 SSE 推送到前端步骤列表 |
+| **与主管线集成** | 通过 `tool_delegate_crew` 在主 Agent 工具循环中调用 |
+
+#### 典型场景
+
+```
+# 研究 + 写作团队
+tool_delegate_crew(
+  task_type="research",
+  topic="2026年AI Agent发展趋势",
+  context="重点分析多Agent协作方向"
+)
+
+# 全流程分析
+tool_delegate_crew(
+  task_type="orchestrated",
+  topic="分析项目Q2数据并出报告"
+)
+```
+
+---
+
+### 两种委托方式对比
+
+| 维度 | `tool_delegate_task` | `tool_delegate_crew` |
+|------|----------------------|----------------------|
+| **适用场景** | 简单子任务、并行调研、分段写作 | 复杂任务需多角色专业分工 |
+| **执行模型** | 单个 SubAgent，独立 LLM tool-call 循环 | CrewAI 团队，多个 Agent 各司其职 |
+| **并行粒度** | 同一轮多个 delegate_task 自动并行 | 团队内按预定义流程串行/层级执行 |
+| **工具访问** | 继承父 Agent 的完整工具集 | 通过桥接层获得 plugin/skill/filesystem 工具 |
+| **资源消耗** | 轻量，一次 LLM 调用 + 工具执行 | 较重，多个 Agent 各调 LLM |
+| **SSE 事件** | `subagent_start` / `subagent_end` / step 事件 | step 事件 + Crew 完成状态 |
+
+---
+
+### 模块结构
+
+```
+backend/app/
+  ├── agent/
+  │   ├── graph.py           # RAGAgent — 主 Agent 工具循环 + delegate/crew 拦截
+  │   ├── tools.py           # ToolDef + delegate_task/crew 工具定义
+  │   └── sub_agent.py       # SubAgent — 轻量子 Agent 工具循环
+  └── crew/
+      ├── __init__.py         # 导出 CrewManager
+      ├── agents.py           # 4 个预定义 Agent
+      ├── tasks.py            # 任务模板
+      ├── tools.py            # ToolDef → CrewAI BaseTool 桥接
+      └── crew_manager.py     # CrewAI 执行管理器
+```
 
 ### API 端点
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/api/crew/status` | GET | 获取 CrewAI 状态（agents/tools/templates） |
-| `/api/crew/run` | POST | 执行 CrewAI 任务（research/analysis/custom） |
+| `/api/crew/run` | POST | 执行 CrewAI 任务（独立接口） |
 | `/api/crew/refresh` | POST | 刷新 CrewAI agents 和 tools |
-
-### 模块结构
-
-```
-backend/app/crew/
-  ├── __init__.py           # 导出 CrewManager
-  ├── agents.py             # 4 个预定义 Agent（researcher/writer/analyst/coordinator）
-  ├── tasks.py              # 任务模板（research/analysis/custom）
-  ├── tools.py              # ToolDef → CrewAI BaseTool 桥接
-  └── crew_manager.py       # CrewAI 执行管理器（单例）
-```
-
-实现路径：`backend/app/crew/` — CrewAI 模块
-`backend/app/api/crew.py` — API 路由
 
 ## 项目学习指南
 
@@ -1244,11 +1349,13 @@ backend/app/config.py    → 配置项（读 .env）
 ### 2. Agent 核心 — 理解 AI 对话链路
 
 ```
-backend/app/agent/graph.py    ← ⭐ 最核心：litellm 工具调用循环（retrieve → rerank → generate）
-backend/app/agent/tools.py    → 工具定义 + 系统 prompt
+backend/app/agent/graph.py       ← ⭐ 最核心：litellm 工具调用循环（retrieve → rerank → generate）
+backend/app/agent/tools.py       → 工具定义 + 系统 prompt
+backend/app/agent/sub_agent.py   → 子 Agent 委托（轻量子任务执行）
 ```
 
 `graph.py` 是整个大脑，LLM 如何调用、工具如何执行、流式响应如何产生，全在这里。
+`sub_agent.py` 实现子任务委托机制，主 Agent 可通过 `tool_delegate_task` 将子任务交给独立的 SubAgent 执行。
 
 ### 3. 上下文管理 — 理解 token 控制策略
 
@@ -1309,9 +1416,11 @@ frontend/src/types/index.ts      → 类型定义（Message、ChatError、SSEEve
       → TaskRunner.run()  ← 任务执行引擎
         │
         ├── Phase 1: agent/graph.py litellm 编排
-        │     ├─ _retrieve()  → retriever.py 混合检索
-        │     ├─ _rerank()    → reranker.py 重排序
-        │     └─ _generate()  → litellm 调 LLM + 工具循环（最多 50 轮）
+        │     ├─ _retrieve()     → retriever.py 混合检索
+        │     ├─ _rerank()       → reranker.py 重排序
+        │     └─ _generate()     → litellm 调 LLM + 工具循环（最多 50 轮）
+        │           ├─ tool_delegate_task() → sub_agent.py 子 Agent 独立 tool-call 循环
+        │           └─ tool_delegate_crew() → crew/crew_manager.py CrewAI 执行
         │
         ├── Phase 2: 持续循环（直到 LLM 不再调用工具）
         │     ├─ compaction: 超 80K tokens 自动压缩
@@ -1319,20 +1428,20 @@ frontend/src/types/index.ts      → 类型定义（Message、ChatError、SSEEve
         │     └─ bound_output: 大输出智能截断
         │
         └── TaskState → SQLite 持久化
-      → SSE 事件流返回
-    → 前端 ChatView.vue 流式渲染
+      → SSE 事件流返回（含 subagent_start/end 事件）
+    → 前端 ChatView.vue 流式渲染，子 Agent 步骤以紫色显示
 ```
 
 ### 推荐学习顺序
 
 | 优先级 | 模块 | 原因 |
 |--------|------|------|
-| **1** | `agent/graph.py` | 核心链路，理解 Agent 如何思考和执行 |
+| **1** | `agent/graph.py` + `agent/sub_agent.py` | 核心链路，理解 Agent 如何思考、执行工具、委托子任务 |
 | **2** | `context/task_runner.py` | 任务执行引擎，理解双层循环如何保证任务完成 |
 | **3** | `rag/retriever.py` + `vector_store.py` | RAG 是项目的核心价值 |
 | **4** | `context/compaction.py` | 理解上下文压缩策略 |
 | **5** | `api/chat.py` | 理解前后端如何通过 SSE 流式通信 |
 | **6** | `stores/chat.ts` | 前端状态管理 + 会话隔离 |
-| **7** | `plugins/loader.py` | 理解插件扩展机制 |
+| **7** | `crew/crew_manager.py` + `plugins/loader.py` | 理解多 Agent 协作和插件扩展机制 |
 
 先跑通 `graph.py` 的工作流，再看 `task_runner.py` 的双层循环，然后向外扩展到 RAG、API、前端，最后看插件系统。

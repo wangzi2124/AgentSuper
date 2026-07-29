@@ -65,6 +65,16 @@ function getStatusIcon(status: string): string {
   return '⏳'
 }
 
+// 步骤是否为子任务
+function isSubtask(s: AgentStep): boolean {
+  return !!s.subagent_name
+}
+
+// 格式化模型名称成短标签
+function shortModel(model: string): string {
+  return model.replace(/^deepseek\//, '').replace(/^openai\//, '')
+}
+
 // 格式化耗时显示
 function formatDuration(ms?: number): string {
   if (ms == null) return ''
@@ -86,10 +96,11 @@ function formatDuration(ms?: number): string {
       </button>
     </div>
     <div class="task-list">
-      <div v-for="s in sortedSteps" :key="s.step_id" class="task-item" :class="s.status">
-        <span class="task-icon">{{ getStatusIcon(s.status) }}</span>
+      <div v-for="s in sortedSteps" :key="s.step_id" class="task-item" :class="[s.status, { 'is-subtask': isSubtask(s) }]">
+        <span class="task-icon">{{ isSubtask(s) ? '🔄' : getStatusIcon(s.status) }}</span>
         <div class="task-content">
           <span class="task-name">{{ s.name }}</span>
+          <span v-if="s.subagent_model" class="task-model-badge">{{ shortModel(s.subagent_model) }}</span>
           <span v-if="s.detail" class="task-detail">{{ s.detail }}</span>
           <span v-if="s.tool_name" class="task-tool">
             🔧 {{ s.tool_name }}
@@ -99,6 +110,9 @@ function formatDuration(ms?: number): string {
           </span>
           <span v-if="s.tool_result && s.status === 'completed'" class="task-view-result" @click.stop="toggleResult(s.step_id)">
             {{ expandedResults[s.step_id] ? '收起' : '查看结果' }}
+          </span>
+          <span v-if="s.subagent_metrics" class="task-subagent-metrics">
+            🔄 {{ s.subagent_metrics.tool_rounds }} 轮 · {{ s.subagent_metrics.prompt_tokens }}+{{ s.subagent_metrics.completion_tokens }} tokens
           </span>
         </div>
         <span v-if="s.duration_ms != null" class="task-duration">{{ formatDuration(s.duration_ms) }}</span>
@@ -196,6 +210,10 @@ function formatDuration(ms?: number): string {
   border-left: 3px solid var(--primary);
   background: rgba(99, 102, 241, 0.05);
 }
+.task-item.is-subtask {
+  border-left-color: #8b5cf6;
+  background: rgba(139, 92, 246, 0.04);
+}
 .task-item.pending {
   opacity: 0.6;
 }
@@ -215,6 +233,22 @@ function formatDuration(ms?: number): string {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.task-model-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(139, 92, 246, 0.12);
+  color: #8b5cf6;
+  font-family: monospace;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.task-subagent-metrics {
+  font-size: 10px;
+  color: #8b5cf6;
+  font-family: monospace;
+  margin-top: 1px;
 }
 .task-tool {
   font-size: 11px;
