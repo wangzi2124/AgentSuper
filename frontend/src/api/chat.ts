@@ -135,9 +135,13 @@ export async function sendMessageStream(
   }
 }
 
+function convTypeQuery(conv_type?: string): string {
+  return conv_type ? `?conv_type=${conv_type}` : ''
+}
+
 // 获取所有对话列表
-export async function listConversations(): Promise<ConversationMeta[]> {
-  const res = await fetchWithTimeout(`${BASE}/conversations`, { method: 'GET' }, 0)
+export async function listConversations(conv_type?: string): Promise<ConversationMeta[]> {
+  const res = await fetchWithTimeout(`${BASE}/conversations${convTypeQuery(conv_type)}`, { method: 'GET' }, 0)
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`List conversations error: ${err || res.statusText}`)
@@ -146,8 +150,8 @@ export async function listConversations(): Promise<ConversationMeta[]> {
 }
 
 // 根据 ID 获取对话详情
-export async function getConversation(conversationId: string): Promise<ConversationDetail> {
-  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}`, { method: 'GET' }, 0)
+export async function getConversation(conversationId: string, conv_type?: string): Promise<ConversationDetail> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}${convTypeQuery(conv_type)}`, { method: 'GET' }, 0)
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`Get conversation error: ${err || res.statusText}`)
@@ -156,8 +160,8 @@ export async function getConversation(conversationId: string): Promise<Conversat
 }
 
 // 重命名对话
-export async function renameConversation(conversationId: string, title: string): Promise<void> {
-  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}`, {
+export async function renameConversation(conversationId: string, title: string, conv_type?: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}${convTypeQuery(conv_type)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title }),
@@ -169,8 +173,8 @@ export async function renameConversation(conversationId: string, title: string):
 }
 
 // 删除对话
-export async function deleteConversation(conversationId: string): Promise<void> {
-  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}`, {
+export async function deleteConversation(conversationId: string, conv_type?: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}${convTypeQuery(conv_type)}`, {
     method: 'DELETE',
   }, 0)
   if (!res.ok) {

@@ -1,20 +1,26 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useMobileChatStore, SUPPORTED_MODELS } from '../stores/mobileChat'
+import { getUserId, setUserId } from '../api/auth'
 
-// 移动端聊天 store
 const chat = useMobileChatStore()
-// 本地模型选择（双向同步到 store）
 const localModel = ref(chat.selectedModel)
-// 本地知识库开关（双向同步到 store）
 const localUseVector = ref(chat.useVectorDb)
+const localUserId = ref(getUserId())
+const editingUserId = ref(false)
 
-// 同步本地模型选择到 store
 watch(localModel, (v) => { chat.selectedModel = v })
-// 同步本地知识库开关到 store
 watch(localUseVector, (v) => { chat.useVectorDb = v })
 
-// 定义组件事件
+function saveUserId() {
+  const id = localUserId.value.trim()
+  if (id) {
+    setUserId(id)
+    editingUserId.value = false
+    chat.loadConversations()
+  }
+}
+
 const emit = defineEmits<{
   (e: 'close'): void
 }>()
@@ -28,6 +34,19 @@ const emit = defineEmits<{
     </div>
     
     <div class="settings-content">
+      <div class="setting-item">
+        <label>用户身份</label>
+        <div class="user-id-row">
+          <template v-if="editingUserId">
+            <input v-model="localUserId" class="user-id-input" @keyup.enter="saveUserId" @blur="saveUserId" autofocus />
+          </template>
+          <template v-else>
+            <span class="user-id-value">{{ localUserId }}</span>
+            <button class="edit-btn" @click="editingUserId = true">✏️</button>
+          </template>
+        </div>
+      </div>
+
       <div class="setting-item">
         <label>AI 模型</label>
         <select v-model="localModel">
@@ -181,4 +200,9 @@ const emit = defineEmits<{
 .danger-btn:hover {
   background: #fef2f2;
 }
+
+.user-id-row { display: flex; align-items: center; gap: 8px; }
+.user-id-value { font-size: 14px; font-weight: 500; color: var(--text, #1e293b); padding: 4px 0; }
+.edit-btn { width: 28px; height: 28px; border: none; border-radius: 6px; background: var(--bg, #f1f5f9); cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; }
+.user-id-input { flex: 1; padding: 8px 10px; border: 1px solid var(--primary, #3b82f6); border-radius: 8px; font-size: 14px; outline: none; background: var(--surface, #fff); color: var(--text, #1e293b); }
 </style>

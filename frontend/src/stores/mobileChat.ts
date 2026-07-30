@@ -89,10 +89,12 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
   // 当前会话的 Agent 执行步骤
   const currentSteps = computed(() => currentSession.value?.currentSteps || [])
 
+  const CONV_TYPE = 'chat'
+
   // 加载会话列表
   async function loadConversations() {
     try {
-      conversations.value = await listConversations()
+      conversations.value = await listConversations(CONV_TYPE)
     } catch (e) {
       console.error('Failed to load conversations:', e)
     }
@@ -103,7 +105,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     const session = getOrCreateSession(id)
     
     try {
-      const detail = await getConversation(id)
+      const detail = await getConversation(id, CONV_TYPE)
       session.conversationId = id
       session.conversationTitle = detail.title
       
@@ -139,7 +141,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
   // 重命名会话
   async function renameConversation(id: string, title: string) {
     try {
-      await apiRenameConversation(id, title)
+      await apiRenameConversation(id, title, CONV_TYPE)
       const session = sessions.value[id]
       if (session) {
         session.conversationTitle = title
@@ -315,7 +317,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
       const session = sessions.value[activeSessionId.value]
       if (session?.conversationId) {
         try {
-          await apiDeleteConversation(session.conversationId)
+          await apiDeleteConversation(session.conversationId, CONV_TYPE)
         } catch (e) {
           console.error('Failed to delete conversation from server:', e)
         }
