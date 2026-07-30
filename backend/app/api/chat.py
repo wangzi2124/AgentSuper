@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 
 from app.config import settings
 from app.context.token_counter import estimate_tokens
-from app.context.task_runner import TaskRunner
+
 from app.middleware.summarization import HierarchicalSummarizationMiddleware
 from app.models.schemas import ChatRequest, ChatResponse, Source, StepEvent
 
@@ -248,7 +248,7 @@ async def chat_stream(request: Request, body: ChatRequest):
     sem = _get_agent_semaphore()
 
     async def run_agent():
-        """异步运行Agent并收集结果，使用TaskRunner执行持久化任务循环。"""
+        """异步运行Agent并收集结果，直接调用 agent.invoke()。"""
         global _queue_counter
         # 如果当前并发已满，先通知前端排队位置
         if sem.locked():
@@ -263,8 +263,7 @@ async def chat_stream(request: Request, body: ChatRequest):
 
         async with sem:
             try:
-                runner = TaskRunner(agent)
-                result = await runner.run(
+                result = await agent.invoke(
                     body.message, model=body.model, history=compressed,
                     use_vector_db=body.use_vector_db,
                     files=[f.model_dump() for f in body.files],

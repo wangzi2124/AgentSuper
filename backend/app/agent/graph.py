@@ -566,8 +566,19 @@ class RAGAgent:
         )
         self.graph = self._build_graph()
 
-    async def invoke(self, question: str, model: Optional[str] = None, history: Optional[list[dict]] = None, use_vector_db: bool = True, files: Optional[list[dict]] = None, event_queue: Optional[asyncio.Queue] = None) -> dict:
-        """执行完整的RAG流程，返回回答和相关源。"""
+    async def invoke(self, question: str, model: Optional[str] = None, history: Optional[list[dict]] = None, use_vector_db: bool = True, files: Optional[list[dict]] = None, event_queue: Optional[asyncio.Queue] = None, conversation_id: str = "") -> dict:
+        """执行完整的RAG流程，返回回答和相关源。
+
+        参数:
+            conversation_id: 对话ID，传入时会自动创建并跟踪 TaskState。
+        """
+        # 可选：集成 TaskState 跟踪（当 conversation_id 不为空时）
+        task = None
+        if conversation_id:
+            from app.context.task_state import TaskState
+            task = TaskState(conversation_id=conversation_id)
+            task.save()
+
         state = AgentState(
             messages=[HumanMessage(content=question)],
             question=question,
@@ -582,9 +593,14 @@ class RAGAgent:
             _event_queue=event_queue,
         )
         result = await self.graph.ainvoke(state)
+
+        if task:
+            task.mark_completed()
+
         return {
             "answer": result.get("answer", ""),
             "sources": result.get("sources", []),
             "steps": result.get("steps", []),
             "messages": result.get("messages", []),
+            "task": task.to_dict() if task else {},
         }
