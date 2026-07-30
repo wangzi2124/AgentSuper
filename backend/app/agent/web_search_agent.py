@@ -62,27 +62,32 @@ class WebSearchAgent(BaseAgent):
                 # 搜索 + LLM 合成回答
                 question = payload.get("question", "")
                 max_results = payload.get("max_results", 5)
+                conv_id = payload.get("conversation_id", "")
 
                 # 步骤 1: 搜索
                 search_results = await self._search_web(question, max_results)
 
-                # 步骤 2: 检查记忆中有无相关上下文
+                # 步骤 2: 检查记忆中有无相关上下文（按 conversation 隔离）
                 memory_context = ""
                 if self._memory:
-                    previous_searches = await self._memory.get("last_search_results")
+                    previous_searches = await self._memory.get(
+                        "last_search_results",
+                        namespace=conv_id,  # 🔒 Session 隔离
+                    )
                     if previous_searches:
                         memory_context = f"\n[之前的搜索结果]:\n{previous_searches[:500]}\n"
 
                 # 步骤 3: LLM 合成
                 answer = await self._synthesize(question, search_results, memory_context)
 
-                # 步骤 4: 存入记忆
+                # 步骤 4: 存入记忆（按 conversation 隔离）
                 if self._memory:
                     await self._memory.set(
                         "last_search_results",
                         f"Q: {question}\nA: {answer[:300]}...",
                         ttl=120,
                         tags=["web_search"],
+                        namespace=conv_id,  # 🔒 Session 隔离
                     )
 
                 yield AgentMessage(

@@ -1,5 +1,6 @@
 import type { DocumentListResponse, DocumentResponse, DeleteResponse, UploadResponse, TaskProgress } from '../types'
 import { fetchWithTimeout } from './fetch'
+import { getUserId } from './auth'
 
 // 文档 API 基础路径
 const BASE = '/api/documents'
@@ -25,6 +26,7 @@ export function uploadDocument(
 
     const xhr = new XMLHttpRequest()
     xhr.open('POST', BASE + '/upload')
+    xhr.setRequestHeader('X-User-Id', getUserId())
 
     const onAbort = () => {
       xhr.abort()

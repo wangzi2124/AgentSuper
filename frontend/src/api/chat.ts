@@ -1,5 +1,5 @@
 import type { ChatRequest, ChatResponse, SSEEvent, ChatError } from '../types'
-import { fetchWithTimeout } from './fetch'
+import { fetchWithTimeout, addAuthHeaders } from './fetch'
 
 // 聊天 API 基础路径
 const BASE = '/api/chat'
@@ -64,7 +64,7 @@ export async function sendMessageStream(
   try {
     res = await fetch(BASE + '/stream', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: addAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(data),
       signal,
     })

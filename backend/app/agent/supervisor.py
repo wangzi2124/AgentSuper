@@ -328,10 +328,11 @@ class SupervisorAgent(BaseAgent):
             else:
                 results.append(r)
 
-        # 存入记忆
+        # 存入记忆（按 conversation 隔离）
         if self._memory:
+            conv_id = original_payload.get("conversation_id", "")
             await self._memory.set(
-                f"decomposed_{original_thread_id[:16]}",
+                f"decomposed_results",
                 {
                     "subtasks": subtasks,
                     "results": results,
@@ -339,6 +340,7 @@ class SupervisorAgent(BaseAgent):
                 },
                 ttl=300,
                 tags=["supervisor", "decomposition"],
+                namespace=conv_id,  # 🔒 Session 隔离
             )
 
         # 合成最终回答

@@ -79,22 +79,24 @@ class CodeAgent(BaseAgent):
             if action == "chat":
                 question = payload.get("question", "")
                 language = payload.get("language", "")
+                conv_id = payload.get("conversation_id", "")
 
-                # 获取相关记忆
-                memory_context = await self._build_memory_context()
+                # 获取相关记忆（按 conversation 隔离）
+                memory_context = await self._build_memory_context(namespace=conv_id)
 
                 answer = await self._ask_llm(
                     system_prompt=CODE_SYSTEM_PROMPT + memory_context,
                     user_message=question,
                 )
 
-                # 缓存到记忆
+                # 缓存到记忆（按 conversation 隔离）
                 if self._memory:
                     await self._memory.set(
                         f"code_last_q",
                         question[:100],
                         ttl=120,
                         tags=["code"],
+                        namespace=conv_id,  # 🔒 Session 隔离
                     )
 
                 yield AgentMessage(
@@ -166,13 +168,13 @@ class CodeAgent(BaseAgent):
                 thread_id=msg.thread_id,
             )
 
-    async def _build_memory_context(self) -> str:
-        """从共享记忆中构建上下文提示。"""
+    async def _build_memory_context(self, namespace: str = "") -> str:
+        """从共享记忆中构建上下文提示（按 conversation 隔离）。"""
         if not self._memory:
             return ""
 
         try:
-            code_memories = await self._memory.get_by_tag("code")
+            code_memories = await self._memory.get_by_tag("code", namespace=namespace)
             if code_memories:
                 return "\n\n[项目上下文]\n" + "\n".join(
                     f"- {k}: {str(v)[:200]}"

@@ -28,6 +28,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# --- 用户身份：优先从 X-User-Id 头获取，默认 anonymous ---
+_DEFAULT_USER_ID = "anonymous"
+
+def _get_user_id(request: Request) -> str:
+    """从请求头中提取用户身份。"""
+    uid = request.headers.get("X-User-Id", "")
+    return uid.strip() if uid.strip() else _DEFAULT_USER_ID
+
 # --- 并发控制：限制同时运行的 Agent 任务数 ---
 MAX_CONCURRENT_AGENTS = 2
 _agent_semaphore: asyncio.Semaphore | None = None
@@ -81,12 +89,13 @@ def reset_summarizer():
 
 
 def _get_db() -> sqlite3.Connection:
-    """获取对话数据库连接并初始化表结构。"""
+    """获取对话数据库连接并初始化表结构（含 user_id 列）。"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.execute(
         "CREATE TABLE IF NOT EXISTS conversations ("
         "  id TEXT PRIMARY KEY,"
+        "  user_id TEXT NOT NULL DEFAULT '',"
         "  title TEXT NOT NULL DEFAULT '',"
         "  messages TEXT NOT NULL,"
         "  created_at TEXT NOT NULL DEFAULT (datetime('now')),"
@@ -94,7 +103,7 @@ def _get_db() -> sqlite3.Connection:
         ")"
     )
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
-    for col in ["title", "created_at", "updated_at"]:
+    for col in ["title", "created_at", "updated_at", "user_id"]:
         if col not in existing_cols:
             try:
                 conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
@@ -121,6 +130,22 @@ def _load_conversation(conv_id: str) -> list[dict]:
         conn.close()
 
 
+def _check_ownership(conv_id: str, user_id: str) -> bool:
+    """检查对话是否属于指定用户。返回 False 表示对话不存在或不属于该用户。"""
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT user_id FROM conversations WHERE id = ?", (conv_id,)
+        ).fetchone()
+        if not row:
+            return False
+        # 空 user_id 表示旧数据，允许访问；否则严格匹配
+        db_uid = row[0] or ""
+        return db_uid == "" or db_uid == user_id
+    finally:
+        conn.close()
+
+
 def _generate_title(messages: list[dict]) -> str:
     """根据用户第一条消息生成对话标题。"""
     for msg in messages:
@@ -131,22 +156,22 @@ def _generate_title(messages: list[dict]) -> str:
     return "新对话"
 
 
-def _save_conversation(conv_id: str, messages: list[dict], title: str | None = None):
+def _save_conversation(conv_id: str, messages: list[dict], title: str | None = None, user_id: str = ""):
     """保存对话历史到数据库。"""
     conn = _get_db()
     try:
         now = datetime.now().isoformat()
         if title is not None:
             conn.execute(
-                "INSERT INTO conversations (id, title, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+                "INSERT INTO conversations (id, user_id, title, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(id) DO UPDATE SET title=excluded.title, messages=excluded.messages, updated_at=excluded.updated_at",
-                (conv_id, title, json.dumps(messages), now, now),
+                (conv_id, user_id, title, json.dumps(messages), now, now),
             )
         else:
             conn.execute(
-                "INSERT INTO conversations (id, messages, created_at, updated_at) VALUES (?, ?, ?, ?)"
+                "INSERT INTO conversations (id, user_id, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
                 " ON CONFLICT(id) DO UPDATE SET messages=excluded.messages, updated_at=excluded.updated_at",
-                (conv_id, json.dumps(messages), now, now),
+                (conv_id, user_id, json.dumps(messages), now, now),
             )
         conn.commit()
     finally:
@@ -175,10 +200,13 @@ def _truncate_history(history: list[dict], max_tokens: int = MAX_HISTORY_TOKENS)
 async def chat(request: Request, body: ChatRequest):
     """处理非流式聊天请求，返回完整响应。"""
     agent = request.app.state.agent
+    user_id = _get_user_id(request)
 
     conv_id = body.conversation_id or str(uuid.uuid4())
 
     if body.conversation_id:
+        if not _check_ownership(conv_id, user_id):
+            raise HTTPException(status_code=404, detail="Conversation not found")
         raw = _load_conversation(conv_id)
         if not raw and body.conversation_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -210,7 +238,7 @@ async def chat(request: Request, body: ChatRequest):
     history.append({"id": str(uuid.uuid4()), "role": "user", "content": body.message})
     history.append({"id": str(uuid.uuid4()), "role": "assistant", "content": result["answer"]})
     title = _generate_title(history) if not body.conversation_id else None
-    _save_conversation(conv_id, history, title=title)
+    _save_conversation(conv_id, history, title=title, user_id=user_id)
 
     return ChatResponse(
         answer=result["answer"],
@@ -239,10 +267,13 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     支持与单 Agent 相同的参数和文件上传。
     """
     agent_bus: AgentBus = request.app.state.agent_bus
+    user_id = _get_user_id(request)
 
     conv_id = body.conversation_id or str(uuid.uuid4())
 
     if body.conversation_id:
+        if not _check_ownership(conv_id, user_id):
+            raise HTTPException(status_code=404, detail="Conversation not found")
         raw = _load_conversation(conv_id)
         if not raw and body.conversation_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -270,6 +301,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
                 "use_vector_db": body.use_vector_db,
                 "files": [f.model_dump() for f in body.files],
                 "conversation_id": conv_id,
+                "user_id": user_id,
             },
             thread_id=conv_id,
         ),
@@ -289,7 +321,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     history.append({"id": str(uuid.uuid4()), "role": "user", "content": body.message})
     history.append({"id": str(uuid.uuid4()), "role": "assistant", "content": answer})
     title = _generate_title(history) if not body.conversation_id else None
-    _save_conversation(conv_id, history, title=title)
+    _save_conversation(conv_id, history, title=title, user_id=user_id)
 
     return MultiAgentChatResponse(
         answer=answer,
@@ -321,10 +353,13 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
       - "error":        处理出错
     """
     agent_bus: AgentBus = request.app.state.agent_bus
+    user_id = _get_user_id(request)
 
     conv_id = body.conversation_id or str(uuid.uuid4())
 
     if body.conversation_id:
+        if not _check_ownership(conv_id, user_id):
+            raise HTTPException(status_code=404, detail="Conversation not found")
         raw = _load_conversation(conv_id)
         if not raw and body.conversation_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -376,6 +411,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                             "use_vector_db": body.use_vector_db,
                             "files": [f.model_dump() for f in body.files],
                             "conversation_id": conv_id,
+                            "user_id": user_id,
                         },
                         thread_id=f"{conv_id}:stream:{uuid.uuid4().hex[:8]}",
                     ),
@@ -437,7 +473,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                             if event.get("steps"):
                                 msg["steps"] = event["steps"]
                             break
-                    _save_conversation(conv_id, history)
+                    _save_conversation(conv_id, history, user_id=user_id)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event["type"] in ("done", "error"):
                     break
@@ -454,7 +490,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     history.append({"id": user_msg_id, "role": "user", "content": body.message})
     history.append({"id": assistant_msg_id, "role": "assistant", "content": ""})
     title = _generate_title(history) if not body.conversation_id else None
-    _save_conversation(conv_id, history, title=title)
+    _save_conversation(conv_id, history, title=title, user_id=user_id)
 
     return StreamingResponse(
         event_generator(user_msg_id, assistant_msg_id),
@@ -466,10 +502,13 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
 async def chat_stream(request: Request, body: ChatRequest):
     """处理流式聊天请求，返回SSE事件流。"""
     agent = request.app.state.agent
+    user_id = _get_user_id(request)
 
     conv_id = body.conversation_id or str(uuid.uuid4())
 
     if body.conversation_id:
+        if not _check_ownership(conv_id, user_id):
+            raise HTTPException(status_code=404, detail="Conversation not found")
         raw = _load_conversation(conv_id)
         if not raw and body.conversation_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -579,7 +618,7 @@ async def chat_stream(request: Request, body: ChatRequest):
                             if event.get("steps"):
                                 msg["steps"] = event["steps"]
                             break
-                    _save_conversation(conv_id, history)
+                    _save_conversation(conv_id, history, user_id=user_id)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event["type"] in ("done", "error"):
                     break
@@ -596,17 +635,21 @@ async def chat_stream(request: Request, body: ChatRequest):
     history.append({"id": user_msg_id, "role": "user", "content": body.message})
     history.append({"id": assistant_msg_id, "role": "assistant", "content": ""})
     title = _generate_title(history) if not body.conversation_id else None
-    _save_conversation(conv_id, history, title=title)
+    _save_conversation(conv_id, history, title=title, user_id=user_id)
 
     return StreamingResponse(event_generator(user_msg_id, assistant_msg_id), media_type="text/event-stream")
 
 
 @router.delete("/conversations/{conversation_id}")
-async def delete_conversation(conversation_id: str):
-    """删除指定对话及其所有消息。"""
+async def delete_conversation(conversation_id: str, request: Request):
+    """删除指定对话（只能删除自己的对话）。"""
+    user_id = _get_user_id(request)
+    if not _check_ownership(conversation_id, user_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
     conn = _get_db()
     try:
-        conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        conn.execute("DELETE FROM conversations WHERE id = ? AND (user_id = ? OR user_id = '')",
+                     (conversation_id, user_id))
         conn.commit()
     finally:
         conn.close()
@@ -614,8 +657,11 @@ async def delete_conversation(conversation_id: str):
 
 
 @router.delete("/conversations/{conversation_id}/messages/{message_id}")
-async def delete_message(conversation_id: str, message_id: str):
-    """删除对话中的指定消息。"""
+async def delete_message(conversation_id: str, message_id: str, request: Request):
+    """删除对话中的指定消息（只能删除自己的对话）。"""
+    user_id = _get_user_id(request)
+    if not _check_ownership(conversation_id, user_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
     conn = _get_db()
     try:
         row = conn.execute(
@@ -648,12 +694,15 @@ async def stream_status():
 
 
 @router.get("/conversations")
-async def list_conversations():
-    """获取所有对话的列表，按更新时间倒序排列。"""
+async def list_conversations(request: Request):
+    """获取当前用户的对话列表，按更新时间倒序排列。"""
+    user_id = _get_user_id(request)
     conn = _get_db()
     try:
         cursor = conn.execute(
-            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
+            "SELECT id, title, created_at, updated_at FROM conversations "
+            "WHERE user_id = ? OR user_id = '' ORDER BY updated_at DESC",
+            (user_id,)
         )
         rows = cursor.fetchall()
         return [
@@ -665,8 +714,11 @@ async def list_conversations():
 
 
 @router.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str):
-    """获取指定对话的详细信息和消息历史。"""
+async def get_conversation(conversation_id: str, request: Request):
+    """获取指定对话的详细信息和消息历史（只能查看自己的对话）。"""
+    user_id = _get_user_id(request)
+    if not _check_ownership(conversation_id, user_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
     conn = _get_db()
     try:
         row = conn.execute(
@@ -687,16 +739,19 @@ async def get_conversation(conversation_id: str):
 
 
 @router.put("/conversations/{conversation_id}")
-async def update_conversation(conversation_id: str, body: dict):
-    """更新对话标题。"""
+async def update_conversation(conversation_id: str, body: dict, request: Request):
+    """更新对话标题（只能更新自己的对话）。"""
+    user_id = _get_user_id(request)
+    if not _check_ownership(conversation_id, user_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
     title = body.get("title")
     if title is None:
         raise HTTPException(status_code=400, detail="title is required")
     conn = _get_db()
     try:
         conn.execute(
-            "UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ?",
-            (title, conversation_id),
+            "UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ? AND (user_id = ? OR user_id = '')",
+            (title, conversation_id, user_id),
         )
         conn.commit()
         if conn.total_changes == 0:
