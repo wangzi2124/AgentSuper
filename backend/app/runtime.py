@@ -18,6 +18,11 @@ from app.services.task_manager import TaskManager
 from app.skills.loader import SkillLoader
 from app.storage.file_store import FileStore
 
+# ── 多 Agent 系统 ──
+from app.agent.bus import AgentBus
+from app.agent.rag_wrapper import RAGAgentWrapper
+from app.agent.supervisor import SupervisorAgent
+
 logger = logging.getLogger(__name__)
 
 _init_lock = threading.Lock()
@@ -91,8 +96,17 @@ def _do_init(app):
 
     agent = RAGAgent(retriever, skill_loader, plugin_loader, reranker=reranker)
 
+    # ── 初始化多 Agent 系统（bus 创建 + 注册，但 start_all 在异步上下文中调用）──
+    agent_bus = AgentBus()
+    rag_wrapper = RAGAgentWrapper(agent, agent_id="rag")
+    agent_bus.register(rag_wrapper)
+    supervisor = SupervisorAgent(agent_bus)
+    agent_bus.register(supervisor)
+    logger.info("Multi-agent system initialized: %s", agent_bus.list_agents())
+
     app.state.vector_store = vs
     app.state.embeddings = emb
+    app.state.agent_bus = agent_bus
     app.state.retriever = retriever
     app.state.bm25_index = bm25
     app.state.chapter_store = chapter_store

@@ -20,6 +20,10 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     """应用生命周期管理，启动时初始化运行时状态。"""
     await asyncio.to_thread(ensure_runtime_state, app)
+    # 启动 Agent Bus 事件循环（需要在主事件循环中调用 asyncio.create_task）
+    agent_bus = getattr(app.state, "agent_bus", None)
+    if agent_bus:
+        agent_bus.start_all()
     weather.load_weather_on_startup()
     try:
         yield

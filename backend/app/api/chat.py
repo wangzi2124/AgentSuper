@@ -18,7 +18,11 @@ from app.config import settings
 from app.context.token_counter import estimate_tokens
 
 from app.middleware.summarization import HierarchicalSummarizationMiddleware
-from app.models.schemas import ChatRequest, ChatResponse, Source, StepEvent
+from app.models.schemas import ChatRequest, ChatResponse, Source, StepEvent, MultiAgentChatResponse
+
+# ── 多 Agent 系统 ──
+from app.agent.base import AgentMessage
+from app.agent.bus import AgentBus
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +224,79 @@ async def chat(request: Request, body: ChatRequest):
         ],
         conversation_id=conv_id,
         steps=[StepEvent(**s) for s in result.get("steps", [])],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  多 Agent 聊天端点
+# ═══════════════════════════════════════════════════════════════
+
+@router.post("/multi-agent", response_model=MultiAgentChatResponse)
+async def chat_multi_agent(request: Request, body: ChatRequest):
+    """使用多 Agent 系统处理聊天请求。
+
+    请求通过 Supervisor Agent 路由到最合适的子 Agent（如 RAG Agent）。
+    支持与单 Agent 相同的参数和文件上传。
+    """
+    agent_bus: AgentBus = request.app.state.agent_bus
+
+    conv_id = body.conversation_id or str(uuid.uuid4())
+
+    if body.conversation_id:
+        raw = _load_conversation(conv_id)
+        if not raw and body.conversation_id:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        history = raw
+    else:
+        history = []
+
+    summarizer = _get_summarizer()
+    if summarizer:
+        compressed = await summarizer.apply(history)
+    else:
+        compressed = _truncate_history(history)
+
+    # 通过 Supervisor 发送请求
+    reply = await agent_bus.send_and_wait(
+        AgentMessage(
+            source="user",
+            target="supervisor",
+            type="request",
+            action="chat",
+            payload={
+                "question": body.message,
+                "model": body.model,
+                "history": compressed,
+                "use_vector_db": body.use_vector_db,
+                "files": [f.model_dump() for f in body.files],
+                "conversation_id": conv_id,
+            },
+            thread_id=conv_id,
+        ),
+        timeout=180.0,
+    )
+
+    if reply.type == "error":
+        raise HTTPException(status_code=500, detail=reply.payload.get("error", "Agent error"))
+
+    payload = reply.payload
+    answer = payload.get("answer", "")
+    sources = payload.get("sources", [])
+    steps = payload.get("steps", [])
+    routed_to = payload.get("routed_to")
+
+    # 保存对话历史
+    history.append({"id": str(uuid.uuid4()), "role": "user", "content": body.message})
+    history.append({"id": str(uuid.uuid4()), "role": "assistant", "content": answer})
+    title = _generate_title(history) if not body.conversation_id else None
+    _save_conversation(conv_id, history, title=title)
+
+    return MultiAgentChatResponse(
+        answer=answer,
+        sources=[Source(**s) if isinstance(s, dict) else s for s in sources],
+        conversation_id=conv_id,
+        steps=[StepEvent(**s) if isinstance(s, dict) else s for s in steps],
+        routed_to=routed_to,
     )
 
 

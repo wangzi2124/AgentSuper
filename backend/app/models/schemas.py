@@ -92,3 +92,12 @@ class ChunkListResponse(BaseModel):
     total: int
     offset: int
     limit: int
+
+
+class MultiAgentChatResponse(BaseModel):
+    """多 Agent 聊天响应模型。"""
+    answer: str
+    sources: list[Source]
+    conversation_id: str
+    steps: list[StepEvent] = []
+    routed_to: Optional[str] = None
