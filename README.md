@@ -9,6 +9,7 @@
 | 功能 | 说明 |
 |------|------|
 | **智能问答** | 上传文档后，通过 RAG 检索相关内容，结合 LLM 生成精准回答 |
+| **多 Agent 编排** | Supervisor Agent 自动分析用户意图，路由到最合适的子 Agent 并行处理，支持多 Agent 流式响应 |
 | **多模型支持** | 前端下拉菜单切换 DeepSeek V3 / R1、OpenAI GPT-4o / 4o-mini |
 | **文档管理** | 支持 TXT / MD / PDF 上传，自动**章节感知分块**、向量化存储到 ChromaDB |
 | **混合检索** | 向量检索 + BM25 关键词检索融合（RRF 排序），精确匹配与语义搜索兼顾 |
@@ -374,8 +375,20 @@ fetch("http://localhost:8000/api/chat/", {
 |------|------|
 | `frontend/src/api/auth.ts` | `getUserId()`/`setUserId()` — 读写 localStorage，默认 `"anonymous"` |
 | `frontend/src/api/fetch.ts` | `addAuthHeaders()` 自动注入 `X-User-Id`；`fetchWithTimeout` 封装自动带认证头 |
+| `frontend/src/mobile/SettingsPanel.vue` | 手机端设置面板可查看/编辑用户身份 |
 
 后端通过 `_get_user_id(request)` 统一提取，接入 JWT/OAuth 后只需修改该函数，前端接口不变。
+
+### 会话类型隔离
+
+聊天对话按类型隔离存储，不同前端会话列表互不干扰：
+
+| 类型 | 前端页面 | conv_type 值 |
+|------|----------|-------------|
+| **单 Agent 聊天** | ChatView、MobileView | `chat` |
+| **多 Agent 编排** | MultiAgentView | `multi-agent` |
+
+后端 `conversations` 表新增 `type` 列，`GET /api/chat/conversations` 支持 `?conv_type=` 参数过滤。三个前端入口各自只加载自己类型的会话。
 
 ---
 
@@ -385,9 +398,13 @@ fetch("http://localhost:8000/api/chat/", {
 |------|------|------|
 | GET | `/` | 服务信息 |
 | GET | `/health` | 健康检查 |
-| POST | `/api/chat/` | 发送聊天消息 |
-| POST | `/api/chat/stream` | 流式聊天（SSE），支持 queued/step_start/step_end/done 事件 |
+| POST | `/api/chat/` | 发送聊天消息（单 Agent） |
+| POST | `/api/chat/stream` | 流式聊天 SSE（单 Agent），支持 queued/step_start/step_end/done 事件 |
+| POST | `/api/chat/multi-agent/` | 发送聊天消息（多 Agent Supervisor） |
+| POST | `/api/chat/multi-agent/stream` | 流式聊天 SSE（多 Agent），支持 routing/agent_start/agent_stream/agent_done/done 事件 |
 | GET | `/api/chat/stream/status` | 查询并发状态（active/queue_depth） |
+| GET | `/api/chat/conversations?conv_type=chat\|multi-agent` | 按类型过滤会话列表 |
+| GET | `/api/chat/conversations/:id?conv_type=` | 获取指定类型会话详情 |
 | POST | `/api/documents/upload` | 上传文档（multipart），返回 task_id 异步处理 |
 | GET | `/api/documents/tasks/{task_id}` | 查询上传任务进度（progress + stage） |
 | GET | `/api/documents/` | 文档列表 |
@@ -531,7 +548,9 @@ const activeSessionId = ref<string | undefined>(undefined)
          └─ 如果用户切回会话A，消息仍在（无需重新加载）
 ```
 
-实现路径：`frontend/src/stores/chat.ts` — `useChatStore`（按会话ID存储消息）
+实现路径：`frontend/src/stores/chat.ts` — `useChatStore`（按会话ID存储消息，`conv_type='chat'`）
+- 多 Agent 版本：`frontend/src/stores/multiAgent.ts` — `useMultiAgentStore`（支持 agents 面板和 routing 状态，`conv_type='multi-agent'`）
+- 手机版本：`frontend/src/stores/mobileChat.ts` — `useMobileChatStore`（移动端适配，`conv_type='chat'`）
 
 ### 并发控制
 
@@ -1285,12 +1304,18 @@ backend/plugins/example_plugin.py → 最简单的插件示例
 ### 7. 前端 — Vue 3 SPA
 
 ```
-frontend/src/stores/chat.ts      ← ⭐ 状态管理（会话、消息、SSE 流式接收、重试逻辑）
-frontend/src/views/ChatView.vue  → 聊天主界面
-frontend/src/api/chat.ts         → 聊天 API 调用 + SSE 断连检测 + 错误分类
-frontend/src/api/session-cache.ts → IndexedDB 会话缓存（双重持久化）
-frontend/src/components/         → 各组件（Sidebar、ChatMessage 等）
-frontend/src/types/index.ts      → 类型定义（Message、ChatError、SSEEvent）
+frontend/src/stores/chat.ts        ← ⭐ 状态管理（会话、消息、SSE 流式接收、重试逻辑）
+frontend/src/stores/multiAgent.ts  → 多 Agent 状态管理（agents 面板、routing 状态）
+frontend/src/stores/mobileChat.ts  → 手机端状态管理
+frontend/src/views/ChatView.vue    → 聊天主界面
+frontend/src/views/MultiAgentView.vue → 多 Agent 聊天界面（并行 Agent 面板）
+frontend/src/views/MobileView.vue  → 手机端聊天界面
+frontend/src/api/chat.ts           → 聊天 API 调用 + conv_type 过滤
+frontend/src/api/multiAgent.ts     → 多 Agent API（sendMultiAgentStream + conv_type）
+frontend/src/api/session-cache.ts  → IndexedDB 会话缓存（双重持久化）
+frontend/src/api/auth.ts           → 用户身份工具（getUserId/setUserId）
+frontend/src/components/           → 各组件（Sidebar、ChatMessage、MultiAgentResponse 等）
+frontend/src/types/index.ts        → 类型定义（Message、ChatError、SSEEvent、MultiAgentSSEEvent）
 ```
 
 ### 核心数据流
