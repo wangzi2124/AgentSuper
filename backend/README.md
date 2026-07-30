@@ -68,8 +68,10 @@ cp .env.example .env
 # 编辑 .env，填入 LLM_API_KEY
 
 # 模型（首次启动通过 ModelScope 自动下载 Embedding 和 Reranker 模型）
+```
 
 ### 启动后端
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```

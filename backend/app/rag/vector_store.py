@@ -85,22 +85,15 @@ class VectorStore:
                 include=["documents", "metadatas"],
             )
             total = len(all_results["ids"])
-            # Use slice indices directly to preserve ChromaDB's ordering
-            page_ids = all_results["ids"][offset:offset + limit]
-            page_ids_set = set(page_ids)
+            # Slice by index range to preserve ChromaDB ordering
+            page_end = min(offset + limit, total)
             chunks = []
-            for i, id_ in enumerate(all_results["ids"]):
-                if id_ not in page_ids_set:
-                    continue
-                # Only include entries that are in the current page, preserving order
+            for i in range(offset, page_end):
                 chunks.append({
-                    "id": id_,
+                    "id": all_results["ids"][i],
                     "text": all_results["documents"][i] if all_results["documents"] else "",
                     "metadata": all_results["metadatas"][i] if all_results["metadatas"] else {},
                 })
-            # Reorder chunks to match page_ids order (in case of duplicate IDs)
-            id_order = {id_: idx for idx, id_ in enumerate(page_ids)}
-            chunks.sort(key=lambda c: id_order.get(c["id"], float("inf")))
         else:
             results = self.collection.get(
                 offset=offset,
