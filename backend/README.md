@@ -16,7 +16,7 @@
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如计算器、查时间），Agent 按需调用 |
 | **本地 Embedding** | 使用 sentence-transformers 本地运行，通过 ModelScope 下载模型 |
 | **检索重排序** | Cross-encoder 对检索结果重打分（top-3），显著提升回答精度 |
-| **上下文管理** | 滑动窗口截断历史（4000 tokens），防止 context 溢出 |
+| **上下文管理** | 滑动窗口截断历史（80K tokens），防止 context 溢出 |
 | **对话持久化** | SQLite 存储对话历史，服务重启不丢失 |
 | **来源引用** | 回答时标注检索到的文档来源及相似度分数 |
 
@@ -51,7 +51,6 @@
 ### 后端
 
 ```bash
-cd backend
 
 # （可选）创建虚拟环境
 python -m venv .venv
@@ -73,5 +72,4 @@ cp .env.example .env
 ### 启动后端
 
 ```bash
-cd backend
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload

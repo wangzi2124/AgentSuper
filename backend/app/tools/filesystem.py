@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import shlex
 import stat
 import subprocess
 import time
@@ -103,16 +104,17 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
         return f"Error reading file: {e}"
 
 
-def tool_write_file(path: str, content: str) -> str:
-    """创建新文件并写入内容，文件已存在时返回错误。"""
+def tool_write_file(path: str, content: str, overwrite: bool = False) -> str:
+    """创建新文件并写入内容。overwrite=True 时允许覆盖已存在的文件。"""
     target = _resolve(path)
     _ensure_safe(target)
-    if target.exists():
-        return f"Error: file already exists: {path} (use edit_file to modify)"
+    if target.exists() and not overwrite:
+        return f"Error: file already exists: {path} (use overwrite=True to overwrite, or edit_file to modify)"
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         target.write_text(content, encoding="utf-8")
-        return f"Created {path} ({target.stat().st_size} bytes)"
+        action = "Overwritten" if target.exists() else "Created"
+        return f"{action} {path} ({target.stat().st_size} bytes)"
     except Exception as e:
         return f"Error writing file: {e}"
 
@@ -202,12 +204,46 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
     return "\n".join(output).rstrip()
 
 
+# Whitelist of allowed commands for tool_execute to mitigate command injection risk.
+# Only the base command (first token) is checked against this set.
+_ALLOWED_COMMANDS = frozenset({
+    "python", "python3", "node", "npm", "npx", "pip", "pip3",
+    "git", "curl", "wget", "cat", "head", "tail", "less", "more",
+    "ls", "dir", "find", "grep", "rg", "ag", "ack", "sed", "awk",
+    "sort", "uniq", "wc", "cut", "tr", "echo", "printf",
+    "cp", "mv", "rm", "mkdir", "rmdir", "touch", "chmod", "chown",
+    "zip", "unzip", "tar", "gzip", "gunzip", "bzip2",
+    "date", "whoami", "hostname", "uname", "df", "du", "free", "ps", "top",
+    "which", "type", "file", "stat", "md5sum", "sha256sum",
+    "diff", "patch", "comm", "cmp",
+    "jq", "yq",
+    "make", "cmake", "gcc", "g++", "clang", "rustc", "cargo",
+    "go", "deno", "ts-node",
+    "docker", "docker-compose",
+    "ping", "nslookup", "dig", "traceroute",
+    "ssh", "scp", "rsync",
+    "ffprobe", "ffmpeg",
+    "nproc", "nvidia-smi",
+    "cmd", "powershell",
+})
+
+
+def _check_command_allowed(command: str) -> None:
+    """Check the base command against the whitelist. Raises ValueError if not allowed."""
+    base_cmd = shlex.split(command)[0].lower() if command else ""
+    if not base_cmd:
+        raise ValueError("Empty command")
+    if base_cmd not in _ALLOWED_COMMANDS:
+        raise ValueError(f"Command '{base_cmd}' is not in the allowed whitelist")
+
+
 def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
     """执行shell命令并返回标准输出、标准错误和退出码。"""
     if timeout > 600:
         timeout = 600
     if timeout < 1:
         timeout = 5
+    _check_command_allowed(command)
     resolved_cwd = _resolve(work_dir)
     mgr = get_perm_mgr()
     decision = mgr.check(str(resolved_cwd), "execute")
@@ -216,9 +252,11 @@ def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
     if decision == "deny":
         return f"Error: access denied to directory '{work_dir}'"
     try:
+        # Parse command into argument list to avoid shell injection
+        args = shlex.split(command)
         result = subprocess.run(
-            command,
-            shell=True,
+            args,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -237,5 +275,7 @@ def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
         return header
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {timeout}s"
+    except ValueError as e:
+        return f"Error: {e}"
     except Exception as e:
         return f"Error executing command: {e}"

@@ -1,8 +1,7 @@
 import asyncio
 import json
 import logging
-import subprocess
-import threading
+import shlex
 import time as tmod
 from pathlib import Path
 from typing import Any, List, Optional, TypedDict, Annotated, Sequence
@@ -211,7 +210,7 @@ class RAGAgent:
         return f"Tool '{name}' not found"
 
     async def _execute_tool_streaming(self, args: dict, event_queue: asyncio.Queue) -> str:
-        """流式执行shell命令，实时推送输出到事件队列。"""
+        """流式执行shell命令，实时推送输出到事件队列。使用异步子进程避免PIPE死锁。"""
         command = args.get("command", "")
         timeout = min(args.get("timeout", 300), 600)
         work_dir = args.get("work_dir", ".")
@@ -229,17 +228,24 @@ class RAGAgent:
         if decision == "ask":
             raise _NeedsPermission(str(resolved_cwd), "execute", "tool_execute", args)
 
+        # Apply whitelist check (same as filesystem.tool_execute)
+        from app.tools.filesystem import _check_command_allowed
+        try:
+            _check_command_allowed(command)
+        except ValueError as e:
+            return f"Error: {e}"
+
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         start_time = tmod.time()
         last_heartbeat = tmod.time()
 
-        async def _push(event: dict):
-            event_queue.put_nowait(event)
-
-        def _read_pipe(pipe, storage: list[str], source: str):
+        async def _read_stream(stream, storage: list[str], source: str):
             nonlocal last_heartbeat
-            for raw_line in iter(pipe.readline, b""):
+            while True:
+                raw_line = await stream.readline()
+                if not raw_line:
+                    break
                 now = tmod.time()
                 if now - last_heartbeat >= 5:
                     last_heartbeat = now
@@ -264,34 +270,31 @@ class RAGAgent:
                     })
                 except Exception:
                     pass
-            pipe.close()
 
         try:
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+            # Use exec (no shell) to prevent shell injection
+            cmd_args = shlex.split(command)
+            process = await asyncio.create_subprocess_exec(
+                *cmd_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
             )
         except Exception as e:
             return f"Error starting command: {e}"
 
-        t_out = threading.Thread(target=_read_pipe, args=(process.stdout, stdout_lines, "stdout"), daemon=True)
-        t_err = threading.Thread(target=_read_pipe, args=(process.stderr, stderr_lines, "stderr"), daemon=True)
-        t_out.start()
-        t_err.start()
+        stdout_task = asyncio.create_task(_read_stream(process.stdout, stdout_lines, "stdout"))
+        stderr_task = asyncio.create_task(_read_stream(process.stderr, stderr_lines, "stderr"))
 
         timed_out = False
         try:
-            await asyncio.to_thread(process.wait, timeout=timeout)
-        except subprocess.TimeoutExpired:
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
             process.kill()
-            process.wait()
+            await process.wait()
             timed_out = True
 
-        t_out.join(timeout=2)
-        t_err.join(timeout=2)
+        await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task, return_exceptions=True), timeout=5)
 
         if timed_out:
             return f"Error: command timed out after {timeout}s"
@@ -441,6 +444,7 @@ class RAGAgent:
                 if cached is not None:
                     early_results[tc.id] = cached
                     self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
+                    self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": cached[:500]})
                     continue
 
                 self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})

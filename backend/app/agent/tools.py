@@ -102,7 +102,7 @@ def create_filesystem_tools() -> List[ToolDef]:
     _PARAM_DOCS: dict[str, dict[str, str]] = {
         "tool_ls": {"path": "Directory path to list (default: current directory)"},
         "tool_read_file": {"path": "File path to read", "offset": "Line number to start reading from (1-indexed, default: 1)", "limit": "Maximum number of lines to read (0 = all)"},
-        "tool_write_file": {"path": "File path to create", "content": "Text content to write into the file"},
+        "tool_write_file": {"path": "File path to create", "content": "Text content to write into the file", "overwrite": "If true, overwrite existing file (default: false)"},
         "tool_edit_file": {"path": "File path to edit", "old_string": "Text to search for and replace", "new_string": "Replacement text", "replace_all": "If true, replace ALL occurrences; if false, replace only the first (default: false)"},
         "tool_glob": {"pattern": "Glob pattern to match files (e.g. **/*.py)"},
         "tool_grep": {"pattern": "Regex pattern to search for", "include": "File glob pattern to restrict search (e.g. *.py)", "context": "Number of context lines before/after each match", "count_only": "If true, return only match counts per file", "files_only": "If true, return only file paths"},
@@ -190,7 +190,7 @@ def build_system_prompt_no_kb(
             "Built-in filesystem tools (for reading/writing/searching local files):\n"
             "   - tool_ls(path) - List directory contents\n"
             "   - tool_read_file(path, offset, limit) - Read file content\n"
-            "   - tool_write_file(path, content) - Create a new file\n"
+            "   - tool_write_file(path, content, overwrite) - Create a new file\n"
             "   - tool_edit_file(path, old_string, new_string, replace_all) - Edit a file\n"
             "   - tool_glob(pattern) - Find files matching a pattern\n"
             "   - tool_grep(pattern, include, context, count_only, files_only) - Search file contents\n"

@@ -4,6 +4,7 @@ from typing import Optional
 MODELSCOPE_MAP = {
     "all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
     "BAAI/bge-small-zh-v1.5": "BAAI/bge-small-zh-v1.5",
+    "cross-encoder/ms-marco-MiniLM-L-6-v2": "cross-encoder/ms-marco-MiniLM-L6-v2",
 }
 
 

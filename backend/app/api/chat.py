@@ -37,7 +37,10 @@ def _get_agent_semaphore() -> asyncio.Semaphore:
     return _agent_semaphore
 
 DB_PATH = Path(__file__).resolve().parents[2] / "data" / "conversations.db"
-MAX_HISTORY_TOKENS = 4000
+# Sliding window: keep up to 80K tokens of history before passing to Agent.
+# The Agent internally truncates to 1M tokens in graph.py, so this threshold
+# is just for DB storage efficiency, not for context management.
+MAX_HISTORY_TOKENS = 80_000
 
 _summarizer: HierarchicalSummarizationMiddleware | None = None
 _summarizer_model: str | None = None
@@ -147,14 +150,15 @@ def _save_conversation(conv_id: str, messages: list[dict], title: str | None = N
 
 
 def _truncate_history(history: list[dict], max_tokens: int = MAX_HISTORY_TOKENS) -> list[dict]:
-    """截断对话历史以控制token数量。"""
+    """截断对话历史以控制token数量。确保至少保留最近一条消息。"""
     if not history:
         return []
     total = 0
     truncated = []
+    # Always keep at least the last message
     for msg in reversed(history):
         tokens = estimate_tokens(msg.get("content", ""))
-        if total + tokens > max_tokens:
+        if total + tokens > max_tokens and truncated:
             truncated.append({"role": "system", "content": "[earlier history truncated]"})
             break
         total += tokens
@@ -194,8 +198,7 @@ async def chat(request: Request, body: ChatRequest):
             })
 
     try:
-        runner = TaskRunner(agent)
-        result = await runner.run(body.message, model=body.model, history=compressed, use_vector_db=body.use_vector_db, files=[f.model_dump() for f in body.files], conversation_id=conv_id)
+        result = await agent.invoke(body.message, model=body.model, history=compressed, use_vector_db=body.use_vector_db, files=[f.model_dump() for f in body.files])
     except Exception as e:
         logger.exception("chat invocation failed")
         raise HTTPException(status_code=500, detail="Internal server error")

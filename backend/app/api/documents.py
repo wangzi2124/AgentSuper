@@ -17,6 +17,9 @@ from app.models.schemas import (
 
 router = APIRouter()
 
+# Maximum upload file size: 100 MB
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024
+
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_document(request: Request, file: UploadFile = File(...)):
@@ -25,6 +28,12 @@ async def upload_document(request: Request, file: UploadFile = File(...)):
 
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
+
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large: {len(content)} bytes exceeds max {MAX_UPLOAD_SIZE} bytes (100 MB)"
+        )
 
     tm = request.app.state.task_manager
     task_id = tm.create(file.filename)

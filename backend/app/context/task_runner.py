@@ -1,13 +1,11 @@
-"""Task runner — persistent agent execution engine.
+"""Task runner — agent execution wrapper.
 
-Inspired by OpenCode's double-while-loop architecture:
-- Inner loop: LLM + tool calls until LLM stops requesting tools
-- Outer loop: check for user steer input or continuation
-- Compaction: compress old messages when context grows too large
-- Max steps: force summary when step limit is reached
-
-This module orchestrates multi-turn agent execution with state persistence,
-ensuring tasks run to completion without premature termination.
+Runs the LangGraph RAG pipeline (retrieve → rerank → generate) with
+task-state tracking and persistence. The tool-call loop is handled
+entirely inside graph.py:_generate, so this wrapper focuses on:
+- TaskState creation and lifecycle
+- Event queue plumbing for SSE streaming
+- Execution logging and statistics
 """
 
 import asyncio
@@ -18,95 +16,12 @@ from typing import Any, Optional
 
 from app.context.compaction import ContextCompactor
 from app.context.task_state import TaskState
-from app.context.token_counter import estimate_tokens, truncate_messages
-from app.context.tool_output import bound_tool_output
-from app.context.tool_dedup import ToolResultDedup
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Max steps before forced summary
-MAX_STEPS = 50
-
 # Compaction threshold
 COMPACTION_THRESHOLD = 80_000
-
-# --- Retry constants (inspired by OpenCode) ---
-RETRY_MAX_ATTEMPTS = 3
-RETRY_INITIAL_DELAY = 2.0  # seconds
-RETRY_BACKOFF_FACTOR = 2
-RETRY_MAX_DELAY = 30.0  # seconds
-
-
-def _is_retryable_error(exc: Exception) -> bool:
-    """Determine if an exception represents a transient, retryable error.
-
-    Retryable: 429 (rate limit), 5xx (server error), network timeout, connection errors.
-    Non-retryable: 401/403 (auth), context overflow, invalid prompt, etc.
-    """
-    exc_str = str(exc).lower()
-    exc_type = type(exc).__name__
-
-    # Rate limit errors (429)
-    if "ratelimit" in exc_type or "rate_limit" in exc_str or "429" in exc_str:
-        return True
-    if "too many requests" in exc_str or "rate limit" in exc_str:
-        return True
-
-    # Server errors (5xx)
-    if "internalserversrror" in exc_type or "500" in exc_str or "502" in exc_str or "503" in exc_str:
-        return True
-    if "server" in exc_str and ("error" in exc_str or "unavailable" in exc_str):
-        return True
-
-    # Overloaded / service unavailable
-    if "overloaded" in exc_str or "service_unavailable" in exc_str or "exhausted" in exc_str:
-        return True
-
-    # Network / timeout errors
-    if "timeout" in exc_str or "timed out" in exc_str:
-        return True
-    if "connection" in exc_str and ("error" in exc_str or "refused" in exc_str or "reset" in exc_str):
-        return True
-    if "network" in exc_str:
-        return True
-
-    # litellm specific
-    if "litellm" in exc_type.lower():
-        # litellm wraps provider errors; check for transient patterns
-        if any(code in exc_str for code in ("429", "500", "502", "503", "504")):
-            return True
-
-    return False
-
-
-def _compute_retry_delay(attempt: int, exc: Exception) -> float:
-    """Compute delay before next retry using exponential backoff.
-
-    Respects Retry-After header if present in the error message.
-    """
-    exc_str = str(exc).lower()
-
-    # Check for Retry-After header in error
-    import re
-    retry_after_match = re.search(r'retry[-_]?after[:\s]*(\d+)', exc_str)
-    if retry_after_match:
-        delay = float(retry_after_match.group(1))
-        return min(delay, RETRY_MAX_DELAY)
-
-    # Exponential backoff: 2s, 4s, 8s, ...
-    delay = RETRY_INITIAL_DELAY * (RETRY_BACKOFF_FACTOR ** (attempt - 1))
-    return min(delay, RETRY_MAX_DELAY)
-
-# Forced summary prompt (injected when max_steps is reached)
-MAX_STEPS_PROMPT = (
-    "You have reached the maximum number of steps for this task. "
-    "Please provide a comprehensive summary of:\n"
-    "1. What you have completed so far\n"
-    "2. What still needs to be done\n"
-    "3. Any important files, decisions, or context\n"
-    "Do NOT make any more tool calls. Respond only with text."
-)
 
 
 class TaskRunner:
@@ -183,203 +98,21 @@ class TaskRunner:
         event_queue: asyncio.Queue | None,
         task: TaskState,
     ) -> dict:
-        """Core execution loop — the double-while pattern.
+        """Core execution loop.
 
-        Inner: LLM call + tool execution until LLM stops calling tools
-        Outer: check for continuation (currently single-pass, extendable)
+        The LangGraph pipeline (retrieve → rerank → generate) already handles
+        the full tool-call loop internally (up to 50 rounds in _generate).
+        This method runs it once and returns the result — no continuation loop
+        needed, eliminating the redundant dual-agent-loop architecture.
         """
-        dedup = ToolResultDedup()
-        all_steps: list[dict] = []
-        all_sources: list[dict] = []
-
-        # --- Phase 1: Initial RAG pipeline (retrieve → rerank → generate) ---
-        # Run the LangGraph workflow for the first turn
         agent_state = await self._run_initial_rag(
             question, model, history, use_vector_db, files, event_queue, task
         )
 
-        # Extract results from the initial turn
-        messages = agent_state.get("_llm_messages", [])
-        answer = agent_state.get("answer", "")
-        all_sources = agent_state.get("sources", [])
-        all_steps = agent_state.get("steps", [])
-
-        # If the initial turn didn't produce messages, we're done
-        if not messages:
-            return {"answer": answer, "sources": all_sources, "steps": all_steps}
-
-        # --- Phase 2: Continue if LLM wants more tool calls ---
-        # Check if the last assistant message has unfinished tool calls
-        last_msg = messages[-1] if messages else None
-        needs_continuation = (
-            last_msg
-            and last_msg.get("role") == "assistant"
-            and last_msg.get("tool_calls")
-        )
-
-        # Also continue if answer is empty (LLM returned nothing useful)
-        if not answer.strip() and not needs_continuation:
-            needs_continuation = True
-
-        turn = 0
-        while needs_continuation and task.step < MAX_STEPS:
-            turn += 1
-            task.increment_step()
-
-            # Check for compaction
-            if self.compactor.should_compact(messages):
-                event = {"type": "step_start", "step_id": "compaction", "name": "压缩上下文", "status": "running"}
-                self._push_event(event_queue, event)
-                old_count = len(messages)
-                messages = await self.compactor.compact(messages)
-                task.record_compaction()
-                event = {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"}
-                self._push_event(event_queue, event)
-
-            # Build tool definitions
-            tool_defs = self.agent._build_tool_defs()
-
-            # Check if this is the last step — force text-only response
-            is_last_step = task.step >= MAX_STEPS - 1
-            if is_last_step:
-                logger.warning("Task %s: max steps (%d) reached, forcing summary", task.task_id, MAX_STEPS)
-                messages.append({"role": "user", "content": MAX_STEPS_PROMPT})
-
-            # Resolve model name
-            resolved_model = model or self.agent.model
-            if "/" not in resolved_model:
-                if self.agent.api_base and "deepseek" in self.agent.api_base:
-                    resolved_model = f"deepseek/{resolved_model}"
-                elif self.agent.api_base and "openai" in self.agent.api_base:
-                    resolved_model = f"openai/{resolved_model}"
-
-            # Truncate messages before LLM call
-            messages = truncate_messages(messages)
-
-            # LLM call with retry
-            response = None
-            last_exc = None
-            for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
-                try:
-                    response = await self.agent._llm_call(resolved_model, messages, tool_defs if not is_last_step else None)
-                    break
-                except Exception as e:
-                    last_exc = e
-                    if not _is_retryable_error(e) or attempt >= RETRY_MAX_ATTEMPTS:
-                        logger.error("Task %s: LLM call failed at step %d (attempt %d/%d): %s",
-                                     task.task_id, task.step, attempt, RETRY_MAX_ATTEMPTS, e)
-                        break
-                    delay = _compute_retry_delay(attempt, e)
-                    logger.warning("Task %s: LLM call failed at step %d (attempt %d/%d), retrying in %.1fs: %s",
-                                   task.task_id, task.step, attempt, RETRY_MAX_ATTEMPTS, delay, e)
-                    self._push_event(event_queue, {
-                        "type": "step_start", "step_id": "retry", "name": "重试中",
-                        "status": "running", "detail": f"第 {attempt} 次重试，{delay:.0f}s 后重试",
-                    })
-                    await asyncio.sleep(delay)
-                    self._push_event(event_queue, {
-                        "type": "step_end", "step_id": "retry", "name": "重试中",
-                        "status": "completed", "detail": f"正在重试（第 {attempt + 1} 次）",
-                    })
-
-            if response is None:
-                # All retries exhausted or non-retryable error
-                if last_exc:
-                    raise last_exc
-                break
-
-            msg = response.choices[0].message
-
-            # Record token usage
-            usage = getattr(response, "usage", None)
-            if usage:
-                pt = getattr(usage, "prompt_tokens", 0) or 0
-                ct = getattr(usage, "completion_tokens", 0) or 0
-                task.add_tokens(pt + ct)
-
-            # If no tool calls, we're done
-            if not msg.tool_calls:
-                answer = msg.content or answer
-                messages.append({"role": "assistant", "content": answer})
-                needs_continuation = False
-                break
-
-            # Execute tool calls
-            messages.append({
-                "role": "assistant",
-                "content": msg.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                    }
-                    for tc in msg.tool_calls
-                ],
-            })
-
-            tool_tasks = []
-            tool_metas = []
-            early_results: dict[str, str] = {}
-
-            for tc in msg.tool_calls:
-                tool_name = tc.function.name
-                try:
-                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                except json.JSONDecodeError as e:
-                    early_results[tc.id] = f"Error parsing arguments for '{tool_name}': {e}"
-                    continue
-
-                dedup_key = dedup.make_key(tool_name, args)
-                cached = dedup.get(dedup_key)
-                if cached is not None:
-                    early_results[tc.id] = cached
-                    self._push_event(event_queue, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
-                    continue
-
-                self._push_event(event_queue, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
-                tool_tasks.append(self.agent._execute_tool(tool_name, args))
-                tool_metas.append((tc.id, tool_name, dedup_key))
-
-            if tool_tasks:
-                tool_results = await asyncio.gather(*tool_tasks, return_exceptions=True)
-            else:
-                tool_results = []
-
-            for (tc_id, tool_name, dkey), result in zip(tool_metas, tool_results):
-                if isinstance(result, Exception):
-                    result = f"Error executing {tool_name}: {result}"
-                result_str = str(result)
-                dedup.set(dkey, result_str)
-                early_results[tc_id] = result_str
-                task.tool_calls_count += 1
-
-            for tc in msg.tool_calls:
-                tc_id = tc.id
-                result_str = early_results.get(tc_id, f"Error: no result for tool call {tc_id}")
-                bounded_result = bound_tool_output(result_str, tc.function.name)
-                tool_name = tc.function.name
-                self._push_event(event_queue, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": bounded_result,
-                })
-
-            # Truncate after tool results
-            messages = truncate_messages(messages)
-
-        # If we exited the loop with tool_calls still pending, force a final answer
-        if needs_continuation and task.step >= MAX_STEPS:
-            # Remove any trailing tool_calls from messages (incompatible with final answer)
-            while messages and messages[-1].get("role") in ("tool",):
-                messages.pop()
-
         return {
-            "answer": answer,
-            "sources": all_sources,
-            "steps": all_steps,
-            "_llm_messages": messages,
+            "answer": agent_state.get("answer", ""),
+            "sources": agent_state.get("sources", []),
+            "steps": agent_state.get("steps", []),
         }
 
     async def _run_initial_rag(
@@ -437,8 +170,6 @@ class TaskRunner:
         Since LangGraph doesn't expose the internal messages array,
         we rebuild it from the known state.
         """
-        from app.context.token_counter import estimate_tokens
-
         # Build system prompt
         if graph_result.get("context"):
             context_parts = [

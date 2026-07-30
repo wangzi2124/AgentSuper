@@ -12,7 +12,7 @@ _CN_QUOTE_LEFT = '\u201c'
 _CN_QUOTE_RIGHT = '\u201d'
 
 DIALOGUE_PREFIX = re.compile(
-    r'([\u4e00-\u9fff\w]{1,8})'
+    r'([\u4e00-\u9fff\w]{1,20})'
     r'(?:说|道|问|答|喊|叫|骂|嚷|叹|念|读|讲|哭|笑|唱|吼|吟|夸|赞|'
     r'批评|表扬|解释|回答|告诉|吩咐|命令|警告|威胁|劝|安慰|询问|补充|回应|宣布|声明|感叹)'
     r'[：:]\s*'
@@ -26,7 +26,7 @@ DIALOGUE_SUFFIX = re.compile(
     r'([^' + _CN_QUOTE_RIGHT + r'\u300d"\uff02]{2,200})'
     r'[' + _CN_QUOTE_RIGHT + r'\u300d"\uff02]'
     r'\s*'
-    r'([\u4e00-\u9fff\w]{1,8})'
+    r'([\u4e00-\u9fff\w]{1,20})'
     r'(?:说|道|问|答|喊|叫|骂|嚷|叹|念|读|讲|哭|笑|唱|吼|吟|夸|赞|解释|回答|告诉|回应|补充|声明)'
 )
 
@@ -38,9 +38,10 @@ PARENT_SUMMARY_LENGTH = 300
 class DocumentProcessor:
     """文档处理器，负责加载、分章、分块和对话提取。"""
 
-    def __init__(self, chunk_size: int = MAX_CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP):
+    def __init__(self, chunk_size: int = MAX_CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP, parent_summary_length: int = PARENT_SUMMARY_LENGTH):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.parent_summary_length = parent_summary_length
 
     def _read_text_file(self, file_path: str) -> str:
         """读取文本文件，自动尝试多种编码。"""
@@ -215,7 +216,7 @@ class DocumentProcessor:
                 meta["chapter_number"] = chapter_number
 
             # --- parent chunk: chapter title + summary ---
-            summary = content[:PARENT_SUMMARY_LENGTH]
+            summary = content[:self.parent_summary_length]
             parent_meta = {
                 **meta,
                 "is_parent": True,

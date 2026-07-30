@@ -2,12 +2,19 @@ import asyncio
 import json
 import logging
 import tempfile
+import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Max number of temporary approvals before evicting oldest
+_MAX_TEMP_APPROVALS = 1000
+# TTL for temporary approvals in seconds (default: 5 minutes)
+_TEMP_APPROVAL_TTL = 300
 
 _manager: Optional["PermissionManager"] = None
 
@@ -63,7 +70,7 @@ class PermissionManager:
         whitelist_dir = Path(whitelist_path) if whitelist_path else self.workspace.parent / "data"
         self.whitelist_path = whitelist_dir / "permissions.json" if whitelist_dir.is_dir() else whitelist_dir
         self._requests: dict[str, PermissionRequest] = {}
-        self._temp_approvals: set[str] = set()
+        self._temp_approvals: OrderedDict[str, float] = OrderedDict()
         self._load_whitelist()
 
     def _load_whitelist(self):
@@ -123,9 +130,16 @@ class PermissionManager:
         if cls == "temp":
             return "allow"
         p = Path(path_str).resolve()
+        now = time.time()
+        # Clean up expired temp approvals
+        expired = [k for k, t in self._temp_approvals.items() if now - t > _TEMP_APPROVAL_TTL]
+        for k in expired:
+            del self._temp_approvals[k]
         if str(p) in self._temp_approvals:
+            self._temp_approvals.move_to_end(str(p))
             return "allow"
         if str(p.parent) in self._temp_approvals:
+            self._temp_approvals.move_to_end(str(p.parent))
             return "allow"
         for allowed in self._whitelist:
             try:
@@ -136,10 +150,14 @@ class PermissionManager:
         return "ask"
 
     def add_temp_approval(self, path_str: str):
-        """临时授权指定路径（及其父目录），无需写入白名单。"""
+        """临时授权指定路径（及其父目录），TTL过期后自动失效。"""
         p = Path(path_str).resolve()
-        self._temp_approvals.add(str(p))
-        self._temp_approvals.add(str(p.parent))
+        now = time.time()
+        self._temp_approvals[str(p)] = now
+        self._temp_approvals[str(p.parent)] = now
+        # Evict oldest entries when over limit
+        while len(self._temp_approvals) > _MAX_TEMP_APPROVALS:
+            self._temp_approvals.popitem(last=False)
 
     def create_request(self, path: str, operation: str, tool_name: str = "", tool_args: Optional[dict] = None, session_id: str = "") -> PermissionRequest:
         """创建一条新的权限审批请求并返回。"""

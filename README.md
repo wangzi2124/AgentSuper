@@ -246,8 +246,10 @@ cd backend
 
 # （可选）创建虚拟环境
 python -m venv .venv
-.venv\Scripts\activate   # Windows
-# source .venv/bin/activate  # Linux/Mac
+# Windows
+.venv\Scripts\activate
+# Linux/Mac
+# source .venv/bin/activate
 
 # 安装依赖（推荐 uv，速度更快）
 pip install uv
@@ -275,9 +277,9 @@ npm install
 
 ### 启动后端
 
-```bash
+```powershell
 cd backend
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 - 启动后访问 `http://localhost:8000` 查看服务信息

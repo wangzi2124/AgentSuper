@@ -20,13 +20,19 @@ class Reranker:
         self.cache_dir = cache_dir or (self.backend_dir / "data" / "models")
         self.model = self._load_model(model_name)
 
+    MODEL_TO_MODELSCOPE_ID = {
+        "cross-encoder/ms-marco-MiniLM-L-6-v2": "cross-encoder/ms-marco-MiniLM-L6-v2",
+    }
+
     def _resolve_local_model(self, model_name: str) -> Optional[Path]:
         """查找本地缓存的重排序模型路径。"""
+        modelscope_id = self.MODEL_TO_MODELSCOPE_ID.get(model_name, model_name)
         candidates = [
             Path(model_name),
             self.backend_dir / model_name,
             self.cache_dir / model_name,
             self.cache_dir / model_name.replace("/", "_").replace(":", "_"),
+            self.cache_dir / modelscope_id,
         ]
         for candidate in candidates:
             if candidate.exists():
@@ -34,6 +40,10 @@ class Reranker:
 
         if self.cache_dir.exists():
             for sub in self.cache_dir.rglob(model_name):
+                if sub.is_dir():
+                    return sub.resolve()
+            # Also search for modelscope_id format
+            for sub in self.cache_dir.rglob(modelscope_id):
                 if sub.is_dir():
                     return sub.resolve()
         return None
