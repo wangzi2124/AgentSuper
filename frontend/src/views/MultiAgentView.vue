@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
-import AgentPanel from '../components/AgentPanel.vue'
+import MultiAgentResponse from '../components/MultiAgentResponse.vue'
 import ChatInput from '../components/ChatInput.vue'
 
 const route = useRoute()
@@ -95,17 +95,12 @@ function handleMessageDelete(messageId: string) { /* not implemented */ }
           <div class="chat-message" :class="[msg.role, { 'is-error': msg.isError }]">
             <div class="avatar">{{ msg.role === 'user' ? '👤' : (msg.isError ? '⚠️' : '🤖') }}</div>
             <div class="bubble">
-              <div v-if="msg.isError" class="error-banner">⚠️ {{ msg.content }}</div>
-
               <template v-if="msg.role === 'user'">
                 <div class="content">{{ msg.content }}</div>
               </template>
 
               <template v-else>
-                <div v-if="msg.agents.length > 0" class="agents-container">
-                  <AgentPanel v-for="a in msg.agents" :key="a.agent_id" :agent="a" />
-                </div>
-                <div v-if="msg.content && msg.agents.length === 0" class="content" v-text="msg.content"></div>
+                <MultiAgentResponse :message="msg" :routingStatus="agent.routingStatus" :isLast="idx === messages.length - 1" />
               </template>
 
               <div class="message-footer">
@@ -158,9 +153,7 @@ function handleMessageDelete(messageId: string) { /* not implemented */ }
 .bubble { max-width: 80%; padding: 12px 16px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); line-height: 1.6; font-size: 14px; }
 .user .bubble { background: var(--primary); color: white; border-color: var(--primary); }
 .content { white-space: pre-wrap; word-break: break-word; }
-.agents-container { display: flex; flex-direction: column; gap: 4px; }
 .is-error .bubble { background: rgba(239,68,68,0.06); border-color: rgba(239,68,68,0.3); }
-.error-banner { display: flex; align-items: center; gap: 6px; color: #ef4444; margin-bottom: 6px; font-size: 13px; font-weight: 500; }
 .message-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 11px; }
 .user .message-footer { border-top-color: rgba(255,255,255,0.2); }
 .time { color: var(--text-secondary); opacity: 0.7; }

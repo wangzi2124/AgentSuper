@@ -109,9 +109,15 @@ def _get_db() -> sqlite3.Connection:
                 conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
             except sqlite3.OperationalError:
                 pass
+    if "type" not in existing_cols:
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN type TEXT NOT NULL DEFAULT 'chat'")
+        except sqlite3.OperationalError:
+            pass
     now = datetime.now().isoformat()
     conn.execute("UPDATE conversations SET created_at = ? WHERE created_at = ''", (now,))
     conn.execute("UPDATE conversations SET updated_at = ? WHERE updated_at = ''", (now,))
+    conn.execute("UPDATE conversations SET type = 'chat' WHERE type IS NULL OR type = ''")
     conn.commit()
     return conn
 
@@ -156,22 +162,22 @@ def _generate_title(messages: list[dict]) -> str:
     return "新对话"
 
 
-def _save_conversation(conv_id: str, messages: list[dict], title: str | None = None, user_id: str = ""):
+def _save_conversation(conv_id: str, messages: list[dict], title: str | None = None, user_id: str = "", conv_type: str = "chat"):
     """保存对话历史到数据库。"""
     conn = _get_db()
     try:
         now = datetime.now().isoformat()
         if title is not None:
             conn.execute(
-                "INSERT INTO conversations (id, user_id, title, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(id) DO UPDATE SET title=excluded.title, messages=excluded.messages, updated_at=excluded.updated_at",
-                (conv_id, user_id, title, json.dumps(messages), now, now),
+                "INSERT INTO conversations (id, user_id, title, messages, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET title=excluded.title, messages=excluded.messages, type=excluded.type, updated_at=excluded.updated_at",
+                (conv_id, user_id, title, json.dumps(messages), conv_type, now, now),
             )
         else:
             conn.execute(
-                "INSERT INTO conversations (id, user_id, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
-                " ON CONFLICT(id) DO UPDATE SET messages=excluded.messages, updated_at=excluded.updated_at",
-                (conv_id, user_id, json.dumps(messages), now, now),
+                "INSERT INTO conversations (id, user_id, messages, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET messages=excluded.messages, type=excluded.type, updated_at=excluded.updated_at",
+                (conv_id, user_id, json.dumps(messages), conv_type, now, now),
             )
         conn.commit()
     finally:
@@ -321,7 +327,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     history.append({"id": str(uuid.uuid4()), "role": "user", "content": body.message})
     history.append({"id": str(uuid.uuid4()), "role": "assistant", "content": answer})
     title = _generate_title(history) if not body.conversation_id else None
-    _save_conversation(conv_id, history, title=title, user_id=user_id)
+    _save_conversation(conv_id, history, title=title, user_id=user_id, conv_type="multi-agent")
 
     return MultiAgentChatResponse(
         answer=answer,
@@ -439,6 +445,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         for s in sources
                     ],
                     "conversation_id": conv_id,
+                    "title": title,
                     "steps": steps,
                     "routed_to": routed_to,
                 })
@@ -472,7 +479,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                             if event.get("steps"):
                                 msg["steps"] = event["steps"]
                             break
-                    _save_conversation(conv_id, history, user_id=user_id)
+                    _save_conversation(conv_id, history, user_id=user_id, conv_type="multi-agent")
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event["type"] in ("done", "error"):
                     break
@@ -489,7 +496,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     history.append({"id": user_msg_id, "role": "user", "content": body.message})
     history.append({"id": assistant_msg_id, "role": "assistant", "content": ""})
     title = _generate_title(history) if not body.conversation_id else None
-    _save_conversation(conv_id, history, title=title, user_id=user_id)
+    _save_conversation(conv_id, history, title=title, user_id=user_id, conv_type="multi-agent")
 
     return StreamingResponse(
         event_generator(user_msg_id, assistant_msg_id),
@@ -693,16 +700,25 @@ async def stream_status():
 
 
 @router.get("/conversations")
-async def list_conversations(request: Request):
-    """获取当前用户的对话列表，按更新时间倒序排列。"""
+async def list_conversations(request: Request, conv_type: str | None = None):
+    """获取当前用户的对话列表，按更新时间倒序排列。
+    支持 ?conv_type=chat 或 ?conv_type=multi-agent 过滤。
+    """
     user_id = _get_user_id(request)
     conn = _get_db()
     try:
-        cursor = conn.execute(
-            "SELECT id, title, created_at, updated_at FROM conversations "
-            "WHERE user_id = ? OR user_id = '' ORDER BY updated_at DESC",
-            (user_id,)
-        )
+        if conv_type:
+            cursor = conn.execute(
+                "SELECT id, title, created_at, updated_at FROM conversations "
+                "WHERE (user_id = ? OR user_id = '') AND type = ? ORDER BY updated_at DESC",
+                (user_id, conv_type),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT id, title, created_at, updated_at FROM conversations "
+                "WHERE user_id = ? OR user_id = '' ORDER BY updated_at DESC",
+                (user_id,)
+            )
         rows = cursor.fetchall()
         return [
             {"id": r[0], "title": r[1] or "新对话", "created_at": r[2], "updated_at": r[3]}
@@ -713,17 +729,23 @@ async def list_conversations(request: Request):
 
 
 @router.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str, request: Request):
+async def get_conversation(conversation_id: str, request: Request, conv_type: str | None = None):
     """获取指定对话的详细信息和消息历史（只能查看自己的对话）。"""
     user_id = _get_user_id(request)
     if not _check_ownership(conversation_id, user_id):
         raise HTTPException(status_code=404, detail="Conversation not found")
     conn = _get_db()
     try:
-        row = conn.execute(
-            "SELECT title, messages, created_at, updated_at FROM conversations WHERE id = ?",
-            (conversation_id,),
-        ).fetchone()
+        if conv_type:
+            row = conn.execute(
+                "SELECT title, messages, created_at, updated_at FROM conversations WHERE id = ? AND type = ?",
+                (conversation_id, conv_type),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT title, messages, created_at, updated_at FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Conversation not found")
         return {

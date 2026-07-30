@@ -27,6 +27,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const sessions = ref<Record<string, SessionState>>({})
   const activeSessionId = ref<string | undefined>(undefined)
   const conversations = ref<ConversationMeta[]>([])
+  const routingStatus = ref<string>('')
 
   function getOrCreateSession(sessionId: string, title?: string): SessionState {
     if (!sessions.value[sessionId]) {
@@ -89,7 +90,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     } catch (e) { console.error('Failed to rename:', e) }
   }
 
-  function newChat() { activeSessionId.value = undefined }
+  function newChat() { routingStatus.value = ''; activeSessionId.value = undefined }
 
   async function send(text: string) {
     let sessionId = activeSessionId.value
@@ -124,7 +125,10 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       await sendMultiAgentStream(reqData, (event: MultiAgentSSEEvent) => {
         if (signal.aborted) return
 
-        if (event.type === 'agent_start') {
+        if (event.type === 'routing') {
+          routingStatus.value = event.detail || 'Routing...'
+        } else if (event.type === 'agent_start') {
+          routingStatus.value = ''
           agentsMap[event.agent_id] = {
             agent_id: event.agent_id,
             agent_name: event.agent_name || event.agent_id,
@@ -152,13 +156,16 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           const agent = agentsMap[event.agent_id]
           if (agent) { agent.status = 'failed'; agent.error = event.error; assistantMsg.agents = Object.values(agentsMap) }
         } else if (event.type === 'error') {
+          routingStatus.value = ''
           assistantMsg.isError = true
           assistantMsg.errorInfo = { type: event.retryable ? 'server_error' : 'unknown', message: event.error || 'Unknown error', retryable: !!event.retryable, statusCode: event.status_code }
           assistantMsg.content = `Error: ${event.error}`
         } else if (event.type === 'done') {
+          routingStatus.value = ''
           session.conversationId = event.conversation_id
           if (event.title) { session.conversationTitle = event.title; loadConversations() }
-          if (event.content) assistantMsg.content = event.content
+          if (event.answer) assistantMsg.content = event.answer
+          else if (event.content) assistantMsg.content = event.content
           assistantMsg.agents = Object.values(agentsMap)
         }
       }, signal)
@@ -170,6 +177,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         assistantMsg.agents = Object.values(agentsMap)
       }
     } finally {
+      routingStatus.value = ''
       session.loading = false
       if (session.abortController === controller) session.abortController = null
     }
@@ -204,7 +212,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   }
 
   return {
-    sessions, activeSessionId, conversations,
+    sessions, activeSessionId, conversations, routingStatus,
     messages, conversationId, conversationTitle, loading,
     send, cancel, clear, undoMessage, deleteConversation,
     loadConversations, loadConversation, newChat, renameConversation,

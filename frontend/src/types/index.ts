@@ -233,12 +233,14 @@ export interface AgentStreamData {
 }
 
 export interface MultiAgentSSEEvent {
-  type: 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'done' | 'error'
+  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'done' | 'error'
   agent_id: string
   agent_name?: string
   agent_avatar?: string
   step?: AgentStep
   content?: string
+  answer?: string
+  detail?: string
   error?: string
   conversation_id?: string
   title?: string

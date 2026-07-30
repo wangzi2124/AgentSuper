@@ -2,6 +2,7 @@ import type { MultiAgentChatRequest, MultiAgentSSEEvent, ChatError } from '../ty
 import { fetchWithTimeout, addAuthHeaders } from './fetch'
 
 const BASE = '/api/chat'
+const CONV_TYPE = 'multi-agent'
 
 export interface ConversationMeta {
   id: string
@@ -88,19 +89,19 @@ export async function sendMultiAgentStream(
 }
 
 export async function listConversations(): Promise<ConversationMeta[]> {
-  const res = await fetchWithTimeout(`${BASE}/conversations`, { method: 'GET' }, 0)
+  const res = await fetchWithTimeout(`${BASE}/conversations?conv_type=${CONV_TYPE}`, { method: 'GET' }, 0)
   if (!res.ok) throw new Error('Failed to list conversations')
   return res.json()
 }
 
 export async function getConversation(id: string): Promise<ConversationDetail> {
-  const res = await fetchWithTimeout(`${BASE}/conversations/${id}`, { method: 'GET' }, 0)
+  const res = await fetchWithTimeout(`${BASE}/conversations/${id}?conv_type=${CONV_TYPE}`, { method: 'GET' }, 0)
   if (!res.ok) throw new Error('Failed to get conversation')
   return res.json()
 }
 
 export async function renameConversation(id: string, title: string): Promise<void> {
-  const res = await fetchWithTimeout(`${BASE}/conversations/${id}`, {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${id}?conv_type=${CONV_TYPE}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title }),
@@ -109,6 +110,6 @@ export async function renameConversation(id: string, title: string): Promise<voi
 }
 
 export async function deleteConversation(id: string): Promise<void> {
-  const res = await fetchWithTimeout(`${BASE}/conversations/${id}`, { method: 'DELETE' }, 0)
+  const res = await fetchWithTimeout(`${BASE}/conversations/${id}?conv_type=${CONV_TYPE}`, { method: 'DELETE' }, 0)
   if (!res.ok) throw new Error('Failed to delete conversation')
 }
