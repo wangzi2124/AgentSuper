@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router'
 import ChatHistory from './ChatHistory.vue'
+import PermissionDialog from './PermissionDialog.vue'
 
-// 当前路由信息
 const route = useRoute()
 
-// 侧边栏导航菜单项
 const navItems = [
   { path: '/chat', label: 'Chat', icon: '💬' },
   { path: '/documents', label: 'Documents', icon: '📄' },
@@ -36,8 +35,17 @@ const navItems = [
       </router-link>
     </nav>
     <ChatHistory v-if="route.path === '/chat'" class="sidebar-history" />
-    <div class="sidebar-footer">
-      v0.1.0
+    <div class="sidebar-bottom">
+      <PermissionDialog />
+      <div class="sidebar-footer">
+        v0.1.0
+      </div>
     </div>
   </aside>
 </template>
+
+<style scoped>
+.sidebar-bottom {
+  flex-shrink: 0;
+}
+</style>
