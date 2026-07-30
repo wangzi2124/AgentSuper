@@ -303,7 +303,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
                 "conversation_id": conv_id,
                 "user_id": user_id,
             },
-            thread_id=conv_id,
+            thread_id=f"{conv_id}:nonstream:{uuid.uuid4().hex[:8]}",
         ),
         timeout=180.0,
     )
@@ -381,15 +381,14 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
         global _queue_counter
         if sem.locked():
             _queue_counter += 1
-            try:
-                await event_queue.put({
-                    "type": "queued",
-                    "queue_position": _queue_counter,
-                })
-            finally:
-                _queue_counter -= 1
+            pos = _queue_counter
+            await event_queue.put({
+                "type": "queued",
+                "queue_position": pos,
+            })
 
         async with sem:
+            _queue_counter = max(0, _queue_counter - 1)
             try:
                 # 先推送路由事件
                 await event_queue.put({
