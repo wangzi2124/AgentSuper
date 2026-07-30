@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { useRoute } from 'vue-router'
 import ChatHistory from './ChatHistory.vue'
+import MultiAgentChatHistory from './MultiAgentChatHistory.vue'
 import PermissionDialog from './PermissionDialog.vue'
 
 const route = useRoute()
 
 const navItems = [
   { path: '/chat', label: 'Chat', icon: '💬' },
+  { path: '/multi-agent', label: 'Multi-Agent', icon: '🤖' },
   { path: '/documents', label: 'Documents', icon: '📄' },
   { path: '/skills', label: 'Skills', icon: '🧠' },
   { path: '/plugins', label: 'Plugins', icon: '🔌' },
@@ -34,7 +36,8 @@ const navItems = [
         {{ item.label }}
       </router-link>
     </nav>
-    <ChatHistory v-if="route.path === '/chat'" class="sidebar-history" />
+    <ChatHistory v-if="route.path.startsWith('/chat')" class="sidebar-history" />
+    <MultiAgentChatHistory v-else-if="route.path.startsWith('/multi-agent')" class="sidebar-history" />
     <div class="sidebar-bottom">
       <PermissionDialog />
       <div class="sidebar-footer">

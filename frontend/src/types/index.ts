@@ -219,3 +219,46 @@ export interface Message {
   isError?: boolean
   errorInfo?: ChatError
 }
+
+// ===== Multi-Agent Types =====
+
+export interface AgentStreamData {
+  agent_id: string
+  agent_name: string
+  agent_avatar?: string
+  status: 'running' | 'completed' | 'failed'
+  content: string
+  steps: AgentStep[]
+  error?: string
+}
+
+export interface MultiAgentSSEEvent {
+  type: 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'done' | 'error'
+  agent_id: string
+  agent_name?: string
+  agent_avatar?: string
+  step?: AgentStep
+  content?: string
+  error?: string
+  conversation_id?: string
+  title?: string
+  retryable?: boolean
+  status_code?: number
+  error_type?: string
+  queue_position?: number
+}
+
+export interface MultiAgentChatRequest {
+  message: string
+  conversation_id?: string
+}
+
+export interface MultiAgentMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  agents: AgentStreamData[]
+  timestamp: Date
+  isError?: boolean
+  errorInfo?: ChatError
+}

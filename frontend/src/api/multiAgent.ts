@@ -1,0 +1,114 @@
+import type { MultiAgentChatRequest, MultiAgentSSEEvent, ChatError } from '../types'
+import { fetchWithTimeout, addAuthHeaders } from './fetch'
+
+const BASE = '/api/chat'
+
+export interface ConversationMeta {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ConversationDetail extends ConversationMeta {
+  messages: Array<{ id: string; role: string; content: string; agents?: any[] }>
+}
+
+function classifyNetworkError(err: unknown): ChatError {
+  const msg = err instanceof Error ? err.message : String(err)
+  const lower = msg.toLowerCase()
+  if (lower.includes('abort') || lower.includes('aborted')) return { type: 'unknown', message: msg, retryable: false }
+  if (lower.includes('timeout') || lower.includes('timed out')) return { type: 'timeout', message: msg, retryable: true }
+  if (lower.includes('rate limit') || lower.includes('429')) return { type: 'rate_limit', message: msg, retryable: true }
+  if (lower.includes('failed to fetch') || lower.includes('networkerror')) return { type: 'network', message: msg, retryable: true }
+  if (lower.includes('500') || lower.includes('502') || lower.includes('503')) return { type: 'server_error', message: msg, retryable: true }
+  return { type: 'unknown', message: msg, retryable: false }
+}
+
+export async function sendMultiAgentStream(
+  data: MultiAgentChatRequest,
+  onEvent: (event: MultiAgentSSEEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch(BASE + '/multi-agent/stream', {
+      method: 'POST',
+      headers: addAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(data),
+      signal,
+    })
+  } catch (err) {
+    throw classifyNetworkError(err)
+  }
+  if (!res.ok) {
+    const err = await res.text()
+    const error: ChatError = {
+      type: res.status === 429 ? 'rate_limit' : res.status >= 500 ? 'server_error' : 'unknown',
+      message: `Stream error: ${err || res.statusText}`,
+      retryable: res.status === 429 || res.status >= 500,
+      statusCode: res.status,
+    }
+    throw error
+  }
+  const reader = res.body?.getReader()
+  if (!reader) throw { type: 'network', message: 'No response body', retryable: true } as ChatError
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let receivedTerminalEvent = false
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        if (!receivedTerminalEvent) throw { type: 'network', message: 'Connection interrupted', retryable: true } as ChatError
+        break
+      }
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const event: MultiAgentSSEEvent = JSON.parse(line.slice(6))
+            if (event.type === 'done' || event.type === 'error') receivedTerminalEvent = true
+            onEvent(event)
+          } catch (e) {
+            if (e && typeof e === 'object' && 'retryable' in (e as any)) throw e
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if (err && typeof err === 'object' && 'retryable' in (err as any)) throw err
+    if (signal?.aborted) throw { type: 'unknown', message: 'Cancelled', retryable: false } as ChatError
+    throw classifyNetworkError(err)
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+export async function listConversations(): Promise<ConversationMeta[]> {
+  const res = await fetchWithTimeout(`${BASE}/conversations`, { method: 'GET' }, 0)
+  if (!res.ok) throw new Error('Failed to list conversations')
+  return res.json()
+}
+
+export async function getConversation(id: string): Promise<ConversationDetail> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${id}`, { method: 'GET' }, 0)
+  if (!res.ok) throw new Error('Failed to get conversation')
+  return res.json()
+}
+
+export async function renameConversation(id: string, title: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  }, 0)
+  if (!res.ok) throw new Error('Failed to rename conversation')
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${id}`, { method: 'DELETE' }, 0)
+  if (!res.ok) throw new Error('Failed to delete conversation')
+}

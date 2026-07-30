@@ -355,6 +355,30 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 
 ---
 
+## 用户身份认证
+
+所有 API 请求通过 `X-User-Id` 请求头标识用户身份，未携带时后端默认使用 `"anonymous"`。
+
+```javascript
+fetch("http://localhost:8000/api/chat/", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-User-Id": "user_xxx",  // ← 用户身份
+  },
+  body: JSON.stringify({ message: "你好" }),
+})
+```
+
+| 文件 | 作用 |
+|------|------|
+| `frontend/src/api/auth.ts` | `getUserId()`/`setUserId()` — 读写 localStorage，默认 `"anonymous"` |
+| `frontend/src/api/fetch.ts` | `addAuthHeaders()` 自动注入 `X-User-Id`；`fetchWithTimeout` 封装自动带认证头 |
+
+后端通过 `_get_user_id(request)` 统一提取，接入 JWT/OAuth 后只需修改该函数，前端接口不变。
+
+---
+
 ## API 接口
 
 | 方法 | 路径 | 说明 |

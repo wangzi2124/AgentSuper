@@ -24,6 +24,16 @@ const router = createRouter({
       component: () => import('../views/ChatView.vue'),
     },
     {
+      path: '/multi-agent',
+      name: 'MultiAgent',
+      component: () => import('../views/MultiAgentView.vue'),
+    },
+    {
+      path: '/multi-agent/:id',
+      name: 'MultiAgentConversation',
+      component: () => import('../views/MultiAgentView.vue'),
+    },
+    {
       path: '/documents',
       name: 'Documents',
       component: () => import('../views/DocumentsView.vue'),
