@@ -300,6 +300,168 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     )
 
 
+# ═══════════════════════════════════════════════════════════════
+#  多 Agent 流式聊天端点
+# ═══════════════════════════════════════════════════════════════
+
+@router.post("/multi-agent/stream")
+async def chat_multi_agent_stream(request: Request, body: ChatRequest):
+    """使用多 Agent 系统的流式聊天端点。
+
+    工作流程:
+      1. 通过 Supervisor 将请求路由到最合适的子 Agent
+      2. 流式返回各步骤事件（路由、检索、生成等）
+      3. 最终返回完整响应
+
+    SSE 事件类型:
+      - "routing":      正在路由到某个 Agent
+      - "step_start":   步骤开始（当子 Agent 支持时）
+      - "step_end":     步骤完成
+      - "done":         所有处理完成，包含最终回答
+      - "error":        处理出错
+    """
+    agent_bus: AgentBus = request.app.state.agent_bus
+
+    conv_id = body.conversation_id or str(uuid.uuid4())
+
+    if body.conversation_id:
+        raw = _load_conversation(conv_id)
+        if not raw and body.conversation_id:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        history = raw
+    else:
+        history = []
+
+    summarizer = _get_summarizer()
+    if summarizer:
+        compressed = await summarizer.apply(history)
+    else:
+        compressed = _truncate_history(history)
+
+    event_queue: asyncio.Queue = asyncio.Queue()
+    sem = _get_agent_semaphore()
+
+    async def run_multi_agent():
+        """通过 Supervisor 运行多 Agent 系统，结果推送到 event_queue。"""
+        global _queue_counter
+        if sem.locked():
+            _queue_counter += 1
+            try:
+                await event_queue.put({
+                    "type": "queued",
+                    "queue_position": _queue_counter,
+                })
+            finally:
+                _queue_counter -= 1
+
+        async with sem:
+            try:
+                # 先推送路由事件
+                await event_queue.put({
+                    "type": "routing",
+                    "detail": "正在分析问题并选择最合适的 Agent...",
+                })
+
+                # 通过 Supervisor 发送请求
+                reply = await agent_bus.send_and_wait(
+                    AgentMessage(
+                        source="user",
+                        target="supervisor",
+                        type="request",
+                        action="chat",
+                        payload={
+                            "question": body.message,
+                            "model": body.model,
+                            "history": compressed,
+                            "use_vector_db": body.use_vector_db,
+                            "files": [f.model_dump() for f in body.files],
+                            "conversation_id": conv_id,
+                        },
+                        thread_id=f"{conv_id}:stream:{uuid.uuid4().hex[:8]}",
+                    ),
+                    timeout=180.0,
+                )
+
+                if reply.type == "error":
+                    await event_queue.put({
+                        "type": "error",
+                        "detail": reply.payload.get("error", "Agent error"),
+                    })
+                    return
+
+                payload = reply.payload
+                answer = payload.get("answer", "")
+                sources = payload.get("sources", [])
+                steps = payload.get("steps", [])
+                routed_to = payload.get("routed_to")
+
+                await event_queue.put({
+                    "type": "done",
+                    "answer": answer,
+                    "sources": [
+                        {"document_id": s["document_id"], "content": s["content"], "score": s["score"]}
+                        if isinstance(s, dict) else s
+                        for s in sources
+                    ],
+                    "conversation_id": conv_id,
+                    "steps": steps,
+                    "routed_to": routed_to,
+                })
+
+            except asyncio.TimeoutError:
+                await event_queue.put({
+                    "type": "error",
+                    "detail": "请求超时，请重试",
+                })
+            except Exception as e:
+                logger.exception("multi-agent stream invocation failed")
+                await event_queue.put({
+                    "type": "error",
+                    "detail": str(e),
+                })
+
+    async def event_generator(user_msg_id: str, assistant_msg_id: str):
+        """生成 SSE 事件流。"""
+        task = asyncio.create_task(run_multi_agent())
+        try:
+            while True:
+                event = await event_queue.get()
+                if event["type"] == "done":
+                    event["user_msg_id"] = user_msg_id
+                    event["assistant_msg_id"] = assistant_msg_id
+                    for msg in history:
+                        if msg["id"] == assistant_msg_id:
+                            msg["content"] = event["answer"]
+                            if event.get("sources"):
+                                msg["sources"] = event["sources"]
+                            if event.get("steps"):
+                                msg["steps"] = event["steps"]
+                            break
+                    _save_conversation(conv_id, history)
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                if event["type"] in ("done", "error"):
+                    break
+            await task
+        finally:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    user_msg_id = str(uuid.uuid4())
+    assistant_msg_id = str(uuid.uuid4())
+    history.append({"id": user_msg_id, "role": "user", "content": body.message})
+    history.append({"id": assistant_msg_id, "role": "assistant", "content": ""})
+    title = _generate_title(history) if not body.conversation_id else None
+    _save_conversation(conv_id, history, title=title)
+
+    return StreamingResponse(
+        event_generator(user_msg_id, assistant_msg_id),
+        media_type="text/event-stream",
+    )
+
+
 @router.post("/stream")
 async def chat_stream(request: Request, body: ChatRequest):
     """处理流式聊天请求，返回SSE事件流。"""

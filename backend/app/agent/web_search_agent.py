@@ -1,0 +1,276 @@
+"""WebSearchAgent — 网络搜索 Agent。
+
+处理需要实时/外部信息的查询。使用内置的互联网搜索能力（通过插件接口）
+获取最新信息，然后使用 LLM 组织回答。
+
+支持的动作:
+  - "chat":     搜索 + LLM 生成回答
+  - "search":   仅搜索（返回原始结果）
+"""
+
+import asyncio
+import logging
+import json
+from typing import AsyncIterator, Optional
+
+import litellm
+
+from app.agent.base import BaseAgent, AgentMessage
+from app.agent.memory import MemoryManager
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+_SEARCH_ENGINES = {
+    "baidu": "百度 (适合中文内容)",
+    "duckduckgo": "DuckDuckGo (国际内容，无需API Key)",
+    "tavily": "Tavily (国际内容，需 API Key)",
+}
+
+
+class WebSearchAgent(BaseAgent):
+    """网络搜索 Agent。
+
+    使用互联网搜索获取最新信息，结合 LLM 生成回答。
+    适合处理需要实时数据、最新新闻、或不在知识库中的问题。
+    """
+
+    def __init__(
+        self,
+        memory: Optional[MemoryManager] = None,
+        agent_id: str = "web_search",
+    ):
+        self._id = agent_id
+        self._memory = memory
+        self._model = settings.llm_model
+        self._api_key = settings.llm_api_key
+        self._api_base = settings.llm_api_base
+
+    @property
+    def agent_id(self) -> str:
+        return self._id
+
+    async def handle_message(self, msg: AgentMessage) -> AsyncIterator[AgentMessage]:
+        if msg.type != "request":
+            return
+
+        action = msg.action
+        payload = msg.payload
+
+        try:
+            if action == "chat":
+                # 搜索 + LLM 合成回答
+                question = payload.get("question", "")
+                max_results = payload.get("max_results", 5)
+
+                # 步骤 1: 搜索
+                search_results = await self._search_web(question, max_results)
+
+                # 步骤 2: 检查记忆中有无相关上下文
+                memory_context = ""
+                if self._memory:
+                    previous_searches = await self._memory.get("last_search_results")
+                    if previous_searches:
+                        memory_context = f"\n[之前的搜索结果]:\n{previous_searches[:500]}\n"
+
+                # 步骤 3: LLM 合成
+                answer = await self._synthesize(question, search_results, memory_context)
+
+                # 步骤 4: 存入记忆
+                if self._memory:
+                    await self._memory.set(
+                        "last_search_results",
+                        f"Q: {question}\nA: {answer[:300]}...",
+                        ttl=120,
+                        tags=["web_search"],
+                    )
+
+                yield AgentMessage(
+                    source=self._id, target=msg.source,
+                    type="response", action="chat",
+                    payload={
+                        "answer": answer,
+                        "sources": [
+                            {
+                                "document_id": r.get("url", ""),
+                                "content": r.get("snippet", ""),
+                                "score": 1.0 - (i * 0.05),
+                            }
+                            for i, r in enumerate(search_results[:5])
+                        ] if search_results else [],
+                        "steps": [],
+                    },
+                    thread_id=msg.thread_id,
+                )
+
+            elif action == "search":
+                # 仅搜索
+                question = payload.get("query", "")
+                max_results = payload.get("max_results", 5)
+                results = await self._search_web(question, max_results)
+
+                yield AgentMessage(
+                    source=self._id, target=msg.source,
+                    type="response", action="search",
+                    payload={
+                        "results": results,
+                        "answer": "\n\n".join(
+                            f"{i+1}. [{r.get('title','')}]({r.get('url','')})\n   {r.get('snippet','')}"
+                            for i, r in enumerate(results[:10])
+                        ),
+                    },
+                    thread_id=msg.thread_id,
+                )
+
+            else:
+                yield AgentMessage(
+                    source=self._id, target=msg.source,
+                    type="error", action=action,
+                    payload={"error": f"Unknown action: {action}"},
+                    thread_id=msg.thread_id,
+                )
+
+        except Exception as e:
+            logger.exception("WebSearchAgent error on action=%s", action)
+            yield AgentMessage(
+                source=self._id, target=msg.source,
+                type="error", action=action,
+                payload={"error": str(e)},
+                thread_id=msg.thread_id,
+            )
+
+    async def _search_web(self, query: str, max_results: int = 5) -> list[dict]:
+        """使用插件系统搜索网络。
+
+        优先使用 Tavily（如果有 API Key），否则回退到 DuckDuckGo。
+        """
+        # 尝试 Tavily
+        import os
+        tavily_key = os.environ.get("TAVILY_API_KEY", "")
+        if tavily_key and tavily_key not in ("", "your-tavily-api-key"):
+            try:
+                return await self._search_tavily(query, max_results, tavily_key)
+            except Exception as e:
+                logger.warning("Tavily search failed, falling back to DuckDuckGo: %s", e)
+
+        # 回退到 DuckDuckGo
+        try:
+            return await self._search_duckduckgo(query, max_results)
+        except Exception as e:
+            logger.warning("DuckDuckGo search failed: %s", e)
+            return []
+
+    async def _search_tavily(self, query: str, max_results: int, api_key: str) -> list[dict]:
+        """使用 Tavily API 搜索。"""
+        import aiohttp
+
+        url = "https://api.tavily.com/search"
+        payload = {
+            "api_key": api_key,
+            "query": query,
+            "max_results": max_results,
+            "search_depth": "basic",
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+                results = data.get("results", [])
+                logger.info("Tavily returned %d results for '%s'", len(results), query[:50])
+                return [
+                    {
+                        "title": r.get("title", ""),
+                        "url": r.get("url", ""),
+                        "snippet": r.get("content", ""),
+                    }
+                    for r in results
+                ]
+
+    async def _search_duckduckgo(self, query: str, max_results: int) -> list[dict]:
+        """使用 DuckDuckGo 搜索。"""
+        import aiohttp
+        from urllib.parse import quote
+
+        url = f"https://api.duckduckgo.com/?q={quote(query)}&format=json&no_html=1"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json()
+                results = []
+
+                # Abstract
+                abstract = data.get("AbstractText", "")
+                abstract_source = data.get("AbstractSource", "")
+                if abstract:
+                    results.append({
+                        "title": abstract_source or "Abstract",
+                        "url": data.get("AbstractURL", ""),
+                        "snippet": abstract,
+                    })
+
+                # Related topics
+                for topic in data.get("RelatedTopics", []):
+                    if "Text" in topic:
+                        results.append({
+                            "title": topic.get("Text", "")[:80],
+                            "url": topic.get("FirstURL", ""),
+                            "snippet": topic.get("Text", ""),
+                        })
+                        if len(results) >= max_results:
+                            break
+
+                logger.info("DuckDuckGo returned %d results for '%s'", len(results), query[:50])
+                return results[:max_results]
+
+    async def _synthesize(
+        self,
+        question: str,
+        search_results: list[dict],
+        memory_context: str = "",
+    ) -> str:
+        """使用 LLM 将搜索结果合成为回答。"""
+        if not search_results:
+            return "抱歉，我没有找到相关的信息。"
+
+        sources_text = "\n\n".join(
+            f"[来源 {i+1}] {r.get('title','')}\n{r.get('snippet','')}\nURL: {r.get('url','')}"
+            for i, r in enumerate(search_results[:8])
+        )
+
+        system_prompt = """你是一个网络搜索助手。根据以下搜索结果，用中文回答用户的问题。
+
+要求:
+- 用自然的语言组织信息，不要直接罗列搜索结果
+- 在回答末尾列出信息来源编号
+- 如果搜索结果不足，诚实说明
+- 使用中文回答"""
+
+        user_prompt = f"""用户问题: {question}
+
+{memory_context}
+
+搜索结果:
+{sources_text}
+
+请基于以上信息回答用户问题。"""
+
+        try:
+            response = await litellm.acompletion(
+                model=self._model,
+                api_key=self._api_key,
+                api_base=self._api_base,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=1024,
+                temperature=0.3,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error("LLM synthesis failed: %s", e)
+            # 回退：直接返回搜索结果摘要
+            lines = [f"搜索结果:"] + [
+                f"- {r.get('title','')}: {r.get('snippet','')[:100]}"
+                for r in search_results[:5]
+            ]
+            return "\n".join(lines)

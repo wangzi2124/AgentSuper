@@ -20,7 +20,10 @@ from app.storage.file_store import FileStore
 
 # ── 多 Agent 系统 ──
 from app.agent.bus import AgentBus
+from app.agent.memory import MemoryManager
 from app.agent.rag_wrapper import RAGAgentWrapper
+from app.agent.web_search_agent import WebSearchAgent
+from app.agent.code_agent import CodeAgent
 from app.agent.supervisor import SupervisorAgent
 
 logger = logging.getLogger(__name__)
@@ -98,15 +101,26 @@ def _do_init(app):
 
     # ── 初始化多 Agent 系统（bus 创建 + 注册，但 start_all 在异步上下文中调用）──
     agent_bus = AgentBus()
+    shared_memory = MemoryManager(default_ttl=300)  # 共享记忆，5 分钟过期
+
     rag_wrapper = RAGAgentWrapper(agent, agent_id="rag")
     agent_bus.register(rag_wrapper)
-    supervisor = SupervisorAgent(agent_bus)
+
+    web_search = WebSearchAgent(memory=shared_memory, agent_id="web_search")
+    agent_bus.register(web_search)
+
+    code_agent = CodeAgent(memory=shared_memory, agent_id="code")
+    agent_bus.register(code_agent)
+
+    supervisor = SupervisorAgent(agent_bus, memory=shared_memory)
     agent_bus.register(supervisor)
+
     logger.info("Multi-agent system initialized: %s", agent_bus.list_agents())
 
     app.state.vector_store = vs
     app.state.embeddings = emb
     app.state.agent_bus = agent_bus
+    app.state.shared_memory = shared_memory
     app.state.retriever = retriever
     app.state.bm25_index = bm25
     app.state.chapter_store = chapter_store
