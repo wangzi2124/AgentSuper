@@ -13,6 +13,7 @@
 
 import asyncio
 import logging
+import time as tmod
 import uuid
 from typing import AsyncIterator, Optional
 
@@ -22,6 +23,7 @@ from app.agent.base import BaseAgent, AgentMessage
 from app.agent.bus import AgentBus
 from app.agent.memory import MemoryManager
 from app.config import settings
+from app.monitor import record_model_call
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +233,7 @@ class SupervisorAgent(BaseAgent):
 
     async def _llm_decompose(self, question: str, available: list[str]) -> list[dict]:
         """使用 LLM 判断如何分解任务。"""
+        start = tmod.time()
         try:
             response = await litellm.acompletion(
                 model=self._model,
@@ -243,6 +246,11 @@ class SupervisorAgent(BaseAgent):
                 max_tokens=512,
                 temperature=0.1,
             )
+            dur = (tmod.time() - start) * 1000
+            usage = getattr(response, "usage", None)
+            pt = getattr(usage, "prompt_tokens", 0) if usage else 0
+            ct = getattr(usage, "completion_tokens", 0) if usage else 0
+            record_model_call(self._model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
 
             text = response.choices[0].message.content.strip()
             # 移除可能的 markdown 代码块标记
@@ -400,6 +408,7 @@ class SupervisorAgent(BaseAgent):
         context = "\n\n---\n\n".join(segments)
 
         try:
+            start = tmod.time()
             response = await litellm.acompletion(
                 model=self._model,
                 api_key=self._api_key,
@@ -411,6 +420,11 @@ class SupervisorAgent(BaseAgent):
                 max_tokens=2048,
                 temperature=0.3,
             )
+            dur = (tmod.time() - start) * 1000
+            usage = getattr(response, "usage", None)
+            pt = getattr(usage, "prompt_tokens", 0) if usage else 0
+            ct = getattr(usage, "completion_tokens", 0) if usage else 0
+            record_model_call(self._model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
             return response.choices[0].message.content.strip()
         except Exception as e:
             logger.error("Synthesis LLM call failed: %s", e)

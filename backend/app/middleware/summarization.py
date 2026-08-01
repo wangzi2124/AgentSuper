@@ -1,9 +1,13 @@
+import hashlib
+import json
 import logging
+import time as tmod
 from typing import Any
 
 import litellm
 
 from app.context.token_counter import estimate_tokens, estimate_tokens_messages
+from app.monitor import record_model_call
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +30,25 @@ def _split_into_chunks(messages: list[dict], pairs_per_chunk: int = 10) -> list[
     return chunks
 
 
+def _chunk_cache_key(messages: list[dict]) -> str:
+    """生成分块摘要的缓存键（基于 role+content 的规范化 JSON）。"""
+    normalized = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if isinstance(content, list):
+            text_parts = [
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            content = " ".join(text_parts)
+        normalized.append({"role": role, "content": content})
+    raw = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
 class HierarchicalSummarizationMiddleware:
     """Hierarchical conversation summarization middleware.
 
@@ -33,6 +56,11 @@ class HierarchicalSummarizationMiddleware:
     chunks, each chunk is summarized independently, and the summaries are
     hierarchically merged until they fit within the budget. Recent messages
     are kept intact.
+
+    优化点（相对旧版）：
+    - 分块摘要按内容哈希缓存：长对话的旧分块跨请求不变，命中缓存后不再重复调用 LLM
+    - 超长分块截断（保留头部 + 尾部），避免单次摘要请求塞入数万 token
+    - 每次摘要 LLM 调用都写入本地监控统计
 
     Signature:
         HierarchicalSummarizationMiddleware(
@@ -51,6 +79,7 @@ class HierarchicalSummarizationMiddleware:
         chunk_pairs: int = 10,
         api_key: str | None = None,
         api_base: str | None = None,
+        cache_size: int = 200,
     ):
         """初始化分层摘要中间件，配置触发条件、保留策略和LLM参数。"""
         self.model = model
@@ -59,6 +88,19 @@ class HierarchicalSummarizationMiddleware:
         self.chunk_pairs = chunk_pairs
         self.api_key = api_key
         self.api_base = api_base
+        self._cache: dict[str, str] = {}
+        self._cache_size = cache_size
+
+    def _cache_get(self, key: str):
+        return self._cache.get(key)
+
+    def _cache_set(self, key: str, value: str):
+        if len(self._cache) >= self._cache_size:
+            # 简单淘汰：清掉一半最旧的
+            keys = list(self._cache.keys())
+            for k in keys[: len(keys) // 2]:
+                self._cache.pop(k, None)
+        self._cache[key] = value
 
     async def apply(self, history: list[dict]) -> list[dict]:
         """对对话历史执行分层摘要压缩，超出触发阈值时压缩旧消息并保留最近消息。"""
@@ -109,14 +151,34 @@ class HierarchicalSummarizationMiddleware:
         return await self._hierarchical_summarize(summary_messages, depth + 1)
 
     async def _summarize(self, messages: list[dict]) -> str:
-        """调用LLM对一批消息生成简洁摘要，保留关键事实和决策。"""
+        """调用LLM对一批消息生成简洁摘要，保留关键事实和决策。
+
+        带内容哈希缓存：相同分块（跨请求不变的旧历史）直接命中缓存，
+        不再重复调用 LLM。
+        """
+        cache_key = _chunk_cache_key(messages)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            logger.debug("summarization cache hit (chunk=%d msgs)", len(messages))
+            return cached
+
         text = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
+
+        # 超长分块截断：保留头部（目标）与尾部（最近进展），避免单次请求塞入数万 token
+        max_input_tokens = 12_000
+        if estimate_tokens(text) > max_input_tokens:
+            chars = len(text)
+            head = text[: chars // 3]
+            tail = text[chars - (chars * 2) // 3:]
+            text = f"{head}\n\n... [middle portion omitted] ...\n\n{tail}"
+
         prompt = (
             "Condense the following conversation into a concise summary "
             "that preserves all key facts, decisions, and context. "
             "Write in the same language as the conversation.\n\n"
             f"{text}"
         )
+        start = tmod.time()
         try:
             kwargs = {
                 "model": self.model,
@@ -130,8 +192,18 @@ class HierarchicalSummarizationMiddleware:
             if self.api_base:
                 kwargs["api_base"] = self.api_base
             resp = await litellm.acompletion(**kwargs)
-            return resp.choices[0].message.content or ""
+            dur = (tmod.time() - start) * 1000
+            usage = getattr(resp, "usage", None)
+            pt = getattr(usage, "prompt_tokens", 0) if usage else 0
+            ct = getattr(usage, "completion_tokens", 0) if usage else 0
+            record_model_call(self.model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
+            summary = resp.choices[0].message.content or ""
+            if summary:
+                self._cache_set(cache_key, summary)
+            return summary
         except Exception as e:
+            dur = (tmod.time() - start) * 1000
+            record_model_call(self.model, duration_ms=dur)
             logger.warning("summarization failed: %s", e)
             return ""
 

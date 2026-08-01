@@ -1,9 +1,16 @@
 """
 System monitoring: request logging, model call tracking, usage stats.
+
+Stats are persisted to data/monitor_stats.json so that restarts do not lose
+accumulated usage data (the model platform bill is the source of truth, but
+this gives local visibility into every LLM call, including summarization,
+compaction, supervisor decompose/synthesize, and sub-agent calls).
 """
+import json
 import time
 import logging
 from collections import defaultdict
+from pathlib import Path
 from threading import Lock
 
 logger = logging.getLogger(__name__)
@@ -21,6 +28,43 @@ _stats = {
     "tool_rounds_total": 0,
 }
 
+_STATS_FILE = Path(__file__).resolve().parents[1] / "data" / "monitor_stats.json"
+
+
+def _load_persisted():
+    """从磁盘加载历史统计（若存在）。"""
+    global _stats
+    try:
+        if _STATS_FILE.exists():
+            with open(_STATS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for key in ("requests_by_path", "requests_by_status", "model_calls_by_model"):
+                if key in data:
+                    data[key] = defaultdict(int, data[key])
+            _stats.update(data)
+            logger.info("Loaded persisted monitor stats from %s", _STATS_FILE)
+    except Exception as e:
+        logger.warning("Failed to load persisted monitor stats: %s", e)
+
+
+def _save_persisted():
+    """将当前统计写入磁盘。"""
+    try:
+        _STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        snapshot = {
+            k: (dict(v) if isinstance(v, defaultdict) else v)
+            for k, v in _stats.items()
+        }
+        tmp = _STATS_FILE.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+        tmp.replace(_STATS_FILE)
+    except Exception as e:
+        logger.warning("Failed to persist monitor stats: %s", e)
+
+
+_load_persisted()
+
 
 def record_request(method: str, path: str, status: int, duration_ms: float):
     """记录一次 HTTP 请求的统计信息（路径、状态码、耗时）。"""
@@ -28,6 +72,7 @@ def record_request(method: str, path: str, status: int, duration_ms: float):
         _stats["requests_total"] += 1
         _stats["requests_by_path"][f"{method} {path}"] += 1
         _stats["requests_by_status"][status] += 1
+    _save_persisted()
 
 
 def record_model_call(
@@ -45,6 +90,7 @@ def record_model_call(
         _stats["total_completion_tokens"] += completion_tokens
         _stats["total_duration_ms"] += duration_ms
         _stats["tool_rounds_total"] += tool_rounds
+    _save_persisted()
 
 
 def get_stats() -> dict:
@@ -68,6 +114,27 @@ def get_stats() -> dict:
                 "avg_tool_rounds": round(_stats["tool_rounds_total"] / calls, 1) if calls else 0,
             },
         }
+
+
+def reset_stats():
+    """清空统计并删除持久化文件（用于调试）。"""
+    global _stats
+    with _stats_lock:
+        _stats = {
+            "requests_total": 0,
+            "requests_by_path": defaultdict(int),
+            "requests_by_status": defaultdict(int),
+            "model_calls_total": 0,
+            "model_calls_by_model": defaultdict(int),
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_duration_ms": 0,
+            "tool_rounds_total": 0,
+        }
+    try:
+        _STATS_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 class RequestLogMiddleware:

@@ -13,11 +13,13 @@ Compaction produces a structured summary with:
 """
 
 import logging
+import time as tmod
 from typing import Optional
 
 import litellm
 
 from app.context.token_counter import estimate_tokens, estimate_tokens_messages
+from app.monitor import record_model_call
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +167,13 @@ class ContextCompactor:
             if self.api_base:
                 kwargs["api_base"] = self.api_base
 
+            start = tmod.time()
             resp = await litellm.acompletion(**kwargs)
+            dur = (tmod.time() - start) * 1000
+            usage = getattr(resp, "usage", None)
+            pt = getattr(usage, "prompt_tokens", 0) if usage else 0
+            ct = getattr(usage, "completion_tokens", 0) if usage else 0
+            record_model_call(self.model or "compaction", prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
             return resp.choices[0].message.content or ""
         except Exception as e:
             logger.warning("Compaction LLM call failed: %s", e)

@@ -16,6 +16,7 @@
 
 import asyncio
 import logging
+import time as tmod
 from typing import AsyncIterator, Optional
 
 import litellm
@@ -23,6 +24,7 @@ import litellm
 from app.agent.base import BaseAgent, AgentMessage
 from app.agent.memory import MemoryManager
 from app.config import settings
+from app.monitor import record_model_call
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +188,7 @@ class CodeAgent(BaseAgent):
 
     async def _ask_llm(self, system_prompt: str, user_message: str) -> str:
         """调用 LLM 生成回答。"""
+        start = tmod.time()
         response = await litellm.acompletion(
             model=self._model,
             api_key=self._api_key,
@@ -197,4 +200,9 @@ class CodeAgent(BaseAgent):
             max_tokens=2048,
             temperature=0.3,
         )
+        dur = (tmod.time() - start) * 1000
+        usage = getattr(response, "usage", None)
+        pt = getattr(usage, "prompt_tokens", 0) if usage else 0
+        ct = getattr(usage, "completion_tokens", 0) if usage else 0
+        record_model_call(self._model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
         return response.choices[0].message.content.strip()

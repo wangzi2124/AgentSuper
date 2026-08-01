@@ -14,7 +14,9 @@ from app.context.token_counter import estimate_tokens, truncate_messages as _tru
 from app.context.tool_output import bound_tool_output
 from app.context.tool_dedup import ToolResultDedup
 
-MAX_CONTEXT_TOKENS = 1_000_000  # Leave buffer below model limit
+# 每次 LLM 调用允许的最大上下文 token（system + history + 当前问题）
+# 可通过 .env 的 MAX_CONTEXT_TOKENS 覆盖，见 app/config.py settings.max_context_tokens
+MAX_CONTEXT_TOKENS = 24_000
 
 import litellm
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
@@ -397,12 +399,12 @@ class RAGAgent:
             elif self.api_base and "openai" in self.api_base:
                 model = f"openai/{model}"
 
-        messages = _truncate_messages(messages)
+        messages = _truncate_messages(messages, max_tokens=settings.max_context_tokens)
 
         response = await self._llm_call(model, messages, tool_defs)
         msg = response.choices[0].message
 
-        max_tool_rounds = 50
+        max_tool_rounds = settings.max_tool_rounds  # 每轮 = 一次完整 LLM 调用，限制可大幅省 token
         rounds = 0
         while msg.tool_calls and rounds < max_tool_rounds:
             rounds += 1
@@ -475,7 +477,7 @@ class RAGAgent:
                     "content": bounded_result,
                 })
 
-            messages = _truncate_messages(messages)
+            messages = _truncate_messages(messages, max_tokens=settings.max_context_tokens)
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
 
@@ -520,7 +522,7 @@ class RAGAgent:
                 bounded_result = bound_tool_output(result_str, tool_name)
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tc_id, "content": bounded_result})
-            messages = _truncate_messages(messages)
+            messages = _truncate_messages(messages, max_tokens=settings.max_context_tokens)
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
         if not (msg.content or "").strip():

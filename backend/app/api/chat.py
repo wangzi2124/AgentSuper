@@ -202,6 +202,32 @@ def _truncate_history(history: list[dict], max_tokens: int = MAX_HISTORY_TOKENS)
     return truncated
 
 
+# 发给模型时只保留必要字段，去掉 id / steps / sources 等内部字段
+_ALLOWED_HISTORY_KEYS = {"role", "content", "name", "tool_call_id", "tool_calls"}
+
+
+def _sanitize_history(history: list[dict]) -> list[dict]:
+    """清洗历史消息：仅保留模型需要的最小字段集合。
+
+    DB 中的消息带有 id（前端编辑用）、steps（工具调用过程，含 tool_args/tool_result）、
+    sources 等字段。这些字段原样塞进 LLM 请求会白白增大请求体积（且部分网关会拒绝），
+    这里统一剥离。
+    """
+    cleaned = []
+    for msg in history or []:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if role not in ("user", "assistant", "system", "tool"):
+            continue
+        out = {k: v for k, v in msg.items() if k in _ALLOWED_HISTORY_KEYS}
+        # 至少要有内容或工具调用，否则跳过
+        if out.get("content") is None and not out.get("tool_calls"):
+            continue
+        cleaned.append(out)
+    return cleaned
+
+
 @router.post("/", response_model=ChatResponse)
 async def chat(request: Request, body: ChatRequest):
     """处理非流式聊天请求，返回完整响应。"""
@@ -225,6 +251,7 @@ async def chat(request: Request, body: ChatRequest):
         compressed = await summarizer.apply(history)
     else:
         compressed = _truncate_history(history)
+    compressed = _sanitize_history(compressed)
 
     # Build multimodal user content
     user_content: list[dict] = [{"type": "text", "text": body.message}]
@@ -292,6 +319,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         compressed = await summarizer.apply(history)
     else:
         compressed = _truncate_history(history)
+    compressed = _sanitize_history(compressed)
 
     # 通过 Supervisor 发送请求
     reply = await agent_bus.send_and_wait(
@@ -378,6 +406,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
         compressed = await summarizer.apply(history)
     else:
         compressed = _truncate_history(history)
+    compressed = _sanitize_history(compressed)
 
     event_queue: asyncio.Queue = asyncio.Queue()
     sem = _get_agent_semaphore()
@@ -527,6 +556,7 @@ async def chat_stream(request: Request, body: ChatRequest):
         compressed = await summarizer.apply(history)
     else:
         compressed = _truncate_history(history)
+    compressed = _sanitize_history(compressed)
 
     event_queue: asyncio.Queue = asyncio.Queue()
     sem = _get_agent_semaphore()

@@ -35,5 +35,13 @@ class Settings(BaseSettings):
     summarization_api_base: Optional[str] = None
     summarization_keep_messages: int = 20
 
+    # Token 成本控制
+    # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
+    max_context_tokens: int = 24_000
+    # 单次请求内最大工具调用轮数（每轮都是一次完整 LLM 调用）
+    max_tool_rounds: int = 8
+    # 摘要中间件缓存大小（按历史分块缓存，避免每请求全量重算）
+    summarization_cache_size: int = 200
+
 
 settings = Settings()
