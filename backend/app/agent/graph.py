@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 
-from app.context.token_counter import estimate_tokens, truncate_messages as _truncate_messages
+from app.context.token_counter import truncate_messages as _truncate_messages
+from app.context.token_counter import sanitize_tool_messages
 from app.context.tool_output import bound_tool_output
 from app.context.tool_dedup import ToolResultDedup
 
@@ -399,7 +400,7 @@ class RAGAgent:
             elif self.api_base and "openai" in self.api_base:
                 model = f"openai/{model}"
 
-        messages = _truncate_messages(messages, max_tokens=settings.max_context_tokens)
+        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=settings.max_context_tokens))
 
         response = await self._llm_call(model, messages, tool_defs)
         msg = response.choices[0].message
@@ -414,6 +415,7 @@ class RAGAgent:
                 self._push_event(state, {"type": "step_start", "step_id": "compaction", "name": "压缩上下文", "status": "running"})
                 old_count = len(messages)
                 messages = await compactor.compact(messages)
+                messages = sanitize_tool_messages(messages)
                 self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
 
             messages.append({
@@ -477,7 +479,7 @@ class RAGAgent:
                     "content": bounded_result,
                 })
 
-            messages = _truncate_messages(messages, max_tokens=settings.max_context_tokens)
+            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=settings.max_context_tokens))
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
 
@@ -522,7 +524,7 @@ class RAGAgent:
                 bounded_result = bound_tool_output(result_str, tool_name)
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tc_id, "content": bounded_result})
-            messages = _truncate_messages(messages, max_tokens=settings.max_context_tokens)
+            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=settings.max_context_tokens))
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
         if not (msg.content or "").strip():

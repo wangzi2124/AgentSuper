@@ -121,3 +121,64 @@ def truncate_messages(
         })
     result.extend(kept)
     return result
+
+
+def sanitize_tool_messages(messages: list[dict]) -> list[dict]:
+    """Remove messages that violate OpenAI/DeepSeek tool-call ordering rules.
+
+    Truncation or compaction can split a contiguous tool round
+    [assistant-with-tool_calls, tool, tool, ...] in half, leaving 'tool'
+    messages that are not a response to any preceding 'tool_calls'. APIs reject
+    such lists with:
+    "Messages with role 'tool' must be a response to a preceding message with
+    'tool_calls'".
+
+    Only complete, contiguous tool rounds are kept; orphaned tool messages and
+    assistant messages whose tool responses were lost are dropped.
+    """
+    if not messages:
+        return messages
+
+    # Pass 1: drop orphaned tool messages (no contiguous matching assistant).
+    kept: list[dict] = []
+    for msg in messages:
+        if msg.get("role") == "tool":
+            prev = kept[-1] if kept else None
+            if (
+                prev is not None
+                and prev.get("role") == "assistant"
+                and prev.get("tool_calls")
+                and msg.get("tool_call_id") in {tc.get("id") for tc in prev["tool_calls"]}
+            ):
+                kept.append(msg)
+            else:
+                logger.warning("Dropping orphaned tool message (tool_call_id=%s)", msg.get("tool_call_id"))
+            continue
+        kept.append(msg)
+
+    # Pass 2: drop incomplete tool rounds (assistant-with-tool_calls whose
+    # responses were truncated away along with their messages).
+    result: list[dict] = []
+    i = 0
+    n = len(kept)
+    while i < n:
+        msg = kept[i]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            ids = {tc.get("id") for tc in msg["tool_calls"]}
+            j = i + 1
+            answered: set = set()
+            while j < n and kept[j].get("role") == "tool":
+                answered.add(kept[j].get("tool_call_id"))
+                j += 1
+            if not ids.issubset(answered):
+                logger.warning(
+                    "Dropping incomplete tool round (assistant missing responses: %s)", ids - answered
+                )
+                i = j
+                continue
+            result.extend(kept[i:j])
+            i = j
+            continue
+        result.append(msg)
+        i += 1
+    return result
