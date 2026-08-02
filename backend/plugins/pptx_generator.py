@@ -130,19 +130,18 @@ def tool_create_pptx(title: str = "Presentation", slides: str = "[]",
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path:
-        p = Path(output_path)
-        if not p.is_absolute():
-            output_path = str(output_dir / p)
+        from app.plugins._output import resolve_output_path
+        try:
+            target = resolve_output_path(output_path, ".pptx")
+        except ValueError as e:
+            return f"Error: {e}"
     else:
         from datetime import datetime
         safe_title = "".join(c for c in title if c not in '<>:"/\\|?*').strip()
         if not safe_title:
             safe_title = "presentation"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = str(output_dir / f"{safe_title}_{ts}")
-
-    if not output_path.lower().endswith(".pptx"):
-        output_path += ".pptx"
+        target = output_dir / f"{safe_title}_{ts}.pptx"
 
     try:
         parsed_slides = json.loads(slides)
@@ -237,5 +236,5 @@ def tool_create_pptx(title: str = "Presentation", slides: str = "[]",
             if headers:
                 _add_table(slide, 0.8, 1.3, 11.7, 5.5, headers, rows)
 
-    prs.save(output_path)
-    return f"Presentation created successfully: {output_path}"
+    prs.save(str(target))
+    return f"Presentation created successfully: {target}"

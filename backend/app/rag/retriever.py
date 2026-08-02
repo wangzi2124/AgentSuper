@@ -13,29 +13,43 @@ BM25_WEIGHT = 0.3
 DIALOGUE_WEIGHT = 0.4
 
 
+def _doc_key(doc: dict) -> str:
+    """生成跨检索来源稳定的文档标识，用于 RRF 融合去重。
+
+    不能用 id(doc)：向量检索与 BM25 返回的是不同的 dict 对象，
+    同一文档会被当成两条，无法合并分数。
+    """
+    import hashlib
+    meta = doc.get("metadata") or {}
+    doc_id = meta.get("document_id") or ""
+    text = doc.get("text") or ""
+    return f"{doc_id}|{hashlib.md5(text.encode('utf-8', 'ignore')).hexdigest()}"
+
+
 def _reciprocal_rank_fusion(
     vector_results: List[Tuple[dict, float]],
     bm25_results: List[Tuple[dict, float]],
     k: int = 60,
 ) -> List[Tuple[dict, float]]:
     """使用倒数排名融合（RRF）合并向量搜索和 BM25 搜索结果。"""
-    scores: dict[int, float] = {}
-    docs: list[dict] = []
+    scores: dict[str, float] = {}
+    docs: dict[str, dict] = {}
 
     for rank, (doc, _) in enumerate(vector_results):
-        idx = id(doc)
-        docs.append(doc)
-        scores[idx] = VECTOR_WEIGHT * (1.0 / (rank + k))
+        key = _doc_key(doc)
+        if key not in docs:
+            docs[key] = doc
+        scores[key] = VECTOR_WEIGHT * (1.0 / (rank + k))
 
     for rank, (doc, _) in enumerate(bm25_results):
-        idx = id(doc)
-        if idx not in scores:
-            docs.append(doc)
-            scores[idx] = 0
-        scores[idx] += BM25_WEIGHT * (1.0 / (rank + k))
+        key = _doc_key(doc)
+        if key not in docs:
+            docs[key] = doc
+            scores[key] = 0
+        scores[key] += BM25_WEIGHT * (1.0 / (rank + k))
 
     ranked = sorted(
-        [(d, scores.get(id(d), 0)) for d in docs if scores.get(id(d), 0) > 0],
+        [(docs[k], v) for k, v in scores.items() if v > 0],
         key=lambda x: x[1],
         reverse=True,
     )
@@ -50,23 +64,24 @@ def _dialogue_rrf(
     """将主搜索结果与对话多召回结果进行 RRF 融合。"""
     if not dialogue_results:
         return main_results
-    scores: dict[int, float] = {}
-    docs: list[dict] = []
+    scores: dict[str, float] = {}
+    docs: dict[str, dict] = {}
 
     for rank, (doc, _) in enumerate(main_results):
-        idx = id(doc)
-        docs.append(doc)
-        scores[idx] = 1.0 * (1.0 / (rank + k))
+        key = _doc_key(doc)
+        if key not in docs:
+            docs[key] = doc
+        scores[key] = 1.0 * (1.0 / (rank + k))
 
     for rank, (doc, _) in enumerate(dialogue_results):
-        idx = id(doc)
-        if idx not in scores:
-            docs.append(doc)
-            scores[idx] = 0
-        scores[idx] += DIALOGUE_WEIGHT * (1.0 / (rank + k))
+        key = _doc_key(doc)
+        if key not in docs:
+            docs[key] = doc
+            scores[key] = 0
+        scores[key] += DIALOGUE_WEIGHT * (1.0 / (rank + k))
 
     ranked = sorted(
-        [(d, scores.get(id(d), 0)) for d in docs if scores.get(id(d), 0) > 0],
+        [(docs[k], v) for k, v in scores.items() if v > 0],
         key=lambda x: x[1],
         reverse=True,
     )

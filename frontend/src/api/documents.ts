@@ -67,13 +67,23 @@ export function uploadDocument(
 }
 
 // 轮询文档处理任务状态，直到完成或失败
+// 设置最大轮询时长，避免任务卡死时无限轮询
+const MAX_POLL_ATTEMPTS = 1500 // 400ms * 1500 ≈ 10 分钟
+const POLL_INTERVAL_MS = 400
+
 async function pollTask(
   taskId: string,
   onProgress?: (pct: number, stage: string) => void,
   signal?: AbortSignal,
 ): Promise<DocumentResponse> {
+  let attempts = 0
+
   const poll = async (): Promise<DocumentResponse> => {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    attempts++
+    if (attempts > MAX_POLL_ATTEMPTS) {
+      throw new Error(`Processing timed out after ${Math.round(MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS / 60000)} minutes`)
+    }
 
     const res = await fetchWithTimeout(`${BASE}/tasks/${taskId}`, {}, 0)
     if (!res.ok) throw new Error(`Failed to get task progress: ${res.statusText}`)
@@ -92,7 +102,7 @@ async function pollTask(
       throw new Error(data.error || 'Processing failed')
     }
 
-    await new Promise((r) => setTimeout(r, 400))
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     return poll()
   }

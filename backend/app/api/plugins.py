@@ -7,7 +7,17 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Any, Dict
 
+from app.api.deps import require_admin
+
 router = APIRouter()
+
+# 允许通过 HTTP 直接调用的插件白名单（只读/生成类，安全）。
+# 其余插件（http-client、file_reader、filesystem 等）只能经由 Agent 调用，
+# 以保证权限系统（PermissionManager）的审批流程不被绕过。
+_HTTP_CALLABLE_PLUGINS = frozenset({
+    "example-plugin", "weather-alert", "internet-search",
+    "docx-generator", "pdf-generator", "excel-generator", "pptx-generator", "kb-export",
+})
 
 
 class TogglePluginRequest(BaseModel):
@@ -30,6 +40,7 @@ async def list_plugins(request: Request):
 @router.post("/{name}/toggle")
 async def toggle_plugin(name: str, body: TogglePluginRequest, request: Request):
     """启用或禁用指定插件。"""
+    require_admin(request)
     loader = request.app.state.plugin_loader
     if not loader.toggle(name, body.enabled):
         raise HTTPException(status_code=404, detail="Plugin not found")
@@ -51,6 +62,12 @@ async def get_plugin_status(name: str, request: Request):
 @router.post("/{name}/call/{function_name}")
 async def call_plugin_function(name: str, function_name: str, body: CallPluginRequest, request: Request):
     """调用指定插件的函数并返回结果。"""
+    if name not in _HTTP_CALLABLE_PLUGINS:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Plugin '{name}' cannot be invoked over HTTP; it must go through the Agent"
+        )
+    require_admin(request)
     loader = request.app.state.plugin_loader
     try:
         result = loader.call_function(name, function_name, **body.args)

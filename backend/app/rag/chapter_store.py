@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -11,6 +12,9 @@ class ChapterStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
+        # 写锁：上传流程（事件循环线程）与检索（executor 线程）共享同一连接，
+        # 用显式锁保护写事务，避免并发写入冲突。
+        self._write_lock = threading.Lock()
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -23,31 +27,32 @@ class ChapterStore:
 
     def _init_db(self):
         """初始化数据库表和索引。"""
-        conn = self._get_conn()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS chapters (
-                id TEXT PRIMARY KEY,
-                document_id TEXT NOT NULL,
-                document_filename TEXT NOT NULL,
-                chapter_number INTEGER,
-                chapter_title TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                parent_chunk_id TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_chapters_doc
-            ON chapters(document_id)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_chapters_title
-            ON chapters(chapter_title)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_chapters_number
-            ON chapters(chapter_number)
-        """)
-        conn.commit()
+        with self._write_lock:
+            conn = self._get_conn()
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS chapters (
+                    id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    document_filename TEXT NOT NULL,
+                    chapter_number INTEGER,
+                    chapter_title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    parent_chunk_id TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chapters_doc
+                ON chapters(document_id)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chapters_title
+                ON chapters(chapter_title)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chapters_number
+                ON chapters(chapter_number)
+            """)
+            conn.commit()
 
     def add_chapter(
         self, document_id: str, filename: str,
@@ -56,12 +61,13 @@ class ChapterStore:
     ) -> str:
         """添加章节记录，返回生成的章节 ID。"""
         chapter_id = str(uuid.uuid4())
-        conn = self._get_conn()
-        conn.execute(
-            "INSERT INTO chapters (id, document_id, document_filename, chapter_number, chapter_title, summary, parent_chunk_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (chapter_id, document_id, filename, chapter_number, chapter_title, summary, parent_chunk_text),
-        )
-        conn.commit()
+        with self._write_lock:
+            conn = self._get_conn()
+            conn.execute(
+                "INSERT INTO chapters (id, document_id, document_filename, chapter_number, chapter_title, summary, parent_chunk_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (chapter_id, document_id, filename, chapter_number, chapter_title, summary, parent_chunk_text),
+            )
+            conn.commit()
         return chapter_id
 
     def find_by_keyword(self, keyword: str) -> list[dict]:
@@ -126,6 +132,7 @@ class ChapterStore:
 
     def delete_by_document(self, document_id: str):
         """删除指定文档的所有章节记录。"""
-        conn = self._get_conn()
-        conn.execute("DELETE FROM chapters WHERE document_id = ?", (document_id,))
-        conn.commit()
+        with self._write_lock:
+            conn = self._get_conn()
+            conn.execute("DELETE FROM chapters WHERE document_id = ?", (document_id,))
+            conn.commit()

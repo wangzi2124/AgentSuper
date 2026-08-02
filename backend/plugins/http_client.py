@@ -13,10 +13,14 @@ PLUGIN_NAME = "http-client"
 PLUGIN_VERSION = "0.1.0"
 PLUGIN_DESCRIPTION = "Send HTTP requests to test APIs or fetch data from endpoints"
 
-# SSL context that does not verify certificates (for local/dev APIs)
-_no_verify_ctx = ssl.create_default_context()
-_no_verify_ctx.check_hostname = False
-_no_verify_ctx.verify_mode = ssl.CERT_NONE
+
+def _ssl_context(url: str = ""):
+    """默认校验证书；仅对本地回环地址（localhost/127.0.0.1）允许跳过校验以便开发调试。"""
+    ctx = ssl.create_default_context()
+    if any(h in url for h in ("localhost", "127.0.0.1", "::1", "0.0.0.0")):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def tool_http_request(
@@ -68,7 +72,7 @@ def tool_http_request(
     req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_no_verify_ctx) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context(url)) as resp:
             status = resp.status
             resp_headers = dict(resp.headers)
             resp_body = resp.read().decode("utf-8", errors="replace")

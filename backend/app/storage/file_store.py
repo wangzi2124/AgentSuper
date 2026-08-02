@@ -8,6 +8,14 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def _safe_filename(filename: str) -> str:
+    """清洗上传文件名，丢弃路径分隔符与相对路径片段，防止路径穿越。"""
+    name = Path(filename or "").name
+    if not name or name in (".", ".."):
+        name = "unnamed"
+    return name
+
+
 class FileStore:
     """文件存储管理器，负责文件的保存、删除和元数据管理。"""
 
@@ -39,7 +47,7 @@ class FileStore:
     def save(self, filename: str, content: bytes) -> tuple[str, str]:
         """保存文件并更新元数据，返回文档ID和文件路径。"""
         doc_id = str(uuid.uuid4())
-        safe_name = f"{doc_id}_{filename}"
+        safe_name = f"{doc_id}_{_safe_filename(filename)}"
         file_path = self.upload_dir / safe_name
         with open(file_path, "wb") as f:
             f.write(content)

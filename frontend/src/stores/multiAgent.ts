@@ -21,6 +21,7 @@ interface SessionState {
   conversationTitle: string
   loading: boolean
   abortController: AbortController | null
+  queuePosition: number | null
 }
 
 export const useMultiAgentStore = defineStore('multiAgent', () => {
@@ -37,6 +38,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         conversationTitle: title || '',
         loading: false,
         abortController: null,
+        queuePosition: null,
       }
     }
     return sessions.value[sessionId]
@@ -51,6 +53,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const conversationId = computed(() => currentSession.value?.conversationId)
   const conversationTitle = computed(() => currentSession.value?.conversationTitle)
   const loading = computed(() => currentSession.value?.loading || false)
+  const queuePosition = computed(() => currentSession.value?.queuePosition ?? null)
 
   async function loadConversations() {
     try { conversations.value = await listConversations() }
@@ -102,12 +105,15 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
     const session = sessions.value[sessionId]
     if (!session) return
+    // 防止同一会话并发发送导致消息/步骤竞态
+    if (session.loading) return
 
     const userMsg: MultiAgentMessage = {
       id: genId(), role: 'user', content: text, agents: [], timestamp: new Date(),
     }
     session.messages = [...session.messages, userMsg]
     session.loading = true
+    session.queuePosition = null
 
     const assistantMsgId = genId()
     const agentsMap: Record<string, AgentStreamData> = {}
@@ -124,6 +130,16 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     try {
       await sendMultiAgentStream(reqData, (event: MultiAgentSSEEvent) => {
         if (signal.aborted) return
+
+        if (event.type === 'queued') {
+          session.queuePosition = event.queue_position ?? null
+          return
+        }
+
+        // 收到任何执行事件 → 清除排队状态
+        if (session.queuePosition !== null) {
+          session.queuePosition = null
+        }
 
         if (event.type === 'routing') {
           routingStatus.value = event.detail || 'Routing...'
@@ -179,6 +195,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     } finally {
       routingStatus.value = ''
       session.loading = false
+      session.queuePosition = null
       if (session.abortController === controller) session.abortController = null
     }
   }
@@ -213,7 +230,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
   return {
     sessions, activeSessionId, conversations, routingStatus,
-    messages, conversationId, conversationTitle, loading,
+    messages, conversationId, conversationTitle, loading, queuePosition,
     send, cancel, clear, undoMessage, deleteConversation,
     loadConversations, loadConversation, newChat, renameConversation,
   }

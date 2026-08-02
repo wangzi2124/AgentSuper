@@ -39,9 +39,14 @@ class Settings(BaseSettings):
     # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
     max_context_tokens: int = 24_000
     # 单次请求内最大工具调用轮数（每轮都是一次完整 LLM 调用）
-    max_tool_rounds: int = 8
+    # 可用环境变量 MAX_TOOL_ROUNDS 覆盖
+    max_tool_rounds: int = 24
     # 摘要中间件缓存大小（按历史分块缓存，避免每请求全量重算）
     summarization_cache_size: int = 200
+
+    # 可选：管理端鉴权 token。设置后插件 toggle/call、权限审批等敏感接口需携带
+    # Authorization: Bearer <token>；不设置则保持本地单用户模式（不做校验）。
+    admin_token: Optional[str] = None
 
 
 settings = Settings()

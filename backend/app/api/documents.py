@@ -3,7 +3,9 @@
 提供文档上传、进度查询、列表获取和删除功能。
 """
 
+import asyncio
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Request
 
@@ -19,33 +21,52 @@ router = APIRouter()
 
 # Maximum upload file size: 100 MB
 MAX_UPLOAD_SIZE = 100 * 1024 * 1024
+# 读取时单次分块大小（用于流式限制文件大小，避免整文件读入内存）
+_CHUNK = 1024 * 1024
+
+
+def _clean_upload_filename(filename: str) -> str:
+    """清洗上传文件名，仅保留 basename，防止路径穿越。"""
+    name = Path(filename or "").name
+    if not name or name in (".", ".."):
+        name = "unnamed"
+    return name
 
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_document(request: Request, file: UploadFile = File(...)):
     """上传文档并启动异步处理任务。"""
-    content = await file.read()
+    filename = _clean_upload_filename(file.filename or "")
+
+    # 流式分块读取，超过上限立即中止，避免大文件占满内存
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        data = await file.read(_CHUNK)
+        if not data:
+            break
+        total += len(data)
+        if total > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large: exceeds max {MAX_UPLOAD_SIZE} bytes (100 MB)"
+            )
+        chunks.append(data)
+    content = b"".join(chunks)
 
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large: {len(content)} bytes exceeds max {MAX_UPLOAD_SIZE} bytes (100 MB)"
-        )
-
     tm = request.app.state.task_manager
-    task_id = tm.create(file.filename)
+    task_id = tm.create(filename)
 
     bm25 = getattr(request.app.state, "bm25_index", None)
 
-    import asyncio
     asyncio.create_task(
         tm.process_document(
             task_id,
             content,
-            file.filename,
+            filename,
             request.app.state.file_store,
             request.app.state.doc_processor,
             request.app.state.embeddings,
@@ -133,4 +154,7 @@ async def delete_document(request: Request, doc_id: str):
     cs = getattr(request.app.state, "chapter_store", None)
     if cs:
         cs.delete_by_document(doc_id)
+    bm25 = getattr(request.app.state, "bm25_index", None)
+    if bm25:
+        await asyncio.to_thread(bm25.remove_by_metadata, "document_id", doc_id)
     return DeleteResponse(message="Document deleted")

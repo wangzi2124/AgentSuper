@@ -47,24 +47,35 @@ async def list_generated(q: Optional[str] = None):
     return GeneratedFileList(files=files, total=len(files))
 
 
+def _safe_generated_path(filename: str) -> Path:
+    """解析生成文件路径，确保不会逃逸出 GENERATED_DIR。"""
+    if not filename or filename in (".", ".."):
+        raise HTTPException(status_code=404, detail="File not found")
+    root = GENERATED_DIR.resolve()
+    filepath = (GENERATED_DIR / filename).resolve()
+    if not filepath.is_relative_to(root):
+        raise HTTPException(status_code=404, detail="File not found")
+    return filepath
+
+
 @router.get("/download/{filename}")
 async def download_generated(filename: str):
     """下载指定的生成文件。"""
-    filepath = GENERATED_DIR / filename
+    filepath = _safe_generated_path(filename)
     if not filepath.exists() or not filepath.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    media_type, _ = mimetypes.guess_type(filename)
+    media_type, _ = mimetypes.guess_type(filepath.name)
     return FileResponse(
         str(filepath),
         media_type=media_type or "application/octet-stream",
-        filename=filename,
+        filename=filepath.name,
     )
 
 
 @router.delete("/{filename}")
 async def delete_generated(filename: str):
     """删除指定的生成文件。"""
-    filepath = GENERATED_DIR / filename
+    filepath = _safe_generated_path(filename)
     if not filepath.exists() or not filepath.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     os.remove(str(filepath))

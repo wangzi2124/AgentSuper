@@ -6,24 +6,39 @@ from app.skills.loader import SkillLoader
 from app.plugins.loader import PluginLoader
 
 
-# Python类型到JSON Schema类型的映射表
+# Python类型到JSON Schema类型的映射表（精确匹配外层类型）
 _TYPE_MAP: Dict[str, str] = {
     "str": "string",
+    "string": "string",
     "int": "integer",
+    "integer": "integer",
     "float": "number",
+    "number": "number",
     "bool": "boolean",
+    "boolean": "boolean",
     "dict": "object",
+    "mapping": "object",
     "list": "array",
-    "Any": "string",
-    "optional": "string",
+    "sequence": "array",
+    "any": "string",
 }
 
 
 def _annotation_to_json_type(annotation: str) -> str:
-    """将Python类型注解转换为JSON Schema类型。"""
-    low = annotation.lower().replace("typing.", "").replace("optional[", "").removesuffix("]")
+    """将Python类型注解转换为JSON Schema类型。
+
+    先剥离 Optional/Union 外壳取内层类型，再按外层容器（List/Dict）精确匹配，
+    避免子串匹配导致的 `List[str]` → string 等错误。
+    """
+    low = annotation.lower().replace("typing.", "").strip()
+    if low.startswith("optional["):
+        low = low[len("optional["):-1]
+    if low.startswith("list[") or low.startswith("tuple[") or low.startswith("sequence["):
+        return "array"
+    if low.startswith("dict[") or low.startswith("mapping[") or low.startswith("dict["):
+        return "object"
     for k, v in _TYPE_MAP.items():
-        if k in low:
+        if low == k or low == f"<class '{k}'>":
             return v
     return "string"
 
@@ -36,7 +51,8 @@ def _build_parameters_schema(params: List[dict]) -> dict:
         json_type = _annotation_to_json_type(p["annotation"])
         prop: dict = {"type": json_type, "description": f"Parameter {p['name']}"}
         properties[p["name"]] = prop
-        if p["default"] is None:
+        # 有默认值的参数（含默认值为 None 的可选参数）不标为必填
+        if not p.get("has_default", p["default"] is not None):
             required.append(p["name"])
     return {
         "type": "object",

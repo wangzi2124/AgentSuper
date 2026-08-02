@@ -19,7 +19,13 @@ def save_file(content: str | bytes, filename: str = "") -> str:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"file_{ts}"
 
-    filepath = GENERATED_DIR / filename
+    # 仅保留 basename，防止路径穿越（filename="../../.env" 会被截断为 ".env"）
+    name = Path(filename).name
+    if not name or name in (".", ".."):
+        name = f"file_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    filepath = GENERATED_DIR / name
+    if not filepath.resolve().is_relative_to(GENERATED_DIR.resolve()):
+        raise ValueError(f"filename must stay inside {GENERATED_DIR}")
 
     if isinstance(content, str):
         filepath.write_text(content, encoding="utf-8")

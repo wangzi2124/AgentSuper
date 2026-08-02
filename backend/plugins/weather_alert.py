@@ -17,11 +17,8 @@ PLUGIN_DESCRIPTION = "Weather alerts and typhoon tracking for China regions"
 
 
 def _create_ssl_context():
-    """Create SSL context that works in restricted network environments."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+    """创建校验证书的默认 SSL 上下文。"""
+    return ssl.create_default_context()
 
 
 def _fetch_url(url: str, timeout: int = 10) -> dict:

@@ -120,16 +120,52 @@ class PermissionManager:
             pass
         return "external"
 
+    def _is_critical_read(self, p: Path) -> bool:
+        """判断是否为禁止读取的敏感路径（密钥/数据库/凭据文件）。"""
+        try:
+            rel = p.relative_to(self.workspace)
+        except ValueError:
+            return False
+        parts = [part.lower() for part in rel.parts]
+        name = parts[-1]
+        if name.startswith(".env") or name.endswith(".env"):
+            return True
+        if name.endswith(".db") or name.endswith(".sqlite") or name.endswith(".sqlite3"):
+            return True
+        if "permissions.json" in name:
+            return True
+        return False
+
+    def _is_critical_write(self, p: Path) -> bool:
+        """判断是否为禁止写入/执行的敏感代码路径（源码、配置、插件、技能）。"""
+        try:
+            rel = p.relative_to(self.workspace)
+        except ValueError:
+            return False
+        parts = [part.lower() for part in rel.parts]
+        first = parts[0] if parts else ""
+        if first in ("app", ".git"):
+            return True
+        if first in ("plugins", "skills", "config"):
+            return True
+        if len(parts) == 1 and parts[0] in ("main.py", "requirements.txt", "pyproject.toml"):
+            return True
+        return False
+
     def check(self, path_str: str, operation: str) -> str:
         """检查指定路径的操作权限，返回allow/deny/ask。"""
         cls = self.classify_path(path_str)
-        if cls == "workspace":
-            return "allow"
         if cls == "system":
             return "deny"
         if cls == "temp":
             return "allow"
         p = Path(path_str).resolve()
+        if cls == "workspace":
+            if self._is_critical_read(p):
+                return "deny"
+            if operation in ("write", "execute") and self._is_critical_write(p):
+                return "deny"
+            return "allow"
         now = time.time()
         # Clean up expired temp approvals
         expired = [k for k, t in self._temp_approvals.items() if now - t > _TEMP_APPROVAL_TTL]
@@ -191,6 +227,7 @@ class PermissionManager:
             if p not in self._whitelist:
                 self._whitelist.append(p)
                 self._save_whitelist()
+        self.cleanup_expired()
         return True
 
     def get_pending_requests(self) -> list[PermissionRequest]:

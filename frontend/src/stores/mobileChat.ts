@@ -172,6 +172,8 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     
     const session = sessions.value[sessionId]
     if (!session) return
+    // 防止同一会话并发发送导致消息/步骤竞态
+    if (session.loading) return
 
     const userMsg: Message = {
       id: genId(),

@@ -145,10 +145,10 @@ class ContextCompactor:
         # Truncate if conversation itself is too long
         max_input_tokens = 16_000
         if estimate_tokens(conversation_text) > max_input_tokens:
-            # Keep first 20% (for objective) + last 80% (for recent work)
+            # Keep first 20% (for objective) + last 20% (for recent work)
             chars = len(conversation_text)
-            head = conversation_text[:chars // 5]
-            tail = conversation_text[chars // 5:]
+            head = conversation_text[: chars // 5]
+            tail = conversation_text[-chars // 5:] if chars // 5 else ""
             conversation_text = f"{head}\n\n... [middle portion omitted] ...\n\n{tail}"
 
         prompt = COMPACTION_PROMPT + conversation_text

@@ -39,6 +39,19 @@ class BM25Index:
         self._tokenized.extend(_tokenize(d) for d in documents)
         self.bm25 = BM25Okapi(self._tokenized)
 
+    def remove_by_metadata(self, key: str, value) -> None:
+        """按元数据删除索引中的文档条目（如删除文档后同步 BM25）。"""
+        kept_docs = []
+        kept_meta = []
+        for doc, meta in zip(self.documents, self.metadata):
+            if meta.get(key) != value:
+                kept_docs.append(doc)
+                kept_meta.append(meta)
+        self.documents = kept_docs
+        self.metadata = kept_meta
+        self._tokenized = [_tokenize(d) for d in self.documents]
+        self.bm25 = BM25Okapi(self._tokenized) if self.documents else None
+
     def search(self, query: str, k: int = 5) -> List[Tuple[dict, float]]:
         """执行 BM25 检索，返回 (文档条目, 得分) 列表。"""
         if not self.bm25 or not self.documents:

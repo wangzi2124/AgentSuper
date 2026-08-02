@@ -201,6 +201,12 @@ export const useChatStore = defineStore('chat', () => {
       session.messages = session.messages.slice(0, -1)
     }
 
+    // 同时移除原 user 消息，避免重试后产生重复的用户消息
+    const lastUserMsgIdx = session.messages.findIndex(m => m.id === lastUserMsg.id)
+    if (lastUserMsgIdx >= 0) {
+      session.messages = session.messages.slice(0, lastUserMsgIdx)
+    }
+
     // 重新发送
     await send(lastUserMsg.content)
   }
@@ -229,8 +235,8 @@ export const useChatStore = defineStore('chat', () => {
 
     const userMsg = session.messages[userIdx]
 
-    // 删除 error 消息及之后的所有消息
-    session.messages = session.messages.slice(0, errorIdx)
+    // 删除 user 消息及其后的 error 消息，避免重试产生重复的用户消息
+    session.messages = session.messages.slice(0, userIdx)
 
     // 重新发送
     await send(userMsg.content)
@@ -363,6 +369,10 @@ export const useChatStore = defineStore('chat', () => {
     
     const session = sessions.value[sessionId]
     if (!session) return
+    // 防止同一会话并发发送导致消息/步骤竞态
+    if (session.loading) return
+    // 用户主动发送新消息时，取消待执行的自动重试
+    cancelAutoRetry()
 
     const userMsg: Message = {
       id: genId(),
@@ -518,7 +528,8 @@ export const useChatStore = defineStore('chat', () => {
       const errorInfo: ChatError = isChatError
         ? err as ChatError
         : classifyNetworkError(err)
-      if (!signal.aborted && errorInfo.retryable !== false) {
+      // 除用户主动取消外，任何失败都应展示错误消息（避免静默失败）
+      if (!signal.aborted) {
         session.messages = [...session.messages, {
           id: genId(),
           role: 'assistant',
@@ -529,7 +540,7 @@ export const useChatStore = defineStore('chat', () => {
         }]
         session.currentSteps = []
         persistSession(sessionId)
-        // 自动重试
+        // 自动重试：仅对可重试错误
         if (errorInfo.retryable && autoRetrySessionId.value === sessionId) {
           startAutoRetry(sessionId, text)
         }
@@ -584,6 +595,10 @@ export const useChatStore = defineStore('chat', () => {
   async function deleteConversation() {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
+      // 取消未执行的自动重试，避免删除后残留定时器再次发送
+      cancelAutoRetry()
+      // 中断正在进行的流式请求，防止 late callback 写回已删除会话
+      session?.abortController?.abort()
       if (session?.conversationId) {
         try {
           await apiDeleteConversation(session.conversationId, CONV_TYPE)
@@ -592,7 +607,7 @@ export const useChatStore = defineStore('chat', () => {
         }
       }
       // 删除 IndexedDB 缓存
-      deleteSessionFromCache(activeSessionId.value)
+      await deleteSessionFromCache(activeSessionId.value)
       delete sessions.value[activeSessionId.value]
       activeSessionId.value = undefined
       loadConversations()

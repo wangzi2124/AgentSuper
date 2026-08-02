@@ -123,19 +123,18 @@ def tool_create_docx(title: str = "Document", sections: str = "[]", output_path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path:
-        p = Path(output_path)
-        if not p.is_absolute():
-            output_path = str(output_dir / p)
+        from app.plugins._output import resolve_output_path
+        try:
+            target = resolve_output_path(output_path, ".docx")
+        except ValueError as e:
+            return f"Error: {e}"
     else:
         from datetime import datetime
         safe_title = "".join(c for c in title if c not in '<>:"/\\|?*').strip()
         if not safe_title:
             safe_title = "document"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = str(output_dir / f"{safe_title}_{ts}")
+        target = output_dir / f"{safe_title}_{ts}.docx"
 
-    if not output_path.lower().endswith(".docx"):
-        output_path += ".docx"
-
-    doc.save(output_path)
-    return f"Document created successfully: {output_path}"
+    doc.save(str(target))
+    return f"Document created successfully: {target}"

@@ -217,6 +217,8 @@ class RAGAgent:
         """流式执行shell命令，实时推送输出到事件队列。使用异步子进程避免PIPE死锁。"""
         command = args.get("command", "")
         timeout = min(args.get("timeout", 300), 600)
+        if timeout < 1:
+            timeout = 5
         work_dir = args.get("work_dir", ".")
 
         resolved_cwd = Path(work_dir)
@@ -233,9 +235,10 @@ class RAGAgent:
             raise _NeedsPermission(str(resolved_cwd), "execute", "tool_execute", args)
 
         # Apply whitelist check (same as filesystem.tool_execute)
-        from app.tools.filesystem import _check_command_allowed
+        from app.tools.filesystem import _check_command_allowed, _check_command_blacklist
         try:
             _check_command_allowed(command)
+            _check_command_blacklist(command)
         except ValueError as e:
             return f"Error: {e}"
 
@@ -526,6 +529,14 @@ class RAGAgent:
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tc_id, "content": bounded_result})
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=settings.max_context_tokens))
+            messages.append({
+                "role": "user",
+                "content": (
+                    "（系统提示：已达到本轮请求的最大工具调用轮数上限，不再继续执行工具。"
+                    "请基于以上已获取的工具结果，整理出最终回答；若任务尚未完成，"
+                    "请明确指出哪些部分已完成、哪些部分尚未完成，以及继续完成所需执行的下一步操作。）"
+                ),
+            })
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
         if not (msg.content or "").strip():

@@ -39,8 +39,6 @@ def _bing_search(query: str, max_results: int = 5, market: str = "zh-CN") -> lis
     })
     
     ctx = __import__("ssl").create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = __import__("ssl").CERT_NONE
     
     with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
         data = json.loads(resp.read())
@@ -61,8 +59,6 @@ def _duckduckgo_search(query: str, max_results: int = 5) -> list:
     url = f"https://api.duckduckgo.com/?{params}"
     
     ctx = __import__("ssl").create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = __import__("ssl").CERT_NONE
     
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -97,8 +93,6 @@ def _baidu_search(query: str, max_results: int = 5) -> list:
     url = f"https://www.baidu.com/s?{params}"
     
     ctx = __import__("ssl").create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = __import__("ssl").CERT_NONE
     
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -239,8 +233,6 @@ def tool_extract_urls(
     - timeout: max wait time in seconds (default 30, max 60)
     """
     ctx = __import__("ssl").create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = __import__("ssl").CERT_NONE
     
     url_list = [u.strip() for u in urls.split(",") if u.strip()]
     if not url_list:

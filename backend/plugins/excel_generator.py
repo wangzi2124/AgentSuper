@@ -30,16 +30,15 @@ def tool_create_excel(sheets: str = "[]", output_path: str = "") -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path:
-        p = Path(output_path)
-        if not p.is_absolute():
-            output_path = str(output_dir / p)
+        from app.plugins._output import resolve_output_path
+        try:
+            target = resolve_output_path(output_path, ".xlsx")
+        except ValueError as e:
+            return f"Error: {e}"
     else:
         from datetime import datetime
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = str(output_dir / f"spreadsheet_{ts}")
-
-    if not output_path.lower().endswith(".xlsx"):
-        output_path += ".xlsx"
+        target = output_dir / f"spreadsheet_{ts}.xlsx"
 
     try:
         parsed_sheets = json.loads(sheets)
@@ -101,5 +100,5 @@ def tool_create_excel(sheets: str = "[]", output_path: str = "") -> str:
                     max_len = max(max_len, len(str(row[col_idx - 1])))
             ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 4, 60)
 
-    wb.save(output_path)
-    return f"Excel created successfully: {output_path}"
+    wb.save(str(target))
+    return f"Excel created successfully: {target}"

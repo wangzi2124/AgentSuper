@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).resolve().parents[2] / "data" / "tasks.db"
 
+# 已完成/失败任务的保留时间窗口（天），防止 tasks 表无界增长
+_TASK_RETENTION_DAYS = 7
+
 
 def _get_db() -> sqlite3.Connection:
     """Get task database connection and ensure schema exists."""
@@ -38,6 +41,23 @@ def _get_db() -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def cleanup_old_tasks() -> None:
+    """清理超过保留时间的已完成/失败任务记录。"""
+    try:
+        conn = _get_db()
+        try:
+            conn.execute(
+                "DELETE FROM tasks WHERE status IN ('completed', 'failed') "
+                "AND datetime(updated_at) < datetime('now', ?)",
+                (f"-{_TASK_RETENTION_DAYS} days",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("Failed to cleanup old tasks: %s", e)
 
 
 class TaskState:

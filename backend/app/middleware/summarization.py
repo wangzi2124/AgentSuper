@@ -169,7 +169,7 @@ class HierarchicalSummarizationMiddleware:
         if estimate_tokens(text) > max_input_tokens:
             chars = len(text)
             head = text[: chars // 3]
-            tail = text[chars - (chars * 2) // 3:]
+            tail = text[-chars // 3:] if chars // 3 else ""
             text = f"{head}\n\n... [middle portion omitted] ...\n\n{tail}"
 
         prompt = (

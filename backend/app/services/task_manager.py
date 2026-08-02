@@ -25,6 +25,7 @@ class ProcessingTask:
         self.stage = ""
         self.result: Optional[dict] = None
         self.error: Optional[str] = None
+        self.finished_at: Optional[datetime] = None
 
     def to_dict(self):
         """将任务状态转换为字典格式。"""
@@ -42,6 +43,9 @@ class ProcessingTask:
 class TaskManager:
     """任务管理器，负责创建和管理文档处理任务。"""
 
+    # 已完成/失败任务的保留时间窗口（秒），防止 _tasks 无界增长
+    TASK_TTL_SECONDS = 3600
+
     def __init__(self):
         self._tasks: dict[str, ProcessingTask] = {}
 
@@ -49,7 +53,19 @@ class TaskManager:
         """创建新的处理任务，返回任务ID。"""
         task_id = str(uuid.uuid4())
         self._tasks[task_id] = ProcessingTask(task_id, filename)
+        self._prune_old_tasks()
         return task_id
+
+    def _prune_old_tasks(self):
+        """清理超过保留时间的已完成/失败任务，避免内存无界增长。"""
+        now = datetime.now()
+        stale = [
+            tid for tid, t in self._tasks.items()
+            if t.status in ("completed", "failed") and t.finished_at
+            and (now - t.finished_at).total_seconds() > self.TASK_TTL_SECONDS
+        ]
+        for tid in stale:
+            self._tasks.pop(tid, None)
 
     def get(self, task_id: str) -> Optional[ProcessingTask]:
         """根据任务ID获取任务对象。"""
@@ -145,3 +161,5 @@ class TaskManager:
             task.progress = 0
             task.stage = "Error"
             task.error = str(e)
+        finally:
+            task.finished_at = datetime.now()

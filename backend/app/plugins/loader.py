@@ -90,6 +90,7 @@ class PluginLoader:
                                 "default": None
                                 if p.default is inspect.Parameter.empty
                                 else p.default,
+                                "has_default": p.default is not inspect.Parameter.empty,
                             }
                             for p in sig.parameters.values()
                             if p.name != "self"

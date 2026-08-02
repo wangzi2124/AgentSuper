@@ -10,9 +10,7 @@ export const usePermissionStore = defineStore('permission', () => {
   async function pollPending() {
     try {
       const data = await fetchPendingRequests()
-      if (data.pending.length > 0) {
-        pendingRequests.value = data.pending
-      }
+      pendingRequests.value = data.pending
     } catch { /* ignore */ }
   }
 
@@ -21,6 +19,7 @@ export const usePermissionStore = defineStore('permission', () => {
     polling = true
     const interval = setInterval(async () => {
       await pollPending()
+      // 服务器已无待处理请求时停止轮询
       if (pendingRequests.value.length === 0) {
         clearInterval(interval)
         polling = false

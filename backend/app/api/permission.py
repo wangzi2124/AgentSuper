@@ -5,10 +5,11 @@
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.permission import get_manager
+from app.api.deps import require_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -51,8 +52,9 @@ async def list_pending():
 
 
 @router.post("/permission/request/{request_id}/respond", tags=["Permission"])
-async def respond(request_id: str, body: RespondRequest):
+async def respond(request_id: str, body: RespondRequest, request: Request):
     """响应指定的权限请求，允许或拒绝操作。"""
+    require_admin(request)
     mgr = get_manager()
     ok = mgr.respond(request_id, body.decision, remember=body.remember)
     if not ok:

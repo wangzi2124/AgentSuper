@@ -41,22 +41,22 @@ def _resolve(path_str: str) -> Path:
     return p.resolve()
 
 
-def _ensure_safe(path: Path) -> None:
+def _ensure_safe(path: Path, operation: str = "write") -> None:
     """检查路径访问权限，不允许时抛出PermissionError或NeedsPermission异常。"""
     resolved = path.resolve()
     mgr = get_perm_mgr()
-    decision = mgr.check(str(resolved), "write")
+    decision = mgr.check(str(resolved), operation)
     if decision == "allow":
         return
     if decision == "deny":
-        raise PermissionError(f"Access denied: '{path}' is outside workspace")
-    raise NeedsPermission(str(resolved), "write")
+        raise PermissionError(f"Access denied: '{path}' is outside workspace or protected")
+    raise NeedsPermission(str(resolved), operation)
 
 
 def tool_ls(path: str = ".") -> str:
     """列出指定目录下的文件和子目录，显示类型、大小和修改时间。"""
     target = _resolve(path)
-    _ensure_safe(target)
+    _ensure_safe(target, "read")
     if not target.is_dir():
         return f"Error: '{path}' is not a directory"
     rows = []
@@ -75,7 +75,7 @@ def tool_ls(path: str = ".") -> str:
 def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
     """读取文件内容，文本文件支持按行偏移和限制，多模态文件返回base64编码。"""
     target = _resolve(path)
-    _ensure_safe(target)
+    _ensure_safe(target, "read")
     if not target.is_file():
         return f"Error: file not found: {path}"
     ext = target.suffix.lower()
@@ -107,7 +107,7 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
 def tool_write_file(path: str, content: str, overwrite: bool = False) -> str:
     """创建新文件并写入内容。overwrite=True 时允许覆盖已存在的文件。"""
     target = _resolve(path)
-    _ensure_safe(target)
+    _ensure_safe(target, "write")
     if target.exists() and not overwrite:
         return f"Error: file already exists: {path} (use overwrite=True to overwrite, or edit_file to modify)"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +122,7 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> str:
 def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
     """在文件中查找并替换指定字符串，支持单次替换或全部替换。"""
     target = _resolve(path)
-    _ensure_safe(target)
+    _ensure_safe(target, "write")
     if not target.is_file():
         return f"Error: file not found: {path}"
     try:
@@ -237,6 +237,56 @@ def _check_command_allowed(command: str) -> None:
         raise ValueError(f"Command '{base_cmd}' is not in the allowed whitelist")
 
 
+# 解释器类命令的 -c/-e/-Command 参数中禁止出现的高危模式
+_DANGEROUS_PATTERNS = (
+    "os.system", "os.popen", "subprocess", "os.exec", "eval(", "exec(",
+    "__import__", "importlib", "pickle", "marshal",
+    "socket.", "urllib", "requests.", "http.client", "aiohttp", "httpx",
+    "base64", "ctypes", "win32api", "winreg", "b64decode",
+    "Invoke-Expression", "IEX", "Invoke-WebRequest", "IWR", "DownloadString",
+    "DownloadFile", "WebClient", "Net.WebClient", "Start-Process",
+    "Add-MscProject", "shutdown", "reg add", "net user", "net localgroup",
+    "whoami /all", "netsh", "taskkill", "format ", "del /f",
+    "/dev/tcp", "/dev/udp", "curl", "wget",
+)
+
+
+def _check_command_blacklist(command: str) -> None:
+    """对解释器类命令的 -c/-e/-Command 内联参数做危险模式检查，阻止任意代码执行。
+
+    白名单只能校验首个 token，`python -c "import os; os.system(...)"` 可完全绕过，
+    因此对 python/node/powershell/cmd 等解释器的内联代码参数额外做黑名单过滤。
+    """
+    parts = shlex.split(command)
+    if not parts:
+        return
+    base_cmd = parts[0].lower()
+    interpreter_flag: str | None = None
+    if base_cmd in ("python", "python3", "py"):
+        interpreter_flag = "-c"
+    elif base_cmd == "node":
+        interpreter_flag = "-e"
+    elif base_cmd == "powershell":
+        interpreter_flag = "-Command"
+    elif base_cmd == "cmd":
+        interpreter_flag = "/c"
+    if interpreter_flag is None:
+        return
+    i = 1
+    while i < len(parts):
+        if parts[i].lower() == interpreter_flag:
+            inline = " ".join(parts[i + 1:])
+            lowered = inline.lower()
+            for pat in _DANGEROUS_PATTERNS:
+                if pat in lowered:
+                    raise ValueError(
+                        f"Command contains dangerous pattern '{pat}' in {base_cmd} -c argument; "
+                        "inline code execution is blocked"
+                    )
+            return
+        i += 1
+
+
 def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
     """执行shell命令并返回标准输出、标准错误和退出码。"""
     if timeout > 600:
@@ -244,6 +294,7 @@ def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
     if timeout < 1:
         timeout = 5
     _check_command_allowed(command)
+    _check_command_blacklist(command)
     resolved_cwd = _resolve(work_dir)
     mgr = get_perm_mgr()
     decision = mgr.check(str(resolved_cwd), "execute")

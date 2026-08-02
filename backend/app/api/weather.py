@@ -39,10 +39,8 @@ _cache: Dict[str, Any] = {
 
 
 def _create_ssl_context():
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+    """返回校验证书的默认 SSL 上下文，防止中间人攻击。"""
+    return ssl.create_default_context()
 
 
 def _fetch_json(url: str, timeout: int = 10) -> dict:
@@ -61,7 +59,7 @@ def _fetch_json(url: str, timeout: int = 10) -> dict:
 
 def _detect_city() -> str:
     """通过 IP 获取当前城市名称（中文）。"""
-    data = _fetch_json("http://ip-api.com/json/?lang=zh-CN", timeout=5)
+    data = _fetch_json("https://ip-api.com/json/?lang=zh-CN", timeout=5)
     city = data.get("city")
     if city:
         return city

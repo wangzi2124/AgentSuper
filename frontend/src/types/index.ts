@@ -233,7 +233,7 @@ export interface AgentStreamData {
 }
 
 export interface MultiAgentSSEEvent {
-  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'done' | 'error'
+  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'done' | 'error' | 'queued'
   agent_id: string
   agent_name?: string
   agent_avatar?: string

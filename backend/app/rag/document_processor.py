@@ -44,17 +44,29 @@ class DocumentProcessor:
         self.parent_summary_length = parent_summary_length
 
     def _read_text_file(self, file_path: str) -> str:
-        """读取文本文件，自动尝试多种编码。"""
+        """读取文本文件，自动尝试多种编码。
+
+        不含 latin-1 兜底：latin-1 对所有字节都能解码，会把损坏/二进制文件
+        静默当作正常文本入库，因此只尝试常见真实文本编码。
+        """
         with open(file_path, "rb") as f:
             data = f.read()
 
-        for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "cp1252", "latin-1"):
+        for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "cp1252"):
             try:
-                return data.decode(encoding)
+                text = data.decode(encoding)
+                break
             except UnicodeDecodeError:
                 continue
+        else:
+            text = data.decode("utf-8", errors="ignore")
 
-        return data.decode("utf-8", errors="ignore")
+        # 乱码检测：不可打印控制字符占比过高时视为非文本文件
+        if text:
+            control = sum(1 for ch in text if ord(ch) < 32 and ch not in "\t\n\r")
+            if control / len(text) > 0.01:
+                raise ValueError(f"File does not appear to be a readable text file: {file_path}")
+        return text
 
     def load(self, file_path: str) -> str:
         """加载文件内容，支持 txt/md/pdf 格式。"""

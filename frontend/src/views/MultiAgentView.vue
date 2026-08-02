@@ -79,7 +79,10 @@ function handleMessageDelete(messageId: string) { /* not implemented */ }
         <p>Send a message to all agents simultaneously</p>
       </div>
       <div class="header-controls">
-        <span v-if="agent.loading" class="stream-badge running">● agents running</span>
+        <span v-if="agent.queuePosition != null" class="stream-badge queued">
+          ⏳ 排队中 #{{ agent.queuePosition }}
+        </span>
+        <span v-else-if="agent.loading" class="stream-badge running">● agents running</span>
       </div>
     </div>
 
@@ -136,6 +139,7 @@ function handleMessageDelete(messageId: string) { /* not implemented */ }
 .chat-header p { margin: 0; font-size: 13px; color: var(--text-secondary); }
 .header-controls { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
 .stream-badge { font-size: 12px; padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
+.stream-badge.queued { background: rgba(251,191,36,0.12); color: #f59e0b; }
 .stream-badge.running { background: rgba(34,197,94,0.12); color: #22c55e; animation: pulse-stream 1.5s ease-in-out infinite; }
 @keyframes pulse-stream { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 .chat-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; }

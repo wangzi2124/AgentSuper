@@ -30,6 +30,10 @@ _stats = {
 
 _STATS_FILE = Path(__file__).resolve().parents[1] / "data" / "monitor_stats.json"
 
+# 落盘节流：两次持久化之间至少间隔秒数，避免每次请求/每次 LLM 调用都同步写盘阻塞事件循环
+_SAVE_INTERVAL_SECONDS = 5.0
+_last_save = 0.0
+
 
 def _load_persisted():
     """从磁盘加载历史统计（若存在）。"""
@@ -48,13 +52,19 @@ def _load_persisted():
 
 
 def _save_persisted():
-    """将当前统计写入磁盘。"""
+    """将当前统计写入磁盘（节流：每 _SAVE_INTERVAL_SECONDS 最多一次）。"""
+    global _last_save
+    now = time.time()
+    if now - _last_save < _SAVE_INTERVAL_SECONDS:
+        return
+    _last_save = now
     try:
         _STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        snapshot = {
-            k: (dict(v) if isinstance(v, defaultdict) else v)
-            for k, v in _stats.items()
-        }
+        with _stats_lock:
+            snapshot = {
+                k: (dict(v) if isinstance(v, defaultdict) else v)
+                for k, v in _stats.items()
+            }
         tmp = _STATS_FILE.with_suffix(".json.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
