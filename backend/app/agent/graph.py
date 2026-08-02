@@ -3,8 +3,9 @@ import json
 import logging
 import shlex
 import time as tmod
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, List, Optional, TypedDict, Annotated, Sequence
+from typing import Annotated, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +46,12 @@ class AgentState(TypedDict):
     context: list[dict]
     answer: str
     sources: list[dict]
-    model: Optional[str]
+    model: str | None
     history: list[dict]
     use_vector_db: bool
     files: list[dict]
     steps: list[dict]
-    _event_queue: Optional[asyncio.Queue]
+    _event_queue: asyncio.Queue | None
 
 
 class RAGAgent:
@@ -59,9 +60,9 @@ class RAGAgent:
     def __init__(
         self,
         retriever: Retriever,
-        skill_loader: Optional[SkillLoader] = None,
-        plugin_loader: Optional[PluginLoader] = None,
-        reranker: Optional[Reranker] = None,
+        skill_loader: SkillLoader | None = None,
+        plugin_loader: PluginLoader | None = None,
+        reranker: Reranker | None = None,
     ):
         self.retriever = retriever
         self.reranker = reranker
@@ -71,7 +72,7 @@ class RAGAgent:
         self.api_key = settings.llm_api_key
         self.api_base = settings.llm_api_base
 
-        self.tools: List[ToolDef] = []
+        self.tools: list[ToolDef] = []
         self.tools.extend(create_filesystem_tools())
         if skill_loader:
             self.tools.extend(create_skill_tools(skill_loader))
@@ -157,13 +158,13 @@ class RAGAgent:
             "\n- plugin_character-analysis_tool_analyze_character_interactions(character_name): Find characters who appear in same chapters."
         )
 
-    def _build_tool_defs(self) -> Optional[List[dict]]:
+    def _build_tool_defs(self) -> list[dict] | None:
         """构建OpenAI格式的工具定义列表。"""
         if not self.tools:
             return None
         return [t.to_openai_tool() for t in self.tools]
 
-    async def _execute_tool(self, name: str, args: dict, state: Optional[dict] = None) -> str:
+    async def _execute_tool(self, name: str, args: dict, state: dict | None = None) -> str:
         """执行指定的工具函数，处理权限检查和错误。"""
         for t in self.tools:
             if t.name == name:
@@ -570,7 +571,7 @@ class RAGAgent:
         )
         self.graph = self._build_graph()
 
-    async def invoke(self, question: str, model: Optional[str] = None, history: Optional[list[dict]] = None, use_vector_db: bool = True, files: Optional[list[dict]] = None, event_queue: Optional[asyncio.Queue] = None, conversation_id: str = "") -> dict:
+    async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = True, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "") -> dict:
         """执行完整的RAG流程，返回回答和相关源。
 
         参数:
