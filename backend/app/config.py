@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     summarization_api_base: Optional[str] = None
     summarization_keep_messages: int = 20
 
+    # 多 Agent 超时（秒）
+    # supervisor 转发到子 Agent 的等待上限（单次生成可能因 LLM 延迟/tool 循环超 60s）
+    sub_agent_timeout: float = 150.0
+    # 端点层等待 supervisor 返回的上限（需 > decompose + sub_agent + synthesize）
+    supervisor_timeout: float = 300.0
+
     # Token 成本控制
     # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
     max_context_tokens: int = 24_000

@@ -152,7 +152,7 @@ class SupervisorAgent(BaseAgent):
                     payload=payload,
                     thread_id=sub_thread_id,  # 🔧 独立 thread_id
                 ),
-                timeout=60.0,
+                timeout=settings.sub_agent_timeout,
             )
 
             if reply.type == "response":
@@ -313,7 +313,7 @@ class SupervisorAgent(BaseAgent):
                         payload=sub_payload,
                         thread_id=sub_thread_id,
                     ),
-                    timeout=60.0,
+                    timeout=settings.sub_agent_timeout,
                 )
                 return {
                     "agent": st["agent"],

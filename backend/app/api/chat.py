@@ -485,7 +485,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
                 },
                 thread_id=thread_id,
             ),
-            timeout=180.0,
+            timeout=settings.supervisor_timeout,
         )
     except asyncio.CancelledError:
         task_bridge.unregister(child_id)
@@ -601,7 +601,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         },
                         thread_id=thread_id,
                     ),
-                    timeout=180.0,
+                    timeout=settings.supervisor_timeout,
                 )
 
                 if reply.type == "error":
