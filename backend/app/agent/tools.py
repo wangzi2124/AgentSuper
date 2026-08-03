@@ -244,7 +244,7 @@ def build_system_prompt_no_kb(
         "- For document generation, use the docx-generator plugin (plugin_docx-generator_tool_create_docx) for .docx files, or save content using tool_write_file for other formats.",
         "- For web search (查找信息/搜索), use plugin_internet-search_tool_internet_search.",
         "  - Use region='cn' for Chinese content, region='global' for international.",
-        "  - Use engine='auto' to auto-select, or specify: baidu (best for Chinese), tavily, bing, duckduckgo.",
+        "  - Use engine='auto' to auto-select. Engines: tavily (requires TAVILY_API_KEY), bing (requires BING_API_KEY), duckduckgo (free). Avoid 'baidu' (anti-bot, usually returns nothing).",
         "- For fetching content from a specific URL (查看某个网站的内容), use plugin_internet-search_tool_extract_urls.",
         "- For HTTP requests (testing APIs, calling endpoints, fetching data from URLs), use plugin_http-client_tool_http_request, plugin_http-client_tool_http_get, or plugin_http-client_tool_http_post.",
         "  - Pass headers as a JSON string, e.g. {\"Authorization\": \"Bearer xxx\"}.",

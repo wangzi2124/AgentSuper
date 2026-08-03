@@ -192,39 +192,51 @@ class WebSearchAgent(BaseAgent):
                 ]
 
     async def _search_duckduckgo(self, query: str, max_results: int) -> list[dict]:
-        """使用 DuckDuckGo 搜索。"""
+        """使用 DuckDuckGo HTML 端点搜索（无需 API Key，返回通用网页结果）。"""
         import aiohttp
-        from urllib.parse import quote
+        from urllib.parse import urlencode, unquote
 
-        url = f"https://api.duckduckgo.com/?q={quote(query)}&format=json&no_html=1"
+        url = "https://html.duckduckgo.com/html/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        data = urlencode({"q": query})
+
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                data = await resp.json()
-                results = []
+            async with session.post(url, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                html = await resp.text(errors="ignore")
 
-                # Abstract
-                abstract = data.get("AbstractText", "")
-                abstract_source = data.get("AbstractSource", "")
-                if abstract:
-                    results.append({
-                        "title": abstract_source or "Abstract",
-                        "url": data.get("AbstractURL", ""),
-                        "snippet": abstract,
-                    })
+        import re
+        results = []
+        blocks = re.split(r'<div[^>]*class="result(?: |")', html)[1:]
 
-                # Related topics
-                for topic in data.get("RelatedTopics", []):
-                    if "Text" in topic:
-                        results.append({
-                            "title": topic.get("Text", "")[:80],
-                            "url": topic.get("FirstURL", ""),
-                            "snippet": topic.get("Text", ""),
-                        })
-                        if len(results) >= max_results:
-                            break
+        for block in blocks:
+            title_match = re.search(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, re.DOTALL)
+            if not title_match:
+                continue
 
-                logger.info("DuckDuckGo returned %d results for '%s'", len(results), query[:50])
-                return results[:max_results]
+            link = title_match.group(1)
+            redirect = re.search(r'uddg=([^&]+)', link)
+            if redirect:
+                link = unquote(redirect.group(1))
+            elif link.startswith("//"):
+                link = "https:" + link
+
+            title = re.sub(r"<[^>]+>", "", title_match.group(2)).strip()
+
+            snippet = ""
+            snippet_match = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', block, re.DOTALL)
+            if snippet_match:
+                snippet = re.sub(r"<[^>]+>", "", snippet_match.group(1)).strip()
+
+            results.append({"title": title, "url": link, "snippet": snippet})
+            if len(results) >= max_results:
+                break
+
+        logger.info("DuckDuckGo returned %d results for '%s'", len(results), query[:50])
+        return results[:max_results]
 
     async def _synthesize(
         self,
