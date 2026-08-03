@@ -21,7 +21,7 @@
 | **会话隔离** | 每个会话独立消息存储，切换会话时消息互不干扰，后台流式请求继续运行 |
 | **会话持久化** | IndexedDB 本地缓存 + 服务器 SQLite 双重持久化，页面刷新/SSE 中断不丢失消息 |
 | **会话管理系统** | 归一化会话库：用户/项目/工作区三级隔离、子会话树与 fork、上下文纪元、压缩基线持久化、消息撤销（revert）、AgentBus 任务自动登记为子会话 |
-| **错误重试机制** | 三层重试架构：litellm 内置重试 → TaskRunner 指数退避 → 前端自动重试倒计时 + 手动重试按钮 |
+| **错误重试机制** | 三层重试架构：litellm 内置重试 → AgentBus 事件循环自愈 → 前端自动重试倒计时 + 手动重试按钮 |
 | **并发控制** | 后端 Semaphore 限制同时运行的 Agent 任务数（默认 2），超出自动排队，前端实时显示排队/流式状态 |
 | **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如搜索、天气、生成文档），Agent 按需调用 |
@@ -30,14 +30,14 @@
 | **生成文件管理** | Agent 创建的文档（.docx/.pdf/.xlsx/.pptx）可在独立页面查看、搜索、下载和删除，PDF 支持中文显示 |
 | **本地 Embedding** | 使用 sentence-transformers 本地运行，通过 ModelScope 下载模型 |
 | **检索重排序** | Cross-encoder 对检索结果重打分（top-3），显著提升回答精度 |
-| **上下文管理** | tiktoken 精确 token 计数 + 工具输出智能边界控制 + 工具结果去重，防止 context 膨胀 |
+| **上下文管理** | tiktoken 精确 token 计数 + 上下文预算控制 + 工具输出智能边界/回溯清理 + 工具结果去重，防止 context 膨胀 |
 | **对话持久化** | SQLite 存储对话历史，服务重启不丢失 |
 | **来源引用** | 回答时标注检索到的文档来源及相似度分数 |
 | **系统监控** | 请求级日志（方法/路径/状态/耗时）+ LLM 调用统计（模型/token/耗时/工具轮数），Web 页面可视化展示 |
 | **虚拟滚动** | 聊天消息列表使用 `@tanstack/vue-virtual`，只渲染可视区域节点，长对话 DOM 不臃肿 |
 | **权限系统** | AI Agent 写外部路径时前端弹窗审批，支持白名单持久化 |
 | **任务执行引擎** | 参考 OpenCode 双层循环架构，任务持续执行直到完成，支持上下文压缩和最大步数限制 |
-| **上下文压缩** | 消息超 80K tokens 时自动压缩旧消息为结构化 checkpoint，保留关键工作状态 |
+| **上下文压缩** | 消息超阈值（自动 = 可用预算的 80%）时将旧消息压缩为锚定式结构化 checkpoint，保留最近 N 轮工具上下文 |
 
 ---
 
@@ -345,6 +345,27 @@ PLUGINS_DIR=plugins
 
 # ===== Tavily（互联网搜索）======
 TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
+```
+
+### 上下文预算与压缩
+
+所有配置项均可在 `backend/.env` 中调整（默认值见注释，全部默认开启无需手动配置）：
+
+```ini
+# ===== Context Budget & Compaction =====
+# 单次 LLM 调用的上下文上限（默认 64000）
+# MAX_CONTEXT_TOKENS=64000
+# 输出预留 token（默认 8192）——usable = MAX_CONTEXT_TOKENS - CONTEXT_RESERVE_TOKENS
+# CONTEXT_RESERVE_TOKENS=8192
+# 压缩触发阈值；0 = 自动（0.8 × usable）
+# COMPACTION_THRESHOLD_TOKENS=0
+# 压缩保留的最近轮次（默认 2）
+# CONTEXT_TAIL_TURNS=2
+# 尾部保留 token 预算（默认 8000）
+# CONTEXT_PRESERVE_RECENT_TOKENS=8000
+# 工具输出回溯清理：保护下限 / 生效下限（默认 40000 / 20000）
+# TOOL_OUTPUT_PROTECT_TOKENS=40000
+# TOOL_OUTPUT_PRUNE_MINIMUM_TOKENS=20000
 ```
 
 ### 切换 LLM 提供商
@@ -664,7 +685,7 @@ Session A 完成 → slot #1 释放 → Session C 获得 slot
                        │ 429/500/503
 ┌──────────────────────▼──────────────────────────────┐
 │                 后端层                                │
-│  litellm num_retries=2 + TaskRunner 指数退避(3次)    │
+│  litellm num_retries=2 + AgentBus 事件循环自愈(5次)  │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -672,8 +693,8 @@ Session A 完成 → slot #1 释放 → Session C 获得 slot
 
 | 错误类型 | 分类依据 | 可重试 | 后端重试 | 前端自动重试 |
 |----------|----------|--------|----------|-------------|
-| 429 Rate Limit | `RateLimitError` / `429` | ✅ | litellm 2次 + TaskRunner 3次 | 5s 倒计时，最多 2 次 |
-| 500/502/503 | `InternalServerError` / `5xx` | ✅ | litellm 2次 + TaskRunner 3次 | 5s 倒计时，最多 2 次 |
+| 429 Rate Limit | `RateLimitError` / `429` | ✅ | litellm 2次 + AgentBus 5次 | 5s 倒计时，最多 2 次 |
+| 500/502/503 | `InternalServerError` / `5xx` | ✅ | litellm 2次 + AgentBus 5次 | 5s 倒计时，最多 2 次 |
 | 网络断开 | `Failed to fetch` / SSE 断连 | ✅ | — | 5s 倒计时，最多 2 次 |
 | 超时 | `timeout` / `timed out` | ✅ | litellm 2次 | 5s 倒计时，最多 2 次 |
 | Context Overflow | `context_length_exceeded` | ❌ | — | — |
@@ -684,8 +705,8 @@ Session A 完成 → slot #1 释放 → Session C 获得 slot
 
 ```
 retryAfter header → 使用 header 值（上限 60s）
-无 header → 2s → 4s → 8s（上限 30s）
-最大重试次数: 3
+无 header → litellm 递增间隔；AgentBus 崩溃自愈按重试次数递增延迟（1s→5s）
+最大重试次数: AgentBus 事件循环 5 次
 ```
 
 ### 重试流程
@@ -695,7 +716,7 @@ LLM API 报错 (429/500)
   │
   ├─ 1. litellm num_retries=2（自动，~1s/2s 间隔）
   │
-  ├─ 2. TaskRunner 指数退避（2s→4s→8s，最多 3 次）
+  ├─ 2. AgentBus 事件循环崩溃自愈（最多 5 次，按重试次数递增延迟）
   │     └─ 每次重试推送 step 事件 → 前端显示 "重试中..."
   │
   └─ 3. 如果仍然失败 → SSE error 事件（retryable=true）
@@ -722,7 +743,7 @@ LLM API 报错 (429/500)
 
 实现路径：
 - 后端重试：`backend/app/agent/graph.py` — `_llm_call()` num_retries
-- 后端重试：`backend/app/context/task_runner.py` — `_run_loop()` 指数退避
+- 后端自愈：`backend/app/agent/bus.py` — `run_agent()` 事件循环崩溃重启（递增延迟，最多 5 次）
 - 后端分类：`backend/app/api/chat.py` — SSE error 事件携带 retryable/statusCode
 - 前端分类：`frontend/src/api/chat.ts` — `classifyNetworkError()` + SSE 断连检测
 - 前端重试：`frontend/src/stores/chat.ts` — `retryLastMessage()` / `manualRetry()` / `cancelAutoRetry()`
@@ -1115,19 +1136,33 @@ Agent 在每一轮工具调用循环中，所有工具通过 `asyncio.gather()` 
 ```
 backend/app/context/
   ├── __init__.py           # 包入口，导出公共 API
-  ├── token_counter.py      # tiktoken 精确 token 计数 + fallback
-  ├── tool_output.py        # 工具输出智能边界控制
-  └── tool_dedup.py         # 工具结果去重缓存
+  ├── budget.py             # 上下文预算：usable = max_context - reserve；压缩阈值（0.8 × usable）
+  ├── token_counter.py      # tiktoken 精确 token 计数 + fallback + 截断 + 工具消息净化
+  ├── tool_output.py        # 工具输出智能边界控制 + 回溯清理
+  ├── tool_dedup.py         # 工具结果去重缓存
+  └── compaction.py         # 上下文压缩（LLM 锚定摘要 + 轮次尾部保留）
 ```
 
-#### 1. Token 计数（token_counter.py）
+#### 1. 上下文预算（budget.py）
+
+对齐 opencode 的 overflow 策略，为单次 LLM 调用划定可用上下文：
+
+| 计算 | 说明 |
+|------|------|
+| **可用预算 usable** | `max_context_tokens - context_reserve_tokens`（默认 64000 − 8192 = 55808） |
+| **压缩阈值** | 显式配置 `COMPACTION_THRESHOLD_TOKENS` > 0 时用配置值；否则自动取 usable 的 80% |
+
+预算先于截断兜底生效：长工具循环在触顶之前先触发压缩（总结而非丢弃）。
+
+#### 2. Token 计数（token_counter.py）
 
 | 特性 | 说明 |
 |------|------|
 | **精确计数** | 使用 tiktoken `cl100k_base` 编码（GPT-3.5/4 系列通用） |
 | **Fallback** | tiktoken 不可用时降级为 `len(text) // 4` 启发式估算 |
 | **消息级计数** | `estimate_tokens_messages()` 支持文本和多模态消息 |
-| **统一截断** | `truncate_messages()` 保留系统提示 + 最新消息，插入截断哨兵 |
+| **统一截断** | `truncate_messages()` 保留系统提示 + 最新消息，插入截断哨兵；按 `usable_context_tokens()` 对齐预算（调用方无需二次预留） |
+| **工具消息净化** | `sanitize_tool_messages()` 在截断/压缩后校正 `tool_calls ↔ tool` 配对：丢弃孤儿工具结果与不完整轮次，同一轮的多条工具结果全量保留，避免向 LLM 发送格式非法的消息序列 |
 
 对比旧实现：
 
@@ -1137,7 +1172,7 @@ backend/app/context/
 | 中文误差 | ~准确 | 精确 |
 | 统一性 | 3 处各自实现 | 单一模块 |
 
-#### 2. 工具输出边界（tool_output.py）
+#### 3. 工具输出边界（tool_output.py）
 
 防止大输出（文件读取、shell 命令）撑爆上下文窗口：
 
@@ -1149,6 +1184,8 @@ backend/app/context/
 
 截断后附加通知：`[output truncated: showed 200/1500 lines, 32768/98304 bytes]`
 
+**回溯清理（`prune_tool_outputs`）** — 入口边界截断之外的补充策略：当最近 N 轮内累计工具输出超过 `TOOL_OUTPUT_PROTECT_TOKENS`（默认 40000）时，把更早轮次的工具输出替换为剪枝占位符 `[tool output pruned ...]`；仅在收益超过 `TOOL_OUTPUT_PRUNE_MINIMUM_TOKENS`（默认 20000）时执行，避免微小收益的频繁改写。
+
 对比旧实现：
 
 | 旧行为 | 新行为 |
@@ -1156,8 +1193,9 @@ backend/app/context/
 | 硬截断 `result[:3000]` 字符 | 按行数 + 字节双重截断 |
 | 无截断通知 | 附加 truncation notice |
 | 所有工具统一限制 | 按工具类型差异化限制 |
+| 只限制新输出 | 新增回溯清理更旧轮次的工具输出 |
 
-#### 3. 工具结果去重（tool_dedup.py）
+#### 4. 工具结果去重（tool_dedup.py）
 
 检测并跳过重复的工具调用，节省 token 和执行时间：
 
@@ -1171,11 +1209,40 @@ LLM 调用 tool_read_file(path="b.py")  → 新调用，正常执行
 - 缓存作用域为单次 `_generate()` 调用（跨轮次生效）
 - 每次调用记录命中率统计（hits/misses/cached_entries）
 
+#### 5. 上下文压缩（compaction.py）
+
+参考 OpenCode 的 compaction 策略，在截断兜底之前先对旧消息做 **LLM 总结压缩**：
+
+| 机制 | 说明 |
+|------|------|
+| **触发阈值** | `compaction_threshold_tokens()`：显式配置 >0 用配置值；否则自动取 usable 的 80%，保证压缩先于触顶截断 |
+| **轮次尾部保留** | 以 user 消息划分轮次，保留最近 `CONTEXT_TAIL_TURNS`（默认 2）轮原文，受 `CONTEXT_PRESERVE_RECENT_TOKENS`（默认 8000）预算约束 |
+| **轮次边界切分** | 超预算的轮次在 user 或完整工具轮边界处切开，保证 `tool_calls ↔ tool` 对应关系不被切断；分割后若尾部不以 user 开头，则补上最新问题作为锚定 |
+| **锚定摘要** | 若已有 checkpoint，新摘要基于前一份做增量更新（保留仍成立的事实、剔除过时信息、合并新进展），而非从头重写 |
+| **结构化模板** | 摘要按 Objective / Important Details / Work State / Next Move / Relevant Files 输出，以 `[Task checkpoint` 标记，与会话持久化压缩基线打通 |
+| **失败回退** | 摘要 LLM 调用失败时回退为截断，保留最近消息并插入 `[earlier messages truncated]` 哨兵 |
+
+```
+messages 超阈值（如工具输出累积）
+  │
+  ▼
+compactor.should_compact(messages) → True
+  │
+  ▼
+_select(conversation, preserve_recent_tokens)
+  ├── 保留最近 tail_turns 轮（受预算约束，按轮次边界切分）
+  └── 旧轮 → _summarize(head, previous_summary) → 锚定 checkpoint
+        │
+        ▼
+[system(原有)] + [system checkpoint] + tail（最近轮次原文）
+```
+
 #### 集成点
 
 | 模块 | 改动 |
 |------|------|
-| `agent/graph.py` | `_generate()` 中工具循环集成去重 + 输出边界；删除旧 `_estimate_tokens`/`_truncate_messages` |
+| `agent/graph.py` | `_generate()` 工具循环集成 prune → should_compact → compact → sanitize → truncate（预算对齐）；删除旧 `_estimate_tokens`/`_truncate_messages` |
+| `config.py` | 新增 `max_context_tokens` / `context_reserve_tokens` / `compaction_threshold_tokens` / `context_tail_turns` / `context_preserve_recent_tokens` / `tool_output_protect_tokens` / `tool_output_prune_minimum_tokens` |
 | `api/chat.py` | `_truncate_history()` 改用 `estimate_tokens` |
 | `middleware/summarization.py` | 删除本地 token 估算，改用 `context.token_counter` |
 
@@ -1197,39 +1264,41 @@ LLM 调用 tool_read_file(path="b.py")  → 新调用，正常执行
     ├── [User message]
     │
     ▼
-[truncate_messages() 安全网] ← 1M tokens
-    │
+[sanitize_tool_messages(truncate_messages(usable_context_tokens()))]
+    │  ← usable = max_context - reserve，预算对齐
     ▼
 [LLM 调用 #1]
     │
     ▼
-[工具调用循环, 最多 20 轮]
+[工具调用循环, 最多 24 轮]
   每轮:
+    ├── prune_tool_outputs() 回溯清理更旧轮次的工具输出
+    ├── should_compact() → 超阈值则 compact()（锚定摘要 + 尾部保留）
     ├── Dedup 检查 → 命中则跳过执行
-    ├── 执行工具 → bound_tool_output() 智能截断
-    ├── 结果存入 early_results (按 tool_call_id 索引)
-    └── truncate_messages() → LLM 调用 #N
+    ├── 执行工具（并发）→ bound_tool_output() 智能截断
+    ├── sanitize_tool_messages() 净化 tool_calls ↔ tool 配对
+    └── truncate_messages(usable) → LLM 调用 #N
         │
         ▼
     [最终回答]
 ```
 
-实现路径：`backend/app/context/` — 整个包
+实现路径：`backend/app/context/` — 整个包；设计文档见 `docs/context-design.md`
 
-### 任务执行引擎（Task Runner）
+### 工具调用循环与任务状态（graph.py + task_state.py）
 
-参考 OpenCode 的双层 while 循环架构，解决「任务未完成就提前终止」的问题。
+工具调用循环位于 `agent/graph.py` 的 `_generate()` 中：内层循环持续「LLM 生成 tool_calls → 并发执行工具 → 结果回填」直到 LLM 不再调用工具，解决「任务未完成就提前终止」的问题。
 
-#### 核心设计
+#### 核心机制
 
 | 机制 | 说明 |
 |------|------|
-| **双层循环** | 内层：LLM + 工具调用持续到 LLM 不再返回 tool_calls；外层：检查是否有用户追加输入 |
-| **最大步数** | 默认 50 步，超限后注入强制总结 prompt，让 LLM 输出完成报告后结束 |
-| **上下文压缩** | 每步检查 token 总量，超 80K 自动压缩旧消息为结构化 checkpoint |
-| **任务状态持久化** | SQLite 持久化 step/token/compaction 状态，支持崩溃恢复 |
+| **工具循环** | 每轮一次完整 LLM 调用，最多 `MAX_TOOL_ROUNDS`（默认 24）；同一轮的多个工具通过 `asyncio.gather()` 并发执行 |
+| **强制收尾** | 达到最大轮数仍有 tool_calls 时，执行最后一批工具并注入强制总结 prompt，让 LLM 输出完成报告 |
+| **上下文压缩** | 每轮先回溯清理旧工具输出（`prune_tool_outputs`），再检查 token 总量，超阈值（自动 = usable 的 80%）压缩旧消息为锚定 checkpoint（见上文"上下文压缩"） |
+| **任务状态持久化** | `task_state.py` 用 SQLite 持久化 step/token/compaction 状态 |
 | **工具结果去重** | 相同 `(tool_name, args)` 的调用复用缓存结果 |
-| **智能输出边界** | 按行数+字节截断大输出，附带 truncation notice |
+| **智能输出边界** | 按行数+字节截断大输出，附带 truncation notice，超阈值回溯清理更旧轮次 |
 
 #### 任务流转
 
@@ -1237,56 +1306,42 @@ LLM 调用 tool_read_file(path="b.py")  → 新调用，正常执行
 用户消息
   │
   ▼
-TaskRunner.run()  ← 创建 TaskState，持久化到 SQLite
+LangGraph 流水线（retrieve → rerank → generate）
   │
-  ├── Phase 1: LangGraph RAG 流水线（retrieve → rerank → generate）
-  │     └── _generate 内层循环（最多 50 轮工具调用）
-  │           ├── 每轮: compaction 检查 → dedup → bound_output
-  │           └── LLM 返回无 tool_calls → 内层结束
+  └── _generate 工具循环（最多 24 轮）
+        ├── 每轮: prune_tool_outputs → should_compact/compact → dedup → 并发执行工具 → bound_output
+        ├── sanitize_tool_messages() 净化 tool_calls ↔ tool 配对
+        ├── truncate_messages(usable) → LLM 调用 #N
+        └── LLM 返回无 tool_calls → 循环结束，生成最终回答
   │
-  ├── Phase 2: 检查 LLM 是否还想继续
-  │     ├── 有 tool_calls → 继续循环（最多 50 步）
-  │     │     ├── compaction: 压缩旧消息
-  │     │     ├── 工具执行: dedup + bound_output
-  │     │     └── 记录 token/step 到 SQLite
-  │     └── 无 tool_calls → 任务完成
-  │
-  └── TaskState.mark_completed()
-        │
-        ▼
-      返回 {answer, sources, steps, task}
+  ▼
+返回 {answer, sources, steps, task}
 ```
-
-#### 对比旧架构
-
-| 维度 | 旧架构 | 新架构（Task Runner） |
-|------|--------|---------------------|
-| 执行模型 | 单次 invoke，最多 20 轮工具调用 | 双层循环，最多 50 步 |
-| 任务完成判定 | `rounds >= 20` 或空内容 → 强制结束 | LLM 不再返回 tool_calls → 自然结束 |
-| 上下文膨胀 | 被动截断（1M tokens 丢弃旧消息） | 主动压缩（80K tokens 时 LLM 总结） |
-| 状态持久化 | 无 | SQLite 持久化 step/token/compaction |
-| 崩溃恢复 | 不支持 | 可从 SQLite 恢复任务状态 |
 
 #### 模块架构
 
 ```
 backend/app/context/
-  ├── token_counter.py     ← tiktoken 精确计数
-  ├── tool_output.py       ← 智能输出边界
+  ├── budget.py            ← 上下文预算与压缩阈值
+  ├── token_counter.py     ← tiktoken 精确计数 + 截断 + 工具消息净化
+  ├── tool_output.py       ← 智能输出边界 + 回溯清理
   ├── tool_dedup.py        ← 工具结果去重
-  ├── compaction.py        ← 上下文压缩（LLM 总结）
-  ├── task_state.py        ← 任务状态持久化（SQLite）
-  └── task_runner.py       ← 核心执行引擎（双层循环）
+  ├── compaction.py        ← 上下文压缩（LLM 锚定摘要 + 轮次尾部保留）
+  └── task_state.py        ← 任务状态持久化（SQLite）
 ```
 
 #### 关键参数
 
 | 参数 | 默认值 | 配置方式 |
 |------|--------|----------|
-| `MAX_STEPS` | 50 | `task_runner.py` 常量 |
-| `COMPACTION_THRESHOLD` | 80,000 tokens | `task_runner.py` 常量 |
-| `keep_recent` | 6 条 | `compaction.py` 常量 |
-| `max_tool_rounds` | 50 | `graph.py` 常量 |
+| `max_tool_rounds` | 24 | `config.py` / `MAX_TOOL_ROUNDS` 环境变量 |
+| `max_context_tokens` | 64,000 | `config.py` / `MAX_CONTEXT_TOKENS` |
+| `context_reserve_tokens` | 8,192 | `config.py` / `CONTEXT_RESERVE_TOKENS` |
+| `compaction_threshold_tokens` | 0（自动 = 0.8 × usable） | `config.py` / `COMPACTION_THRESHOLD_TOKENS` |
+| `context_tail_turns` | 2 | `config.py` / `CONTEXT_TAIL_TURNS` |
+| `context_preserve_recent_tokens` | 8,000 | `config.py` / `CONTEXT_PRESERVE_RECENT_TOKENS` |
+| `tool_output_protect_tokens` | 40,000 | `config.py` / `TOOL_OUTPUT_PROTECT_TOKENS` |
+| `tool_output_prune_minimum_tokens` | 20,000 | `config.py` / `TOOL_OUTPUT_PRUNE_MINIMUM_TOKENS` |
 
 #### 前端适配
 
@@ -1296,7 +1351,7 @@ backend/app/context/
 | `types/index.ts` | `SSEEvent` 加 `task` 字段（task_id/status/step/total_tokens/tool_calls_count） |
 | compaction `step_end` 事件 | 包含 `detail`："X 条消息压缩为 Y 条" |
 
-实现路径：`backend/app/context/task_runner.py` — 核心引擎
+实现路径：`backend/app/agent/graph.py` — `_generate()` 工具循环（压缩/去重/输出边界）
 `backend/app/context/compaction.py` — 上下文压缩
 `backend/app/context/task_state.py` — 任务状态持久化
 
@@ -1324,12 +1379,12 @@ backend/app/agent/tools.py    → 工具定义 + 系统 prompt
 ### 3. 上下文管理 — 理解 token 控制策略
 
 ```
-backend/app/context/token_counter.py  → tiktoken 精确计数 + 截断策略
-backend/app/context/tool_output.py    → 工具输出智能边界控制
+backend/app/context/budget.py         → 上下文预算 + 压缩阈值（0.8 × usable）
+backend/app/context/token_counter.py  → tiktoken 精确计数 + 截断 + 工具消息净化
+backend/app/context/tool_output.py    → 工具输出智能边界控制 + 回溯清理
 backend/app/context/tool_dedup.py     → 工具结果去重缓存
-backend/app/context/compaction.py     → 上下文压缩（LLM 总结旧消息）
+backend/app/context/compaction.py     → 上下文压缩（LLM 锚定摘要 + 轮次尾部保留）
 backend/app/context/task_state.py     → 任务状态持久化（SQLite）
-backend/app/context/task_runner.py    ← ⭐ 核心：双层循环任务执行引擎
 ```
 
 ### 4. RAG 检索链路 — 理解知识库如何工作
@@ -1383,19 +1438,16 @@ frontend/src/types/index.ts        → 类型定义（Message、ChatError、SSEE
 用户输入
   → 前端 chat.ts 发送 POST /api/chat/stream
     → backend api/chat.py 接收
-      → TaskRunner.run()  ← 任务执行引擎
+      → agent/graph.py LangGraph 编排（retrieve → rerank → generate）
         │
-        ├── Phase 1: agent/graph.py LangGraph 编排
-        │     ├─ _retrieve()  → retriever.py 混合检索
-        │     ├─ _rerank()    → reranker.py 重排序
-        │     └─ _generate()  → litellm 调 LLM + 工具循环（最多 50 轮）
-        │
-        ├── Phase 2: 持续循环（直到 LLM 不再调用工具）
-        │     ├─ compaction: 超 80K tokens 自动压缩
-        │     ├─ dedup: 相同工具调用复用缓存
-        │     └─ bound_output: 大输出智能截断
-        │
-        └── TaskState → SQLite 持久化
+        ├─ _retrieve()  → retriever.py 混合检索
+        ├─ _rerank()    → reranker.py 重排序
+        └─ _generate()  → litellm 调 LLM + 工具循环（最多 MAX_TOOL_ROUNDS 轮）
+              ├─ prune_tool_outputs: 回溯清理更旧工具输出
+              ├─ compaction: 超阈值（0.8 × usable）自动压缩旧消息
+              ├─ dedup: 相同工具调用复用缓存
+              ├─ bound_output: 大输出智能截断
+              └─ sanitize + truncate(usable) → 下一轮 LLM 调用
       → SSE 事件流返回
     → 前端 ChatView.vue 流式渲染
 ```
@@ -1405,11 +1457,11 @@ frontend/src/types/index.ts        → 类型定义（Message、ChatError、SSEE
 | 优先级 | 模块 | 原因 |
 |--------|------|------|
 | **1** | `agent/graph.py` | 核心链路，理解 Agent 如何思考和执行 |
-| **2** | `context/task_runner.py` | 任务执行引擎，理解双层循环如何保证任务完成 |
+| **2** | `context/budget.py` + `context/compaction.py` | 上下文预算与压缩策略，理解长工具循环如何不爆上下文 |
 | **3** | `rag/retriever.py` + `vector_store.py` | RAG 是项目的核心价值 |
-| **4** | `context/compaction.py` | 理解上下文压缩策略 |
+| **4** | `context/token_counter.py` | 精确 token 计数 + 工具消息净化 |
 | **5** | `api/chat.py` | 理解前后端如何通过 SSE 流式通信 |
 | **6** | `stores/chat.ts` | 前端状态管理 + 会话隔离 |
 | **7** | `plugins/loader.py` | 理解插件扩展机制 |
 
-先跑通 `graph.py` 的工作流，再看 `task_runner.py` 的双层循环，然后向外扩展到 RAG、API、前端，最后看插件系统。
+先跑通 `graph.py` 的工作流，再看上下文预算/压缩（`budget.py` + `compaction.py`），然后向外扩展到 RAG、API、前端，最后看插件系统。
