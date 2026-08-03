@@ -43,7 +43,20 @@ class Settings(BaseSettings):
 
     # Token 成本控制
     # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
-    max_context_tokens: int = 24_000
+    # 对齐 opencode overflow.ts：usable = max_context_tokens - context_reserve_tokens
+    max_context_tokens: int = 64_000
+    # 输出预留：留给模型回答的 token（≈ min(20_000, maxOutputTokens)，默认 8_192）
+    context_reserve_tokens: int = 8_192
+    # 压缩触发阈值（token）；0 表示自动 = 0.8 × usable，长工具循环在截断兜底之前先压缩
+    compaction_threshold_tokens: int = 0
+    # 压缩时尾部保留的最近轮次（对齐 opencode tail_turns，默认 2）
+    context_tail_turns: int = 2
+    # 尾部保留的 token 预算（对齐 opencode preserve_recent_tokens，默认 8_000）
+    context_preserve_recent_tokens: int = 8_000
+    # 回溯式工具输出清理：最近 N 轮之内累计工具输出超过该值时，清理更旧输出（默认 40_000）
+    tool_output_protect_tokens: int = 40_000
+    # 清理收益低于该值时不做（避免微小收益的频繁改写）
+    tool_output_prune_minimum_tokens: int = 20_000
     # 单次请求内最大工具调用轮数（每轮都是一次完整 LLM 调用）
     # 可用环境变量 MAX_TOOL_ROUNDS 覆盖
     max_tool_rounds: int = 24

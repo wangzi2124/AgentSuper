@@ -13,12 +13,9 @@ WORKSPACE = Path(__file__).resolve().parents[2]
 
 from app.context.token_counter import truncate_messages as _truncate_messages
 from app.context.token_counter import sanitize_tool_messages
-from app.context.tool_output import bound_tool_output
+from app.context.tool_output import bound_tool_output, prune_tool_outputs
 from app.context.tool_dedup import ToolResultDedup
-
-# 每次 LLM 调用允许的最大上下文 token（system + history + 当前问题）
-# 可通过 .env 的 MAX_CONTEXT_TOKENS 覆盖，见 app/config.py settings.max_context_tokens
-MAX_CONTEXT_TOKENS = 24_000
+from app.context.budget import usable_context_tokens, compaction_threshold_tokens
 
 import litellm
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
@@ -185,17 +182,21 @@ class RAGAgent:
                 except NeedsPermission as e:
                     mgr = get_perm_mgr()
                     req = mgr.create_request(e.path, e.operation, name, args)
-                    if state:
-                        eq = state.get("_event_queue")
-                        if eq:
-                            eq.put_nowait({
-                                "type": "permission_request",
-                                "request_id": req.id,
-                                "path": e.path,
-                                "operation": e.operation,
-                                "tool_name": name,
-                                "tool_args": args,
-                            })
+                    eq = state.get("_event_queue") if state else None
+                    if eq:
+                        eq.put_nowait({
+                            "type": "permission_request",
+                            "request_id": req.id,
+                            "path": e.path,
+                            "operation": e.operation,
+                            "tool_name": name,
+                            "tool_args": args,
+                        })
+                    if not eq:
+                        # 无事件队列（如多 agent 总线路径）时无人能审批，
+                        # 直接拒绝而不是永久等待（此前会卡到 supervisor 超时）
+                        logger.warning("Permission request denied: no event queue to approve %s", e.path)
+                        return f"Permission denied: {e.path}"
                     decision = await mgr.await_decision(req.id)
                     if decision == "allowed":
                         mgr.add_temp_approval(e.path)
@@ -358,6 +359,9 @@ class RAGAgent:
             model=settings.summarization_model or self.model,
             api_key=settings.summarization_api_key or settings.llm_api_key,
             api_base=settings.summarization_api_base or settings.llm_api_base,
+            threshold=compaction_threshold_tokens(),
+            tail_turns=settings.context_tail_turns,
+            preserve_recent_tokens=settings.context_preserve_recent_tokens,
         )
         self._push_event(state, {"type": "step_start", "step_id": "generate", "name": "生成回答", "status": "running"})
 
@@ -404,7 +408,7 @@ class RAGAgent:
             elif self.api_base and "openai" in self.api_base:
                 model = f"openai/{model}"
 
-        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=settings.max_context_tokens))
+        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
 
         response = await self._llm_call(model, messages, tool_defs)
         msg = response.choices[0].message
@@ -415,6 +419,13 @@ class RAGAgent:
             rounds += 1
 
             # Compaction: compress old messages when context grows large
+            # （先回溯清理旧工具输出，再判断是否触发压缩）
+            messages = prune_tool_outputs(
+                messages,
+                protect_tokens=settings.tool_output_protect_tokens,
+                minimum_tokens=settings.tool_output_prune_minimum_tokens,
+                tail_turns=settings.context_tail_turns,
+            )
             if compactor.should_compact(messages):
                 self._push_event(state, {"type": "step_start", "step_id": "compaction", "name": "压缩上下文", "status": "running"})
                 old_count = len(messages)
@@ -483,7 +494,7 @@ class RAGAgent:
                     "content": bounded_result,
                 })
 
-            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=settings.max_context_tokens))
+            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
             response = await self._llm_call(model, messages, tool_defs)
             msg = response.choices[0].message
 
@@ -528,7 +539,7 @@ class RAGAgent:
                 bounded_result = bound_tool_output(result_str, tool_name)
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tc_id, "content": bounded_result})
-            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=settings.max_context_tokens))
+            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
             messages.append({
                 "role": "user",
                 "content": (

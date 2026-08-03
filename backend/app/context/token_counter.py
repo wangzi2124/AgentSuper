@@ -143,12 +143,16 @@ def sanitize_tool_messages(messages: list[dict]) -> list[dict]:
     kept: list[dict] = []
     for msg in messages:
         if msg.get("role") == "tool":
-            prev = kept[-1] if kept else None
+            # 校验目标是最近一条带 tool_calls 的 assistant（同一轮可能有
+            # 多条 tool 结果，紧邻上一条可能是另一个 tool 消息）
+            prev_assistant = None
+            for k in range(len(kept) - 1, -1, -1):
+                if kept[k].get("role") == "assistant" and kept[k].get("tool_calls"):
+                    prev_assistant = kept[k]
+                    break
             if (
-                prev is not None
-                and prev.get("role") == "assistant"
-                and prev.get("tool_calls")
-                and msg.get("tool_call_id") in {tc.get("id") for tc in prev["tool_calls"]}
+                prev_assistant is not None
+                and msg.get("tool_call_id") in {tc.get("id") for tc in prev_assistant["tool_calls"]}
             ):
                 kept.append(msg)
             else:

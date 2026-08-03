@@ -2,13 +2,21 @@
 
 When the message list grows too large, compaction summarizes older messages
 into a structured checkpoint, preserving key information while freeing token
-budget. Inspired by OpenCode's compaction strategy.
+budget. Inspired by OpenCode's compaction strategy:
+
+- Turn-based tail preservation: the last `tail_turns` user turns are kept
+  verbatim within a token budget; overflow turns are split at round
+  boundaries so only the most recent tool rounds stay in context.
+- Anchored summary: if a previous checkpoint exists, the new summary updates
+  it (preserve still-true details, drop stale ones, merge new facts) instead
+  of rewriting from scratch.
+- Fallback truncation when summarization fails.
 
 Compaction produces a structured summary with:
 - Task objective
-- Completed work
-- Current state
-- Next steps
+- Important details / constraints
+- Work state (completed / active / blocked)
+- Next move
 - Relevant files/context
 """
 
@@ -26,26 +34,47 @@ logger = logging.getLogger(__name__)
 # Default threshold: trigger compaction when messages exceed this many tokens
 DEFAULT_COMPACTION_THRESHOLD = 80_000
 
-# How many recent messages to always keep intact
-DEFAULT_KEEP_RECENT = 6
+# How many recent user turns to keep intact (aligned with opencode tail_turns)
+DEFAULT_TAIL_TURNS = 2
 
-# Compaction summary prompt
-COMPACTION_PROMPT = """You are a task checkpoint manager. Summarize the following conversation into a structured checkpoint that preserves all critical information for continuing the work.
+# Token budget for the preserved tail (aligned with opencode preserve_recent_tokens)
+DEFAULT_PRESERVE_RECENT_TOKENS = 8_000
 
-Write the summary as a concise checkpoint with these sections:
-- **Objective**: What the user asked for
-- **Completed**: What has been done so far (with specific file paths, function names, decisions)
-- **Current State**: Where the task currently stands
-- **Next Steps**: What remains to be done
-- **Key Context**: Important files, variables, patterns, or constraints
+COMPACTION_MARKER = "[Task checkpoint"
 
-Be specific and precise. Include file paths, function names, variable names, and exact technical details. This summary will be used to continue the task without re-reading the original conversation.
+# Anchored summary template, aligned with opencode core/session/compaction.ts
+COMPACTION_TEMPLATE = """Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+<template>
+## Objective
+- [one or two brief sentences describing what the user is trying to accomplish]
 
-Language: write in the same language as the conversation.
+## Important Details
+- [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or "(none)"]
 
----
-CONVERSATION TO SUMMARIZE:
-"""
+## Work State
+### Completed
+- [finished work, verified facts, or changes made; otherwise "(none)"]
+
+### Active
+- [current work, partial changes, or investigation state; otherwise "(none)"]
+
+### Blocked
+- [blockers, failing commands, or unknowns; otherwise "(none)"]
+
+## Next Move
+1. [immediate concrete action, or "(none)"]
+2. [next action if known, or "(none)"]
+
+## Relevant Files
+- [file or directory path: why it matters, or "(none)"]
+</template>
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
+- Do not mention the summary process or that context was compacted.
+- Write in the same language as the conversation."""
 
 COMPACTION_MESSAGE_TEMPLATE = (
     "[Task checkpoint — conversation compacted to save context space]\n\n"
@@ -54,11 +83,39 @@ COMPACTION_MESSAGE_TEMPLATE = (
 )
 
 
+def is_checkpoint(msg: dict) -> bool:
+    """判断消息是否为之前压缩产生的 checkpoint（system 角色 + 标记前缀）。"""
+    return bool(msg) and msg.get("role") == "system" and str(msg.get("content", "")).startswith(COMPACTION_MARKER)
+
+
+def _summary_of(msg: dict) -> Optional[str]:
+    """从 checkpoint 消息中提取上一份摘要正文。"""
+    content = str(msg.get("content", ""))
+    if "\n\n" not in content:
+        return None
+    summary = content.split("\n\n", 1)[1]
+    marker = "\n\n[Recent messages preserved"
+    if marker in summary:
+        summary = summary.split(marker, 1)[0]
+    summary = summary.strip()
+    return summary or None
+
+
+def previous_summary_of(messages: list[dict]) -> Optional[str]:
+    """取最近一份已存在 checkpoint 的摘要作为锚定基准。"""
+    for msg in reversed(messages):
+        if is_checkpoint(msg):
+            summary = _summary_of(msg)
+            if summary:
+                return summary
+    return None
+
+
 class ContextCompactor:
     """Compacts conversation context when token budget is exceeded.
 
     Usage:
-        compactor = ContextCompactor(model="deepseek-chat")
+        compactor = ContextCompactor(model="deepseek-chat", threshold=44_000)
         if compactor.should_compact(messages):
             messages = await compactor.compact(messages)
     """
@@ -69,43 +126,115 @@ class ContextCompactor:
         api_key: str | None = None,
         api_base: str | None = None,
         threshold: int = DEFAULT_COMPACTION_THRESHOLD,
-        keep_recent: int = DEFAULT_KEEP_RECENT,
+        tail_turns: int = DEFAULT_TAIL_TURNS,
+        preserve_recent_tokens: int = DEFAULT_PRESERVE_RECENT_TOKENS,
     ):
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
         self.threshold = threshold
-        self.keep_recent = keep_recent
+        self.tail_turns = tail_turns
+        self.preserve_recent_tokens = preserve_recent_tokens
 
     def should_compact(self, messages: list[dict]) -> bool:
         """Check if messages exceed the compaction threshold."""
         total = estimate_tokens_messages(messages)
         return total > self.threshold
 
+    def _select(self, messages: list[dict], budget: int) -> tuple[list[dict], list[dict]]:
+        """把消息切成 (head, tail)：head 待压缩、tail 原样保留。
+
+        - 以 user 消息划分轮次，默认保留最后 tail_turns 轮（受 budget 约束）。
+        - 超预算的轮次在"轮次边界"（user 开头或完整工具轮起点）处切开，
+          只保留最近部分，避免切断 tool_calls ↔ tool 的对应关系。
+        - 分割后若尾部不以 user 开头，则把最新的 user 问题补到尾部开头，
+          保证下一轮 LLM 调用仍有用户消息锚定。
+        """
+        if not messages:
+            return messages, []
+
+        user_idx = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+        if not user_idx:
+            return messages, []
+
+        boundaries = sorted({
+            0,
+            *user_idx,
+            *(i for i, m in enumerate(messages) if m.get("role") == "assistant" and m.get("tool_calls")),
+        })
+        n = len(user_idx)
+        ends = user_idx[1:] + [len(messages)]
+
+        total = 0
+        keep = None
+        for j in range(n - 1, -1, -1):
+            if n - j > self.tail_turns:
+                break
+            start, end = user_idx[j], ends[j]
+            size = estimate_tokens_messages(messages[start:end])
+            if total + size <= budget:
+                total += size
+                keep = start
+                continue
+            remaining = max(0, budget - total)
+            split = self._split_suffix(messages, start, end, boundaries, remaining)
+            if split is not None:
+                keep = split
+            break
+
+        if keep is None or keep == 0:
+            # 完全放不下（含分割失败）→ 兜底把最新一整轮作为尾部，
+            # 保证主循环仍锚定在最近的 user 消息上。
+            if len(messages) <= 1:
+                return messages, []
+            last_user = user_idx[-1]
+            if last_user == 0:
+                return messages, []
+            return messages[:last_user], messages[last_user:]
+
+        tail = messages[keep:]
+        # 分割路径的尾部不以 user 开头 → 补上最新的 user 问题（体积很小）
+        if tail and tail[0].get("role") != "user":
+            nu = user_idx[-1]
+            if nu < keep:
+                tail = [messages[nu]] + tail
+        return messages[:keep], tail
+
+    def _split_suffix(self, messages: list[dict], start: int, end: int,
+                      boundaries: list[int], remaining: int) -> int | None:
+        """在 (start, end) 内找最大的轮次边界 b，使 messages[b:end] 落在剩余预算内。"""
+        for b in reversed(boundaries):
+            if start < b < end:
+                size = estimate_tokens_messages(messages[b:end])
+                if size <= remaining:
+                    return b
+        return None
+
     async def compact(self, messages: list[dict]) -> list[dict]:
         """Compact messages by summarizing older messages into a checkpoint.
 
         Returns a new message list with:
-        - System message(s) preserved
-        - Compaction summary inserted
-        - Recent messages kept intact
+        - System message(s) preserved (previous checkpoints replaced)
+        - Compaction summary inserted (anchored on previous summary if any)
+        - Recent turns kept intact
         """
         if not messages:
             return messages
 
-        # Separate system messages from conversation messages
-        system_msgs = [m for m in messages if m.get("role") == "system" and "[earlier messages truncated" not in m.get("content", "")]
-        conversation = [m for m in messages if m.get("role") != "system" or "[earlier messages truncated" in m.get("content", "")]
+        previous_summary = previous_summary_of(messages)
+        system_msgs = [m for m in messages if m.get("role") == "system" and not is_checkpoint(m)]
+        conversation = [m for m in messages if m.get("role") != "system"]
 
-        if len(conversation) <= self.keep_recent:
-            return messages  # Nothing to compact
+        if not conversation:
+            return messages
 
-        # Split: older (to compact) + recent (to keep)
-        older = conversation[:-self.keep_recent]
-        recent = conversation[-self.keep_recent:]
+        head, tail = self._select(conversation, self.preserve_recent_tokens)
+        if not head:
+            # 最新几轮已全在尾部保留，没有更旧的内容可压缩
+            return messages
 
-        # Generate summary of older messages
-        summary = await self._summarize(older)
+        # Generate anchored summary of the head
+        summary = await self._summarize(head, previous_summary)
         if not summary:
             # Compaction failed, fall back to truncation
             logger.warning("Compaction summarization failed, falling back to truncation")
@@ -115,19 +244,19 @@ class ContextCompactor:
         checkpoint_content = COMPACTION_MESSAGE_TEMPLATE.format(summary=summary)
         checkpoint_msg = {"role": "system", "content": checkpoint_content}
 
-        result = system_msgs + [checkpoint_msg] + recent
+        result = system_msgs + [checkpoint_msg] + tail
 
-        old_tokens = estimate_tokens_messages(older)
+        old_tokens = estimate_tokens_messages(head)
         new_tokens = estimate_tokens(checkpoint_content)
         logger.info(
-            "Compaction: %d messages (%d tokens) -> checkpoint (%d tokens) + %d recent messages",
-            len(older), old_tokens, new_tokens, len(recent),
+            "Compaction: %d messages (%d tokens) -> checkpoint (%d tokens) + tail (%d messages, %d tokens)",
+            len(head), old_tokens, new_tokens, len(tail), estimate_tokens_messages(tail),
         )
 
         return result
 
-    async def _summarize(self, messages: list[dict]) -> str:
-        """Call LLM to generate a structured summary of older messages."""
+    async def _summarize(self, messages: list[dict], previous_summary: str | None) -> str:
+        """Call LLM to generate an anchored structured summary of older messages."""
         # Build conversation text
         lines = []
         for m in messages:
@@ -151,7 +280,22 @@ class ContextCompactor:
             tail = conversation_text[-chars // 5:] if chars // 5 else ""
             conversation_text = f"{head}\n\n... [middle portion omitted] ...\n\n{tail}"
 
-        prompt = COMPACTION_PROMPT + conversation_text
+        if previous_summary:
+            instruction = (
+                "Update the anchored summary below using the conversation history above.\n"
+                "Preserve still-true details, remove stale details, and merge in the new facts.\n"
+                f"<previous-summary>\n{previous_summary}\n</previous-summary>"
+            )
+        else:
+            instruction = "Create a new anchored summary from the conversation history."
+
+        prompt = (
+            instruction
+            + "\n\n"
+            + COMPACTION_TEMPLATE
+            + "\n\n---\nCONVERSATION HISTORY:\n"
+            + conversation_text
+        )
 
         try:
             kwargs = {
