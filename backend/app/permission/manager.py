@@ -64,11 +64,28 @@ class PermissionRequest:
 class PermissionManager:
     """文件系统权限管理器，负责路径分类、权限检查、白名单管理和审批流程。"""
 
-    def __init__(self, workspace: str = "", whitelist_path: str = ""):
-        """初始化权限管理器，设置工作目录和白名单文件路径。"""
+    def __init__(
+        self,
+        workspace: str = "",
+        whitelist_path: str = "",
+        extra_workspaces: Optional[list] = None,
+        external_default: str = "ask",
+        approval_timeout: int = 60,
+    ):
+        """初始化权限管理器，设置工作目录、白名单文件路径和额外工作区。"""
         self.workspace = Path(workspace).resolve() if workspace else Path.cwd()
         whitelist_dir = Path(whitelist_path) if whitelist_path else self.workspace.parent / "data"
         self.whitelist_path = whitelist_dir / "permissions.json" if whitelist_dir.is_dir() else whitelist_dir
+        self.extra_workspaces: list[Path] = []
+        if extra_workspaces:
+            for item in extra_workspaces:
+                item = str(item).strip()
+                if item:
+                    self.extra_workspaces.append(Path(item).resolve())
+        if external_default not in ("ask", "allow", "deny"):
+            external_default = "ask"
+        self.external_default = external_default
+        self.approval_timeout = max(1, int(approval_timeout))
         self._requests: dict[str, PermissionRequest] = {}
         self._temp_approvals: OrderedDict[str, float] = OrderedDict()
         self._load_whitelist()
@@ -118,6 +135,12 @@ class PermissionManager:
             return "temp"
         except (ValueError, OSError):
             pass
+        for extra in self.extra_workspaces:
+            try:
+                p.relative_to(extra)
+                return "workspace"
+            except (ValueError, OSError):
+                pass
         return "external"
 
     def _is_critical_read(self, p: Path) -> bool:
@@ -183,7 +206,7 @@ class PermissionManager:
                 return "allow"
             except ValueError:
                 pass
-        return "ask"
+        return self.external_default
 
     def add_temp_approval(self, path_str: str):
         """临时授权指定路径（及其父目录），TTL过期后自动失效。"""
@@ -201,8 +224,10 @@ class PermissionManager:
         self._requests[req.id] = req
         return req
 
-    async def await_decision(self, request_id: str, timeout: int = 120) -> str:
+    async def await_decision(self, request_id: str, timeout: Optional[int] = None) -> str:
         """异步等待用户对权限请求的审批结果，超时返回expired。"""
+        if timeout is None:
+            timeout = self.approval_timeout
         req = self._requests.get(request_id)
         if not req:
             return "expired"

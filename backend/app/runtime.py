@@ -94,7 +94,15 @@ def _do_init(app):
     plugin_loader = PluginLoader(settings.plugins_dir)
     plugin_loader.load_all()
 
-    perm_mgr = PermissionManager(workspace=str(Path(__file__).resolve().parents[1].parent))
+    extra_workspaces = [
+        p.strip() for p in (settings.extra_workspaces or "").split(",") if p.strip()
+    ]
+    perm_mgr = PermissionManager(
+        workspace=str(Path(__file__).resolve().parents[1].parent),
+        extra_workspaces=extra_workspaces,
+        external_default=settings.external_path_default,
+        approval_timeout=settings.permission_approval_timeout,
+    )
     set_perm_manager(perm_mgr)
 
     agent = RAGAgent(retriever, skill_loader, plugin_loader, reranker=reranker)
