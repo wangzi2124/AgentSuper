@@ -182,8 +182,8 @@ class ContextCompactor:
                 keep = split
             break
 
-        if keep is None or keep == 0:
-            # 完全放不下（含分割失败）→ 兜底把最新一整轮作为尾部，
+        if keep is None:
+            # 预算完全放不下（含分割失败）→ 兜底把最新一整轮作为尾部，
             # 保证主循环仍锚定在最近的 user 消息上。
             if len(messages) <= 1:
                 return messages, []
@@ -191,6 +191,10 @@ class ContextCompactor:
             if last_user == 0:
                 return messages, []
             return messages[:last_user], messages[last_user:]
+
+        if keep == 0:
+            # 整个对话都在保留预算内 → 没有更旧的内容可压缩
+            return [], messages
 
         tail = messages[keep:]
         # 分割路径的尾部不以 user 开头 → 补上最新的 user 问题（体积很小）
