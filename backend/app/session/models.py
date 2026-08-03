@@ -125,6 +125,12 @@ class PromptRequest(BaseModel):
     delivery: str = "steer"  # steer | queue
 
 
+class RevertRequest(BaseModel):
+    """撤销到指定消息。"""
+
+    message_id: str
+
+
 class SessionStatus(BaseModel):
     """会话运行状态。"""
 

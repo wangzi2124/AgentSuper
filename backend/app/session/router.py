@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from . import repository
 from .deps import SessionContext, create_project_context, get_user_id, resolve_session_context
-from .models import PromptRequest, SessionCreate, SessionInfo, SessionStatus, SessionUpdate
+from .models import PromptRequest, RevertRequest, SessionCreate, SessionInfo, SessionStatus, SessionUpdate
 
 router = APIRouter()
 
@@ -133,6 +133,15 @@ async def compact_session(
     ctx: SessionContext = Depends(resolve_session_context),
 ):
     ctx.service.compact(ctx.user_id, ctx.session_id, checkpoint or "")
+
+
+@router.post("/{session_id}/revert", response_model=dict)
+async def revert_session(
+    body: RevertRequest,
+    ctx: SessionContext = Depends(resolve_session_context),
+):
+    """撤销到指定消息（删除其后的消息与部件）。"""
+    return ctx.service.revert(ctx.user_id, ctx.session_id, body.message_id)
 
 
 @router.post("/{session_id}/interrupt", status_code=204)

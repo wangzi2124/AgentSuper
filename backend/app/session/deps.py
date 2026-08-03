@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import HTTPException, Request
 
 from . import repository
 from .models import ProjectInfo, SessionInfo
@@ -55,13 +55,13 @@ def discover_project_root(directory: str = "") -> str:
 def resolve_session_context(
     request: Request,
     session_id: str,
-    service: SessionService = Depends(lambda: request.app.state.session_service),
 ) -> SessionContext:
     """按 session 解析并注入隔离上下文；越权/不存在返回 403/404。
 
     对齐 opencode session-location.ts：从 session 行解析 directory，
     为该会话构建所属 project 的上下文。
     """
+    service: SessionService = request.app.state.session_service
     user_id = get_user_id(request)
     session = repository.get_session(session_id)
     if not session:

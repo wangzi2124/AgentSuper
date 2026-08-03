@@ -6,10 +6,12 @@
 """
 
 import logging
+import time as tmod
 from typing import Any, Awaitable, Callable, Optional
 
 from . import history as session_history
 from . import repository
+from . import task_bridge
 from .coordinator import SessionCoordinator
 from .models import ContextEpoch, Message, SessionInfo, SessionStatus
 
@@ -44,6 +46,7 @@ class SessionService:
         model: Optional[Any] = None,
         kind: str = "chat",
         title: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> SessionInfo:
         if parent_id:
             parent = repository.require_session(parent_id)
@@ -55,6 +58,7 @@ class SessionService:
         return repository.create_session(
             user_id, project_id, directory,
             parent_id=parent_id, agent=agent, model=model, kind=kind, title=title,
+            session_id=session_id,
         )
 
     def get(self, user_id: str, session_id: str) -> SessionInfo:
@@ -84,8 +88,11 @@ class SessionService:
     def remove(self, user_id: str, session_id: str) -> None:
         self._authorized(user_id, session_id)
         # 取消该会话及其子会话的后台执行（对齐 session.ts:remove）
-        for sid in [session_id] + [c.id for c in repository.list_children(session_id)]:
+        child_ids = [c.id for c in repository.list_children(session_id)]
+        for sid in [session_id] + child_ids:
             self.coordinator.cancel_best_effort(sid)
+        # 级联取消子会话对应的 AgentBus 任务（multi-agent kind='task' 子会话）
+        task_bridge.cancel_children(child_ids)
         repository.remove_session(session_id)
 
     def children(self, user_id: str, parent_id: str) -> list[SessionInfo]:
@@ -93,7 +100,11 @@ class SessionService:
         return repository.list_children(parent_id)
 
     def fork(self, user_id: str, session_id: str, message_id: Optional[str] = None) -> SessionInfo:
-        """在指定消息（默认末尾）处克隆子会话，重建 parentID 映射。"""
+        """在指定消息（默认末尾）处克隆子会话，重建 parentID 映射（对齐 session.ts:fork）。
+
+        拷贝截至 message_id（含）的消息到子会话；子会话获得独立消息日志与上下文，
+        与父会话互不污染。消息对应的 message_parts 一并复制。
+        """
         original = self._authorized(user_id, session_id)
         child = self.create(
             user_id,
@@ -105,9 +116,25 @@ class SessionService:
             kind=original.kind,
             title=f"{original.title} (fork)",
         )
-        # 拷贝截至 message_id 的消息（含部件），此处为骨架占位。
-        # TODO(P4): 遍历 repository.list_messages + list_parts，为新会话重放。
+        source = repository.list_messages(session_id)
+        copied = 0
+        for m in source:
+            if message_id and m.id == message_id:
+                copied += 1
+                self._copy_message(session_id, child.id, m)
+                break
+            copied += 1
+            self._copy_message(session_id, child.id, m)
+        if message_id and copied == len(source):
+            raise repository.MessageNotFound(message_id)
         return child
+
+    @staticmethod
+    def _copy_message(source_session: str, target_session: str, m: Message) -> None:
+        """重放一条消息（含其 parts）到目标会话，保持类型/数据。"""
+        new_msg = repository.append_message(target_session, m.type, m.data)
+        for part in repository.list_parts(m.id):
+            repository.append_part(target_session, new_msg.id, part.type, part.data)
 
     # ── 消息 / 上下文 ────────────────────────────────────────────────────
 
@@ -132,21 +159,48 @@ class SessionService:
     def initialize_context(self, session_id: str, baseline: str, snapshot: dict) -> ContextEpoch:
         return session_history.initialize_epoch(session_id, baseline, snapshot)
 
-    def compact(self, user_id: str, session_id: str, checkpoint: str) -> None:
-        """写压缩水位：落一条 compaction 消息并重建 epoch baseline。"""
+    def compact(self, user_id: str, session_id: str, checkpoint: str = "") -> None:
+        """写压缩水位：落一条 compaction 消息并重建 epoch baseline。
+
+        checkpoint 为空时用占位文案；落库后把 session.time_compacted 置为当前时间，
+        使压缩基线持久化（重启/恢复后 history.load 仍能定位水位）。
+        """
         self._authorized(user_id, session_id)
+        if not checkpoint:
+            checkpoint = "[compacted]"
         repository.append_message(session_id, "compaction", {"content": checkpoint})
         session_history.replace_epoch_after_compaction(session_id, checkpoint, {})
+        repository.update_session(session_id, time_compacted=int(tmod.time() * 1000))
+
+    def revert(self, user_id: str, session_id: str, message_id: str) -> dict[str, Any]:
+        """撤销到指定消息：删除其后的所有消息与部件（对齐 revert.ts）。
+
+        Returns:
+            {"deleted": n, "messages": [...]}  剩余消息列表。
+        """
+        self._authorized(user_id, session_id)
+        deleted = repository.revert_to_message(session_id, message_id)
+        remaining = repository.list_messages(session_id)
+        return {
+            "deleted": deleted,
+            "messages": [m.model_dump() for m in remaining],
+        }
 
     # ── 输入 / 执行 ──────────────────────────────────────────────────────
 
     def prompt(self, user_id: str, session_id: str, text: str, files: Optional[list] = None,
-               delivery: str = "steer") -> str:
-        """投递输入（steer 打断 / queue 排队），并唤醒执行（对齐 opencode prompt+wake）。"""
+               delivery: str = "steer", **extra: Any) -> str:
+        """投递输入（steer 打断 / queue 排队），并唤醒执行（对齐 opencode prompt+wake）。
+
+        extra：并入输入 payload 的附加字段（model/use_vector_db/request_id 等），
+        executor promote 后可读取。
+        """
         self._authorized(user_id, session_id)
+        payload: dict[str, Any] = {"text": text, "files": files or []}
+        payload.update(extra)
         input_id = repository.admit_input(
             session_id,
-            {"text": text, "files": files or []},
+            payload,
             delivery=delivery,
         )
         self.coordinator.wake(session_id)
@@ -157,8 +211,14 @@ class SessionService:
         await self.coordinator.run(session_id)
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
+        """打断会话（级联：连同子会话一起打断，对齐 session.ts 级联取消）。"""
         self._authorized(user_id, session_id)
-        await self.coordinator.interrupt(session_id)
+        child_ids = [c.id for c in repository.list_children(session_id)]
+        for sid in [session_id] + child_ids:
+            await self.coordinator.interrupt(sid)
+        # 级联取消子会话对应的 AgentBus 任务
+        task_bridge.cancel_children(child_ids)
+        repository.update_session(session_id, status="interrupted")
 
     def status(self, user_id: str, session_id: str) -> SessionStatus:
         session = self._authorized(user_id, session_id)

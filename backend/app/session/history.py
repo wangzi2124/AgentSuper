@@ -26,18 +26,26 @@ def load(session_id: str) -> HistoryLoad:
     """装载模型视角历史（对齐 SessionHistory.load 的过滤逻辑）。
 
     - epoch.baseline_seq：上下文纪元建立时消息日志水位（跳过其前的消息）
-    - 压缩后：仅保留 compaction seq 起的消息
+    - 压缩后：仅保留 compaction seq 起的消息，并把最新压缩 checkpoint
+      （compaction 消息）作为 system 上下文带回，避免模型丢失摘要上下文
     """
     epoch = repository.get_epoch(session_id)
     compaction_seq = repository.latest_compaction_seq(session_id)
 
     after_seq = 0
-    if compaction_seq is not None:
-        after_seq = max(after_seq, compaction_seq)
     if epoch is not None:
         after_seq = max(after_seq, epoch.baseline_seq)
 
-    messages = repository.list_messages(session_id, after_seq=after_seq)
+    messages = [m for m in repository.list_messages(session_id, after_seq=after_seq)
+                if m.type != "compaction"]
+
+    # 对齐设计 §6.1：seq >= compaction.seq 且 (seq > baseline OR type != 'system')
+    # → 最新 compaction 消息始终纳入模型视角（除非尚未建立）
+    if compaction_seq is not None:
+        checkpoint = repository.list_messages(session_id, after_seq=compaction_seq - 1)
+        if checkpoint and checkpoint[0].type == "compaction":
+            messages.insert(0, checkpoint[0])
+
     return HistoryLoad(messages=messages, epoch=epoch)
 
 

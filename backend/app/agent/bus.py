@@ -118,6 +118,18 @@ class AgentBus:
                 f"(thread={msg.thread_id}, action={msg.action})"
             )
 
+    def cancel_pending(self, thread_id: str) -> bool:
+        """取消指定 thread 的等待（级联取消用，对齐 opencode abort）。
+
+        Returns:
+            True 表示确实取消了一个尚未完成的 future。
+        """
+        fut = self._pending.pop(thread_id, None)
+        if fut is not None and not fut.done():
+            fut.cancel()
+            return True
+        return False
+
     # ------------------------------------------------------------------
     # Agent 事件循环管理
     # ------------------------------------------------------------------

@@ -20,6 +20,7 @@
 | **多轮对话** | 自动生成 conversation_id，支持同一会话内的上下文连续对话 |
 | **会话隔离** | 每个会话独立消息存储，切换会话时消息互不干扰，后台流式请求继续运行 |
 | **会话持久化** | IndexedDB 本地缓存 + 服务器 SQLite 双重持久化，页面刷新/SSE 中断不丢失消息 |
+| **会话管理系统** | 归一化会话库：用户/项目/工作区三级隔离、子会话树与 fork、上下文纪元、压缩基线持久化、消息撤销（revert）、AgentBus 任务自动登记为子会话 |
 | **错误重试机制** | 三层重试架构：litellm 内置重试 → TaskRunner 指数退避 → 前端自动重试倒计时 + 手动重试按钮 |
 | **并发控制** | 后端 Semaphore 限制同时运行的 Agent 任务数（默认 2），超出自动排队，前端实时显示排队/流式状态 |
 | **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
@@ -405,6 +406,18 @@ fetch("http://localhost:8000/api/chat/", {
 | GET | `/api/chat/stream/status` | 查询并发状态（active/queue_depth） |
 | GET | `/api/chat/conversations?conv_type=chat\|multi-agent` | 按类型过滤会话列表 |
 | GET | `/api/chat/conversations/:id?conv_type=` | 获取指定类型会话详情 |
+| POST | `/api/sessions` | 创建会话 |
+| GET | `/api/sessions` | 会话列表（`project`/`roots`/`search`/`archived`） |
+| GET / PATCH / DELETE | `/api/sessions/{id}` | 详情 / 更新 / 删除（级联子会话） |
+| POST | `/api/sessions/{id}/fork` | 在指定 `message_id` 处 fork 子会话 |
+| POST | `/api/sessions/{id}/prompt` | 投递输入（`delivery: steer\|queue`） |
+| GET | `/api/sessions/{id}/messages?after_seq=` | 分页消息 |
+| GET | `/api/sessions/{id}/context` | 模型视角上下文（epoch + 过滤后历史） |
+| POST | `/api/sessions/{id}/compact` | 手动压缩（可选 `checkpoint`） |
+| POST | `/api/sessions/{id}/revert` | 撤销到指定 `message_id` |
+| POST | `/api/sessions/{id}/interrupt` | 打断（级联子会话 + 取消任务） |
+| GET | `/api/sessions/{id}/children` | 子会话列表 |
+| GET | `/api/sessions/{id}/status` | 状态 + 队列深度 |
 | POST | `/api/documents/upload` | 上传文档（multipart），返回 task_id 异步处理 |
 | GET | `/api/documents/tasks/{task_id}` | 查询上传任务进度（progress + stage） |
 | GET | `/api/documents/` | 文档列表 |
@@ -446,6 +459,52 @@ fetch("http://localhost:8000/api/chat/", {
 > 截断在 LLM 调用前发生，仅影响 prompt 传入的历史，不影响数据库中的完整记录。
 
 实现路径：`backend/app/api/chat.py` — `_load_conversation` / `_truncate_history` / `_save_conversation`，`backend/app/middleware/summarization.py` — `HierarchicalSummarizationMiddleware`
+
+---
+
+## 会话管理系统（Session Management）
+
+基于 SQLite（`backend/data/session.db`）的归一化会话体系，对齐 OpenCode 的 session 模型，为单 Agent / 多 Agent / 任务执行提供统一底座。旧 `conversations.db` 保持只读，首次访问时惰性迁移（`conversation_id == session.id`），前端无需改动。
+
+### 核心概念
+
+| 概念 | 说明 |
+|------|------|
+| **会话（Session）** | 用户/项目/工作区三级隔离；`parent_id` 构成子会话树（fork / 任务共享） |
+| **消息日志** | `session_messages` append-only 事件日志，会话内自增 `seq` 水位 |
+| **上下文纪元（Context Epoch）** | 每个会话持久化系统上下文快照 + `baseline_seq`，恢复/压缩后精确定位历史水位 |
+| **压缩基线（Compaction Baseline）** | 压缩发生时落 `compaction` 消息 + 重建 epoch；checkpoint 作为 system 上下文带回，重启不丢摘要 |
+| **输入投递** | `session_inputs`，`delivery: steer`（打断）/ `queue`（排队），per-session 串行执行 |
+| **撤销（Revert）** | 删除指定消息之后的所有消息与部件，并回滚纪元水位 |
+
+### 特性
+
+- **per-session 串行 + 全局并发上限**：`SessionCoordinator` 保证同一会话串行、不同会话并行，受 `MAX_CONCURRENT_AGENTS` 全局限流（替代旧的全局排队）
+- **fork**：在任意消息处克隆子会话，独立消息日志与上下文，与父会话互不污染
+- **级联删除 / 取消**：删除或打断会话时级联其子会话，并取消对应的 AgentBus 后台任务
+- **多 Agent 任务**：`/api/chat/multi-agent` 与 `/stream` 把每次任务登记为 `kind='task'` 子会话，父/子消息同步回写
+- **压缩基线持久化**：历史超阈值被摘要/截断时落 `compaction` 消息 + 置 `time_compacted`；`history.load` 始终带回最新 checkpoint
+
+### REST API（前缀 `/api/sessions`）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/sessions` | 创建会话 |
+| GET | `/api/sessions` | 列表（`project`/`roots`/`search`/`archived`） |
+| GET / PATCH / DELETE | `/api/sessions/{id}` | 详情 / 更新 / 删除（级联） |
+| POST | `/api/sessions/{id}/fork` | 在指定 `message_id` 处 fork 子会话 |
+| POST | `/api/sessions/{id}/prompt` | 投递输入（`delivery: steer\|queue`） |
+| GET | `/api/sessions/{id}/messages` | 分页消息（`after_seq`） |
+| GET | `/api/sessions/{id}/context` | 模型视角上下文（epoch + 过滤后历史） |
+| POST | `/api/sessions/{id}/compact` | 手动压缩（可选 `checkpoint`） |
+| POST | `/api/sessions/{id}/revert` | 撤销到指定 `message_id` |
+| POST | `/api/sessions/{id}/interrupt` | 打断（级联子会话） |
+| GET | `/api/sessions/{id}/children` | 子会话列表 |
+| GET | `/api/sessions/{id}/status` | 状态 + 队列深度 |
+
+> 所有 `/api/sessions` 请求经 `X-User-Id` 头隔离（默认 `anonymous`），跨用户访问返回 403。
+
+实现路径：`backend/app/session/`（db / models / repository / history / coordinator / service / deps / router / agent_executor / task_bridge）；设计文档见 `docs/session-management-design.md`。
 
 ---
 

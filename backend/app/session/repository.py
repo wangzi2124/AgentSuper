@@ -51,6 +51,10 @@ class SessionNotFound(Exception):
     pass
 
 
+class MessageNotFound(Exception):
+    pass
+
+
 class Forbidden(Exception):
     pass
 
@@ -99,9 +103,10 @@ def create_session(
     model: Optional[Any] = None,
     kind: str = "chat",
     title: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> SessionInfo:
     now = int(time.time() * 1000)
-    sid = f"ses_{uuid.uuid4().hex[:24]}"
+    sid = session_id or f"ses_{uuid.uuid4().hex[:24]}"
     slug = uuid.uuid4().hex[:8]
     conn = _get_db()
     try:
@@ -327,6 +332,82 @@ def list_parts(message_id: str) -> list[Part]:
                  type=r["type"], data=json.loads(r["data"]), time_created=r["time_created"])
             for r in rows
         ]
+    finally:
+        conn.close()
+
+
+def delete_message(session_id: str, message_id: str) -> bool:
+    """删除指定会话中的一条消息（对齐旧 delete_message 端点语义）。"""
+    conn = _get_db()
+    try:
+        cur = conn.execute(
+            "DELETE FROM session_messages WHERE session_id = ? AND id = ?",
+            (session_id, message_id),
+        )
+        conn.execute("DELETE FROM message_parts WHERE session_id = ? AND message_id = ?",
+                     (session_id, message_id))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def revert_to_message(session_id: str, message_id: str) -> int:
+    """撤销到指定消息（对齐 opencode revert.ts）。
+
+    删除该消息之后的所有消息及其 message_parts；若纪元水位越过撤销点则回滚，
+    避免 history.load 把已被撤销的消息继续纳入模型视角。
+
+    Returns:
+        deleted 的消息条数。
+    """
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT seq FROM session_messages WHERE session_id = ? AND id = ?",
+            (session_id, message_id),
+        ).fetchone()
+        if not row:
+            raise MessageNotFound(message_id)
+        target_seq = int(row["seq"])
+
+        doomed = conn.execute(
+            "SELECT id FROM session_messages WHERE session_id = ? AND seq > ?",
+            (session_id, target_seq),
+        ).fetchall()
+        ids = [d["id"] for d in doomed]
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(
+                f"DELETE FROM message_parts WHERE session_id = ? AND message_id IN ({placeholders})",
+                [session_id, *ids],
+            )
+            conn.execute(
+                "DELETE FROM session_messages WHERE session_id = ? AND seq > ?",
+                (session_id, target_seq),
+            )
+
+        # 回滚上下文纪元水位：baseline_seq 不得超过撤销后剩余的最新 compaction
+        # 消息（无则归 0），保证被保留的历史仍对模型可见。
+        rem_comp = conn.execute(
+            "SELECT MAX(seq) AS n FROM session_messages"
+            " WHERE session_id = ? AND type = 'compaction' AND seq <= ?",
+            (session_id, target_seq),
+        ).fetchone()
+        new_base = int(rem_comp["n"]) if rem_comp and rem_comp["n"] is not None else 0
+        epoch = conn.execute(
+            "SELECT baseline_seq FROM session_context_epoch WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if epoch and int(epoch["baseline_seq"]) > new_base:
+            conn.execute(
+                "UPDATE session_context_epoch SET baseline_seq = ?, time_updated = ? WHERE session_id = ?",
+                (new_base, int(time.time() * 1000), session_id),
+            )
+        now = int(time.time() * 1000)
+        conn.execute("UPDATE sessions SET time_updated = ? WHERE id = ?", (now, session_id))
+        conn.commit()
+        return len(ids)
     finally:
         conn.close()
 

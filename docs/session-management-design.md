@@ -247,6 +247,7 @@ children(user_id, parent_id) / status(user_id, session_id)
 | GET | `/api/sessions/{id}/messages` | 分页消息 |
 | GET | `/api/sessions/{id}/context` | 模型视角上下文 |
 | POST | `/api/sessions/{id}/compact` | 手动压缩 |
+| POST | `/api/sessions/{id}/revert` | 撤销到指定消息（`message_id`） |
 | POST | `/api/sessions/{id}/interrupt` | 打断 |
 | GET | `/api/sessions/{id}/children` | 子会话列表 |
 | GET | `/api/sessions/{id}/status` | 状态（active/queue） |
@@ -294,11 +295,31 @@ backend/app/session/
 
 ## 11. 实施路线
 
-| 阶段 | 内容 | 依赖 |
-| --- | --- | --- |
-| P0 | `db.py` + `models.py` + `repository.py`（建表/CRUD/迁移） | 无 |
-| P1 | `history.py` + `context-epoch`（历史装载 + 上下文纪元） | P0 |
-| P2 | `coordinator.py` + `service.py` + `deps.py` + `router.py` | P0/P1 |
-| P3 | 接入 `chat.py`：`/api/chat/*` 改为走 SessionService | P2 |
-| P4 | 子会话/任务：`AgentBus` 任务登记为子会话，支持 fork/级联取消 | P2 |
-| P5 | 压缩基线持久化 + undo/revert（`revert.ts` 思路） | P1 |
+| 阶段 | 内容 | 依赖 | 状态 |
+| --- | --- | --- | --- |
+| P0 | `db.py` + `models.py` + `repository.py`（建表/CRUD/迁移） | 无 | ✅ 完成 |
+| P1 | `history.py` + `context-epoch`（历史装载 + 上下文纪元） | P0 | ✅ 完成 |
+| P2 | `coordinator.py` + `service.py` + `deps.py` + `router.py` | P0/P1 | ✅ 完成 |
+| P3 | 接入 `chat.py`：`/api/chat/*` 改为走 SessionService | P2 | ✅ 完成 |
+| P4 | 子会话/任务：`AgentBus` 任务登记为子会话，支持 fork/级联取消 | P2 | ✅ 完成 |
+| P5 | 压缩基线持久化 + undo/revert（`revert.ts` 思路） | P1 | ✅ 完成 |
+
+> P3 落地细节：新增 `agent_executor.py`（coordinator drain → RAGAgent，SSE 事件桥经
+> `request_id` 回填请求级队列）；`main.py` lifespan 建 `session.db` + 注入 `SessionService`；
+> `/stream` 改走 SessionService；会话 CRUD 读 session.db（旧 conversations.db 惰性迁移）；
+> `stream_status` 改为反映协调器并发。
+>
+> P4 落地细节：新增 `task_bridge.py`（child_session_id ↔ thread_id 映射，`cancel`/`cancel_children`
+> 对齐 opencode abort）；`bus.py` 增 `cancel_pending(thread_id)`；`service.remove`/`interrupt`
+> 级联子会话（coordinator + task_bridge 双通道）；`fork` 按 `message_id` 用 `_copy_message` 复制
+> 消息（含 parts）；`chat.py` 的 `/multi-agent` 与 `/multi-agent/stream` 登记 `kind='task'` 子会话
+> + thread 并回写父/子消息。验证：TestClient/httpx 端到端 5 组场景（子会话生成、流式、fork、
+> 级联取消、interrupt）全部通过。
+>
+> P5 落地细节：压缩基线持久化——executor 在压缩实际发生时落 `type='compaction'` 消息 +
+> `replace_epoch_after_compaction` + 置 `session.time_compacted`；`history.load` 改为把最新
+> compaction 消息作为 system 上下文带回（对齐设计 §6.1），恢复/重放不再丢摘要；首条消息标题
+> 判定改用 `latest_seq==0`（避免被 compaction 消息干扰）。undo/revert——`repository.revert_to_message`
+> 删除目标消息之后的所有消息与 parts，并按剩余最新 compaction 回滚纪元水位；`service.revert` +
+> `POST /api/sessions/{id}/revert`；`compact` 补写 `time_compacted`。验证：e2e 覆盖压缩基线、
+> revert 回滚（含越权 403）、executor 自动压缩、标题生成、HTTP /revert+/compact，全部通过。

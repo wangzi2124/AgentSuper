@@ -20,6 +20,12 @@ from app.context.token_counter import estimate_tokens
 from app.middleware.summarization import HierarchicalSummarizationMiddleware
 from app.models.schemas import ChatRequest, ChatResponse, Source, StepEvent, MultiAgentChatResponse
 
+# ── Session 管理（session.db）──
+from app.session import repository as session_repo
+from app.session import task_bridge
+from app.session.agent_executor import register_request_queue, unregister_request_queue
+from app.session.deps import discover_project_root
+
 # ── 多 Agent 系统 ──
 from app.agent.base import AgentMessage
 from app.agent.bus import AgentBus
@@ -228,6 +234,150 @@ def _sanitize_history(history: list[dict]) -> list[dict]:
     return cleaned
 
 
+# ═══════════════════════════════════════════════════════════════
+#  Session 管理接线（设计文档 P3）：/stream 走 SessionService，
+#  会话 CRUD 统一读 session.db（旧 conversations.db 保留只读 + 惰性迁移）
+# ═══════════════════════════════════════════════════════════════
+
+def _get_session_service(request: Request):
+    return request.app.state.session_service
+
+
+def _msg_type_to_role(msg_type: str) -> str:
+    return {
+        "user": "user", "assistant": "assistant", "tool": "tool",
+        "compaction": "system", "epoch": "system", "system": "system",
+    }.get(msg_type, "system")
+
+
+def _fmt_time(ms: int) -> str:
+    """epoch ms -> ISO 字符串（兼容旧 conversations.created_at 格式）。"""
+    return datetime.fromtimestamp(ms / 1000).isoformat() if ms else ""
+
+
+def _migrate_conversation(conv_id: str, user_id: str) -> bool:
+    """一次性迁移旧 conversations.db 行 → session.db（对齐设计文档 §10.2）。
+
+    保持 conversation_id == session.id，前端无需感知。
+    """
+    if not _check_ownership(conv_id, user_id):
+        return False
+    raw = _load_conversation(conv_id)
+    if not raw:
+        return False
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT title, type FROM conversations WHERE id = ?", (conv_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    title = (row[0] if row and row[0] else "") or _generate_title(raw)
+    kind = (row[1] if row and row[1] else "") or "chat"
+    root = discover_project_root()
+    project = session_repo.resolve_project(root)
+    session_repo.create_session(
+        user_id, project.id, root, kind=kind, title=title, session_id=conv_id,
+    )
+    for m in raw:
+        role = m.get("role", "")
+        msg_type = role if role in ("user", "assistant") else "system"
+        session_repo.append_message(conv_id, msg_type, {
+            "role": role or msg_type,
+            "content": m.get("content", ""),
+            "sources": m.get("sources"),
+            "steps": m.get("steps"),
+        })
+    return True
+
+
+def _resolve_session(user_id: str, conv_id: str) -> tuple[object, str]:
+    """解析/创建会话：已存在 → 校验归属；未找到 → 惰性迁移旧库；都没有 → 404。"""
+    service = None  # filled by caller
+    return service, conv_id
+
+
+def _get_legacy_conversation(conv_id: str, user_id: str) -> dict:
+    """读取旧 conversations.db 中的对话（仅未迁移行）。"""
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT title, messages, created_at, updated_at FROM conversations WHERE id = ?",
+            (conv_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {
+        "id": conv_id,
+        "title": row[0] or "新对话",
+        "messages": json.loads(row[1]),
+        "created_at": row[2],
+        "updated_at": row[3],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Multi-Agent 子任务会话（设计文档 P4）：
+#  每次 send_and_wait 登记为 kind='task' 子会话，级联取消经 task_bridge
+# ═══════════════════════════════════════════════════════════════
+
+def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | None) -> tuple[object, str]:
+    """解析/创建 multi-agent 主会话（session.db，旧库惰性迁移）。"""
+    service = _get_session_service(request)
+    if conv_id:
+        try:
+            service.get(user_id, conv_id)
+            return service, conv_id
+        except session_repo.SessionNotFound:
+            if not _migrate_conversation(conv_id, user_id):
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            return service, conv_id
+    else:
+        session = service.create(user_id, directory=discover_project_root(), kind="multi-agent")
+        return service, session.id
+
+
+def _session_history_for(service, user_id: str, session_id: str) -> list[dict]:
+    """把会话消息投影为模型历史（role/content）。"""
+    history = []
+    for m in service.messages(user_id, session_id):
+        role = m.data.get("role") or _msg_type_to_role(m.type)
+        if role in ("user", "assistant", "system"):
+            history.append({"role": role, "content": m.data.get("content", "")})
+    return history
+
+
+def _begin_task_session(service, user_id: str, parent_id: str, question: str) -> tuple[str, str]:
+    """创建 kind='task' 子会话并登记 thread（返回 child_id + thread_id）。"""
+    thread_id = f"{parent_id}:task:{uuid.uuid4().hex[:8]}"
+    title = question.strip().replace("\n", " ")[:20]
+    child = service.create(user_id, parent_id=parent_id, kind="task",
+                           agent="supervisor", title=title or "任务")
+    task_bridge.register(child.id, thread_id)
+    return child.id, thread_id
+
+
+def _persist_multi_agent(service, user_id: str, session_id: str, child_id: str,
+                         question: str, answer: str, sources: list, steps: list) -> tuple[str, str]:
+    """主会话 + 子任务会话各追加 user/assistant 消息；新会话生成标题。"""
+    user_msg = service.append_message(user_id, session_id, "user", {"role": "user", "content": question})
+    if session_repo.latest_seq(session_id) == 1:
+        service.update(user_id, session_id, title=_generate_title([{"role": "user", "content": question}]))
+    assistant_msg = service.append_message(user_id, session_id, "assistant", {
+        "role": "assistant", "content": answer, "sources": sources, "steps": steps,
+    })
+    # 子任务会话独立日志（隔离上下文）
+    service.append_message(user_id, child_id, "user", {"role": "user", "content": question})
+    service.append_message(user_id, child_id, "assistant", {
+        "role": "assistant", "content": answer, "sources": sources, "steps": steps,
+    })
+    service.update(user_id, child_id, status="idle")
+    return user_msg.id, assistant_msg.id
+
+
+
 @router.post("/", response_model=ChatResponse)
 async def chat(request: Request, body: ChatRequest):
     """处理非流式聊天请求，返回完整响应。"""
@@ -298,21 +448,13 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
 
     请求通过 Supervisor Agent 路由到最合适的子 Agent（如 RAG Agent）。
     支持与单 Agent 相同的参数和文件上传。
+    P4：本次请求登记为 kind='task' 子会话（parent_id=主会话），支持级联取消。
     """
     agent_bus: AgentBus = request.app.state.agent_bus
     user_id = _get_user_id(request)
+    service, session_id = _resolve_multi_agent_parent(request, user_id, body.conversation_id)
 
-    conv_id = body.conversation_id or str(uuid.uuid4())
-
-    if body.conversation_id:
-        if not _check_ownership(conv_id, user_id):
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        raw = _load_conversation(conv_id)
-        if not raw and body.conversation_id:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        history = raw
-    else:
-        history = []
+    history = _session_history_for(service, user_id, session_id)
 
     summarizer = _get_summarizer()
     if summarizer:
@@ -321,28 +463,42 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         compressed = _truncate_history(history)
     compressed = _sanitize_history(compressed)
 
-    # 通过 Supervisor 发送请求
-    reply = await agent_bus.send_and_wait(
-        AgentMessage(
-            source="user",
-            target="supervisor",
-            type="request",
-            action="chat",
-            payload={
-                "question": body.message,
-                "model": body.model,
-                "history": compressed,
-                "use_vector_db": body.use_vector_db,
-                "files": [f.model_dump() for f in body.files],
-                "conversation_id": conv_id,
-                "user_id": user_id,
-            },
-            thread_id=f"{conv_id}:nonstream:{uuid.uuid4().hex[:8]}",
-        ),
-        timeout=180.0,
-    )
+    # 登记子任务会话（kind='task'）+ AgentBus thread
+    child_id, thread_id = _begin_task_session(service, user_id, session_id, body.message)
+
+    try:
+        # 通过 Supervisor 发送请求
+        reply = await agent_bus.send_and_wait(
+            AgentMessage(
+                source="user",
+                target="supervisor",
+                type="request",
+                action="chat",
+                payload={
+                    "question": body.message,
+                    "model": body.model,
+                    "history": compressed,
+                    "use_vector_db": body.use_vector_db,
+                    "files": [f.model_dump() for f in body.files],
+                    "conversation_id": session_id,
+                    "user_id": user_id,
+                },
+                thread_id=thread_id,
+            ),
+            timeout=180.0,
+        )
+    except asyncio.CancelledError:
+        task_bridge.unregister(child_id)
+        service.update(user_id, child_id, status="interrupted")
+        raise HTTPException(status_code=499, detail="Request cancelled")
+    except Exception as e:
+        task_bridge.unregister(child_id)
+        service.update(user_id, child_id, status="error")
+        raise HTTPException(status_code=500, detail=f"Agent error: {e}")
 
     if reply.type == "error":
+        task_bridge.unregister(child_id)
+        service.update(user_id, child_id, status="error")
         raise HTTPException(status_code=500, detail=reply.payload.get("error", "Agent error"))
 
     payload = reply.payload
@@ -351,16 +507,16 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     steps = payload.get("steps", [])
     routed_to = payload.get("routed_to")
 
-    # 保存对话历史
-    history.append({"id": str(uuid.uuid4()), "role": "user", "content": body.message})
-    history.append({"id": str(uuid.uuid4()), "role": "assistant", "content": answer})
-    title = _generate_title(history) if not body.conversation_id else None
-    _save_conversation(conv_id, history, title=title, user_id=user_id, conv_type="multi-agent")
+    # 落库：主会话 + 子任务会话
+    user_msg_id, assistant_msg_id = _persist_multi_agent(
+        service, user_id, session_id, child_id, body.message, answer, sources, steps
+    )
+    task_bridge.unregister(child_id)
 
     return MultiAgentChatResponse(
         answer=answer,
         sources=[Source(**s) if isinstance(s, dict) else s for s in sources],
-        conversation_id=conv_id,
+        conversation_id=session_id,
         steps=[StepEvent(**s) if isinstance(s, dict) else s for s in steps],
         routed_to=routed_to,
     )
@@ -385,21 +541,14 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
       - "step_end":     步骤完成
       - "done":         所有处理完成，包含最终回答
       - "error":        处理出错
+
+    P4：请求登记为 kind='task' 子会话，删除/打断父会话时级联取消。
     """
     agent_bus: AgentBus = request.app.state.agent_bus
     user_id = _get_user_id(request)
+    service, session_id = _resolve_multi_agent_parent(request, user_id, body.conversation_id)
 
-    conv_id = body.conversation_id or str(uuid.uuid4())
-
-    if body.conversation_id:
-        if not _check_ownership(conv_id, user_id):
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        raw = _load_conversation(conv_id)
-        if not raw and body.conversation_id:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        history = raw
-    else:
-        history = []
+    history = _session_history_for(service, user_id, session_id)
 
     summarizer = _get_summarizer()
     if summarizer:
@@ -410,6 +559,9 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
 
     event_queue: asyncio.Queue = asyncio.Queue()
     sem = _get_agent_semaphore()
+
+    # 登记子任务会话（kind='task'）+ AgentBus thread
+    child_id, thread_id = _begin_task_session(service, user_id, session_id, body.message)
 
     async def run_multi_agent():
         """通过 Supervisor 运行多 Agent 系统，结果推送到 event_queue。"""
@@ -444,10 +596,10 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                             "history": compressed,
                             "use_vector_db": body.use_vector_db,
                             "files": [f.model_dump() for f in body.files],
-                            "conversation_id": conv_id,
+                            "conversation_id": session_id,
                             "user_id": user_id,
                         },
-                        thread_id=f"{conv_id}:stream:{uuid.uuid4().hex[:8]}",
+                        thread_id=thread_id,
                     ),
                     timeout=180.0,
                 )
@@ -465,6 +617,11 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                 steps = payload.get("steps", [])
                 routed_to = payload.get("routed_to")
 
+                # 落库：主会话 + 子任务会话（先落库以拿到消息 id）
+                user_msg_id, assistant_msg_id = _persist_multi_agent(
+                    service, user_id, session_id, child_id, body.message, answer, sources, steps
+                )
+
                 await event_queue.put({
                     "type": "done",
                     "answer": answer,
@@ -473,8 +630,9 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         if isinstance(s, dict) else s
                         for s in sources
                     ],
-                    "conversation_id": conv_id,
-                    "title": title,
+                    "conversation_id": session_id,
+                    "user_msg_id": user_msg_id,
+                    "assistant_msg_id": assistant_msg_id,
                     "steps": steps,
                     "routed_to": routed_to,
                 })
@@ -484,31 +642,31 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     "type": "error",
                     "detail": "请求超时，请重试",
                 })
+            except asyncio.CancelledError:
+                service.update(user_id, child_id, status="interrupted")
+                await event_queue.put({
+                    "type": "error",
+                    "detail": "cancelled",
+                    "retryable": False,
+                    "status_code": None,
+                    "error_type": "CancelledError",
+                })
             except Exception as e:
                 logger.exception("multi-agent stream invocation failed")
+                service.update(user_id, child_id, status="error")
                 await event_queue.put({
                     "type": "error",
                     "detail": str(e),
                 })
+            finally:
+                task_bridge.unregister(child_id)
 
-    async def event_generator(user_msg_id: str, assistant_msg_id: str):
+    async def event_generator():
         """生成 SSE 事件流。"""
         task = asyncio.create_task(run_multi_agent())
         try:
             while True:
                 event = await event_queue.get()
-                if event["type"] == "done":
-                    event["user_msg_id"] = user_msg_id
-                    event["assistant_msg_id"] = assistant_msg_id
-                    for msg in history:
-                        if msg["id"] == assistant_msg_id:
-                            msg["content"] = event["answer"]
-                            if event.get("sources"):
-                                msg["sources"] = event["sources"]
-                            if event.get("steps"):
-                                msg["steps"] = event["steps"]
-                            break
-                    _save_conversation(conv_id, history, user_id=user_id, conv_type="multi-agent")
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event["type"] in ("done", "error"):
                     break
@@ -520,182 +678,107 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
             except (asyncio.CancelledError, Exception):
                 pass
 
-    user_msg_id = str(uuid.uuid4())
-    assistant_msg_id = str(uuid.uuid4())
-    history.append({"id": user_msg_id, "role": "user", "content": body.message})
-    history.append({"id": assistant_msg_id, "role": "assistant", "content": ""})
-    title = _generate_title(history) if not body.conversation_id else None
-    _save_conversation(conv_id, history, title=title, user_id=user_id, conv_type="multi-agent")
-
     return StreamingResponse(
-        event_generator(user_msg_id, assistant_msg_id),
+        event_generator(),
         media_type="text/event-stream",
     )
 
 
 @router.post("/stream")
 async def chat_stream(request: Request, body: ChatRequest):
-    """处理流式聊天请求，返回SSE事件流。"""
-    agent = request.app.state.agent
+    """处理流式聊天请求，返回SSE事件流。
+
+    设计文档 P3：消息经 SessionService 落库 session.db，Agent 执行由
+    per-session 协调器串行调度；conversation_id 即 session.id。
+    """
     user_id = _get_user_id(request)
+    service = _get_session_service(request)
 
-    conv_id = body.conversation_id or str(uuid.uuid4())
-
-    if body.conversation_id:
-        if not _check_ownership(conv_id, user_id):
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        raw = _load_conversation(conv_id)
-        if not raw and body.conversation_id:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        history = raw
-    else:
-        history = []
-
-    summarizer = _get_summarizer()
-    if summarizer:
-        compressed = await summarizer.apply(history)
-    else:
-        compressed = _truncate_history(history)
-    compressed = _sanitize_history(compressed)
-
-    event_queue: asyncio.Queue = asyncio.Queue()
-    sem = _get_agent_semaphore()
-
-    async def run_agent():
-        """异步运行Agent并收集结果，直接调用 agent.invoke()。"""
-        global _queue_counter
-        # 如果当前并发已满，先通知前端排队位置
-        if sem.locked():
-            _queue_counter += 1
-            try:
-                await event_queue.put({
-                    "type": "queued",
-                    "queue_position": _queue_counter,
-                })
-            finally:
-                _queue_counter -= 1
-
-        async with sem:
-            try:
-                result = await agent.invoke(
-                    body.message, model=body.model, history=compressed,
-                    use_vector_db=body.use_vector_db,
-                    files=[f.model_dump() for f in body.files],
-                    event_queue=event_queue,
-                    conversation_id=conv_id,
-                )
-                await event_queue.put({
-                    "type": "done",
-                    "answer": result["answer"],
-                    "sources": [
-                        {"document_id": s["document_id"], "content": s["content"], "score": s["score"]}
-                        for s in result["sources"]
-                    ],
-                    "conversation_id": conv_id,
-                    "title": title,
-                    "steps": result.get("steps", []),
-                    "task": result.get("task", {}),
-                })
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.exception("chat stream invocation failed")
-                # Classify error for frontend retry logic
-                error_str = str(e).lower()
-                error_type = type(e).__name__
-                retryable = False
-                status_code = None
-
-                # Rate limit (429)
-                if "ratelimit" in error_type or "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
-                    retryable = True
-                    status_code = 429
-                # Server errors (5xx)
-                elif "500" in error_str or "502" in error_str or "503" in error_str or "504" in error_str:
-                    retryable = True
-                    status_code = 500
-                elif "internalserverserror" in error_type or "internal server error" in error_str:
-                    retryable = True
-                    status_code = 500
-                # Timeout
-                elif "timeout" in error_str or "timed out" in error_str:
-                    retryable = True
-                # Connection errors
-                elif "connection" in error_str and ("error" in error_str or "refused" in error_str or "reset" in error_str):
-                    retryable = True
-                # Overloaded / service unavailable
-                elif "overloaded" in error_str or "service_unavailable" in error_str:
-                    retryable = True
-                    status_code = 503
-
-                await event_queue.put({
-                    "type": "error",
-                    "detail": str(e),
-                    "retryable": retryable,
-                    "status_code": status_code,
-                    "error_type": error_type,
-                })
-
-    async def event_generator(user_msg_id: str, assistant_msg_id: str):
-        """生成SSE事件流。"""
-        task = asyncio.create_task(run_agent())
+    # 解析/创建会话（旧库惰性迁移，conversation_id == session.id）
+    session_id = body.conversation_id
+    if session_id:
         try:
+            service.get(user_id, session_id)
+        except session_repo.SessionNotFound:
+            if not _migrate_conversation(session_id, user_id):
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            service.get(user_id, session_id)
+    else:
+        session = service.create(user_id, directory=discover_project_root(), kind="chat")
+        session_id = session.id
+
+    # 请求级事件桥（request_id 不入库，executor 按此回填事件队列）
+    request_id = uuid.uuid4().hex
+    event_queue: asyncio.Queue = asyncio.Queue()
+    register_request_queue(request_id, event_queue)
+
+    # 会话正在执行 → 先发 queued 事件（对齐旧 _agent_semaphore 排队 UX）
+    active = session_id in service.coordinator.active_sessions
+    pending = session_repo.count_pending(session_id) if active else 0
+
+    service.prompt(
+        user_id, session_id, body.message,
+        files=[f.model_dump() for f in body.files],
+        delivery="queue",
+        model=body.model,
+        use_vector_db=body.use_vector_db,
+        request_id=request_id,
+    )
+
+    async def event_generator():
+        try:
+            if active:
+                yield f"data: {json.dumps({'type': 'queued', 'queue_position': pending + 1}, ensure_ascii=False)}\n\n"
             while True:
                 event = await event_queue.get()
-                if event["type"] == "done":
-                    event["user_msg_id"] = user_msg_id
-                    event["assistant_msg_id"] = assistant_msg_id
-                    for msg in history:
-                        if msg["id"] == assistant_msg_id:
-                            msg["content"] = event["answer"]
-                            # 持久化 sources 和 steps，前端恢复会话时可用
-                            if event.get("sources"):
-                                msg["sources"] = event["sources"]
-                            if event.get("steps"):
-                                msg["steps"] = event["steps"]
-                            break
-                    _save_conversation(conv_id, history, user_id=user_id)
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event["type"] in ("done", "error"):
                     break
-            await task
         finally:
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            unregister_request_queue(request_id)
 
-    user_msg_id = str(uuid.uuid4())
-    assistant_msg_id = str(uuid.uuid4())
-    history.append({"id": user_msg_id, "role": "user", "content": body.message})
-    history.append({"id": assistant_msg_id, "role": "assistant", "content": ""})
-    title = _generate_title(history) if not body.conversation_id else None
-    _save_conversation(conv_id, history, title=title, user_id=user_id)
-
-    return StreamingResponse(event_generator(user_msg_id, assistant_msg_id), media_type="text/event-stream")
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, request: Request):
     """删除指定对话（只能删除自己的对话）。"""
     user_id = _get_user_id(request)
-    if not _check_ownership(conversation_id, user_id):
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    conn = _get_db()
+    service = _get_session_service(request)
     try:
-        conn.execute("DELETE FROM conversations WHERE id = ? AND (user_id = ? OR user_id = '')",
-                     (conversation_id, user_id))
-        conn.commit()
-    finally:
-        conn.close()
-    return {"status": "ok"}
+        service.remove(user_id, conversation_id)
+        return {"status": "ok"}
+    except session_repo.SessionNotFound:
+        # 旧库兜底
+        if not _check_ownership(conversation_id, user_id):
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        conn = _get_db()
+        try:
+            conn.execute("DELETE FROM conversations WHERE id = ? AND (user_id = ? OR user_id = '')",
+                         (conversation_id, user_id))
+            conn.commit()
+        finally:
+            conn.close()
+        return {"status": "ok"}
 
 
 @router.delete("/conversations/{conversation_id}/messages/{message_id}")
 async def delete_message(conversation_id: str, message_id: str, request: Request):
     """删除对话中的指定消息（只能删除自己的对话）。"""
     user_id = _get_user_id(request)
+    service = _get_session_service(request)
+    try:
+        service.get(user_id, conversation_id)
+    except session_repo.SessionNotFound:
+        pass  # 走旧库
+    except session_repo.Forbidden:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    else:
+        if not session_repo.delete_message(conversation_id, message_id):
+            raise HTTPException(status_code=404, detail="Message not found")
+        return {"status": "ok"}
+
+    # 旧库兜底
     if not _check_ownership(conversation_id, user_id):
         raise HTTPException(status_code=404, detail="Conversation not found")
     conn = _get_db()
@@ -718,14 +801,18 @@ async def delete_message(conversation_id: str, message_id: str, request: Request
 
 
 @router.get("/stream/status")
-async def stream_status():
-    """返回当前并发状态，前端可轮询。"""
-    sem = _get_agent_semaphore()
-    active = MAX_CONCURRENT_AGENTS - sem._value
+async def stream_status(request: Request):
+    """返回当前并发状态，前端可轮询。
+    P3 起 /stream 由 SessionCoordinator 调度：active = 正在执行的会话数，
+    queue_depth = 各活动会话待执行输入数（替代旧全局 _agent_semaphore）。
+    """
+    service = _get_session_service(request)
+    active = len(service.coordinator.active_sessions)
+    depth = sum(session_repo.count_pending(sid) for sid in service.coordinator.active_sessions)
     return {
         "max_concurrent": MAX_CONCURRENT_AGENTS,
         "active": active,
-        "queue_depth": _queue_counter,
+        "queue_depth": depth,
     }
 
 
@@ -733,80 +820,106 @@ async def stream_status():
 async def list_conversations(request: Request, conv_type: str | None = None):
     """获取当前用户的对话列表，按更新时间倒序排列。
     支持 ?conv_type=chat 或 ?conv_type=multi-agent 过滤。
+    新会话读 session.db，旧库未迁移行合并返回。
     """
     user_id = _get_user_id(request)
+    service = _get_session_service(request)
+    kind = conv_type if conv_type in ("chat", "multi-agent") else None
+    sessions = service.list_sessions(user_id, archived=False, limit=1000)
+    result = [
+        {"id": s.id, "title": s.title or "新对话", "created_at": _fmt_time(s.time_created),
+         "updated_at": _fmt_time(s.time_updated)}
+        for s in sessions
+        if (kind is None or s.kind == kind)
+    ]
+    # 合并旧 conversations.db（尚未迁移的行）
     conn = _get_db()
     try:
         if conv_type:
-            cursor = conn.execute(
+            rows = conn.execute(
                 "SELECT id, title, created_at, updated_at FROM conversations "
                 "WHERE (user_id = ? OR user_id = '') AND type = ? ORDER BY updated_at DESC",
                 (user_id, conv_type),
-            )
+            ).fetchall()
         else:
-            cursor = conn.execute(
+            rows = conn.execute(
                 "SELECT id, title, created_at, updated_at FROM conversations "
                 "WHERE user_id = ? OR user_id = '' ORDER BY updated_at DESC",
-                (user_id,)
-            )
-        rows = cursor.fetchall()
-        return [
-            {"id": r[0], "title": r[1] or "新对话", "created_at": r[2], "updated_at": r[3]}
-            for r in rows
-        ]
+                (user_id,),
+            ).fetchall()
+        existing = {r["id"] for r in result}
+        for r in rows:
+            if r[0] not in existing:
+                result.append({"id": r[0], "title": r[1] or "新对话",
+                               "created_at": r[2], "updated_at": r[3]})
     finally:
         conn.close()
+    result.sort(key=lambda r: r["updated_at"], reverse=True)
+    return result
 
 
 @router.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str, request: Request, conv_type: str | None = None):
-    """获取指定对话的详细信息和消息历史（只能查看自己的对话）。"""
+    """获取指定对话的详细信息和消息历史（只能查看自己的对话）。
+    优先读 session.db（含已迁移行），否则回退旧库。
+    """
     user_id = _get_user_id(request)
-    if not _check_ownership(conversation_id, user_id):
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    conn = _get_db()
+    service = _get_session_service(request)
     try:
-        if conv_type:
-            row = conn.execute(
-                "SELECT title, messages, created_at, updated_at FROM conversations WHERE id = ? AND type = ?",
-                (conversation_id, conv_type),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT title, messages, created_at, updated_at FROM conversations WHERE id = ?",
-                (conversation_id,),
-            ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        return {
-            "id": conversation_id,
-            "title": row[0] or "新对话",
-            "messages": json.loads(row[1]),
-            "created_at": row[2],
-            "updated_at": row[3],
+        session = service.get(user_id, conversation_id)
+    except session_repo.SessionNotFound:
+        return _get_legacy_conversation(conversation_id, user_id)
+    except session_repo.Forbidden:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv_type and session.kind != conv_type:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    messages = []
+    for m in service.messages(user_id, conversation_id):
+        msg = {
+            "id": m.id,
+            "role": _msg_type_to_role(m.type),
+            "content": m.data.get("content", ""),
+            "seq": m.seq,
         }
-    finally:
-        conn.close()
+        if m.data.get("sources"):
+            msg["sources"] = m.data["sources"]
+        if m.data.get("steps"):
+            msg["steps"] = m.data["steps"]
+        messages.append(msg)
+    return {
+        "id": conversation_id,
+        "title": session.title or "新对话",
+        "messages": messages,
+        "created_at": _fmt_time(session.time_created),
+        "updated_at": _fmt_time(session.time_updated),
+    }
 
 
 @router.put("/conversations/{conversation_id}")
 async def update_conversation(conversation_id: str, body: dict, request: Request):
     """更新对话标题（只能更新自己的对话）。"""
     user_id = _get_user_id(request)
-    if not _check_ownership(conversation_id, user_id):
-        raise HTTPException(status_code=404, detail="Conversation not found")
     title = body.get("title")
     if title is None:
         raise HTTPException(status_code=400, detail="title is required")
-    conn = _get_db()
+    service = _get_session_service(request)
     try:
-        conn.execute(
-            "UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ? AND (user_id = ? OR user_id = '')",
-            (title, conversation_id, user_id),
-        )
-        conn.commit()
-        if conn.total_changes == 0:
+        service.update(user_id, conversation_id, title=title)
+        return {"status": "ok"}
+    except session_repo.SessionNotFound:
+        if not _check_ownership(conversation_id, user_id):
             raise HTTPException(status_code=404, detail="Conversation not found")
-    finally:
-        conn.close()
-    return {"status": "ok"}
+        conn = _get_db()
+        try:
+            conn.execute(
+                "UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ? AND (user_id = ? OR user_id = '')",
+                (title, conversation_id, user_id),
+            )
+            conn.commit()
+            if conn.total_changes == 0:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+        finally:
+            conn.close()
+        return {"status": "ok"}
+    except session_repo.Forbidden:
+        raise HTTPException(status_code=404, detail="Conversation not found")
