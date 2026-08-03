@@ -63,6 +63,9 @@ SYNTHESIS_SYSTEM_PROMPT = """你是信息汇总专家。以下是多个并行搜
 class SupervisorAgent(BaseAgent):
     """Supervisor Agent —— 路由和任务分解。"""
 
+    # 可路由的 Agent 白名单（排除 supervisor 自身，防止 LLM 返回 "supervisor" 造成自我递归）
+    ROUTABLE_AGENTS = {"rag", "web_search", "code"}
+
     def __init__(self, bus: AgentBus, memory: Optional[MemoryManager] = None):
         self._bus = bus
         self._memory = memory
@@ -91,6 +94,11 @@ class SupervisorAgent(BaseAgent):
 
             # ── 尝试任务分解 ──
             subtasks = await self._decompose(question)
+
+            # 安全护栏：只路由到白名单 Agent，防止 LLM 返回 "supervisor" 造成自我递归超时
+            subtasks = [st for st in subtasks if st.get("agent") in self.ROUTABLE_AGENTS]
+            if not subtasks:
+                subtasks = [{"agent": "rag", "question": question}]
 
             if len(subtasks) > 1:
                 logger.info(
@@ -195,7 +203,7 @@ class SupervisorAgent(BaseAgent):
         q = question.strip().lower()
 
         # ── 快速路径: 关键词 + 可用 Agent 判断 ──
-        available_agents = self._bus.list_agents()
+        available_agents = [a for a in self._bus.list_agents() if a in self.ROUTABLE_AGENTS]
 
         kb_keywords = [
             "文档", "小说", "角色", "对话", "章节", "故事", "内容", "知识库",
@@ -233,6 +241,7 @@ class SupervisorAgent(BaseAgent):
 
     async def _llm_decompose(self, question: str, available: list[str]) -> list[dict]:
         """使用 LLM 判断如何分解任务。"""
+        routable = [a for a in available if a in self.ROUTABLE_AGENTS] or ["rag"]
         start = tmod.time()
         try:
             response = await litellm.acompletion(
@@ -241,7 +250,7 @@ class SupervisorAgent(BaseAgent):
                 api_base=self._api_base,
                 messages=[
                     {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"可用的 Agent: {', '.join(available)}\n\n用户问题: {question}"},
+                    {"role": "user", "content": f"可用的 Agent: {', '.join(routable)}\n\n用户问题: {question}"},
                 ],
                 max_tokens=512,
                 temperature=0.1,
@@ -257,11 +266,11 @@ class SupervisorAgent(BaseAgent):
             text = text.replace("```json", "").replace("```", "").strip()
             subtasks = __import__("json").loads(text)
 
-            # 验证格式
+            # 验证格式（白名单过滤，防止路由到 supervisor 自身）
             validated = []
             for st in subtasks:
                 if isinstance(st, dict) and "agent" in st and "question" in st:
-                    if st["agent"] in available:
+                    if st["agent"] in self.ROUTABLE_AGENTS and st["agent"] in routable:
                         validated.append(st)
 
             if validated:

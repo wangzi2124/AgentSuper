@@ -43,6 +43,7 @@ npm run preview
   ```
 - **ChatRequest** includes `use_vector_db: bool = True`; frontend toggle controls this per-message. Also accepts `files: list[FileContent]` for multimodal, but frontend does not yet send files.
 - **Chat SSE streaming**: frontend calls `POST /api/chat/stream`; backend emits SSE events: `step_start`, `step_end`, `tool_start`, `tool_end`, `done`, `error`. SSE error events include `retryable`, `status_code`, `error_type` fields for frontend retry logic. Non-streaming fallback at `POST /api/chat/`.
+- **Supervisor routing whitelist** (`app/agent/supervisor.py`): `ROUTABLE_AGENTS = {"rag", "web_search", "code"}`. Decompose validation + LLM prompt only expose routable agents; `handle_message` re-filters subtasks and falls back to `rag`. Prevents LLM returning `"supervisor"` (registered on the bus) causing self-recursive routing → `Agent 'supervisor' did not respond in time` (60s sub-agent timeout at `_route_to`/`_execute_parallel`).
 - **Model name auto-prefixing** (`graph.py:216-220`): if `model` has no `/`, prepends `deepseek/` or `openai/` based on `api_base` — always use full names like `deepseek/deepseek-v4-flash`
 - **AgentState.use_vector_db** (`graph.py:78`): when `false`, `_retrieve` returns empty context immediately — no KB search
 - **Tool call JSON error handling** (`graph.py:244-246`): `json.loads(tc.function.arguments)` wrapped in try/except — malformed args return error to LLM instead of crashing
