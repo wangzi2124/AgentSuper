@@ -33,7 +33,10 @@ npm run preview
 - **Python 3.14+** required (`.python-version`), **use `.venv\Scripts\python.exe`** directly (activate fails in subprocesses)
 - **`.env` injected into `os.environ`** at startup by `runtime.py:_load_env_to_os()` so plugins can read env vars via `os.environ.get()`
 - **LLM calls** need a real `LLM_API_KEY` in `.env`; LiteLLM cost-map fetch failure is non-blocking (falls back to local backup)
-- **Reranker model download fails** from HuggingFace in network-restricted envs → set `ENABLE_RERANKER=false` in `.env`
+- **Reranker model** downloads **ModelScope-first** (HF fallback) via `app/utils/model_download.py:download_model`; in network-restricted envs set `ENABLE_RERANKER=false` in `.env` or pre-download:
+  ```powershell
+  modelscope download --model cross-encoder/ms-marco-MiniLM-L6-v2 --local_dir data/models/cross-encoder/ms-marco-MiniLM-L6-v2
+  ```
 - **Embedding model** (default: `BAAI/bge-small-zh-v1.5`) locally cached; English fallback `all-MiniLM-L6-v2`. Download via ModelScope:
   ```powershell
   modelscope download --model AI-ModelScope/bge-small-zh-v1.5 --local_dir data/models/BAAI/bge-small-zh-v1.5

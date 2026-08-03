@@ -49,14 +49,25 @@ class Reranker:
         return None
 
     def _load_model(self, model_name: str) -> CrossEncoder:
-        """加载 CrossEncoder 模型，优先使用本地缓存。"""
+        """加载 CrossEncoder 模型，优先使用本地缓存，否则从 ModelScope 下载（HF 兜底）。"""
         local_model = self._resolve_local_model(model_name)
         if local_model:
             logger.info("Loading reranker from local path: %s", local_model)
             return CrossEncoder(str(local_model))
 
-        logger.info("Loading reranker from HuggingFace: %s", model_name)
-        return CrossEncoder(model_name)
+        from app.utils.model_download import download_model
+
+        logger.info("Downloading reranker via ModelScope (HuggingFace fallback): %s", model_name)
+        try:
+            model_path = download_model(model_name, self.cache_dir)
+            return CrossEncoder(str(model_path))
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to download reranker model. Download it manually via "
+                "`modelscope download --model cross-encoder/ms-marco-MiniLM-L6-v2 "
+                f"--local_dir data/models/cross-encoder/ms-marco-MiniLM-L6-v2`, "
+                "or set ENABLE_RERANKER=false in .env"
+            ) from exc
 
     def rerank(
         self,
