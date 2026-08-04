@@ -31,6 +31,28 @@ DOOM_LOOP_PROMPT = (
     "或基于已有信息直接给出最终回答。"
 )
 
+# P4: finish_reason 归一化映射（对齐 opencode FinishReason 六值，llm/src/schema/ids.ts:39）
+_FINISH_REASON_MAP = {
+    "stop": "stop",
+    "length": "length",
+    "max_tokens": "length",          # Anthropic/Bedrock 原生名
+    "tool_calls": "tool-calls",
+    "function_call": "tool-calls",   # 旧式 OpenAI
+    "content_filter": "content-filter",
+    "error": "error",
+}
+
+
+def _normalize_finish_reason(finish_reason: str | None) -> str:
+    """把 LiteLLM/OpenAI 式 finish_reason 归一化为 opencode FinishReason 六值。
+
+    None 视为正常结束（stop）：本地执行无 Provider 异常时的缺省语义。
+    未知值归一化为 "unknown"（不视为已完成，保守续跑一轮）。
+    """
+    if not finish_reason:
+        return "stop"
+    return _FINISH_REASON_MAP.get(str(finish_reason).strip().lower(), "unknown")
+
 
 def _permission_denied_msg(operation: str, path: str, tool_name: str = "") -> str:
     """生成可解释的权限拒绝消息，让 LLM 能据此调整路径/策略而非盲目重试。"""
@@ -504,6 +526,8 @@ class RAGAgent:
 
         response = await self._llm_call(model, messages, tool_defs)
         msg = response.choices[0].message
+        # P4: 读取并归一化 finish_reason（对齐 opencode FinishReason：tool-calls/unknown 不算完成）
+        finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
 
         # 硬兜底：单次请求内最多 LLM 调用轮数（每轮 = 一次完整 LLM 调用）
         max_tool_rounds = settings.max_tool_rounds
@@ -516,7 +540,9 @@ class RAGAgent:
         doom_strikes = 0
         steps_prompt_injected = False
         rounds = 0
-        while msg.tool_calls and rounds < max_tool_rounds:
+        while (
+            msg.tool_calls or finish_reason == "tool-calls"
+        ) and rounds < max_tool_rounds:
             rounds += 1
 
             # Compaction: compress old messages when context grows large
@@ -633,6 +659,7 @@ class RAGAgent:
             final_tool_defs = None if steps_prompt_injected else tool_defs
             response = await self._llm_call(model, messages, final_tool_defs)
             msg = response.choices[0].message
+            finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
 
         record_model_call(
             model, duration_ms=(tmod.time() - _gen_start) * 1000,
@@ -680,13 +707,24 @@ class RAGAgent:
             messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
             response = await self._llm_call(model, messages, None)
             msg = response.choices[0].message
+            finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
         if not (msg.content or "").strip():
             # Last resort: LLM still returned empty, use a summary
             msg.content = "任务已完成，请查看结果。"
 
+        # P4: finish_reason 收尾语义（对齐 opencode prompt.ts:1301-1308 / processor.ts）
+        # length → 输出被截断，答案不完整，追加提示不静默
+        # content-filter → 内容被 Provider 过滤，视为错误暴露
         answer = msg.content or ""
         gen_dur = (tmod.time() - _gen_start) * 1000
-        self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "completed", "detail": f"完成（{rounds} 轮工具调用）" if rounds else "完成", "duration_ms": round(gen_dur, 1)})
+        if finish_reason == "length":
+            answer = answer + "\n\n⚠️ 输出因达到 token 上限被截断，内容可能不完整。"
+            self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "completed", "detail": "完成（输出被截断 length）", "duration_ms": round(gen_dur, 1)})
+        elif finish_reason == "content-filter":
+            answer = "模型回答被内容安全策略拦截，未返回完整内容。请调整提问方式或拆分内容后重试。"
+            self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "error", "detail": "内容被过滤", "duration_ms": round(gen_dur, 1)})
+        else:
+            self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "completed", "detail": f"完成（{rounds} 轮工具调用）" if rounds else "完成", "duration_ms": round(gen_dur, 1)})
         return {
             "answer": answer,
             "messages": [AIMessage(content=answer)],
