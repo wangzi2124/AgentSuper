@@ -298,12 +298,13 @@ def _resolve_session(user_id: str, conv_id: str) -> tuple[object, str]:
 
 
 def _get_legacy_conversation(conv_id: str, user_id: str) -> dict:
-    """读取旧 conversations.db 中的对话（仅未迁移行）。"""
+    """读取旧 conversations.db 中的对话（仅未迁移行），只允许本人或匿名（user_id=''）数据。"""
     conn = _get_db()
     try:
         row = conn.execute(
-            "SELECT title, messages, created_at, updated_at FROM conversations WHERE id = ?",
-            (conv_id,),
+            "SELECT title, messages, created_at, updated_at FROM conversations "
+            "WHERE id = ? AND (user_id = ? OR user_id = '')",
+            (conv_id, user_id),
         ).fetchone()
     finally:
         conn.close()

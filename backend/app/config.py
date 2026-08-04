@@ -65,8 +65,17 @@ class Settings(BaseSettings):
     summarization_cache_size: int = 200
 
     # 可选：管理端鉴权 token。设置后插件 toggle/call、权限审批等敏感接口需携带
-    # Authorization: Bearer <token>；不设置则保持本地单用户模式（不做校验）。
+    # Authorization: Bearer <token>；不设置时这些接口仅允许本机来源（deps.require_admin）。
     admin_token: Optional[str] = None
+
+    # CORS 允许的源（JSON 数组，环境变量 CORS_ORIGINS）。默认仅本机前端
+    # （vite dev 5173 / preview 4173），避免局域网/公网页面调用本服务接口。
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ]
 
     # ── 权限 / 工作区（对齐 opencode external_directory 设计）──
     # 可写工作目录由前端「工作目录」面板配置（运行时生效，持久化到 data/runtime_workspaces.json）。

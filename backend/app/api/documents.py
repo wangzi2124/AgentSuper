@@ -33,6 +33,19 @@ def _clean_upload_filename(filename: str) -> str:
     return name
 
 
+def _get_doc_processing_lock(request: Request) -> asyncio.Lock:
+    """获取文档处理串行锁（app 级单例）。
+
+    上传的处理任务与删除都改写共享的 ChromaDB / BM25 / 章节库，
+    串行化避免并发重建索引与删除交叉导致的数据错位。
+    """
+    lock = getattr(request.app.state, "_doc_processing_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        request.app.state._doc_processing_lock = lock
+    return lock
+
+
 @router.post("/upload", response_model=UploadResponse)
 async def upload_document(request: Request, file: UploadFile = File(...)):
     """上传文档并启动异步处理任务。"""
@@ -62,19 +75,26 @@ async def upload_document(request: Request, file: UploadFile = File(...)):
 
     bm25 = getattr(request.app.state, "bm25_index", None)
 
-    asyncio.create_task(
-        tm.process_document(
-            task_id,
-            content,
-            filename,
-            request.app.state.file_store,
-            request.app.state.doc_processor,
-            request.app.state.embeddings,
-            request.app.state.vector_store,
-            bm25,
-            getattr(request.app.state, "chapter_store", None),
+    async with _get_doc_processing_lock(request):
+        task = asyncio.create_task(
+            tm.process_document(
+                task_id,
+                content,
+                filename,
+                request.app.state.file_store,
+                request.app.state.doc_processor,
+                request.app.state.embeddings,
+                request.app.state.vector_store,
+                bm25,
+                getattr(request.app.state, "chapter_store", None),
+            )
         )
-    )
+        # 保留引用防止被 GC（"Task was destroyed but it is pending!"），完成后自动移除
+        pending = getattr(request.app.state, "_doc_processing_tasks", None)
+        if pending is None:
+            pending = request.app.state._doc_processing_tasks = set()
+        pending.add(task)
+        task.add_done_callback(pending.discard)
 
     return UploadResponse(task_id=task_id)
 
@@ -149,12 +169,13 @@ async def delete_document(request: Request, doc_id: str):
     if not fs.get(doc_id):
         raise HTTPException(status_code=404, detail="Document not found")
 
-    fs.delete(doc_id)
-    vs.delete_by_metadata("document_id", doc_id)
-    cs = getattr(request.app.state, "chapter_store", None)
-    if cs:
-        cs.delete_by_document(doc_id)
-    bm25 = getattr(request.app.state, "bm25_index", None)
-    if bm25:
-        await asyncio.to_thread(bm25.remove_by_metadata, "document_id", doc_id)
+    async with _get_doc_processing_lock(request):
+        fs.delete(doc_id)
+        vs.delete_by_metadata("document_id", doc_id)
+        cs = getattr(request.app.state, "chapter_store", None)
+        if cs:
+            cs.delete_by_document(doc_id)
+        bm25 = getattr(request.app.state, "bm25_index", None)
+        if bm25:
+            await asyncio.to_thread(bm25.remove_by_metadata, "document_id", doc_id)
     return DeleteResponse(message="Document deleted")

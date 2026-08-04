@@ -77,6 +77,12 @@ def _coerce_bool(value, default: bool = False) -> bool:
     return bool(value)
 
 
+def _is_read_allowed(path: Path) -> bool:
+    """判断路径是否允许读取（工作区内敏感文件/系统路径/未授权外部路径返回 False）。"""
+    mgr = get_perm_mgr()
+    return mgr.check(str(path), "read") == "allow"
+
+
 def tool_ls(path: str = ".") -> str:
     """列出指定目录下的文件和子目录，显示类型、大小和修改时间。"""
     target = _resolve(path)
@@ -198,6 +204,7 @@ def tool_glob(pattern: str, root: str = ".") -> str:
     if not root_path.is_dir():
         return f"Error: '{root}' is not a directory"
     matches = sorted(root_path.glob(pattern))
+    matches = [m for m in matches if _is_read_allowed(m)]
     if not matches:
         return f"No matches for: {pattern}"
     if root_path == WORKSPACE:
@@ -260,6 +267,8 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
     output: list[str] = []
     for f in sorted(root_path.glob(file_pattern)):
         if not f.is_file():
+            continue
+        if not _is_read_allowed(f):
             continue
         ext = f.suffix.lower()
         if ext in _MULTIMODAL_EXTS:

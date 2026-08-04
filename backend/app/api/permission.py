@@ -49,8 +49,9 @@ class PendingResponse(BaseModel):
 
 
 @router.get("/permission/pending", tags=["Permission"])
-async def list_pending():
+async def list_pending(request: Request):
     """获取所有待处理的权限请求列表。"""
+    require_admin(request)
     mgr = get_manager()
     requests = mgr.get_pending_requests()
     return {

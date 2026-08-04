@@ -4,12 +4,13 @@
 """
 
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 
 from app.config import settings
 from app.api.chat import reset_summarizer
+from app.api.deps import require_admin
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,9 @@ async def get_summarization_config():
 
 
 @router.post("/summarization", response_model=SummarizationStatus)
-async def update_summarization_config(body: SummarizationConfig):
+async def update_summarization_config(body: SummarizationConfig, request: Request):
     """更新摘要功能的配置参数。"""
+    require_admin(request)
     if body.model is not None:
         settings.summarization_model = body.model if body.model else None
     if body.keep_messages is not None:

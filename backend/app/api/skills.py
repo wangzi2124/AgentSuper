@@ -6,6 +6,8 @@
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.api.deps import require_admin
+
 router = APIRouter()
 
 
@@ -24,6 +26,7 @@ async def list_skills(request: Request):
 @router.post("/{name}/toggle")
 async def toggle_skill(name: str, body: ToggleSkillRequest, request: Request):
     """启用或禁用指定技能。"""
+    require_admin(request)
     loader = request.app.state.skill_loader
     if not loader.toggle(name, body.enabled):
         raise HTTPException(status_code=404, detail="Skill not found")

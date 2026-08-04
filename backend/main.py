@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config, weather
 from app.api.chat import MAX_CONCURRENT_AGENTS
+from app.config import settings
 from app.monitor import RequestLogMiddleware, get_stats
 from app.runtime import ensure_runtime_state
 from app.session import SessionService, init_db
@@ -49,7 +50,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
