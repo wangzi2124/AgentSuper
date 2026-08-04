@@ -57,9 +57,6 @@ class Settings(BaseSettings):
     tool_output_protect_tokens: int = 40_000
     # 清理收益低于该值时不做（避免微小收益的频繁改写）
     tool_output_prune_minimum_tokens: int = 20_000
-    # 单次请求内最大工具调用轮数（每轮都是一次完整 LLM 调用）
-    # 可用环境变量 MAX_TOOL_ROUNDS 覆盖
-    max_tool_rounds: int = 24
     # 摘要中间件缓存大小（按历史分块缓存，避免每请求全量重算）
     summarization_cache_size: int = 200
 
@@ -74,12 +71,18 @@ class Settings(BaseSettings):
     # 权限审批等待超时（秒），默认 60；超时视为拒绝
     permission_approval_timeout: int = 60
 
-    # ── Agent 执行循环护栏（对齐 opencode prompt.ts / processor.ts）──
-    # 单次请求最大步骤数（含工具循环）；生效上限 = min(MAX_TOOL_ROUNDS, MAX_STEPS)。
-    # 到达上限前的最后一轮会注入收尾提示，强制"已完成/未完成/下一步"式总结。
+    # ── Agent 执行循环护栏（对齐 opencode prompt.ts / processor.ts / max-steps.ts）──
+    # 主步骤上限（对齐 opencode agent.steps，默认 40）：到达上限的最后一轮注入收尾提示，
+    # 并禁用工具，强制"已完成/未完成/下一步"式总结。生效上限 = min(MAX_STEPS, MAX_TOOL_ROUNDS)。
     max_steps: int = 40
+    # 硬兜底：单次请求内最多 LLM 调用轮数（每轮都是一次完整 LLM 调用）。
+    # 当 MAX_STEPS >= MAX_TOOL_ROUNDS 时，MAX_STEPS 生效上限即等于该值。
+    max_tool_rounds: int = 24
     # Doom-loop 检测：同一组工具调用指纹连续重复 N 轮后，注入策略变更提示（≥2）
     doom_loop_threshold: int = 3
+    # Doom-loop 升级：首次提示之后，再次连续触发 N 次相同指纹即强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具），
+    # 对齐 opencode processor.ts 的 permission.ask(doom_loop) → deny 后 stop 语义
+    doom_loop_max_strikes: int = 2
     # 工具密集型子 Agent（如 code）的更长等待超时（秒），避免长任务被误判超时
     sub_agent_timeout_extended: float = 300.0
     # 使用 extended 超时的子 Agent 列表（逗号分隔）

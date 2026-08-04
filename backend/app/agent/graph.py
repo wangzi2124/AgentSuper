@@ -505,10 +505,15 @@ class RAGAgent:
         response = await self._llm_call(model, messages, tool_defs)
         msg = response.choices[0].message
 
-        max_tool_rounds = settings.max_tool_rounds  # 每轮 = 一次完整 LLM 调用，限制可大幅省 token
+        # 硬兜底：单次请求内最多 LLM 调用轮数（每轮 = 一次完整 LLM 调用）
+        max_tool_rounds = settings.max_tool_rounds
+        # 主步骤上限（对齐 opencode agent.steps）：生效上限 = min(MAX_STEPS, MAX_TOOL_ROUNDS)
         effective_max_steps = min(max_tool_rounds, max(1, settings.max_steps))
+        # Doom-loop：连续相同指纹 N 轮注入提示；升级到 doom_loop_max_strikes 次后强制收尾
         doom_threshold = max(2, settings.doom_loop_threshold)
+        doom_max_strikes = max(1, settings.doom_loop_max_strikes)
         doom_fingerprints: list[str] = []
+        doom_strikes = 0
         steps_prompt_injected = False
         rounds = 0
         while msg.tool_calls and rounds < max_tool_rounds:
@@ -595,21 +600,33 @@ class RAGAgent:
                     "content": bounded_result,
                 })
 
-            # Doom-loop 检测：同一组工具调用指纹连续重复 ≥ threshold 轮 → 注入策略变更提示
+            # Doom-loop 检测：同一组工具调用指纹连续重复 ≥ threshold 轮 → 注入策略变更提示；
+            # 首次提示后仍连续重复（升级到 doom_loop_max_strikes）→ 强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具）
             fp = "|".join(
                 sorted(f"{tc.function.name}:{tc.function.arguments}" for tc in msg.tool_calls)
             )
             doom_fingerprints.append(fp)
             if len(doom_fingerprints) >= doom_threshold and len(set(doom_fingerprints[-doom_threshold:])) == 1:
-                logger.warning("Doom loop detected: %d consecutive identical tool calls (%s)", doom_threshold, fp[:120])
-                messages.append({"role": "user", "content": DOOM_LOOP_PROMPT})
+                doom_strikes += 1
+                if doom_strikes >= doom_max_strikes:
+                    logger.warning(
+                        "Doom loop persisted (%d strikes), forcing structured summary: %s",
+                        doom_strikes, fp[:120],
+                    )
+                    messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
+                    steps_prompt_injected = True
+                    self._push_event(state, {"type": "step_end", "step_id": "doom_loop", "name": "重复工具调用升级", "status": "completed", "detail": "已强制收尾总结"})
+                else:
+                    logger.warning("Doom loop detected: %d consecutive identical tool calls (%s)", doom_threshold, fp[:120])
+                    messages.append({"role": "user", "content": DOOM_LOOP_PROMPT})
+                    self._push_event(state, {"type": "step_end", "step_id": "doom_loop", "name": "检测到重复工具调用", "status": "completed", "detail": "已注入策略变更提示"})
                 doom_fingerprints.clear()
-                self._push_event(state, {"type": "step_end", "step_id": "doom_loop", "name": "检测到重复工具调用", "status": "completed", "detail": "已注入策略变更提示"})
 
-            # MAX_STEPS：达到生效上限前的最后一轮注入收尾提示
+            # MAX_STEPS：达到生效上限前的最后一轮注入收尾提示（对齐 opencode prompt.ts:1281，
+            # 以 assistant 角色消息注入，模型据此收尾总结）
             if not steps_prompt_injected and rounds >= effective_max_steps:
                 steps_prompt_injected = True
-                messages.append({"role": "user", "content": MAX_STEPS_PROMPT})
+                messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
 
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
             # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）
@@ -659,15 +676,9 @@ class RAGAgent:
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tc_id, "content": bounded_result})
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
-            messages.append({
-                "role": "user",
-                "content": (
-                    "（系统提示：已达到本轮请求的最大工具调用轮数上限，不再继续执行工具。"
-                    "请基于以上已获取的工具结果，整理出最终回答；若任务尚未完成，"
-                    "请明确指出哪些部分已完成、哪些部分尚未完成，以及继续完成所需执行的下一步操作。）"
-                ),
-            })
-            response = await self._llm_call(model, messages, tool_defs)
+            # 对齐 opencode max-steps 语义：达到上限后工具禁用，仅注入收尾总结提示（assistant 角色）
+            messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
+            response = await self._llm_call(model, messages, None)
             msg = response.choices[0].message
         if not (msg.content or "").strip():
             # Last resort: LLM still returned empty, use a summary
