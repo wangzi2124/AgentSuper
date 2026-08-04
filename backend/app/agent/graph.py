@@ -102,6 +102,7 @@ from app.plugins.loader import PluginLoader
 from app.config import settings
 from app.agent.tools import (
     ToolDef,
+    LONG_CONTENT_FILE_RULE,
     create_filesystem_tools,
     create_skill_tools,
     create_plugin_tools,
@@ -262,6 +263,7 @@ class RAGAgent:
             "\n- plugin_character-analysis_tool_list_characters(): List all characters and their dialogue counts."
             "\n- plugin_character-analysis_tool_get_character_dialogues(character_name, limit): Get all dialogues spoken by a character."
             "\n- plugin_character-analysis_tool_analyze_character_interactions(character_name): Find characters who appear in same chapters."
+            "\n\n" + LONG_CONTENT_FILE_RULE
         )
 
     def _build_tool_defs(self) -> list[dict] | None:
@@ -444,7 +446,7 @@ class RAGAgent:
                 api_key=self.api_key,
                 api_base=self.api_base,
                 temperature=0.1,
-                max_tokens=4096,
+                max_tokens=settings.llm_max_tokens,
                 timeout=500,
                 num_retries=2,
             )

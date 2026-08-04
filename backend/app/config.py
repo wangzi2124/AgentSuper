@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # 端点层等待 supervisor 返回的上限（需 > decompose + sub_agent + synthesize）
     supervisor_timeout: float = 300.0
 
+    # 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
+    # 默认 16_384 ≈ 模型原生上限的常用值；长任务配合系统提示"长内容写文件"规则避免截断。
+    llm_max_tokens: int = 16_384
+
     # Token 成本控制
     # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
     # 对齐 opencode overflow.ts：usable = max_context_tokens - context_reserve_tokens

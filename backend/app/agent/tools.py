@@ -15,6 +15,21 @@ def _writable_workspaces() -> list[str]:
         return []
 
 
+# 长内容必须写文件、不得在回复中粘贴全文的硬性规则（对齐 opencode 长任务机制：
+# 长文用工具写入文件、回复只留摘要，避免单轮输出触发 finish_reason="length" 截断）。
+LONG_CONTENT_FILE_RULE = (
+    "IMPORTANT - Long content MUST be written to files, NOT pasted in replies:\n"
+    "  If your reply would exceed roughly 500 Chinese characters (about 1000 tokens), "
+    "you MUST write the full content to a file instead of outputting it inline:\n"
+    "  1. Text or code -> tool_write_file(path, content, overwrite=True). For very large files, "
+    "write the first chunk with tool_write_file then append the rest with tool_append_file.\n"
+    "  2. Structured documents (.docx / .pdf / .xlsx / .pptx) -> use the corresponding generator plugin.\n"
+    "  3. In your reply, only output: the saved file path + a summary of the key points + structure overview. "
+    "Do NOT paste the full content.\n"
+    "  Exception: ONLY if the user explicitly asks for the full text inline."
+)
+
+
 # Python类型到JSON Schema类型的映射表（精确匹配外层类型）
 _TYPE_MAP: Dict[str, str] = {
     "str": "string",
@@ -309,6 +324,8 @@ def build_system_prompt_no_kb(
         "  1. Use tool_write_file(path, content, overwrite=True) to write the first chunk.",
         "  2. Then append the remaining chunks with tool_append_file(path, content), one chunk per call.",
         "  This avoids truncated/corrupted files. You may also use tool_read_file to verify after writing.",
+        "",
+        LONG_CONTENT_FILE_RULE,
         "",
         "IMPORTANT - Working paths / workspace:",
         "  The following absolute paths are writable workspaces (you MUST write files under one of them):",
