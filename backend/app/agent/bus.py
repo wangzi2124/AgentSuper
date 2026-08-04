@@ -7,7 +7,6 @@
 import asyncio
 import logging
 import time as tmod
-from collections import defaultdict
 from typing import Optional
 
 from app.agent.base import BaseAgent, AgentMessage
@@ -28,7 +27,7 @@ class AgentBus:
 
     def __init__(self):
         self._agents: dict[str, BaseAgent] = {}
-        self._mailboxes: dict[str, asyncio.Queue] = defaultdict(asyncio.Queue)
+        self._mailboxes: dict[str, asyncio.Queue] = {}
         self._pending: dict[str, asyncio.Future] = {}  # thread_id → Future
         self._running: set[str] = set()
         self._tasks: list[asyncio.Task] = []  # 由 start_all() 创建的 task 列表
@@ -49,6 +48,7 @@ class AgentBus:
         if aid in self._agents:
             logger.warning("Agent '%s' already registered, overwriting", aid)
         self._agents[aid] = agent
+        self._mailboxes[aid] = asyncio.Queue()
         logger.info("✅ Agent registered: %s", aid)
 
     def get_agent(self, agent_id: str) -> Optional[BaseAgent]:
@@ -116,7 +116,7 @@ class AgentBus:
                 if aid != msg.source:
                     await self._mailboxes[aid].put(msg)
                     logger.debug("Broadcast %s → %s", msg.source, aid)
-        elif msg.target in self._mailboxes:
+        elif msg.target in self._agents:
             await self._mailboxes[msg.target].put(msg)
             logger.debug("Send %s → %s", msg.source, msg.target)
         else:
