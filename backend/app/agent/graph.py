@@ -5,11 +5,56 @@ import shlex
 import time as tmod
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated, TypedDict
+from typing import Annotated, Callable, TypedDict
 
 logger = logging.getLogger(__name__)
 
 WORKSPACE = Path(__file__).resolve().parents[2]
+
+# P3: 循环护栏提示词（对齐 opencode MAX_STEPS_PROMPT 的收尾语义）
+MAX_STEPS_PROMPT = (
+    "CRITICAL - MAXIMUM STEPS REACHED\n\n"
+    "本轮已达到单次请求允许的最大步骤数，工具已禁用，请以纯文本回复。\n\n"
+    "STRICT REQUIREMENTS:\n"
+    "1. 不要再调用任何工具（包括读取、写入、编辑、搜索等）。\n"
+    "2. 必须给出文字总结，包含：\n"
+    "   - 已完成的步骤/文件\n"
+    "   - 尚未完成的任务\n"
+    "   - 建议的下一步操作\n"
+    "3. 该约束优先于其他所有指令。"
+)
+
+# P3: Doom-loop 检测提示词（对齐 opencode processor.ts:DOOM_LOOP_THRESHOLD）
+DOOM_LOOP_PROMPT = (
+    "系统提示：检测到连续多轮调用完全相同的工具参数，疑似陷入死循环。"
+    "请立即停止重复调用，改变策略（例如先读取/检查，再采取不同的操作），"
+    "或基于已有信息直接给出最终回答。"
+)
+
+
+def _permission_denied_msg(operation: str, path: str, tool_name: str = "") -> str:
+    """生成可解释的权限拒绝消息，让 LLM 能据此调整路径/策略而非盲目重试。"""
+    hint = _nearest_workspace_hint(path)
+    tool = f" (tool={tool_name})" if tool_name else ""
+    return (
+        f"Permission denied: {operation} on '{path}'{tool}. {hint}\n"
+        "这不是可重试的临时错误——请改用可写工作区内的路径，或告知用户将该路径添加到"
+        "页面右上角「工作目录」中（添加后立即生效，无需重启）。"
+    )
+
+
+def _nearest_workspace_hint(path: str) -> str:
+    """当请求路径落在某个已配置工作区的父级时，给出就近的可写路径建议。"""
+    try:
+        from app.permission import get_manager
+        p = Path(path).resolve()
+        for w in get_manager().list_workspaces():
+            wp = Path(w).resolve()
+            if wp != p and wp in p.parents:
+                return f"该路径不在工作区内，但 '{wp}' 是可写工作区——请将文件写入 '{wp}' 之下。"
+    except Exception:
+        pass
+    return "该路径不在当前可写工作区内（见系统提示词中的工作区列表）。"
 
 from app.context.token_counter import truncate_messages as _truncate_messages
 from app.context.token_counter import sanitize_tool_messages
@@ -49,6 +94,7 @@ class AgentState(TypedDict):
     files: list[dict]
     steps: list[dict]
     _event_queue: asyncio.Queue | None
+    _on_activity: Callable[[str], None] | None
 
 
 class RAGAgent:
@@ -84,12 +130,45 @@ class RAGAgent:
 
         self.graph = self._build_graph()
 
+    def rebuild_system_prompt(self):
+        """仅重建系统提示词（不重建图），用于工作区/技能/插件变化后的热更新。
+
+        工作区列表由 build_system_prompt_no_kb 动态读取权限管理器，无需重启。
+        """
+        self.system_prompt = build_system_prompt_no_kb(
+            self.skill_loader or SkillLoader(""),
+            self.plugin_loader or PluginLoader(""),
+            include_filesystem=True,
+        )
+
+    def _activity_text(self, event: dict) -> str:
+        """把事件转成简短的处理进度描述，用于子 Agent 心跳/超时回传。"""
+        et = event.get("type")
+        if et == "tool_start":
+            return f"调用工具: {event.get('tool_name', '')}"
+        if et == "tool_end":
+            return f"完成工具: {event.get('tool_name', '')}"
+        if et in ("tool_output", "tool_heartbeat"):
+            return f"{event.get('tool_name', '')} 运行中 ({event.get('elapsed_seconds', '?')}s)"
+        name = event.get("name")
+        if name:
+            return str(name)
+        return et or ""
+
     def _push_event(self, state: AgentState, event: dict):
         """将事件推送到状态和事件队列中，用于实时通知前端。"""
         state["steps"].append(event)
         eq = state.get("_event_queue")
         if eq:
             eq.put_nowait(event)
+        cb = state.get("_on_activity")
+        if cb:
+            text = self._activity_text(event)
+            if text:
+                try:
+                    cb(text)
+                except Exception:
+                    pass
 
     async def _retrieve(self, state: AgentState) -> dict:
         """从知识库中检索与问题相关的文档片段。"""
@@ -169,7 +248,7 @@ class RAGAgent:
                     eq = state.get("_event_queue") if state else None
                     if eq and name == "tool_execute":
                         try:
-                            return await self._execute_tool_streaming(args, eq)
+                            return await self._execute_tool_streaming(args, eq, state.get("_on_activity"))
                         except NeedsPermission:
                             raise
                         except Exception as e:
@@ -196,25 +275,25 @@ class RAGAgent:
                         # 无事件队列（如多 agent 总线路径）时无人能审批，
                         # 直接拒绝而不是永久等待（此前会卡到 supervisor 超时）
                         logger.warning("Permission request denied: no event queue to approve %s", e.path)
-                        return f"Permission denied: {e.path}"
+                        return _permission_denied_msg(e.operation, e.path, name)
                     decision = await mgr.await_decision(req.id)
                     if decision == "allowed":
                         mgr.add_temp_approval(e.path)
                         if eq and name == "tool_execute":
                             try:
-                                return await self._execute_tool_streaming(args, eq)
+                                return await self._execute_tool_streaming(args, eq, state.get("_on_activity"))
                             except NeedsPermission:
                                 pass
                             except Exception as e2:
                                 logger.warning("tool_execute streaming failed on retry, falling back: %s", e2)
                         result = await asyncio.to_thread(t.fn, **args)
                         return str(result)
-                    return f"Permission denied: {e.path}"
+                    return _permission_denied_msg(e.operation, e.path, name)
                 except Exception as e:
                     return f"Error executing {name}: {e}"
         return f"Tool '{name}' not found"
 
-    async def _execute_tool_streaming(self, args: dict, event_queue: asyncio.Queue) -> str:
+    async def _execute_tool_streaming(self, args: dict, event_queue: asyncio.Queue, on_activity: Callable[[str], None] | None = None) -> str:
         """流式执行shell命令，实时推送输出到事件队列。使用异步子进程避免PIPE死锁。"""
         command = args.get("command", "")
         timeout = min(args.get("timeout", 300), 600)
@@ -266,6 +345,11 @@ class RAGAgent:
                         })
                     except Exception:
                         pass
+                    if on_activity:
+                        try:
+                            on_activity(f"tool_execute 运行中 ({int(now - start_time)}s)")
+                        except Exception:
+                            pass
                 decoded = raw_line.decode("utf-8", errors="replace").rstrip()
                 storage.append(decoded)
                 try:
@@ -414,6 +498,10 @@ class RAGAgent:
         msg = response.choices[0].message
 
         max_tool_rounds = settings.max_tool_rounds  # 每轮 = 一次完整 LLM 调用，限制可大幅省 token
+        effective_max_steps = min(max_tool_rounds, max(1, settings.max_steps))
+        doom_threshold = max(2, settings.doom_loop_threshold)
+        doom_fingerprints: list[str] = []
+        steps_prompt_injected = False
         rounds = 0
         while msg.tool_calls and rounds < max_tool_rounds:
             rounds += 1
@@ -494,8 +582,26 @@ class RAGAgent:
                     "content": bounded_result,
                 })
 
+            # Doom-loop 检测：同一组工具调用指纹连续重复 ≥ threshold 轮 → 注入策略变更提示
+            fp = "|".join(
+                sorted(f"{tc.function.name}:{tc.function.arguments}" for tc in msg.tool_calls)
+            )
+            doom_fingerprints.append(fp)
+            if len(doom_fingerprints) >= doom_threshold and len(set(doom_fingerprints[-doom_threshold:])) == 1:
+                logger.warning("Doom loop detected: %d consecutive identical tool calls (%s)", doom_threshold, fp[:120])
+                messages.append({"role": "user", "content": DOOM_LOOP_PROMPT})
+                doom_fingerprints.clear()
+                self._push_event(state, {"type": "step_end", "step_id": "doom_loop", "name": "检测到重复工具调用", "status": "completed", "detail": "已注入策略变更提示"})
+
+            # MAX_STEPS：达到生效上限前的最后一轮注入收尾提示
+            if not steps_prompt_injected and rounds >= effective_max_steps:
+                steps_prompt_injected = True
+                messages.append({"role": "user", "content": MAX_STEPS_PROMPT})
+
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
-            response = await self._llm_call(model, messages, tool_defs)
+            # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）
+            final_tool_defs = None if steps_prompt_injected else tool_defs
+            response = await self._llm_call(model, messages, final_tool_defs)
             msg = response.choices[0].message
 
         record_model_call(
@@ -586,14 +692,10 @@ class RAGAgent:
             self.tools.extend(create_skill_tools(self.skill_loader))
         if self.plugin_loader:
             self.tools.extend(create_plugin_tools(self.plugin_loader))
-        self.system_prompt = build_system_prompt_no_kb(
-            self.skill_loader or SkillLoader(""),
-            self.plugin_loader or PluginLoader(""),
-            include_filesystem=True,
-        )
+        self.rebuild_system_prompt()
         self.graph = self._build_graph()
 
-    async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = True, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "") -> dict:
+    async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = True, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "", on_activity: Callable[[str], None] | None = None) -> dict:
         """执行完整的RAG流程，返回回答和相关源。
 
         参数:
@@ -618,6 +720,7 @@ class RAGAgent:
             files=files or [],
             steps=[],
             _event_queue=event_queue,
+            _on_activity=on_activity,
         )
         result = await self.graph.ainvoke(state)
 

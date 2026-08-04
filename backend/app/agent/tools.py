@@ -6,6 +6,15 @@ from app.skills.loader import SkillLoader
 from app.plugins.loader import PluginLoader
 
 
+def _writable_workspaces() -> list[str]:
+    """返回当前所有可写工作区的绝对路径（主工作区 + 运行时/配置的额外工作区）。"""
+    try:
+        from app.permission import get_manager
+        return get_manager().list_workspaces()
+    except Exception:
+        return []
+
+
 # Python类型到JSON Schema类型的映射表（精确匹配外层类型）
 _TYPE_MAP: Dict[str, str] = {
     "str": "string",
@@ -282,6 +291,24 @@ def build_system_prompt_no_kb(
         "  2. Do NOT use tool_execute with mkdir or Set-Content to create files — use tool_write_file instead.",
         "  3. ONLY AFTER all files are written, run tool_execute for npm install or build if needed.",
         "  Do NOT run 'npm create', 'npx create-react-app', 'npm create vite' etc. Write files manually.",
+        "",
+        "IMPORTANT - Working paths / workspace:",
+        "  The following absolute paths are writable workspaces (you MUST write files under one of them):",
+        *[f"    - {w}" for w in _writable_workspaces()],
+        "  Relative paths resolve under the first workspace above. If the user asks to write to a path",
+        "  NOT in this list, you will get a Permission denied error telling you the reason — do NOT",
+        "  blindly retry; instead report it, or ask the user to add the path to the workspace list in",
+        "  the UI (workspace list updates take effect immediately).",
+        "",
+        "IMPORTANT - Planning & final report for multi-step tasks:",
+        "  When the task needs multiple steps or multiple files (e.g. building a project):",
+        "  1. FIRST output a short plan block marked '## 实施计划' listing the steps as a checklist.",
+        "  2. As you work, keep the plan visible and mark each step's progress.",
+        "  3. ALWAYS end your final answer with a '## 完成情况' section listing:",
+        "     - 已完成 (what was completed)",
+        "     - 未完成 (what was NOT completed, if any)",
+        "     - 下一步 (concrete next steps to finish the task)",
+        "  4. When the step limit is reached, you MUST give this report without calling more tools.",
     ])
 
     return "\n".join(parts)

@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+import time as tmod
 from collections import defaultdict
 from typing import Optional
 
@@ -31,6 +32,12 @@ class AgentBus:
         self._pending: dict[str, asyncio.Future] = {}  # thread_id → Future
         self._running: set[str] = set()
         self._tasks: list[asyncio.Task] = []  # 由 start_all() 创建的 task 列表
+        # 心跳：agent 事件循环处理消息时更新的活动时间（秒时间戳），
+        # 供 send_and_wait 判断"子 Agent 是否仍在处理"以决定是否延长等待。
+        self._agent_activity: dict[str, float] = {}
+        # 处理进度：子 Agent 最近完成/进行中的步骤描述（最多保留 8 条），
+        # 供 supervisor 在子 Agent 超时时回传"已完成步骤"上下文。
+        self._agent_progress: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------
     # 注册 / 发现
@@ -51,6 +58,30 @@ class AgentBus:
     def list_agents(self) -> list[str]:
         """列出所有已注册的 Agent ID。"""
         return list(self._agents.keys())
+
+    # ------------------------------------------------------------------
+    # 心跳 / 进度
+    # ------------------------------------------------------------------
+
+    def touch(self, agent_id: str, progress: str = "") -> None:
+        """更新子 Agent 的活动心跳与处理进度。
+
+        在子 Agent 处理期间（含长时间工具循环）持续调用，供
+        send_and_wait 的宽限续期判断"仍在运行"；progress 可附带最近
+        完成/进行中的步骤描述，超时时作为"已完成步骤"回传。
+        """
+        self._agent_activity[agent_id] = tmod.time()
+        if progress:
+            steps = self._agent_progress.setdefault(agent_id, [])
+            if steps and steps[-1] == progress:
+                return
+            steps.append(progress)
+            if len(steps) > 8:
+                self._agent_progress[agent_id] = steps[-8:]
+
+    def agent_progress(self, agent_id: str) -> list[str]:
+        """返回子 Agent 最近的处理进度（已完成步骤的描述列表）。"""
+        return list(self._agent_progress.get(agent_id, []))
 
     # ------------------------------------------------------------------
     # 消息发送
@@ -90,33 +121,61 @@ class AgentBus:
             logger.warning("Unknown target agent '%s', message dropped", msg.target)
 
     async def send_and_wait(
-        self, msg: AgentMessage, timeout: float = 30.0
+        self, msg: AgentMessage, timeout: float = 30.0,
+        grace_extensions: int = 1, grace_window: Optional[float] = None,
     ) -> AgentMessage:
-        """发送消息并等待回复。
+        """发送消息并等待回复（支持分级超时）。
 
         Args:
             msg: 要发送的请求消息（type="request"）
-            timeout: 超时秒数
+            timeout: 基础超时秒数
+            grace_extensions: 子 Agent 仍在活动时最多额外延长的次数（默认 1）
+            grace_window: 判定"仍在活动"的时间窗口（秒）；默认 max(10, timeout/2)
 
         Returns:
             回复消息（type="response"）
 
         Raises:
-            asyncio.TimeoutError: 如果在超时时间内未收到回复
+            asyncio.TimeoutError: 超时（含宽限延长）仍无回复
         """
         assert msg.type == "request", "send_and_wait 只能用于 request 消息"
+        if grace_window is None:
+            grace_window = max(10.0, timeout / 2)
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         self._pending[msg.thread_id] = fut
         await self.send(msg)
         try:
-            return await asyncio.wait_for(fut, timeout=timeout)
+            deadline = loop.time() + timeout
+            extensions = max(0, int(grace_extensions))
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    # 分级超时：目标 Agent 仍在处理消息（事件循环活跃）时延长一次等待，
+                    # 避免工具密集型子任务（脚手架/构建）在 LLM+工具循环中被过早判定超时。
+                    last_active = self._agent_activity.get(msg.target, 0.0)
+                    if extensions > 0 and last_active >= loop.time() - grace_window:
+                        extensions -= 1
+                        deadline = loop.time() + timeout
+                        logger.warning(
+                            "Sub-agent '%s' still active, extending wait by %.0fs (thread=%s)",
+                            msg.target, timeout, msg.thread_id,
+                        )
+                        remaining = deadline - loop.time()
+                    else:
+                        raise asyncio.TimeoutError(
+                            f"No reply from '{msg.target}' within {timeout}s "
+                            f"(thread={msg.thread_id}, action={msg.action})"
+                        )
+                done, _ = await asyncio.wait({fut}, timeout=remaining)
+                if fut in done:
+                    return fut.result()
         except asyncio.TimeoutError:
             self._pending.pop(msg.thread_id, None)
-            raise asyncio.TimeoutError(
-                f"No reply from '{msg.target}' within {timeout}s "
-                f"(thread={msg.thread_id}, action={msg.action})"
-            )
+            raise
+        except BaseException:
+            self._pending.pop(msg.thread_id, None)
+            raise
 
     def cancel_pending(self, thread_id: str) -> bool:
         """取消指定 thread 的等待（级联取消用，对齐 opencode abort）。
@@ -160,8 +219,10 @@ class AgentBus:
             try:
                 while True:
                     msg = await queue.get()
+                    self.touch(agent_id)
                     try:
                         async for reply in agent.handle_message(msg):
+                            self.touch(agent_id)
                             await self.send(reply)
                     except Exception as e:
                         logger.error(

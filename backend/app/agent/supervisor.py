@@ -73,6 +73,16 @@ class SupervisorAgent(BaseAgent):
         self._model = settings.llm_model
         self._api_key = settings.llm_api_key
         self._api_base = settings.llm_api_base
+        # 使用更长超时的子 Agent（工具密集型，如 code）
+        self._extended_timeout_agents = {
+            a.strip() for a in (settings.extended_timeout_agents or "").split(",") if a.strip()
+        }
+
+    def _timeout_for(self, agent_id: str) -> float:
+        """按 Agent 类型分级超时：工具密集型 Agent 使用更长等待，避免长任务被误判超时。"""
+        if agent_id in self._extended_timeout_agents:
+            return settings.sub_agent_timeout_extended
+        return settings.sub_agent_timeout
 
     @property
     def agent_id(self) -> str:
@@ -141,6 +151,7 @@ class SupervisorAgent(BaseAgent):
         🔧 Bug 修复: 子请求使用独立 thread_id，避免覆盖调用方的 Future。
         """
         sub_thread_id = f"{original_thread_id}:sub:{uuid.uuid4().hex[:8]}"
+        timeout = self._timeout_for(target_agent)
 
         try:
             reply = await self._bus.send_and_wait(
@@ -152,7 +163,7 @@ class SupervisorAgent(BaseAgent):
                     payload=payload,
                     thread_id=sub_thread_id,  # 🔧 独立 thread_id
                 ),
-                timeout=settings.sub_agent_timeout,
+                timeout=timeout,
             )
 
             if reply.type == "response":
@@ -176,10 +187,26 @@ class SupervisorAgent(BaseAgent):
                 )
 
         except asyncio.TimeoutError:
+            logger.warning("Sub-agent '%s' timed out after %.0fs (thread=%s)", target_agent, timeout, original_thread_id)
+            completed = self._bus.agent_progress(target_agent)
+            suggestion = (
+                f"如果任务仍在执行（如代码脚手架/构建），可提高 SUB_AGENT_TIMEOUT "
+                f"或 SUB_AGENT_TIMEOUT_EXTENDED，或改用普通对话模式重试。"
+            )
             yield AgentMessage(
                 source=self._id, target="user",
                 type="error", action="chat",
-                payload={"error": f"Agent '{target_agent}' did not respond in time"},
+                payload={
+                    "error": (
+                        f"Agent '{target_agent}' did not respond in time (waited {timeout:.0f}s). "
+                        f"已完成步骤: {(' → '.join(completed) if completed else '无可获取的处理进度')}. "
+                        f"{suggestion}"
+                    ),
+                    "error_type": "sub_agent_timeout",
+                    "timeout": timeout,
+                    "completed_steps": completed,
+                    "suggestion": suggestion,
+                },
                 thread_id=original_thread_id,
             )
         except Exception as e:
@@ -187,7 +214,10 @@ class SupervisorAgent(BaseAgent):
             yield AgentMessage(
                 source=self._id, target="user",
                 type="error", action="chat",
-                payload={"error": str(e)},
+                payload={
+                    "error": str(e),
+                    "error_type": "sub_agent_error",
+                },
                 thread_id=original_thread_id,
             )
 
@@ -299,6 +329,7 @@ class SupervisorAgent(BaseAgent):
         async def run_one(st: dict) -> dict:
             """执行单个子任务。"""
             sub_thread_id = f"{original_thread_id}:decomp:{uuid.uuid4().hex[:8]}"
+            timeout = self._timeout_for(st["agent"])
             try:
                 # 构建子任务 payload（继承原始 payload，但 question 用子任务的）
                 sub_payload = dict(original_payload)
@@ -313,7 +344,7 @@ class SupervisorAgent(BaseAgent):
                         payload=sub_payload,
                         thread_id=sub_thread_id,
                     ),
-                    timeout=settings.sub_agent_timeout,
+                    timeout=timeout,
                 )
                 return {
                     "agent": st["agent"],
@@ -322,11 +353,22 @@ class SupervisorAgent(BaseAgent):
                     "sources": reply.payload.get("sources", []),
                 }
             except asyncio.TimeoutError:
+                completed = self._bus.agent_progress(st["agent"])
+                suggestion = (
+                    f"如果任务仍在执行（如代码脚手架/构建），可提高 SUB_AGENT_TIMEOUT "
+                    f"或 SUB_AGENT_TIMEOUT_EXTENDED，或改用普通对话模式重试。"
+                )
                 return {
                     "agent": st["agent"],
                     "original_question": st["question"],
                     "answer": "",
-                    "error": f"Agent '{st['agent']}' did not respond in time",
+                    "error": (
+                        f"Agent '{st['agent']}' did not respond in time (waited {timeout:.0f}s). "
+                        f"已完成步骤: {(' → '.join(completed) if completed else '无可获取的处理进度')}."
+                    ),
+                    "error_type": "sub_agent_timeout",
+                    "completed_steps": completed,
+                    "suggestion": suggestion,
                 }
             except Exception as e:
                 return {
@@ -334,6 +376,7 @@ class SupervisorAgent(BaseAgent):
                     "original_question": st["question"],
                     "answer": "",
                     "error": str(e),
+                    "error_type": "sub_agent_error",
                 }
 
         # 并行执行所有子任务
@@ -341,7 +384,11 @@ class SupervisorAgent(BaseAgent):
 
         for r in task_results:
             if r.get("error"):
-                errors.append(f"[{r['agent']}] {r['error']}")
+                note = f"[{r['agent']}] {r['error']}"
+                cs = r.get("completed_steps") or []
+                if cs:
+                    note += f" 已完成: {' → '.join(cs)}"
+                errors.append(note)
             else:
                 results.append(r)
 

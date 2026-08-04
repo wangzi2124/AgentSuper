@@ -76,5 +76,16 @@ class Settings(BaseSettings):
     # 权限审批等待超时（秒），默认 60；超时视为拒绝
     permission_approval_timeout: int = 60
 
+    # ── Agent 执行循环护栏（对齐 opencode prompt.ts / processor.ts）──
+    # 单次请求最大步骤数（含工具循环）；生效上限 = min(MAX_TOOL_ROUNDS, MAX_STEPS)。
+    # 到达上限前的最后一轮会注入收尾提示，强制"已完成/未完成/下一步"式总结。
+    max_steps: int = 40
+    # Doom-loop 检测：同一组工具调用指纹连续重复 N 轮后，注入策略变更提示（≥2）
+    doom_loop_threshold: int = 3
+    # 工具密集型子 Agent（如 code）的更长等待超时（秒），避免长任务被误判超时
+    sub_agent_timeout_extended: float = 300.0
+    # 使用 extended 超时的子 Agent 列表（逗号分隔）
+    extended_timeout_agents: str = "code"
+
 
 settings = Settings()

@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChatStore, SUPPORTED_MODELS } from '../stores/chat'
+import { usePermissionStore } from '../stores/permission'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChatInput from '../components/ChatInput.vue'
 import StepTaskList from '../components/StepTaskList.vue'
@@ -13,6 +14,15 @@ const route = useRoute()
 const router = useRouter()
 // 聊天状态管理
 const chat = useChatStore()
+const perm = usePermissionStore()
+// 工作目录管理
+const showWsPanel = ref(false)
+const wsInput = ref('')
+const wsError = ref('')
+const wsBusy = ref(false)
+// 主工作区 = 列表第一项，其余为额外工作区
+const extraWorkspaces = computed(() => perm.workspaces.length > 1 ? perm.workspaces.slice(1) : [])
+const mainWorkspace = computed(() => perm.workspaces[0] || '')
 // 消息列表容器引用
 const parentRef = ref<HTMLElement>()
 // 聊天输入框引用
@@ -76,7 +86,42 @@ onMounted(() => {
     chat.loadConversation(id)
   }
   checkWeatherPlugin()
+  perm.loadWorkspaces()
 })
+
+// 切换工作目录面板
+function toggleWsPanel() {
+  showWsPanel.value = !showWsPanel.value
+  wsError.value = ''
+}
+
+// 添加额外工作区
+async function handleAddWorkspace() {
+  const path = wsInput.value.trim()
+  if (!path) {
+    wsError.value = '请输入绝对路径，如 F:\\tetris'
+    return
+  }
+  wsBusy.value = true
+  wsError.value = ''
+  try {
+    await perm.addWorkspace(path)
+    wsInput.value = ''
+  } catch (e: any) {
+    wsError.value = e?.message || '添加失败'
+  } finally {
+    wsBusy.value = false
+  }
+}
+
+// 移除额外工作区
+async function handleRemoveWorkspace(path: string) {
+  try {
+    await perm.removeWorkspace(path)
+  } catch (e: any) {
+    wsError.value = e?.message || '移除失败'
+  }
+}
 
 // 侦听路由参数变化，加载对应会话或新建会话
 watch(() => route.params.id, (newId) => {
@@ -150,6 +195,40 @@ function handleMessageRetry(messageId: string) {
           ● 流式传输中
         </span>
         <WeatherAlert v-if="isWeatherEnabled" />
+        <div class="ws-manager">
+          <button class="ws-btn" @click="toggleWsPanel" title="管理可写工作目录">
+            📁 工作目录 ({{ extraWorkspaces.length }})
+          </button>
+          <div v-if="showWsPanel" class="ws-panel">
+            <div class="ws-row">
+              <input
+                v-model="wsInput"
+                class="ws-input"
+                placeholder="F:\tetris"
+                @keyup.enter="handleAddWorkspace"
+              />
+              <button class="ws-add" :disabled="wsBusy" @click="handleAddWorkspace">
+                {{ wsBusy ? '添加中...' : '添加' }}
+              </button>
+            </div>
+            <p v-if="wsError" class="ws-error">{{ wsError }}</p>
+            <div class="ws-list">
+              <div v-if="mainWorkspace" class="ws-item fixed" :title="mainWorkspace">
+                <span class="ws-dot"></span>
+                <span class="ws-path">{{ mainWorkspace }}</span>
+                <span class="ws-tag">主</span>
+              </div>
+              <div v-for="w in extraWorkspaces" :key="w" class="ws-item">
+                <span class="ws-dot"></span>
+                <span class="ws-path">{{ w }}</span>
+                <button class="ws-remove" title="移除" @click="handleRemoveWorkspace(w)">×</button>
+              </div>
+              <p v-if="extraWorkspaces.length === 0" class="ws-empty">
+                无额外工作区。添加后 Agent 可写该路径（无需重启）。
+              </p>
+            </div>
+          </div>
+        </div>
         <label class="toggle">
           <input type="checkbox" v-model="chat.useVectorDb" :disabled="chat.loading" />
           <span class="toggle-slider"></span>
@@ -362,6 +441,112 @@ function handleMessageRetry(messageId: string) {
   min-width: 200px;
 }
 .model-selector select:focus { border-color: var(--primary); }
+.ws-manager {
+  position: relative;
+  flex-shrink: 0;
+}
+.ws-btn {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ws-btn:hover { border-color: var(--primary); }
+.ws-panel {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  width: 360px;
+  max-width: 70vw;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  padding: 12px;
+  z-index: 50;
+}
+.ws-row {
+  display: flex;
+  gap: 8px;
+}
+.ws-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+}
+.ws-input:focus { border-color: var(--primary); }
+.ws-add {
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--primary, #4f46e5);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ws-add:disabled { opacity: 0.5; cursor: not-allowed; }
+.ws-error { color: #ef4444; font-size: 12px; margin: 6px 0 0; }
+.ws-list {
+  margin-top: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ws-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+.ws-item.fixed { opacity: 0.7; }
+.ws-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  flex-shrink: 0;
+}
+.ws-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+.ws-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(79, 70, 229, 0.1);
+  color: var(--primary, #4f46e5);
+  flex-shrink: 0;
+}
+.ws-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+.ws-remove:hover { color: #ef4444; }
+.ws-empty { font-size: 12px; color: var(--text-secondary); margin: 0; }
 .btn-danger {
   background: #ef4444;
   color: #fff;

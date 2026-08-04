@@ -10,7 +10,7 @@
 """
 
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable, Optional
 
 from app.agent.base import BaseAgent, AgentMessage
 from app.agent.graph import RAGAgent
@@ -21,13 +21,23 @@ logger = logging.getLogger(__name__)
 class RAGAgentWrapper(BaseAgent):
     """将现有的 RAGAgent 包装为 BaseAgent。"""
 
-    def __init__(self, inner: RAGAgent, agent_id: str = "rag"):
+    def __init__(self, inner: RAGAgent, agent_id: str = "rag",
+                 heartbeat: Optional[Callable[[str, str], None]] = None):
         self._inner = inner
         self._id = agent_id
+        self._heartbeat = heartbeat
 
     @property
     def agent_id(self) -> str:
         return self._id
+
+    def _notify(self, progress: str) -> None:
+        """把处理进度转发给总线心跳（用于超时宽限续期 + 已完成步骤回传）。"""
+        if self._heartbeat:
+            try:
+                self._heartbeat(self._id, progress)
+            except Exception:
+                pass
 
     async def handle_message(self, msg: AgentMessage) -> AsyncIterator[AgentMessage]:
         if msg.type != "request":
@@ -49,6 +59,7 @@ class RAGAgentWrapper(BaseAgent):
                     use_vector_db=payload.get("use_vector_db", True),
                     files=payload.get("files", []),
                     conversation_id=payload.get("conversation_id", ""),
+                    on_activity=self._notify,
                 )
                 yield AgentMessage(
                     source=self._id, target=msg.source,
@@ -66,6 +77,7 @@ class RAGAgentWrapper(BaseAgent):
                 result = await self._inner.invoke(
                     question=payload.get("query", ""),
                     use_vector_db=True,
+                    on_activity=self._notify,
                 )
                 yield AgentMessage(
                     source=self._id, target=msg.source,
@@ -82,6 +94,7 @@ class RAGAgentWrapper(BaseAgent):
                 result = await self._inner.invoke(
                     question=payload.get("prompt", ""),
                     use_vector_db=False,
+                    on_activity=self._notify,
                 )
                 yield AgentMessage(
                     source=self._id, target=msg.source,

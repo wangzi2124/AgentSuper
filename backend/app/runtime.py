@@ -97,8 +97,10 @@ def _do_init(app):
     extra_workspaces = [
         p.strip() for p in (settings.extra_workspaces or "").split(",") if p.strip()
     ]
+    _data_dir = Path(__file__).resolve().parents[1] / "data"
     perm_mgr = PermissionManager(
         workspace=str(Path(__file__).resolve().parents[1].parent),
+        whitelist_path=str(_data_dir / "permissions.json"),
         extra_workspaces=extra_workspaces,
         external_default=settings.external_path_default,
         approval_timeout=settings.permission_approval_timeout,
@@ -111,7 +113,7 @@ def _do_init(app):
     agent_bus = AgentBus()
     shared_memory = MemoryManager(default_ttl=300)  # 共享记忆，5 分钟过期
 
-    rag_wrapper = RAGAgentWrapper(agent, agent_id="rag")
+    rag_wrapper = RAGAgentWrapper(agent, agent_id="rag", heartbeat=agent_bus.touch)
     agent_bus.register(rag_wrapper)
 
     web_search = WebSearchAgent(memory=shared_memory, agent_id="web_search")

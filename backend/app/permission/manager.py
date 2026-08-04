@@ -76,12 +76,14 @@ class PermissionManager:
         self.workspace = Path(workspace).resolve() if workspace else Path.cwd()
         whitelist_dir = Path(whitelist_path) if whitelist_path else self.workspace.parent / "data"
         self.whitelist_path = whitelist_dir / "permissions.json" if whitelist_dir.is_dir() else whitelist_dir
+        self.runtime_workspaces_path = self.whitelist_path.parent / "runtime_workspaces.json"
         self.extra_workspaces: list[Path] = []
         if extra_workspaces:
             for item in extra_workspaces:
                 item = str(item).strip()
                 if item:
                     self.extra_workspaces.append(Path(item).resolve())
+        self._load_runtime_workspaces()
         if external_default not in ("ask", "allow", "deny"):
             external_default = "ask"
         self.external_default = external_default
@@ -89,6 +91,36 @@ class PermissionManager:
         self._requests: dict[str, PermissionRequest] = {}
         self._temp_approvals: OrderedDict[str, float] = OrderedDict()
         self._load_whitelist()
+
+    def _load_runtime_workspaces(self):
+        """从 runtime_workspaces.json 加载前端运行时添加的额外工作区。
+
+        持久化独立于 .env：重启后仍生效，且不修改 EXTRA_WORKSPACES 配置。
+        """
+        try:
+            if self.runtime_workspaces_path.exists():
+                data = json.loads(self.runtime_workspaces_path.read_text("utf-8"))
+                existing = {str(w) for w in self.extra_workspaces}
+                for item in data.get("extra_workspaces", []):
+                    item = str(item).strip()
+                    if item and str(Path(item).resolve()) not in existing:
+                        self.extra_workspaces.append(Path(item).resolve())
+                        existing.add(str(Path(item).resolve()))
+                if data.get("extra_workspaces"):
+                    logger.info("Loaded %d runtime workspaces", len(data["extra_workspaces"]))
+        except Exception as e:
+            logger.warning("Failed to load runtime workspaces: %s", e)
+
+    def _save_runtime_workspaces(self):
+        """将当前额外工作区列表持久化到 JSON 文件。"""
+        try:
+            self.runtime_workspaces_path.parent.mkdir(parents=True, exist_ok=True)
+            self.runtime_workspaces_path.write_text(
+                json.dumps({"extra_workspaces": [str(w) for w in self.extra_workspaces]}, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("Failed to save runtime workspaces: %s", e)
 
     def _load_whitelist(self):
         """从JSON文件加载已授权的路径白名单。"""
@@ -150,7 +182,7 @@ class PermissionManager:
         except ValueError:
             return False
         parts = [part.lower() for part in rel.parts]
-        name = parts[-1]
+        name = parts[-1] if parts else ""
         if name.startswith(".env") or name.endswith(".env"):
             return True
         if name.endswith(".db") or name.endswith(".sqlite") or name.endswith(".sqlite3"):
@@ -207,6 +239,36 @@ class PermissionManager:
             except ValueError:
                 pass
         return self.external_default
+
+    def add_workspace(self, path_str: str) -> Path:
+        """运行时新增可写工作区（免重启生效），目录不存在则自动创建。
+
+        返回解析后的绝对路径。
+        """
+        p = Path(path_str).resolve()
+        if p in self.extra_workspaces:
+            return p
+        self.extra_workspaces.append(p)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning("Failed to create workspace dir %s: %s", p, e)
+        self._save_runtime_workspaces()
+        return p
+
+    def remove_workspace(self, path_str: str) -> bool:
+        """运行时移除工作区，返回是否移除成功。"""
+        p = Path(path_str).resolve()
+        for i, wp in enumerate(self.extra_workspaces):
+            if wp == p:
+                del self.extra_workspaces[i]
+                self._save_runtime_workspaces()
+                return True
+        return False
+
+    def list_workspaces(self) -> list[str]:
+        """返回所有可写工作区（主工作区 + 额外工作区）的绝对路径。"""
+        return [str(self.workspace), *(str(w) for w in self.extra_workspaces)]
 
     def add_temp_approval(self, path_str: str):
         """临时授权指定路径（及其父目录），TTL过期后自动失效。"""

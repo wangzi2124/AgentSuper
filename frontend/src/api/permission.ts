@@ -25,3 +25,37 @@ export async function respondToRequest(requestId: string, decision: string, reme
     throw new Error(`Respond error: ${err || res.statusText}`)
   }
 }
+
+// 获取所有可写工作区（主工作区 + 额外工作区）
+export async function fetchWorkspaces(): Promise<{ workspaces: string[] }> {
+  const res = await fetch(BASE + '/workspaces', { headers: addAuthHeaders() })
+  if (!res.ok) throw new Error('Failed to fetch workspaces')
+  return res.json()
+}
+
+// 运行时新增可写工作区（免重启生效）
+export async function addWorkspace(path: string): Promise<{ status: string; path: string; workspaces: string[] }> {
+  const res = await fetch(BASE + '/workspaces', {
+    method: 'POST',
+    headers: addAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ path }),
+  })
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Add workspace error: ${err || res.statusText}`)
+  }
+  return res.json()
+}
+
+// 运行时移除可写工作区
+export async function removeWorkspace(path: string): Promise<{ status: string; workspaces: string[] }> {
+  const res = await fetch(BASE + '/workspaces?path=' + encodeURIComponent(path), {
+    method: 'DELETE',
+    headers: addAuthHeaders(),
+  })
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Remove workspace error: ${err || res.statusText}`)
+  }
+  return res.json()
+}
