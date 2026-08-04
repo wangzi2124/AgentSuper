@@ -82,9 +82,18 @@ def _do_init(app):
     _bridge_set_retriever(retriever)
     _bridge_set_vector_store(vs)
 
-    reranker = Reranker(
-        model_name=settings.reranker_model,
-    ) if settings.enable_reranker else None
+    reranker = None
+    if settings.enable_reranker:
+        try:
+            reranker = Reranker(
+                model_name=settings.reranker_model,
+            )
+        except Exception as e:  # noqa: BLE001
+            # 下载/加载失败降级为不重排（Agent 仍可用），避免整个启动失败。
+            logger.warning(
+                "Reranker disabled: failed to initialize (%s). "
+                "Set ENABLE_RERANKER=false or pre-download the model.", e,
+            )
 
     _load_env_to_os()
 

@@ -232,31 +232,31 @@ def remove_session(session_id: str) -> None:
 
 # ── 消息日志（append-only）───────────────────────────────────────────────
 
-def _next_seq(conn: sqlite3.Connection, session_id: str) -> int:
-    row = conn.execute(
-        "SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM session_messages WHERE session_id = ?",
-        (session_id,),
-    ).fetchone()
-    return int(row["n"])
-
-
 def append_message(session_id: str, msg_type: str, data: dict[str, Any]) -> Message:
-    """追加一条消息到事件日志并返回（对齐 SessionProjector 的追加写）。"""
+    """追加一条消息到事件日志并返回（对齐 SessionProjector 的追加写）。
+
+    seq 在单条 INSERT 内原子计算（BEGIN IMMEDIATE 持有写锁），并发写者
+    （coordinator 执行体 + multi-agent 直写 + compact/revert/fork 等）不会
+    算出相同 seq 造成主键冲突或乱序。
+    """
     conn = _get_db()
     try:
-        seq = _next_seq(conn, session_id)
+        conn.execute("BEGIN IMMEDIATE")
         mid = f"msg_{uuid.uuid4().hex[:24]}"
         now = int(time.time() * 1000)
         conn.execute(
             "INSERT INTO session_messages (seq, id, session_id, type, data, time_created)"
-            " VALUES (?,?,?,?,?,?)",
-            (seq, mid, session_id, msg_type, json.dumps(data, ensure_ascii=False), now),
+            " VALUES ((SELECT COALESCE(MAX(seq), 0) + 1 FROM session_messages WHERE session_id = ?),?,?,?,?,?)",
+            (session_id, mid, session_id, msg_type, json.dumps(data, ensure_ascii=False), now),
         )
+        seq = conn.execute(
+            "SELECT seq FROM session_messages WHERE session_id = ? AND id = ?", (session_id, mid)
+        ).fetchone()["seq"]
         conn.execute(
             "UPDATE sessions SET time_updated = ? WHERE id = ?", (now, session_id)
         )
         conn.commit()
-        return Message(id=mid, session_id=session_id, type=msg_type, data=data, seq=seq, time_created=now)
+        return Message(id=mid, session_id=session_id, type=msg_type, data=data, seq=int(seq), time_created=now)
     finally:
         conn.close()
 
@@ -449,16 +449,19 @@ def upsert_epoch(session_id: str, baseline: str, baseline_seq: int, snapshot: di
 # ── 输入队列（steer / queue）─────────────────────────────────────────────
 
 def admit_input(session_id: str, prompt: dict[str, Any], delivery: str = "steer") -> str:
-    """投递输入：入队并返回 input id（对齐 opencode SessionInput.admit）。"""
+    """投递输入：入队并返回 input id（对齐 opencode SessionInput.admit）。
+
+    admitted_seq 在单条 INSERT 内原子计算（同 session_messages 的 seq 语义）。
+    """
     conn = _get_db()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         iid = f"in_{uuid.uuid4().hex[:24]}"
         now = int(time.time() * 1000)
-        admitted_seq = _next_seq(conn, session_id)
         conn.execute(
             "INSERT INTO session_inputs (id, session_id, prompt, delivery, admitted_seq, time_created)"
-            " VALUES (?,?,?,?,?,?)",
-            (iid, session_id, json.dumps(prompt, ensure_ascii=False), delivery, admitted_seq, now),
+            " VALUES (?,?,?,?,(SELECT COALESCE(MAX(seq), 0) + 1 FROM session_messages WHERE session_id = ?),?)",
+            (iid, session_id, json.dumps(prompt, ensure_ascii=False), delivery, session_id, now),
         )
         conn.commit()
         return iid
@@ -509,5 +512,16 @@ def count_pending(session_id: str) -> int:
             (session_id,),
         ).fetchone()
         return int(row["n"])
+    finally:
+        conn.close()
+
+
+def clear_inputs(session_id: str) -> int:
+    """清除该会话全部未执行/已入队输入（revert 撤销后防止内容复活）。"""
+    conn = _get_db()
+    try:
+        cur = conn.execute("DELETE FROM session_inputs WHERE session_id = ?", (session_id,))
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()

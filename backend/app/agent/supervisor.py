@@ -178,6 +178,19 @@ class SupervisorAgent(BaseAgent):
                     },
                     thread_id=original_thread_id,  # 🔧 使用原始 thread_id 回复
                 )
+            elif reply.type == "error":
+                # bus 现在以 AgentMessage(type="error") 交付子 Agent 错误，
+                # 透传 error payload（含 completed_steps 等上下文）。
+                yield AgentMessage(
+                    source=self._id, target="user",
+                    type="error", action="chat",
+                    payload={
+                        "error": reply.payload.get("error", "Sub-agent failed"),
+                        "error_type": reply.payload.get("error_type", "sub_agent_error"),
+                        "completed_steps": reply.payload.get("completed_steps", []),
+                    },
+                    thread_id=original_thread_id,
+                )
             else:
                 yield AgentMessage(
                     source=self._id, target="user",
@@ -346,6 +359,15 @@ class SupervisorAgent(BaseAgent):
                     ),
                     timeout=timeout,
                 )
+                if reply.type == "error":
+                    return {
+                        "agent": st["agent"],
+                        "original_question": st["question"],
+                        "answer": "",
+                        "error": reply.payload.get("error", "Sub-agent failed"),
+                        "error_type": reply.payload.get("error_type", "sub_agent_error"),
+                        "completed_steps": reply.payload.get("completed_steps", []),
+                    }
                 return {
                     "agent": st["agent"],
                     "original_question": st["question"],

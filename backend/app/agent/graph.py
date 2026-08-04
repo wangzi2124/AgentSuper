@@ -213,9 +213,13 @@ class RAGAgent:
             return {"context": [], "sources": []}
 
         import functools
-        results = await asyncio.to_thread(
-            functools.partial(self.retriever.invoke, state["question"], k=5)
-        )
+        try:
+            results = await asyncio.to_thread(
+                functools.partial(self.retriever.invoke, state["question"], k=5)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("retrieve failed, returning empty context: %s", e)
+            results = []
         context = []
         sources = []
         for doc, score in results:

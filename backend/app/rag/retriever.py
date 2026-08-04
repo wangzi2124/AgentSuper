@@ -1,3 +1,4 @@
+import logging
 from typing import List, Tuple, Optional, TYPE_CHECKING
 
 from app.rag.vector_store import VectorStore
@@ -7,6 +8,8 @@ from app.rag.intent import detect_chapter_intent
 
 if TYPE_CHECKING:
     from app.rag.chapter_store import ChapterStore
+
+logger = logging.getLogger(__name__)
 
 VECTOR_WEIGHT = 0.7
 BM25_WEIGHT = 0.3
@@ -104,33 +107,61 @@ class Retriever:
         self.chapter_store = chapter_store
 
     def invoke(self, query: str, k: int = 5) -> List[Tuple[dict, float]]:
-        """执行混合检索：章节意图检测 → 向量+BM25 融合 → 对话多召回 → 章节信息丰富。"""
+        """执行混合检索：章节意图检测 → 向量+BM25 融合 → 对话多召回 → 章节信息丰富。
+
+        子链路独立降级：向量/对话/章节任一失败不影响其余路径，最坏返回 BM25 或空结果，
+        而不是整体抛错打断问答（对齐"检索链路异常隔离"）。
+        """
         # Step 1: detect chapter intent
         intent = detect_chapter_intent(query)
         if intent and self.chapter_store:
-            chapter_results = self._chapter_lookup(intent)
+            try:
+                chapter_results = self._chapter_lookup(intent)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("chapter lookup failed, continue hybrid search: %s", e)
+                chapter_results = None
             if chapter_results:
                 return chapter_results[:k]
 
-        # Step 2: normal hybrid search
-        query_embedding = self.embeddings.embed_query(query)
-        vector_results = self.vector_store.similarity_search(query_embedding, k=k * 2)
+        # Step 2: normal hybrid search（向量子链路失败降级为纯 BM25）
+        query_embedding = None
+        vector_results: List[Tuple[dict, float]] = []
+        try:
+            query_embedding = self.embeddings.embed_query(query)
+            vector_results = self.vector_store.similarity_search(query_embedding, k=k * 2)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("vector search failed, falling back to BM25-only: %s", e)
 
         if self.bm25_index:
-            bm25_results = self.bm25_index.search(query, k=k * 2)
-            fused = _reciprocal_rank_fusion(vector_results, bm25_results)
-            results = fused[:k]
+            try:
+                bm25_results = self.bm25_index.search(query, k=k * 2)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("bm25 search failed: %s", e)
+                bm25_results = []
+            if vector_results:
+                fused = _reciprocal_rank_fusion(vector_results, bm25_results)
+                results = fused[:k]
+            else:
+                results = bm25_results[:k]
         else:
             results = vector_results[:k]
 
-        # Step 3: dialogue multi-recall
-        dialogue_results = self._dialogue_search(query_embedding, k=3)
-        if dialogue_results:
-            results = _dialogue_rrf(results, dialogue_results)[:k]
+        # Step 3: dialogue multi-recall（失败不影响主结果）
+        if query_embedding is not None:
+            try:
+                dialogue_results = self._dialogue_search(query_embedding, k=3)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("dialogue search failed: %s", e)
+                dialogue_results = []
+            if dialogue_results:
+                results = _dialogue_rrf(results, dialogue_results)[:k]
 
-        # Enrich with parent chapter info
+        # Enrich with parent chapter info（失败不影响已检索结果）
         if self.chapter_store:
-            results = self._enrich_with_parent(results)
+            try:
+                results = self._enrich_with_parent(results)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("chapter enrichment failed: %s", e)
 
         return results
 

@@ -5,6 +5,7 @@
 由 SessionCoordinator 保证 per-session 串行。
 """
 
+import asyncio
 import logging
 import time as tmod
 from typing import Any, Awaitable, Callable, Optional
@@ -32,6 +33,20 @@ class SessionService:
 
     def __init__(self, executor: Optional[Executor] = None, global_limit: int = 2):
         self.coordinator = SessionCoordinator(executor or self._default_executor, global_limit=global_limit)
+        # 每会话写串行锁：coordinator 执行体、multi-agent 直写、compact/revert/fork 共享，
+        # 保证同一会话的消息追加与撤销不会交错（对齐"per-session 串行"承诺）。
+        self._write_locks: dict[str, asyncio.Lock] = {}
+
+    def write_lock(self, session_id: str) -> asyncio.Lock:
+        """获取该会话的写串行锁（get-or-create）。
+
+        调用方必须 `async with service.write_lock(sid):` 持有后再做追加/撤销写。
+        """
+        lock = self._write_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._write_locks[session_id] = lock
+        return lock
 
     # ── 生命周期 ─────────────────────────────────────────────────────────
 
@@ -99,34 +114,37 @@ class SessionService:
         self._authorized(user_id, parent_id)
         return repository.list_children(parent_id)
 
-    def fork(self, user_id: str, session_id: str, message_id: Optional[str] = None) -> SessionInfo:
+    async def fork(self, user_id: str, session_id: str, message_id: Optional[str] = None) -> SessionInfo:
         """在指定消息（默认末尾）处克隆子会话，重建 parentID 映射（对齐 session.ts:fork）。
 
         拷贝截至 message_id（含）的消息到子会话；子会话获得独立消息日志与上下文，
         与父会话互不污染。消息对应的 message_parts 一并复制。
+
+        边界修复：message_id 指向最后一条消息时正常复制（不再误报 MessageNotFound）；
+        message_id 不存在时在创建子会话前即报错（不再留下满载消息的孤儿子会话）。
         """
         original = self._authorized(user_id, session_id)
-        child = self.create(
-            user_id,
-            project_id=original.project_id,
-            directory=original.directory,
-            parent_id=session_id,
-            agent=original.agent,
-            model=original.model,
-            kind=original.kind,
-            title=f"{original.title} (fork)",
-        )
-        source = repository.list_messages(session_id)
-        copied = 0
-        for m in source:
-            if message_id and m.id == message_id:
-                copied += 1
+        async with self.write_lock(session_id):
+            source = repository.list_messages(session_id)
+            if message_id:
+                idx = next((i for i, m in enumerate(source) if m.id == message_id), None)
+                if idx is None:
+                    raise repository.MessageNotFound(message_id)
+                cut = idx + 1
+            else:
+                cut = len(source)
+            child = self.create(
+                user_id,
+                project_id=original.project_id,
+                directory=original.directory,
+                parent_id=session_id,
+                agent=original.agent,
+                model=original.model,
+                kind=original.kind,
+                title=f"{original.title} (fork)",
+            )
+            for m in source[:cut]:
                 self._copy_message(session_id, child.id, m)
-                break
-            copied += 1
-            self._copy_message(session_id, child.id, m)
-        if message_id and copied == len(source):
-            raise repository.MessageNotFound(message_id)
         return child
 
     @staticmethod
@@ -159,28 +177,43 @@ class SessionService:
     def initialize_context(self, session_id: str, baseline: str, snapshot: dict) -> ContextEpoch:
         return session_history.initialize_epoch(session_id, baseline, snapshot)
 
-    def compact(self, user_id: str, session_id: str, checkpoint: str = "") -> None:
+    async def compact(self, user_id: str, session_id: str, checkpoint: str = "") -> None:
         """写压缩水位：落一条 compaction 消息并重建 epoch baseline。
 
         checkpoint 为空时用占位文案；落库后把 session.time_compacted 置为当前时间，
         使压缩基线持久化（重启/恢复后 history.load 仍能定位水位）。
         """
         self._authorized(user_id, session_id)
-        if not checkpoint:
-            checkpoint = "[compacted]"
-        repository.append_message(session_id, "compaction", {"content": checkpoint})
-        session_history.replace_epoch_after_compaction(session_id, checkpoint, {})
-        repository.update_session(session_id, time_compacted=int(tmod.time() * 1000))
+        async with self.write_lock(session_id):
+            if not checkpoint:
+                checkpoint = "[compacted]"
+            repository.append_message(session_id, "compaction", {"content": checkpoint})
+            session_history.replace_epoch_after_compaction(session_id, checkpoint, {})
+            repository.update_session(session_id, time_compacted=int(tmod.time() * 1000))
 
-    def revert(self, user_id: str, session_id: str, message_id: str) -> dict[str, Any]:
+    async def revert(self, user_id: str, session_id: str, message_id: str) -> dict[str, Any]:
         """撤销到指定消息：删除其后的所有消息与部件（对齐 revert.ts）。
+
+        级联：撤销点之后的 kind='task' 子会话（及其挂起的输入）一并移除，
+        并取消对应 AgentBus 任务，防止"已撤销内容复活"。
 
         Returns:
             {"deleted": n, "messages": [...]}  剩余消息列表。
         """
         self._authorized(user_id, session_id)
-        deleted = repository.revert_to_message(session_id, message_id)
-        remaining = repository.list_messages(session_id)
+        # 打断该会话正在执行的 agent（防止其随后续写被撤销的内容）
+        self.coordinator.cancel_best_effort(session_id)
+        async with self.write_lock(session_id):
+            deleted = repository.revert_to_message(session_id, message_id)
+            # 级联撤销任务子会话 + 清除父会话待执行输入
+            child_ids = [c.id for c in repository.list_children(session_id) if c.kind == "task"]
+            task_bridge.cancel_children(child_ids)
+            for cid in child_ids:
+                self.coordinator.cancel_best_effort(cid)
+            for cid in child_ids:
+                repository.remove_session(cid)
+            repository.clear_inputs(session_id)
+            remaining = repository.list_messages(session_id)
         return {
             "deleted": deleted,
             "messages": [m.model_dump() for m in remaining],

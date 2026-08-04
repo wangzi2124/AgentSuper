@@ -253,13 +253,13 @@
 4. `BM25Index.add/remove` 加锁 + 文档任务串行化——P0-1.5（RLock 保护结构；上传/删除经 app 级 `asyncio.Lock` 串行；上传任务保存引用防 GC）
 5. `list_pending`/`toggle_skill`/`config` 统一 `require_admin`——P1-2.4（`list_pending`/`toggle_skill`/`update_summarization_config` 已加）
 
-**第二批（一致性/正确性）**
-6. session seq 生成改事务内原子化，多写路径收敛到协调器——P0-1.4
-7. fork 末条/不存在边界修复——P1-2.6
-8. revert 级联 task 子会话与待执行输入——P1-2.8
-9. retriever/reranker 子链路降级兜底——P1-2.2
-10. `bus.send` error 包装为 AgentMessage 而非裸异常——P2-3.1
-11. `rag_wrapper` retrieve/generate 透传 `files`——P1-2.5
+**第二批（一致性/正确性）✅ 已完成**
+6. session seq 生成改事务内原子化，多写路径收敛到协调器——P0-1.4（`repository.append_message`/`admit_input` 改 `BEGIN IMMEDIATE` + INSERT 内原子 seq；`service.write_lock` + `agent_executor`/`_persist_multi_agent` 写路径持锁）
+7. fork 末条/不存在边界修复——P1-2.6（写锁内先解析 message 再创建子会话，末条/不存在两边界修复）
+8. revert 级联 task 子会话与待执行输入——P1-2.8（取消 coordinator + `task_bridge.cancel_children` + 级联 `remove_session` + `clear_inputs`）
+9. retriever/reranker 子链路降级兜底——P1-2.2（向量失败降级 BM25-only，各子链路独立降级；reranker 异常回退原序；reranker 构造失败仅降级为不重排，不阻断启动；graph `_retrieve` 兜底）
+10. `bus.send` error 包装为 AgentMessage 而非裸异常——P2-3.1（`send` error 分支与 `run_agent` 崩溃分支均 `fut.set_result(AgentMessage(type="error"))`；supervisor `_route_to`/`_execute_parallel` 增加 error 分支透传 payload）
+11. `rag_wrapper` retrieve/generate 透传 `files`——P1-2.5（三个动作均透传 `model`/`history`/`files`/`conversation_id`）
 
 **第三批（健壮性/清理）**
 12. 清理死代码：`task_state` 未用函数、`session_tasks` 表、`summarization_*` 死配置

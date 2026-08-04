@@ -75,12 +75,20 @@ class Reranker:
         documents: List[dict],
         top_k: int = 3,
     ) -> List[Tuple[dict, float]]:
-        """对文档列表按 query 相关性重新排序，返回 top_k 结果。"""
+        """对文档列表按 query 相关性重新排序，返回 top_k 结果。
+
+        预测失败时降级：返回原顺序（分数 0.0），由调用方按原序取 top_k，
+        不让重排环节的错误中断问答。
+        """
         if not documents:
             return []
 
         pairs = [[query, doc["content"]] for doc in documents]
-        scores = self.model.predict(pairs)
+        try:
+            scores = self.model.predict(pairs)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("reranker predict failed, skipping rerank: %s", e)
+            return [(doc, 0.0) for doc in documents]
 
         ranked = sorted(
             zip(documents, scores),

@@ -102,10 +102,12 @@ class AgentBus:
             return
 
         # ---- 错误消息也支持等待者投递 ----
+        # 以 AgentMessage(type="error") 交付而非裸异常，调用方（supervisor）可读取
+        # payload 中的 completed_steps 等上下文，无需再捕获 RuntimeError。
         if msg.type == "error" and msg.thread_id in self._pending:
             fut = self._pending.pop(msg.thread_id)
             if not fut.done():
-                fut.set_exception(RuntimeError(msg.payload.get("error", "Unknown error")))
+                fut.set_result(msg)
             return
 
         # ---- 正常路由 ----
@@ -229,11 +231,23 @@ class AgentBus:
                             "Agent '%s' error handling %s/%s: %s",
                             agent_id, msg.action, msg.type, e, exc_info=True,
                         )
-                        # 如果有等待者，要通知错误
+                        # 如果有等待者，投递结构化错误消息而非裸异常，
+                        # 让调用方拿到 error payload（含已完成步骤等上下文）。
                         if msg.thread_id in self._pending:
                             fut = self._pending.pop(msg.thread_id)
                             if not fut.done():
-                                fut.set_exception(e)
+                                fut.set_result(AgentMessage(
+                                    source=agent_id,
+                                    target=msg.source,
+                                    type="error",
+                                    action=msg.action,
+                                    payload={
+                                        "error": str(e),
+                                        "error_type": "sub_agent_error",
+                                        "completed_steps": self.agent_progress(agent_id),
+                                    },
+                                    thread_id=msg.thread_id,
+                                ))
             except asyncio.CancelledError:
                 logger.info("⏹ Agent event loop cancelled: %s", agent_id)
                 break

@@ -76,7 +76,11 @@ class RAGAgentWrapper(BaseAgent):
                 # 纯检索
                 result = await self._inner.invoke(
                     question=payload.get("query", ""),
+                    model=payload.get("model"),
+                    history=payload.get("history", []),
                     use_vector_db=True,
+                    files=payload.get("files", []),
+                    conversation_id=payload.get("conversation_id", ""),
                     on_activity=self._notify,
                 )
                 yield AgentMessage(
@@ -93,7 +97,11 @@ class RAGAgentWrapper(BaseAgent):
                 # 纯生成（不检索）
                 result = await self._inner.invoke(
                     question=payload.get("prompt", ""),
+                    model=payload.get("model"),
+                    history=payload.get("history", []),
                     use_vector_db=False,
+                    files=payload.get("files", []),
+                    conversation_id=payload.get("conversation_id", ""),
                     on_activity=self._notify,
                 )
                 yield AgentMessage(

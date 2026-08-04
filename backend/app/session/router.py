@@ -98,7 +98,7 @@ async def fork_session(
     message_id: Optional[str] = None,
     ctx: SessionContext = Depends(resolve_session_context),
 ):
-    return ctx.service.fork(ctx.user_id, ctx.session_id, message_id=message_id)
+    return await ctx.service.fork(ctx.user_id, ctx.session_id, message_id=message_id)
 
 
 @router.post("/{session_id}/prompt", response_model=dict)
@@ -132,7 +132,7 @@ async def compact_session(
     checkpoint: Optional[str] = None,
     ctx: SessionContext = Depends(resolve_session_context),
 ):
-    ctx.service.compact(ctx.user_id, ctx.session_id, checkpoint or "")
+    await ctx.service.compact(ctx.user_id, ctx.session_id, checkpoint or "")
 
 
 @router.post("/{session_id}/revert", response_model=dict)
@@ -141,7 +141,7 @@ async def revert_session(
     ctx: SessionContext = Depends(resolve_session_context),
 ):
     """撤销到指定消息（删除其后的消息与部件）。"""
-    return ctx.service.revert(ctx.user_id, ctx.session_id, body.message_id)
+    return await ctx.service.revert(ctx.user_id, ctx.session_id, body.message_id)
 
 
 @router.post("/{session_id}/interrupt", status_code=204)

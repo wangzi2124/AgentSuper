@@ -100,70 +100,74 @@ def build_executor(app):
             compressed = _truncate_history(raw_history)
         compressed = _sanitize_history(compressed)
 
-        # 3. 压缩发生 → 持久化压缩基线（compaction 消息 + epoch replace + time_compacted），
-        #    使恢复/重放时能定位截断水位（对齐设计 §6.3）
-        checkpoint = _checkpoint_of(compressed)
-        if checkpoint or (compressed and len(compressed) != len(raw_history)):
-            repository.append_message(session_id, "compaction", {
-                "content": checkpoint or "[compacted]",
-                "mode": "summarize" if checkpoint else "truncate",
-            })
-            session_history.replace_epoch_after_compaction(
-                session_id, checkpoint or "[compacted]", {},
-            )
-            repository.update_session(
-                session_id, time_compacted=int(tmod.time() * 1000),
-            )
-
-        # 4. 先落库 user 消息（中断/失败时也已保留）
-        user_msg = repository.append_message(session_id, "user", {
-            "role": "user", "content": prompt.get("text", ""),
-        })
-        # 新会话首条消息 → 生成标题（在压缩消息落库后仍需判断"是否首条"）
-        if first_message:
-            from app.api.chat import _generate_title
-            repository.update_session(
-                session_id, title=_generate_title([{"role": "user", "content": prompt.get("text", "")}])
-            )
-
-        try:
-            # 5. 调用 Agent（事件桥接到请求队列）
-            agent = app.state.agent
-            result = await agent.invoke(
-                prompt.get("text", ""),
-                model=prompt.get("model"),
-                history=compressed,
-                use_vector_db=prompt.get("use_vector_db", True),
-                files=prompt.get("files") or [],
-                event_queue=queue,
-                conversation_id=session_id,
-            )
-
-            # 6. 落库 assistant 消息
-            assistant_msg = repository.append_message(session_id, "assistant", {
-                "role": "assistant", "content": result.get("answer", ""),
-                "sources": result.get("sources", []),
-                "steps": result.get("steps", []),
-            })
-
-            if queue is not None:
-                queue.put_nowait({
-                    "type": "done",
-                    "answer": result.get("answer", ""),
-                    "sources": result.get("sources", []),
-                    "conversation_id": session_id,
-                    "steps": result.get("steps", []),
-                    "user_msg_id": user_msg.id,
-                    "assistant_msg_id": assistant_msg.id,
+        # 3-6 持每会话写锁（与 multi-agent 直写 / compact / revert / fork 共享），
+        #    保证同一会话的消息追加与撤销不会交错。
+        lock = app.state.session_service.write_lock(session_id)
+        async with lock:
+            # 3. 压缩发生 → 持久化压缩基线（compaction 消息 + epoch replace + time_compacted），
+            #    使恢复/重放时能定位截断水位（对齐设计 §6.3）
+            checkpoint = _checkpoint_of(compressed)
+            if checkpoint or (compressed and len(compressed) != len(raw_history)):
+                repository.append_message(session_id, "compaction", {
+                    "content": checkpoint or "[compacted]",
+                    "mode": "summarize" if checkpoint else "truncate",
                 })
-        except asyncio.CancelledError:
-            if queue is not None:
-                queue.put_nowait({"type": "error", "detail": "cancelled",
-                                  "retryable": False, "status_code": None, "error_type": "CancelledError"})
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("executor: session %s agent call failed", session_id, exc_info=exc)
-            if queue is not None:
-                queue.put_nowait({"type": "error", "detail": str(exc), **classify_error(exc)})
+                session_history.replace_epoch_after_compaction(
+                    session_id, checkpoint or "[compacted]", {},
+                )
+                repository.update_session(
+                    session_id, time_compacted=int(tmod.time() * 1000),
+                )
+
+            # 4. 先落库 user 消息（中断/失败时也已保留）
+            user_msg = repository.append_message(session_id, "user", {
+                "role": "user", "content": prompt.get("text", ""),
+            })
+            # 新会话首条消息 → 生成标题（在压缩消息落库后仍需判断"是否首条"）
+            if first_message:
+                from app.api.chat import _generate_title
+                repository.update_session(
+                    session_id, title=_generate_title([{"role": "user", "content": prompt.get("text", "")}])
+                )
+
+            try:
+                # 5. 调用 Agent（事件桥接到请求队列）
+                agent = app.state.agent
+                result = await agent.invoke(
+                    prompt.get("text", ""),
+                    model=prompt.get("model"),
+                    history=compressed,
+                    use_vector_db=prompt.get("use_vector_db", True),
+                    files=prompt.get("files") or [],
+                    event_queue=queue,
+                    conversation_id=session_id,
+                )
+
+                # 6. 落库 assistant 消息
+                assistant_msg = repository.append_message(session_id, "assistant", {
+                    "role": "assistant", "content": result.get("answer", ""),
+                    "sources": result.get("sources", []),
+                    "steps": result.get("steps", []),
+                })
+
+                if queue is not None:
+                    queue.put_nowait({
+                        "type": "done",
+                        "answer": result.get("answer", ""),
+                        "sources": result.get("sources", []),
+                        "conversation_id": session_id,
+                        "steps": result.get("steps", []),
+                        "user_msg_id": user_msg.id,
+                        "assistant_msg_id": assistant_msg.id,
+                    })
+            except asyncio.CancelledError:
+                if queue is not None:
+                    queue.put_nowait({"type": "error", "detail": "cancelled",
+                                      "retryable": False, "status_code": None, "error_type": "CancelledError"})
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("executor: session %s agent call failed", session_id, exc_info=exc)
+                if queue is not None:
+                    queue.put_nowait({"type": "error", "detail": str(exc), **classify_error(exc)})
 
     return executor
