@@ -233,7 +233,7 @@ class RAGAgent:
             "\n- If a source has 'chapter_title' in its metadata, use that exact title when referring to the chapter."
             "\n- If a source has 'chapter_summary', it is a chapter overview — use it to describe the chapter's content."
             "\n- If you don't have enough information, say so."
-            "\n\nYou have access to built-in filesystem tools (tool_ls, tool_read_file, tool_write_file, tool_edit_file, tool_glob, tool_grep, tool_execute) for reading/writing files and running shell commands."
+            "\n\nYou have access to built-in filesystem tools (tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file, tool_glob, tool_grep, tool_execute) for reading/writing files and running shell commands."
             "\nYou also have access to skill tools (load_skill_*) and plugin tools."
             "\nIf the user asks to create/edit/manipulate documents (Word, PDF, PPT, Excel), generate visual designs, build web pages, or use other specialized capabilities, call the relevant skill or plugin tool to get instructions first."
             "\n\nCharacter Analysis (for novels, scripts, or documents with dialogues):"

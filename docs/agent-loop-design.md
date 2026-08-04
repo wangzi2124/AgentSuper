@@ -2,6 +2,10 @@
 
 > 参考 opencode 的 agent 执行循环设计，适配本项目的 **FastAPI + LangGraph + AgentBus + SQLite** 技术栈。
 >
+> ⚠️ **注意**：本文档为历史设计记录。其中 §3.1 的 `EXTRA_WORKSPACES` 环境变量方案已被
+> [工作目录管理与文件系统工具设计](./workspace-and-filesystem-design.md) 取代——可写工作目录
+> 现在唯一由前端「工作目录」面板配置（持久化于 `data/runtime_workspaces.json`）。
+>
 > opencode 核心设计（源码参考）：
 > - 主循环：`packages/opencode/src/session/prompt.ts`（`runLoop`：finish 判定 → 任务解析 → 压缩任务 → 工具调用 → `compact/stop/continue`）
 > - 单步处理器：`packages/opencode/src/session/processor.ts`（事件流 → part 持久化 → tool-call 管理 → doom-loop 检测）

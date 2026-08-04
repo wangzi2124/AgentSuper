@@ -94,9 +94,8 @@ def _do_init(app):
     plugin_loader = PluginLoader(settings.plugins_dir)
     plugin_loader.load_all()
 
-    extra_workspaces = [
-        p.strip() for p in (settings.extra_workspaces or "").split(",") if p.strip()
-    ]
+    # 可写工作目录完全由前端「工作目录」面板配置（持久化于 data/runtime_workspaces.json），
+    # 不再支持 .env 的 EXTRA_WORKSPACES。
     # 工作区根 = backend/（与 app/tools/filesystem.py 的相对路径基准一致，
     # 避免 LLM 把文件写到仓库根导致 glob/grep（基于 backend/）找不到，
     # 同时让 backend/app、backend/plugins 等关键目录落入保护范围）
@@ -105,7 +104,6 @@ def _do_init(app):
     perm_mgr = PermissionManager(
         workspace=str(_base_dir),
         whitelist_path=str(_data_dir / "permissions.json"),
-        extra_workspaces=extra_workspaces,
         external_default=settings.external_path_default,
         approval_timeout=settings.permission_approval_timeout,
     )

@@ -116,9 +116,9 @@ def create_skill_tools(skill_loader: SkillLoader) -> List[ToolDef]:
 
 
 def create_filesystem_tools() -> List[ToolDef]:
-    """创建文件系统操作工具列表（ls、read、write、edit等）。"""
+    """创建文件系统操作工具列表（ls、read、write、append、edit等）。"""
     from app.tools.filesystem import (
-        tool_ls, tool_read_file, tool_write_file, tool_edit_file,
+        tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file,
         tool_glob, tool_grep, tool_execute, tool_delete_file, tool_rename_file,
     )
     tools: List[ToolDef] = []
@@ -128,15 +128,16 @@ def create_filesystem_tools() -> List[ToolDef]:
         "tool_ls": {"path": "Directory path to list (default: current directory)"},
         "tool_read_file": {"path": "File path to read", "offset": "Line number to start reading from (1-indexed, default: 1)", "limit": "Maximum number of lines to read (0 = all)"},
         "tool_write_file": {"path": "File path to create", "content": "Text content to write into the file", "overwrite": "If true, overwrite existing file (default: false)"},
+        "tool_append_file": {"path": "File path to append to (created if missing)", "content": "Text content to append to the end of the file"},
         "tool_edit_file": {"path": "File path to edit", "old_string": "Text to search for and replace", "new_string": "Replacement text", "replace_all": "If true, replace ALL occurrences; if false, replace only the first (default: false)"},
-        "tool_glob": {"pattern": "Glob pattern to match files (e.g. **/*.py)"},
-        "tool_grep": {"pattern": "Regex pattern to search for", "include": "File glob pattern to restrict search (e.g. *.py)", "context": "Number of context lines before/after each match", "count_only": "If true, return only match counts per file", "files_only": "If true, return only file paths"},
+        "tool_glob": {"pattern": "Glob pattern to match files (e.g. **/*.py)", "root": "Directory to search in (default: workspace; absolute paths allowed, e.g. F:\\tetris)"},
+        "tool_grep": {"pattern": "Regex pattern to search for", "include": "File glob pattern to restrict search (e.g. *.py)", "context": "Number of context lines before/after each match", "count_only": "If true, return only match counts per file", "files_only": "If true, return only file paths", "root": "Directory to search in (default: workspace; absolute paths allowed, e.g. F:\\tetris)"},
         "tool_execute": {"command": "Shell command to run", "timeout": "Max execution time in seconds (default 300, max 600)", "work_dir": "Working directory for the command (default: current directory)"},
         "tool_delete_file": {"path": "File or empty directory path to delete"},
         "tool_rename_file": {"path": "Source path to rename/move", "new_path": "Destination path"},
     }
 
-    for func in [tool_ls, tool_read_file, tool_write_file, tool_edit_file, tool_glob, tool_grep, tool_execute, tool_delete_file, tool_rename_file]:
+    for func in [tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file, tool_glob, tool_grep, tool_execute, tool_delete_file, tool_rename_file]:
         name = func.__name__
         sig = inspect.signature(func)
         param_docs = _PARAM_DOCS.get(name, {})
@@ -145,7 +146,9 @@ def create_filesystem_tools() -> List[ToolDef]:
         for p in sig.parameters.values():
             if p.name == "self":
                 continue
-            json_type = "string"
+            annotation = p.annotation
+            ann_name = getattr(annotation, "__name__", None) or "string"
+            json_type = _annotation_to_json_type(ann_name)
             desc = param_docs.get(p.name, f"Parameter {p.name}")
             properties[p.name] = {"type": json_type, "description": desc}
             if p.default is inspect.Parameter.empty:
@@ -155,6 +158,7 @@ def create_filesystem_tools() -> List[ToolDef]:
             "tool_ls": "List files and directories",
             "tool_read_file": "Read file content (text or base64 for images/pdf/audio/video)",
             "tool_write_file": "Create a new file with text content (auto-creates parent directories)",
+            "tool_append_file": "Append text content to a file (creates it if missing). Use for large files: write the first chunk then append in chunks.",
             "tool_edit_file": "Edit a file by replacing text (single or all occurrences)",
             "tool_glob": "Find files matching a glob pattern",
             "tool_grep": "Search file contents using regex",
@@ -220,9 +224,10 @@ def build_system_prompt_no_kb(
             "   - tool_ls(path) - List directory contents\n"
             "   - tool_read_file(path, offset, limit) - Read file content\n"
             "   - tool_write_file(path, content, overwrite) - Create a new file\n"
+            "   - tool_append_file(path, content) - Append content to a file (creates if missing)\n"
             "   - tool_edit_file(path, old_string, new_string, replace_all) - Edit a file\n"
-            "   - tool_glob(pattern) - Find files matching a pattern\n"
-            "   - tool_grep(pattern, include, context, count_only, files_only) - Search file contents\n"
+            "   - tool_glob(pattern, root) - Find files matching a pattern (root defaults to workspace)\n"
+            "   - tool_grep(pattern, include, context, count_only, files_only, root) - Search file contents\n"
             "   - tool_execute(command, timeout, work_dir) - Run a shell command (build/install only)\n"
             "   - tool_delete_file(path) - Delete a file or empty directory\n"
             "   - tool_rename_file(path, new_path) - Rename or move a file/directory"
@@ -298,6 +303,13 @@ def build_system_prompt_no_kb(
         "  3. ONLY AFTER all files are written, run tool_execute for npm install or build if needed.",
         "  Do NOT run 'npm create', 'npx create-react-app', 'npm create vite' etc. Write files manually.",
         "",
+        "IMPORTANT - Writing large files:",
+        "  A single tool call cannot carry very large content (LLM output is limited). For content larger than",
+        "  roughly 6KB (about 150 lines), do NOT try to write it all at once:",
+        "  1. Use tool_write_file(path, content, overwrite=True) to write the first chunk.",
+        "  2. Then append the remaining chunks with tool_append_file(path, content), one chunk per call.",
+        "  This avoids truncated/corrupted files. You may also use tool_read_file to verify after writing.",
+        "",
         "IMPORTANT - Working paths / workspace:",
         "  The following absolute paths are writable workspaces (you MUST write files under one of them):",
         *[f"    - {w}" for w in _writable_workspaces()],
@@ -305,6 +317,8 @@ def build_system_prompt_no_kb(
         "  NOT in this list, you will get a Permission denied error telling you the reason — do NOT",
         "  blindly retry; instead report it, or ask the user to add the path to the workspace list in",
         "  the UI (workspace list updates take effect immediately).",
+        "  To search files in a configured workspace, pass root=<absolute path> to tool_glob / tool_grep.",
+        "  tool_grep / tool_glob return absolute paths when searching a custom root.",
         "",
         "IMPORTANT - Planning & final report for multi-step tasks:",
         "  When the task needs multiple steps or multiple files (e.g. building a project):",

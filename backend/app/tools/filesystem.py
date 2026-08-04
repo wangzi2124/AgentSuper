@@ -53,6 +53,30 @@ def _ensure_safe(path: Path, operation: str = "write") -> None:
     raise NeedsPermission(str(resolved), operation)
 
 
+def _coerce_int(value, default: int = 0) -> int:
+    """将任意输入安全转换为整数（LLM 可能以字符串形式传数值参数）。
+
+    布尔值不是有效整数（True 在 int 强转下为 1），按默认值处理。
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value, default: bool = False) -> bool:
+    """将任意输入安全转换为布尔值，容忍 "true"/"1"/"yes" 等字符串。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    if value is None:
+        return default
+    return bool(value)
+
+
 def tool_ls(path: str = ".") -> str:
     """列出指定目录下的文件和子目录，显示类型、大小和修改时间。"""
     target = _resolve(path)
@@ -76,6 +100,8 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
     """读取文件内容，文本文件支持按行偏移和限制，多模态文件返回base64编码。"""
     target = _resolve(path)
     _ensure_safe(target, "read")
+    offset = _coerce_int(offset, 1)
+    limit = _coerce_int(limit, 0)
     if not target.is_file():
         return f"Error: file not found: {path}"
     ext = target.suffix.lower()
@@ -108,22 +134,40 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> str:
     """创建新文件并写入内容。overwrite=True 时允许覆盖已存在的文件。"""
     target = _resolve(path)
     _ensure_safe(target, "write")
+    overwrite = _coerce_bool(overwrite)
     if target.exists() and not overwrite:
         return f"Error: file already exists: {path} (use overwrite=True to overwrite, or edit_file to modify)"
     target.parent.mkdir(parents=True, exist_ok=True)
     existed = target.exists()
     try:
-        target.write_text(content, encoding="utf-8")
+        target.write_text(str(content), encoding="utf-8")
         action = "Overwritten" if existed else "Created"
         return f"{action} {path} ({target.stat().st_size} bytes)"
     except Exception as e:
         return f"Error writing file: {e}"
 
 
+def tool_append_file(path: str, content: str) -> str:
+    """向文件追加内容（文件不存在则创建）。用于分段写入大文件：先 tool_write_file 写首段，再多次 append。"""
+    target = _resolve(path)
+    _ensure_safe(target, "write")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existed = target.exists()
+    try:
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(str(content))
+        total = target.stat().st_size
+        action = "Appended to" if existed else "Created"
+        return f"{action} {path} ({total} bytes total)"
+    except Exception as e:
+        return f"Error appending to file: {e}"
+
+
 def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
     """在文件中查找并替换指定字符串，支持单次替换或全部替换。"""
     target = _resolve(path)
     _ensure_safe(target, "write")
+    replace_all = _coerce_bool(replace_all)
     if not target.is_file():
         return f"Error: file not found: {path}"
     try:
@@ -147,12 +191,19 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
         return f"Error writing file: {e}"
 
 
-def tool_glob(pattern: str) -> str:
-    """在工作目录中按glob模式搜索文件，返回匹配的相对路径列表。"""
-    matches = sorted(WORKSPACE.glob(pattern))
+def tool_glob(pattern: str, root: str = ".") -> str:
+    """在指定目录中按glob模式搜索文件，返回匹配路径列表（默认工作区为相对路径，自定义 root 为绝对路径）。"""
+    root_path = _resolve(root)
+    _ensure_safe(root_path, "read")
+    if not root_path.is_dir():
+        return f"Error: '{root}' is not a directory"
+    matches = sorted(root_path.glob(pattern))
     if not matches:
         return f"No matches for: {pattern}"
-    lines = [str(m.relative_to(WORKSPACE)) for m in matches]
+    if root_path == WORKSPACE:
+        lines = [str(m.relative_to(WORKSPACE)) for m in matches]
+    else:
+        lines = [str(m.resolve()) for m in matches]
     return "\n".join(lines)
 
 
@@ -193,14 +244,21 @@ def tool_rename_file(path: str, new_path: str) -> str:
         return f"Error renaming: {e}"
 
 
-def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: bool = False, files_only: bool = False) -> str:
-    """在工作目录的文本文件中按正则表达式搜索内容，支持文件过滤和上下文显示。"""
+def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: bool = False, files_only: bool = False, root: str = ".") -> str:
+    """在指定目录的文本文件中按正则表达式搜索内容，支持文件过滤、上下文显示和目录范围。"""
     import re
+    context = _coerce_int(context, 0)
+    count_only = _coerce_bool(count_only)
+    files_only = _coerce_bool(files_only)
+    root_path = _resolve(root)
+    _ensure_safe(root_path, "read")
+    if not root_path.is_dir():
+        return f"Error: '{root}' is not a directory"
     use_re = re.compile(pattern, re.MULTILINE | re.DOTALL)
     file_pattern = include if include else "**/*"
     matched_any = False
     output: list[str] = []
-    for f in sorted(WORKSPACE.glob(file_pattern)):
+    for f in sorted(root_path.glob(file_pattern)):
         if not f.is_file():
             continue
         ext = f.suffix.lower()
@@ -218,7 +276,10 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
         if not found_positions:
             continue
         matched_any = True
-        rel = str(f.relative_to(WORKSPACE))
+        if root_path == WORKSPACE:
+            rel = str(f.relative_to(WORKSPACE))
+        else:
+            rel = str(f.resolve())
         if files_only:
             output.append(rel)
             continue
@@ -327,6 +388,7 @@ def _check_command_blacklist(command: str) -> None:
 
 def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
     """执行shell命令并返回标准输出、标准错误和退出码。"""
+    timeout = _coerce_int(timeout, 300)
     if timeout > 600:
         timeout = 600
     if timeout < 1:

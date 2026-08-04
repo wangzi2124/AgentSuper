@@ -93,9 +93,10 @@ class PermissionManager:
         self._load_whitelist()
 
     def _load_runtime_workspaces(self):
-        """从 runtime_workspaces.json 加载前端运行时添加的额外工作区。
+        """从 runtime_workspaces.json 加载前端运行时添加的工作目录。
 
-        持久化独立于 .env：重启后仍生效，且不修改 EXTRA_WORKSPACES 配置。
+        这是可写工作目录的唯一配置入口（替代已移除的 EXTRA_WORKSPACES 环境变量），
+        持久化独立于 .env：重启后仍生效。
         """
         try:
             if self.runtime_workspaces_path.exists():

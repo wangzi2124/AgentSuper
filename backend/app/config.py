@@ -68,10 +68,8 @@ class Settings(BaseSettings):
     admin_token: Optional[str] = None
 
     # ── 权限 / 工作区（对齐 opencode external_directory 设计）──
-    # Agent 允许读写的额外工作区（逗号分隔的绝对路径，支持盘符）。
-    # 命中这些路径的文件操作与默认工作区同规则（write/execute 放行）。
-    extra_workspaces: str = ""
-    # external 路径（工作区/额外工作区/临时目录之外）的默认策略：ask | allow | deny
+    # 可写工作目录由前端「工作目录」面板配置（运行时生效，持久化到 data/runtime_workspaces.json）。
+    # external 路径（工作区/临时目录之外）的默认策略：ask | allow | deny
     external_path_default: str = "ask"
     # 权限审批等待超时（秒），默认 60；超时视为拒绝
     permission_approval_timeout: int = 60
