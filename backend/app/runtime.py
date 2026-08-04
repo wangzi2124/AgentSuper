@@ -97,9 +97,13 @@ def _do_init(app):
     extra_workspaces = [
         p.strip() for p in (settings.extra_workspaces or "").split(",") if p.strip()
     ]
-    _data_dir = Path(__file__).resolve().parents[1] / "data"
+    # 工作区根 = backend/（与 app/tools/filesystem.py 的相对路径基准一致，
+    # 避免 LLM 把文件写到仓库根导致 glob/grep（基于 backend/）找不到，
+    # 同时让 backend/app、backend/plugins 等关键目录落入保护范围）
+    _base_dir = Path(__file__).resolve().parents[1]
+    _data_dir = _base_dir / "data"
     perm_mgr = PermissionManager(
-        workspace=str(Path(__file__).resolve().parents[1].parent),
+        workspace=str(_base_dir),
         whitelist_path=str(_data_dir / "permissions.json"),
         extra_workspaces=extra_workspaces,
         external_default=settings.external_path_default,

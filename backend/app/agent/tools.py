@@ -119,7 +119,7 @@ def create_filesystem_tools() -> List[ToolDef]:
     """创建文件系统操作工具列表（ls、read、write、edit等）。"""
     from app.tools.filesystem import (
         tool_ls, tool_read_file, tool_write_file, tool_edit_file,
-        tool_glob, tool_grep, tool_execute,
+        tool_glob, tool_grep, tool_execute, tool_delete_file, tool_rename_file,
     )
     tools: List[ToolDef] = []
 
@@ -132,9 +132,11 @@ def create_filesystem_tools() -> List[ToolDef]:
         "tool_glob": {"pattern": "Glob pattern to match files (e.g. **/*.py)"},
         "tool_grep": {"pattern": "Regex pattern to search for", "include": "File glob pattern to restrict search (e.g. *.py)", "context": "Number of context lines before/after each match", "count_only": "If true, return only match counts per file", "files_only": "If true, return only file paths"},
         "tool_execute": {"command": "Shell command to run", "timeout": "Max execution time in seconds (default 300, max 600)", "work_dir": "Working directory for the command (default: current directory)"},
+        "tool_delete_file": {"path": "File or empty directory path to delete"},
+        "tool_rename_file": {"path": "Source path to rename/move", "new_path": "Destination path"},
     }
 
-    for func in [tool_ls, tool_read_file, tool_write_file, tool_edit_file, tool_glob, tool_grep, tool_execute]:
+    for func in [tool_ls, tool_read_file, tool_write_file, tool_edit_file, tool_glob, tool_grep, tool_execute, tool_delete_file, tool_rename_file]:
         name = func.__name__
         sig = inspect.signature(func)
         param_docs = _PARAM_DOCS.get(name, {})
@@ -157,6 +159,8 @@ def create_filesystem_tools() -> List[ToolDef]:
             "tool_glob": "Find files matching a glob pattern",
             "tool_grep": "Search file contents using regex",
             "tool_execute": "Run a shell command (build/install/test only, NOT for network/web operations)",
+            "tool_delete_file": "Delete a file or empty directory (workspace only)",
+            "tool_rename_file": "Rename or move a file/directory",
         }
         tools.append(ToolDef(
             name=name,
@@ -219,7 +223,9 @@ def build_system_prompt_no_kb(
             "   - tool_edit_file(path, old_string, new_string, replace_all) - Edit a file\n"
             "   - tool_glob(pattern) - Find files matching a pattern\n"
             "   - tool_grep(pattern, include, context, count_only, files_only) - Search file contents\n"
-            "   - tool_execute(command, timeout, work_dir) - Run a shell command (build/install only)"
+            "   - tool_execute(command, timeout, work_dir) - Run a shell command (build/install only)\n"
+            "   - tool_delete_file(path) - Delete a file or empty directory\n"
+            "   - tool_rename_file(path, new_path) - Rename or move a file/directory"
         )
 
     if enabled_skills:

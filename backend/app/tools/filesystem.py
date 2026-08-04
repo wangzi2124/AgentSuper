@@ -111,9 +111,10 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> str:
     if target.exists() and not overwrite:
         return f"Error: file already exists: {path} (use overwrite=True to overwrite, or edit_file to modify)"
     target.parent.mkdir(parents=True, exist_ok=True)
+    existed = target.exists()
     try:
         target.write_text(content, encoding="utf-8")
-        action = "Overwritten" if target.exists() else "Created"
+        action = "Overwritten" if existed else "Created"
         return f"{action} {path} ({target.stat().st_size} bytes)"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -153,6 +154,43 @@ def tool_glob(pattern: str) -> str:
         return f"No matches for: {pattern}"
     lines = [str(m.relative_to(WORKSPACE)) for m in matches]
     return "\n".join(lines)
+
+
+def tool_delete_file(path: str) -> str:
+    """删除指定文件或空目录（仅限工作区内）。"""
+    target = _resolve(path)
+    _ensure_safe(target, "write")
+    if not target.exists():
+        return f"Error: not found: {path}"
+    if target.is_dir():
+        try:
+            target.rmdir()
+            return f"Deleted directory {path}"
+        except OSError as e:
+            return f"Error deleting directory: {e}"
+    try:
+        target.unlink()
+        return f"Deleted {path}"
+    except Exception as e:
+        return f"Error deleting file: {e}"
+
+
+def tool_rename_file(path: str, new_path: str) -> str:
+    """重命名或移动文件/目录到新路径。"""
+    src = _resolve(path)
+    dst = _resolve(new_path)
+    _ensure_safe(src, "write")
+    _ensure_safe(dst, "write")
+    if not src.exists():
+        return f"Error: source not found: {path}"
+    if dst.exists():
+        return f"Error: destination already exists: {new_path}"
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(dst)
+        return f"Renamed {path} -> {new_path}"
+    except Exception as e:
+        return f"Error renaming: {e}"
 
 
 def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: bool = False, files_only: bool = False) -> str:

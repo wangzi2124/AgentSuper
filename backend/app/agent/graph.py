@@ -44,12 +44,17 @@ def _permission_denied_msg(operation: str, path: str, tool_name: str = "") -> st
 
 
 def _nearest_workspace_hint(path: str) -> str:
-    """当请求路径落在某个已配置工作区的父级时，给出就近的可写路径建议。"""
+    """根据路径归属给出可解释的拒绝建议：受保护源码路径 / 就近可写工作区 / 完全外部。"""
     try:
         from app.permission import get_manager
         p = Path(path).resolve()
         for w in get_manager().list_workspaces():
             wp = Path(w).resolve()
+            try:
+                p.relative_to(wp)
+                return "该路径位于工作区内但属于受保护的系统/源码路径（如 app、plugins、skills、.env），不可写入。"
+            except ValueError:
+                pass
             if wp != p and wp in p.parents:
                 return f"该路径不在工作区内，但 '{wp}' 是可写工作区——请将文件写入 '{wp}' 之下。"
     except Exception:
@@ -61,6 +66,9 @@ from app.context.token_counter import sanitize_tool_messages
 from app.context.tool_output import bound_tool_output, prune_tool_outputs
 from app.context.tool_dedup import ToolResultDedup
 from app.context.budget import usable_context_tokens, compaction_threshold_tokens
+
+# 读取类工具：只读文件/目录状态，结果可被后续写操作改变，因此缓存仅在"未发生写操作"时有效
+_DEDUP_READONLY_TOOLS = {"tool_ls", "tool_read_file", "tool_glob", "tool_grep"}
 
 import litellm
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
@@ -569,6 +577,11 @@ class RAGAgent:
                 result_str = str(result)
                 dedup.set(dkey, result_str)
                 early_results[tc_id] = result_str
+
+            # 变更类工具（写/编辑/执行/插件生成器等）执行后清空去重缓存，
+            # 避免后续 read_file 命中旧缓存返回陈旧内容（写入→读取验证失效）
+            if any(name not in _DEDUP_READONLY_TOOLS for _, name, _ in tool_metas):
+                dedup.clear()
 
             for tc in msg.tool_calls:
                 tc_id = tc.id
