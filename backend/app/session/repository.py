@@ -351,6 +351,73 @@ def list_parts(message_id: str) -> list[Part]:
         conn.close()
 
 
+def list_parts_for_messages(message_ids: list[str]) -> dict[str, list[Part]]:
+    """按消息批量加载 parts（保持每消息内 (time_created, id) 排序）。"""
+    if not message_ids:
+        return {}
+    conn = _get_db()
+    try:
+        placeholders = ",".join("?" * len(message_ids))
+        rows = conn.execute(
+            f"SELECT * FROM message_parts WHERE message_id IN ({placeholders})"
+            " ORDER BY message_id, time_created, id",
+            message_ids,
+        ).fetchall()
+        out: dict[str, list[Part]] = {}
+        for r in rows:
+            p = Part(id=r["id"], session_id=r["session_id"], message_id=r["message_id"],
+                     type=r["type"], data=json.loads(r["data"]), time_created=r["time_created"])
+            out.setdefault(r["message_id"], []).append(p)
+        return out
+    finally:
+        conn.close()
+
+
+def update_part(session_id: str, part_id: str, data: dict[str, Any]) -> Optional[Part]:
+    """就地更新一条 part 的 data（如 tool 从 running → completed）。"""
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM message_parts WHERE session_id = ? AND id = ?",
+            (session_id, part_id),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "UPDATE message_parts SET data = ? WHERE session_id = ? AND id = ?",
+            (json.dumps(data, ensure_ascii=False), session_id, part_id),
+        )
+        conn.commit()
+        return Part(id=row["id"], session_id=row["session_id"], message_id=row["message_id"],
+                    type=row["type"], data=data, time_created=row["time_created"])
+    finally:
+        conn.close()
+
+
+def update_message(session_id: str, message_id: str, data: dict[str, Any]) -> Optional[Message]:
+    """就地更新一条消息的 data（如 assistant 结算字段/最终答案回填）。
+
+    消息日志仍是 append-only：本函数只更新既有行的 data，不新增 seq。
+    """
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM session_messages WHERE session_id = ? AND id = ?",
+            (session_id, message_id),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "UPDATE session_messages SET data = ? WHERE session_id = ? AND id = ?",
+            (json.dumps(data, ensure_ascii=False), session_id, message_id),
+        )
+        conn.commit()
+        return Message(id=row["id"], session_id=row["session_id"], type=row["type"],
+                       data=data, seq=row["seq"], time_created=row["time_created"])
+    finally:
+        conn.close()
+
+
 def delete_message(session_id: str, message_id: str) -> bool:
     """删除指定会话中的一条消息（对齐旧 delete_message 端点语义）。"""
     conn = _get_db()

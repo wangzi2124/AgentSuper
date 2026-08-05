@@ -17,6 +17,14 @@ export interface AgentStep {
   tool_args?: Record<string, unknown>
   tool_result?: string
   tool_output?: string
+  part_id?: string
+}
+
+// 消息部件（对齐 opencode Part：正文/推理/工具/步骤 以 Part 承载）
+export interface Part {
+  id: string
+  type: 'text' | 'reasoning' | 'tool' | 'step-start' | 'step-finish' | 'file' | 'patch' | 'agent' | 'compaction'
+  data: Record<string, any>
 }
 
 // 聊天响应
@@ -43,6 +51,8 @@ export interface SSEEvent {
   conversation_id?: string
   title?: string
   steps?: AgentStep[]
+  parts?: Part[]
+  part_id?: string
   error?: string
   retryable?: boolean
   status_code?: number
@@ -214,6 +224,7 @@ export interface Message {
   content: string
   sources?: Source[]
   steps?: AgentStep[]
+  parts?: Part[]
   files?: { filename: string; mime_type: string }[]
   timestamp: Date
   isError?: boolean

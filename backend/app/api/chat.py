@@ -342,12 +342,22 @@ def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | N
 
 
 def _session_history_for(service, user_id: str, session_id: str) -> list[dict]:
-    """把会话消息投影为模型历史（role/content）。"""
+    """把会话消息投影为模型历史（role/content）。
+
+    正文优先从 message_parts 的 text part 提取（对齐设计 §3），无 parts 时
+    回退 data.content（旧数据/compaction/system 消息）。
+    """
+    from app.session import history as session_history
+
+    messages = service.messages(user_id, session_id)
+    ids = [m.id for m in messages]
+    parts_map = session_repo.list_parts_for_messages(ids) if ids else {}
     history = []
-    for m in service.messages(user_id, session_id):
+    for m in messages:
         role = m.data.get("role") or _msg_type_to_role(m.type)
         if role in ("user", "assistant", "system"):
-            history.append({"role": role, "content": m.data.get("content", "")})
+            content = session_history.text_from_parts(parts_map.get(m.id, [])) or m.data.get("content", "")
+            history.append({"role": role, "content": content})
     return history
 
 
@@ -919,6 +929,9 @@ async def get_conversation(conversation_id: str, request: Request, conv_type: st
             msg["steps"] = m.data["steps"]
         if m.data.get("agents"):
             msg["agents"] = m.data["agents"]
+        parts = session_repo.list_parts(m.id)
+        if parts:
+            msg["parts"] = [p.model_dump() for p in parts]
         messages.append(msg)
     return {
         "id": conversation_id,

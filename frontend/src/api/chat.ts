@@ -14,7 +14,7 @@ export interface ConversationMeta {
 
 // 对话详情，包含完整消息列表
 export interface ConversationDetail extends ConversationMeta {
-  messages: Array<{ id: string; role: string; content: string; sources?: any[]; steps?: any[] }>
+  messages: Array<{ id: string; role: string; content: string; sources?: any[]; steps?: any[]; parts?: any[] }>
 }
 
 // 分类前端产生的网络错误

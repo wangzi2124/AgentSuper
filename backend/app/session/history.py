@@ -15,11 +15,27 @@ logger = logging.getLogger(__name__)
 
 
 class HistoryLoad:
-    """一次性装载结果：模型应看到的历史消息。"""
+    """一次性装载结果：模型应看到的历史消息 + 每消息的 parts。"""
 
-    def __init__(self, messages: list[Message], epoch: Optional[ContextEpoch]):
+    def __init__(self, messages: list[Message], epoch: Optional[ContextEpoch],
+                 parts: Optional[dict[str, list]] = None):
         self.messages = messages
         self.epoch = epoch
+        self.parts: dict[str, list] = parts or {}
+
+
+def text_from_parts(parts: list) -> str:
+    """从 parts 提取模型可读文本：拼接所有 text part 的 data.text。"""
+    if not parts:
+        return ""
+    chunks = []
+    for p in parts:
+        data = p.data if hasattr(p, "data") else (p.get("data") or {})
+        if (p.type if hasattr(p, "type") else p.get("type")) == "text":
+            t = data.get("text", "")
+            if t:
+                chunks.append(t)
+    return "\n".join(chunks)
 
 
 def load(session_id: str) -> HistoryLoad:
@@ -46,7 +62,10 @@ def load(session_id: str) -> HistoryLoad:
         if checkpoint and checkpoint[0].type == "compaction":
             messages.insert(0, checkpoint[0])
 
-    return HistoryLoad(messages=messages, epoch=epoch)
+    ids = [m.id for m in messages]
+    parts = repository.list_parts_for_messages(ids) if ids else {}
+
+    return HistoryLoad(messages=messages, epoch=epoch, parts=parts)
 
 
 def initialize_epoch(session_id: str, baseline: str, snapshot: dict) -> ContextEpoch:

@@ -179,3 +179,17 @@
 
 已验证：模块可导入、ID 排序正确、repository 增删/part 顺序/usage 累加函数级测试通过。
 
+### 阶段 B（2026-08-05）
+
+已落地（对应第 3 节「阶段 B」核心）：
+
+- **G1+G3+G6 聊天主路径切到 Parts**：
+  - 新增 `PartBridgeQueue`（`agent_executor.py`）：graph 事件实时落库为 message_parts——`step_start`→`step-start`、`step_end`→`step-finish`、`tool_start`→`tool`(running)、`tool_end`→更新同 part 为 completed+output（tool 状态机）；`tool_output`/`tool_heartbeat` 仅转发不落库；转发的 SSE 事件带 `part_id`。
+  - executor 重排：先建 assistant 骨架消息（含 `parent_id`/`agent`/`model`/`finish:"running"`）→ `agent.invoke(event_queue=bridge)` 实时落 parts → 回填 `content`/`finish`/`tokens`/`steps`/`sources` 结算字段 → `append_text(最终答案)`；异常时骨架标记 `finish:"error"` 防止空消息残留。
+  - `done` SSE 事件携带 `parts`（最终 part 列表）。
+  - repository 新增 `update_part`（tool 状态机更新）、`update_message`（结算字段回填）、`list_parts_for_messages`（批量加载）。
+- **G3 历史重建**：`_message_to_history` / `_session_history_for` 改为优先取 text parts 拼内容，无 parts 时回退 `data.content`（兼容旧数据/compaction/system）。
+- **G8 前端**：`Message.parts?: Part[]` + `Part` 判别类型；`/conversations/{id}` 返回 `parts`；ChatMessage.vue 优先渲染 parts（text 拼正文、tool part 状态卡、step-start/finish 合并步骤、reasoning 折叠块），SSE 事件类型加 `part_id`；IndexedDB 缓存 merge 时 `parts` 视为 meta 字段避免被旧缓存覆盖。
+
+未做（阶段 B 之外）：多 Agent 子会话的 parts 落库（`_persist_multi_agent` 仍扁平）、模型视角的 reasoning part 参与、`message.part.delta` 真增量（graph 目前不流式输出 token）。
+

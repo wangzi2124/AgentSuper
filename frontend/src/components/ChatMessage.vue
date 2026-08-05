@@ -11,21 +11,80 @@ const props = defineProps<{ message: Message; index: number }>()
 const copied = ref(false)
 // 步骤列表展开/折叠状态
 const stepsExpanded = ref(false)
+// 推理片段展开/折叠状态
+const reasoningExpanded = ref(false)
 // 单个步骤结果展开状态
 const expandedResults = ref<Record<string, boolean>>({})
 // 单个步骤参数展开状态
 const expandedArgs = ref<Record<string, boolean>>({})
 
+// 消息是否携带 parts（对齐 opencode Part 渲染路径）
+const hasParts = computed(() => !!props.message.parts?.length)
+
+// 正文：优先取 text parts（对齐设计 §3：正文在 Part），否则回退 message.content
+const displayContent = computed(() => {
+  if (hasParts.value) {
+    const text = (props.message.parts || [])
+      .filter(p => p.type === 'text')
+      .map(p => p.data.text || '')
+      .join('\n')
+    if (text) return text
+  }
+  return props.message.content
+})
+
+// 推理片段（reasoning part，可折叠）
+const reasoningParts = computed(() => (props.message.parts || []).filter(p => p.type === 'reasoning'))
+
+// 从 parts 重建步骤列表（tool part 一张卡、step-start/step-finish 按 step_id 合并）
+const partSteps = computed(() => {
+  const byId = new Map<string, any>()
+  const order: string[] = []
+  for (const p of props.message.parts || []) {
+    const d = p.data || {}
+    if (p.type === 'tool') {
+      const id = d.step_id || p.id
+      const step: any = {
+        type: d.state === 'running' ? 'tool_start' : 'tool_end',
+        step_id: id,
+        name: d.name || '调用工具',
+        status: d.state === 'running' ? 'running' : d.state === 'error' ? 'failed' : 'completed',
+        tool_name: d.name,
+        tool_args: d.args,
+        tool_result: d.output,
+        part_id: p.id,
+      }
+      if (!byId.has(id)) order.push(id)
+      byId.set(id, step)
+    } else if (p.type === 'step-start' || p.type === 'step-finish') {
+      const id = d.step_id || p.id
+      const existing = byId.get(id)
+      const step: any = {
+        type: p.type === 'step-start' ? 'step_start' : 'step_end',
+        step_id: id,
+        name: d.name || existing?.name || '',
+        status: d.state === 'running' ? 'running' : d.state === 'error' ? 'failed' : 'completed',
+        detail: d.detail,
+        duration_ms: d.duration_ms,
+      }
+      if (!existing) order.push(id)
+      byId.set(id, step)
+    }
+  }
+  return order.map(id => byId.get(id)).filter(Boolean)
+})
+
 // 计算思考步骤的耗时
 const thoughtDuration = computed(() => {
-  if (!props.message.steps) return null
-  const genStep = props.message.steps.find(s => s.step_id === 'generate' || s.name === '生成回答')
+  const steps = hasParts.value ? partSteps.value : props.message.steps
+  if (!steps) return null
+  const genStep = steps.find((s: any) => s.step_id === 'generate' || s.name === '生成回答')
   return genStep?.duration_ms ?? null
 })
 
 // 复制消息内容到剪贴板
 async function handleCopy() {
-  const text = props.message.content
+  const text = displayContent.value
   if (!text) return
   try {
     if (navigator.clipboard && window.isSecureContext) {
@@ -111,6 +170,9 @@ function argsSummary(args: Record<string, unknown>): string {
 
 // 只显示有意义的步骤（工具调用或有耗时的步骤）
 const meaningfulSteps = computed(() => {
+  if (hasParts.value) {
+    return partSteps.value.filter((s: any) => s.tool_name || s.duration_ms || s.detail)
+  }
   if (!props.message.steps) return []
   return props.message.steps.filter(s =>
     s.tool_name || s.duration_ms || s.detail
@@ -163,7 +225,16 @@ const meaningfulSteps = computed(() => {
           </div>
         </div>
       </div>
-      <div v-if="message.content" class="content">{{ message.content }}</div>
+      <div v-if="reasoningParts.length > 0" class="reasoning-section">
+        <div class="reasoning-header" @click="reasoningExpanded = !reasoningExpanded">
+          <span class="reasoning-toggle">{{ reasoningExpanded ? '▾' : '▸' }}</span>
+          <span class="reasoning-label">🤔 思考过程</span>
+        </div>
+        <div v-if="reasoningExpanded" class="reasoning-content">
+          <pre v-for="(r, i) in reasoningParts" :key="i">{{ r.data.text }}</pre>
+        </div>
+      </div>
+      <div v-if="displayContent" class="content">{{ displayContent }}</div>
       <div v-if="message.files && message.files.length > 0" class="attachments">
         <div v-for="(f, i) in message.files" :key="i" class="attachment-badge">
           {{ f.filename }}
@@ -245,6 +316,38 @@ const meaningfulSteps = computed(() => {
   border-color: var(--primary);
 }
 .content { white-space: pre-wrap; word-break: break-word; }
+.reasoning-section {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.reasoning-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  background: var(--bg);
+  font-size: 12px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+.reasoning-toggle { font-size: 10px; width: 12px; }
+.reasoning-content {
+  padding: 8px 10px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+.reasoning-content pre {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: inherit;
+}
+.reasoning-content pre:last-child { margin-bottom: 0; }
 .steps-section {
   margin-bottom: 8px;
   border: 1px solid var(--border);

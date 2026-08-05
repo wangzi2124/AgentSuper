@@ -310,6 +310,7 @@ export const useChatStore = defineStore('chat', () => {
           content: m.content,
           sources: m.sources,
           steps: m.steps,
+          parts: m.parts,
           timestamp: new Date(),
         }))
 
@@ -483,6 +484,7 @@ export const useChatStore = defineStore('chat', () => {
             content: event.answer || '',
             sources: event.sources,
             steps: event.steps || session.currentSteps,
+            parts: event.parts,
             timestamp: new Date(),
           }
           session.messages = [...session.messages, assistantMsg]

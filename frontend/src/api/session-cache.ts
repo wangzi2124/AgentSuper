@@ -171,9 +171,9 @@ export function mergeServerAndCache(
       // 服务器没有这条消息，补入（可能是 SSE 中断时的 user 消息）
       merged.set(msg.id, msg)
     } else if (msg.role === 'assistant') {
-      // assistant 消息：优先取有 sources/steps 的版本，其次取 content 更长的
-      const existingHasMeta = !!(existing as any).sources || !!(existing as any).steps
-      const cachedHasMeta = !!(msg as any).sources || !!(msg as any).steps
+      // assistant 消息：优先取有 sources/steps/parts 的版本，其次取 content 更长的
+      const existingHasMeta = !!(existing as any).sources || !!(existing as any).steps || !!(existing as any).parts
+      const cachedHasMeta = !!(msg as any).sources || !!(msg as any).steps || !!(msg as any).parts
       if (cachedHasMeta && !existingHasMeta) {
         merged.set(msg.id, msg)
       } else if (msg.content.length > existing.content.length) {

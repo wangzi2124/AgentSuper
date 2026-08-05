@@ -51,14 +51,111 @@ def classify_error(exc: Exception) -> dict[str, Any]:
     return {"retryable": retryable, "status_code": status_code, "error_type": error_type}
 
 
-def _message_to_history(message) -> dict[str, Any]:
-    """把 session_messages 行转成模型历史消息（对齐 chat.py 的消息结构）。"""
+def _message_to_history(message, parts=None) -> dict[str, Any]:
+    """把 session_messages 行转成模型历史消息（对齐 chat.py 的消息结构）。
+
+    优先用 parts 里的 text part 拼内容（对齐设计 §3：正文在 Part），
+    无 parts 时回退 data.content（旧数据/compaction/system 消息）。
+    """
     data = message.data or {}
     role = data.get("role") or {
         "user": "user", "assistant": "assistant", "tool": "tool",
         "compaction": "system", "epoch": "system", "system": "system",
     }.get(message.type, "system")
-    return {"id": message.id, "role": role, "content": data.get("content", "")}
+    content = session_history.text_from_parts(parts or []) or data.get("content", "")
+    return {"id": message.id, "role": role, "content": content}
+
+
+class PartBridgeQueue:
+    """把 graph 事件实时落库为 message_parts，同时转发给请求级 SSE 队列。
+
+    事件 → part 映射（对齐设计 §2 Part 类型族）：
+      step_start  → step-start part（state: running）
+      step_end    → step-finish part
+      tool_start  → tool part（state: running）
+      tool_end    → 更新同一 tool part（state: completed + output）
+      tool_output / tool_heartbeat / step → 噪音，仅转发不落库
+
+    转发的 SSE 事件带上 part_id，前端可按 part 定位/增量渲染。
+    """
+
+    def __init__(self, inner_queue, session_id: str, message_id: str):
+        self._inner = inner_queue
+        self._session_id = session_id
+        self._message_id = message_id
+        self._tool_parts: dict[str, str] = {}
+        self._tool_meta: dict[str, dict] = {}
+
+    def put_nowait(self, event: dict) -> None:
+        try:
+            event = self._persist(event)
+        except Exception:  # noqa: BLE001
+            logger.exception("persist part failed: %s", event.get("type"))
+        if self._inner is not None:
+            try:
+                self._inner.put_nowait(event)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def append_text(self, text: str) -> None:
+        """把最终答案追加为 text part（在 invoke 结束后调用一次）。"""
+        if text:
+            repository.append_part(self._session_id, self._message_id, "text", {"text": text})
+
+    def _persist(self, event: dict) -> dict:
+        """落库 part 并给事件附加 part_id，返回（可能被修改的）事件副本。"""
+        out = dict(event)
+        et = event.get("type")
+        now = int(tmod.time() * 1000)
+        if et == "step_start":
+            part = repository.append_part(self._session_id, self._message_id, "step-start", {
+                "step_id": event.get("step_id", ""),
+                "state": "running",
+                "name": event.get("name", ""),
+            })
+            out["part_id"] = part.id
+        elif et == "step_end":
+            part = repository.append_part(self._session_id, self._message_id, "step-finish", {
+                "step_id": event.get("step_id", ""),
+                "state": event.get("status", "completed"),
+                "name": event.get("name", ""),
+                "detail": event.get("detail", ""),
+                "duration_ms": event.get("duration_ms", 0),
+            })
+            out["part_id"] = part.id
+        elif et == "tool_start":
+            step_id = event.get("step_id", "")
+            self._tool_meta[step_id] = {
+                "args": event.get("tool_args") or {},
+                "time_start": now,
+            }
+            part = repository.append_part(self._session_id, self._message_id, "tool", {
+                "step_id": step_id,
+                "state": "running",
+                "name": event.get("tool_name", ""),
+                "args": event.get("tool_args") or {},
+                "output": "",
+                "time_start": now,
+            })
+            self._tool_parts[step_id] = part.id
+            out["part_id"] = part.id
+        elif et == "tool_end":
+            step_id = event.get("step_id", "")
+            pid = self._tool_parts.get(step_id)
+            if pid:
+                meta = self._tool_meta.get(step_id) or {}
+                updated = repository.update_part(self._session_id, pid, {
+                    "step_id": step_id,
+                    "state": event.get("status", "completed"),
+                    "name": event.get("tool_name", ""),
+                    "args": meta.get("args") or event.get("tool_args") or {},
+                    "output": event.get("tool_result", "") or "",
+                    "time_start": meta.get("time_start"),
+                    "time_end": now,
+                })
+                if updated:
+                    out["part_id"] = updated.id
+        return out
 
 
 def _checkpoint_of(compressed: list[dict]) -> str:
@@ -88,7 +185,7 @@ def build_executor(app):
 
         # 1. 构建模型视角历史（epoch 之后的会话消息，不含当前轮）
         load = session_history.load(session_id)
-        raw_history = [_message_to_history(m) for m in load.messages]
+        raw_history = [_message_to_history(m, load.parts.get(m.id)) for m in load.messages]
 
         # 2. 压缩/清洗（复用 chat.py 的截断 + 摘要逻辑）
         from app.api.chat import MAX_HISTORY_TOKENS, _get_summarizer, _sanitize_history, _truncate_history
@@ -131,7 +228,20 @@ def build_executor(app):
                 )
 
             try:
-                # 5. 调用 Agent（事件桥接到请求队列）
+                # 5. 先建 assistant 骨架消息（parts 落库需要其 id；对齐设计 §1：正文在 Part）
+                assistant_msg = repository.append_message(session_id, "assistant", {
+                    "role": "assistant",
+                    "parent_id": user_msg.id,
+                    "agent": "rag",
+                    "model": prompt.get("model"),
+                    "finish": "running",
+                    "tokens": {},
+                })
+
+                # 事件桥：graph 步骤/工具事件实时落库为 parts + 转发 SSE（带 part_id）
+                bridge = PartBridgeQueue(queue, session_id, assistant_msg.id)
+
+                # 6. 调用 Agent（事件桥接到请求队列）
                 agent = app.state.agent
                 result = await agent.invoke(
                     prompt.get("text", ""),
@@ -139,22 +249,24 @@ def build_executor(app):
                     history=compressed,
                     use_vector_db=prompt.get("use_vector_db", True),
                     files=prompt.get("files") or [],
-                    event_queue=queue,
+                    event_queue=bridge,
                     conversation_id=session_id,
                 )
 
-                # 6. 落库 assistant 消息（骨架 + 结算字段，对齐 opencode Message）
-                assistant_msg = repository.append_message(session_id, "assistant", {
-                    "role": "assistant",
-                    "content": result.get("answer", ""),
-                    "sources": result.get("sources", []),
-                    "steps": result.get("steps", []),
-                    "parent_id": user_msg.id,
-                    "agent": getattr(agent, "agent_id", None) or "rag",
-                    "model": result.get("model"),
+                # 7. 回填 assistant 结算字段 + 最终答案（text part 承载正文）
+                answer = result.get("answer", "")
+                final_data = dict(assistant_msg.data)
+                final_data.update({
+                    "content": answer,
                     "finish": result.get("finish", "stop"),
+                    "model": result.get("model"),
                     "tokens": result.get("tokens") or {},
+                    "steps": result.get("steps", []),
+                    "sources": result.get("sources", []),
                 })
+                repository.update_message(session_id, assistant_msg.id, final_data)
+                bridge.append_text(answer)
+
                 # 会话级 token/费用累加
                 tokens = result.get("tokens") or {}
                 repository.add_session_usage(
@@ -167,20 +279,36 @@ def build_executor(app):
                 if queue is not None:
                     queue.put_nowait({
                         "type": "done",
-                        "answer": result.get("answer", ""),
+                        "answer": answer,
                         "sources": result.get("sources", []),
                         "conversation_id": session_id,
                         "steps": result.get("steps", []),
+                        "parts": [p.model_dump() for p in repository.list_parts(assistant_msg.id)],
                         "user_msg_id": user_msg.id,
                         "assistant_msg_id": assistant_msg.id,
                     })
             except asyncio.CancelledError:
+                # 中断：assistant 骨架标记为错误，避免空消息残留
+                try:
+                    repository.update_message(session_id, assistant_msg.id, {
+                        **dict(assistant_msg.data),
+                        "content": "请求已中断", "finish": "error",
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
                 if queue is not None:
                     queue.put_nowait({"type": "error", "detail": "cancelled",
                                       "retryable": False, "status_code": None, "error_type": "CancelledError"})
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.exception("executor: session %s agent call failed", session_id, exc_info=exc)
+                try:
+                    repository.update_message(session_id, assistant_msg.id, {
+                        **dict(assistant_msg.data),
+                        "content": str(exc) or "Agent 调用失败", "finish": "error",
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
                 if queue is not None:
                     queue.put_nowait({"type": "error", "detail": str(exc), **classify_error(exc)})
 
