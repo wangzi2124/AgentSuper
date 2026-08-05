@@ -6,7 +6,7 @@ context compaction, and task state persistence.
 
 from app.context.token_counter import estimate_tokens, count_message_tokens, truncate_messages
 from app.context.tool_output import bound_tool_output, ToolOutputLimits, prune_tool_outputs
-from app.context.tool_dedup import ToolResultDedup
+from app.context.tool_dedup import ToolResultDedup, NON_IDEMPOTENT_TOOLS
 from app.context.compaction import ContextCompactor, previous_summary_of
 from app.context.task_state import TaskState
 from app.context.budget import usable_context_tokens, compaction_threshold_tokens
@@ -25,6 +25,7 @@ __all__ = [
     "prune_tool_outputs",
     # Dedup
     "ToolResultDedup",
+    "NON_IDEMPOTENT_TOOLS",
     # Compaction
     "ContextCompactor",
     "previous_summary_of",

@@ -126,6 +126,7 @@ class AgentState(TypedDict):
     steps: list[dict]
     _event_queue: asyncio.Queue | None
     _on_activity: Callable[[str], None] | None
+    _task: object | None
 
 
 class RAGAgent:
@@ -546,6 +547,7 @@ class RAGAgent:
         doom_strikes = 0
         steps_prompt_injected = False
         rounds = 0
+        tool_calls_count = 0
         while (
             msg.tool_calls or finish_reason == "tool-calls"
         ) and rounds < max_tool_rounds:
@@ -564,6 +566,8 @@ class RAGAgent:
                 old_count = len(messages)
                 messages = await compactor.compact(messages)
                 messages = sanitize_tool_messages(messages)
+                if state.get("_task"):
+                    state["_task"].record_compaction()
                 self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
 
             messages.append({
@@ -590,7 +594,15 @@ class RAGAgent:
                     early_results[tc.id] = f"Error parsing arguments for '{tool_name}': {e}"
                     continue
 
-                # Dedup: skip re-execution for identical tool+args
+                # Dedup: 仅对只读且幂等的工具复用结果。
+                # 非只读工具（写/执行）和非确定性工具（weather/时间/网络/HTTP 等）跳过缓存，
+                # 避免同轮内相同参数第二次调用返回过期/陈旧结果。
+                if not dedup.should_dedup(tool_name) or tool_name not in _DEDUP_READONLY_TOOLS:
+                    self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
+                    tool_tasks.append(self._execute_tool(tool_name, args, state))
+                    tool_metas.append((tc.id, tool_name, None))
+                    continue
+
                 dedup_key = dedup.make_key(tool_name, args)
                 cached = dedup.get(dedup_key)
                 if cached is not None:
@@ -612,7 +624,8 @@ class RAGAgent:
                 if isinstance(result, Exception):
                     result = f"Error executing {tool_name}: {result}"
                 result_str = str(result)
-                dedup.set(dkey, result_str)
+                if dkey is not None:
+                    dedup.set(dkey, result_str)
                 early_results[tc_id] = result_str
 
             # 变更类工具（写/编辑/执行/插件生成器等）执行后清空去重缓存，
@@ -629,8 +642,15 @@ class RAGAgent:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
+                    "tool_name": tool_name,
                     "content": bounded_result,
                 })
+
+            # TaskState 进度跟踪：每轮 +1 step，并按本轮工具调用数累加 tool_calls_count
+            tool_calls_count += len(msg.tool_calls)
+            if state.get("_task"):
+                state["_task"].increment_step()
+                state["_task"].increment_tool_calls(len(msg.tool_calls))
 
             # Doom-loop 检测：同一组工具调用指纹连续重复 ≥ threshold 轮 → 注入策略变更提示；
             # 首次提示后仍连续重复（升级到 doom_loop_max_strikes）→ 强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具）
@@ -669,7 +689,7 @@ class RAGAgent:
 
         record_model_call(
             model, duration_ms=(tmod.time() - _gen_start) * 1000,
-            tool_rounds=rounds,
+            tool_rounds=rounds, tool_calls=tool_calls_count,
         )
 
         # If tool calls remain (max rounds reached) or content is empty, force a final answer
@@ -707,7 +727,7 @@ class RAGAgent:
                 result_str = str(result)
                 bounded_result = bound_tool_output(result_str, tool_name)
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
-                messages.append({"role": "tool", "tool_call_id": tc_id, "content": bounded_result})
+                messages.append({"role": "tool", "tool_call_id": tc_id, "tool_name": tool_name, "content": bounded_result})
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
             # 对齐 opencode max-steps 语义：达到上限后工具禁用，仅注入收尾总结提示（assistant 角色）
             messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
@@ -789,8 +809,14 @@ class RAGAgent:
             steps=[],
             _event_queue=event_queue,
             _on_activity=on_activity,
+            _task=task,
         )
-        result = await self.graph.ainvoke(state)
+        try:
+            result = await self.graph.ainvoke(state)
+        except Exception as e:
+            if task:
+                task.mark_failed(str(e))
+            raise
 
         if task:
             task.mark_completed()

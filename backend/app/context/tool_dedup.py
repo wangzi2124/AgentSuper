@@ -31,12 +31,38 @@ def _make_dedup_key(tool_name: str, args: dict) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
+# 非确定性工具：输出随外部状态/时间/网络变化，同一轮内相同参数重复调用
+# 也可能返回不同结果，缓存上一次结果会返回过期数据，因此永远跳过去重。
+# 命名遵循插件注册格式 plugin_<PLUGIN_NAME>_<func_name>，与 filesystem 原生工具。
+NON_IDEMPOTENT_TOOLS: frozenset[str] = frozenset({
+    "tool_execute",
+    "tool_get_current_time",
+    "tool_http_request",
+    "tool_http_get",
+    "tool_http_post",
+    "plugin_weather_tool_get_weather",
+    "plugin_weather_tool_get_weather_summary",
+    "plugin_weather-alert_tool_get_weather_alert",
+    "plugin_weather-alert_tool_get_weather_summary",
+    "plugin_weather-alert_tool_get_typhoon_info",
+    "plugin_example-plugin_tool_get_current_time",
+    "plugin_internet-search_tool_internet_search",
+    "plugin_internet-search_tool_extract_urls",
+    "plugin_http-client_tool_http_request",
+    "plugin_http-client_tool_http_get",
+    "plugin_http-client_tool_http_post",
+})
+
+
 class ToolResultDedup:
     """Per-generation tool result deduplication cache.
 
     Usage:
         dedup = ToolResultDedup()
         for tool_call in tool_calls:
+            if not dedup.should_dedup(tool_name):
+                result = await execute_tool(tool_name, args)  # 非确定性工具：始终执行
+                continue
             key = dedup.make_key(tool_name, args)
             cached = dedup.get(key)
             if cached is not None:
@@ -49,10 +75,15 @@ class ToolResultDedup:
         stats = dedup.stats()
     """
 
-    def __init__(self):
+    def __init__(self, skip_names: set[str] | frozenset[str] | None = None):
         self._cache: dict[str, str] = {}
         self._hits = 0
         self._misses = 0
+        self._skip_names = set(NON_IDEMPOTENT_TOOLS) | set(skip_names or ())
+
+    def should_dedup(self, tool_name: str) -> bool:
+        """非确定性工具（weather/时间/网络/执行等）不参与去重，避免返回过期结果。"""
+        return tool_name not in self._skip_names
 
     def make_key(self, tool_name: str, args: dict) -> str:
         """Create a dedup key for a tool call."""

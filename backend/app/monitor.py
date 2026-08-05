@@ -26,6 +26,7 @@ _stats = {
     "total_completion_tokens": 0,
     "total_duration_ms": 0,
     "tool_rounds_total": 0,
+    "tool_calls_total": 0,
 }
 
 _STATS_FILE = Path(__file__).resolve().parents[1] / "data" / "monitor_stats.json"
@@ -52,19 +53,24 @@ def _load_persisted():
 
 
 def _save_persisted():
-    """将当前统计写入磁盘（节流：每 _SAVE_INTERVAL_SECONDS 最多一次）。"""
+    """将当前统计写入磁盘（节流：每 _SAVE_INTERVAL_SECONDS 最多一次）。
+
+    节流判断与 _last_save 更新放入锁内（check-then-act 原子化），
+    并发请求不会同时通过判断导致短时间多次写盘；快照也在锁内生成，
+    文件 IO 在锁外执行以免阻塞统计更新。
+    """
     global _last_save
-    now = time.time()
-    if now - _last_save < _SAVE_INTERVAL_SECONDS:
-        return
-    _last_save = now
+    with _stats_lock:
+        now = time.time()
+        if now - _last_save < _SAVE_INTERVAL_SECONDS:
+            return
+        _last_save = now
+        snapshot = {
+            k: (dict(v) if isinstance(v, defaultdict) else v)
+            for k, v in _stats.items()
+        }
     try:
         _STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with _stats_lock:
-            snapshot = {
-                k: (dict(v) if isinstance(v, defaultdict) else v)
-                for k, v in _stats.items()
-            }
         tmp = _STATS_FILE.with_suffix(".json.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
@@ -91,8 +97,9 @@ def record_model_call(
     completion_tokens: int = 0,
     duration_ms: float = 0,
     tool_rounds: int = 0,
+    tool_calls: int = 0,
 ):
-    """记录一次模型调用的统计信息（模型名、token 数、耗时、工具调用轮数）。"""
+    """记录一次模型调用的统计信息（模型名、token 数、耗时、工具调用轮数与次数）。"""
     with _stats_lock:
         _stats["model_calls_total"] += 1
         _stats["model_calls_by_model"][model] += 1
@@ -100,6 +107,7 @@ def record_model_call(
         _stats["total_completion_tokens"] += completion_tokens
         _stats["total_duration_ms"] += duration_ms
         _stats["tool_rounds_total"] += tool_rounds
+        _stats["tool_calls_total"] += tool_calls
     _save_persisted()
 
 
@@ -122,6 +130,8 @@ def get_stats() -> dict:
                 "avg_duration_ms": round(_stats["total_duration_ms"] / calls, 1) if calls else 0,
                 "tool_rounds_total": _stats["tool_rounds_total"],
                 "avg_tool_rounds": round(_stats["tool_rounds_total"] / calls, 1) if calls else 0,
+                "tool_calls_total": _stats["tool_calls_total"],
+                "avg_tool_calls": round(_stats["tool_calls_total"] / calls, 1) if calls else 0,
             },
         }
 
@@ -140,6 +150,7 @@ def reset_stats():
             "total_completion_tokens": 0,
             "total_duration_ms": 0,
             "tool_rounds_total": 0,
+            "tool_calls_total": 0,
         }
     try:
         _STATS_FILE.unlink(missing_ok=True)

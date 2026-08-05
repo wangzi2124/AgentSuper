@@ -250,6 +250,9 @@ class ContextCompactor:
 
         result = system_msgs + [checkpoint_msg] + tail
 
+        # 压缩后仍可能超限（tail 本身很大，含近期超长工具输出）→ 校验并回溯清理
+        result = self._ensure_within_budget(result)
+
         old_tokens = estimate_tokens_messages(head)
         new_tokens = estimate_tokens(checkpoint_content)
         logger.info(
@@ -257,6 +260,41 @@ class ContextCompactor:
             len(head), old_tokens, new_tokens, len(tail), estimate_tokens_messages(tail),
         )
 
+        return result
+
+    def _ensure_within_budget(self, result: list[dict]) -> list[dict]:
+        """压缩结果可能仍超限：与阈值比对，超限则回溯打桩旧工具输出。
+
+        迭代收紧保护预算（protect_tokens）并重测；minimum_tokens 取溢出量的一半，
+        避免"必须一轮回收全部溢出"才落桩（那会被尾部保护挡住而完全不回收）。
+        若回收后仍超限（如 tail 保护轮内工具输出本身就很大）则告警而非静默返回。
+        """
+        from app.context.tool_output import prune_tool_outputs
+
+        protect = self.preserve_recent_tokens
+        for _ in range(4):
+            tokens = estimate_tokens_messages(result)
+            overflow = tokens - self.threshold
+            if overflow <= 0:
+                return result
+            pruned = prune_tool_outputs(
+                result,
+                protect_tokens=max(0, protect),
+                minimum_tokens=max(1, overflow // 2),
+                tail_turns=self.tail_turns,
+            )
+            if pruned is result:
+                break
+            result = pruned
+            protect = max(0, protect // 2)
+
+        tokens = estimate_tokens_messages(result)
+        if tokens > self.threshold:
+            logger.warning(
+                "Compacted context still exceeds threshold (%d > %d) after pruning; "
+                "consider raising the compaction threshold or lowering the tail budget",
+                tokens, self.threshold,
+            )
         return result
 
     async def _summarize(self, messages: list[dict], previous_summary: str | None) -> str:

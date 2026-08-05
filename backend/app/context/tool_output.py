@@ -64,24 +64,23 @@ def bound_tool_output(
     original_lines = output.count("\n") + 1
 
     truncated = False
-    truncated_lines = original_lines
-    truncated_bytes = original_bytes
 
     # Step 1: Truncate by line count
     if original_lines > max_lines:
         lines = output.split("\n")
         output = "\n".join(lines[:max_lines])
-        truncated_lines = max_lines
         truncated = True
 
     # Step 2: Truncate by byte size
     encoded = output.encode("utf-8")
     if len(encoded) > max_bytes:
         output = encoded[:max_bytes].decode("utf-8", errors="ignore")
-        truncated_bytes = max_bytes
         truncated = True
 
     if truncated:
+        # 字节截断可能切在行中间 → 以最终输出重算实际显示行/字节数，保证 notice 精确
+        truncated_lines = output.count("\n") + 1
+        truncated_bytes = len(output.encode("utf-8"))
         notice = (
             f"\n\n[output truncated: showed {truncated_lines}/{original_lines} lines, "
             f"{truncated_bytes}/{original_bytes} bytes]"
@@ -126,6 +125,19 @@ def prune_tool_outputs(
         return messages
 
     result = list(messages)
+
+    # 提前构建 tool_call_id -> 工具名 映射：历史消息可能未带 tool_name 字段，
+    # 从对应 assistant 消息的 tool_calls 反查，打桩时保留原始工具名便于排障。
+    tool_name_by_id: dict[str, str] = {}
+    for m in result:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                if isinstance(fn, dict) and fn.get("name") and tc.get("id"):
+                    tool_name_by_id[tc["id"]] = fn["name"]
+
     user_count = 0
     total = 0
     pruned = 0
@@ -158,9 +170,14 @@ def prune_tool_outputs(
     for i in candidates:
         content = result[i].get("content") or ""
         omitted = estimate_output_tokens(content)
-        result[i] = {
-            **result[i],
-            "content": f"[tool output pruned to save context space: ~{omitted} tokens omitted]",
-        }
+        tool_name = (
+            result[i].get("tool_name")
+            or tool_name_by_id.get(result[i].get("tool_call_id"), "")
+        )
+        if tool_name:
+            stub = f"[tool output pruned to save context space: {tool_name}, ~{omitted} tokens omitted]"
+        else:
+            stub = f"[tool output pruned to save context space: ~{omitted} tokens omitted]"
+        result[i] = {**result[i], "content": stub}
     logger.info("Pruned %d tool outputs (~%d tokens) to free context budget", len(candidates), pruned)
     return result

@@ -9,8 +9,9 @@ Tracks task execution state across the agent loop, enabling:
 import json
 import logging
 import sqlite3
+import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -21,41 +22,53 @@ DB_PATH = Path(__file__).resolve().parents[2] / "data" / "tasks.db"
 # 已完成/失败任务的保留时间窗口（天），防止 tasks 表无界增长
 _TASK_RETENTION_DAYS = 7
 
+# 每线程复用一条连接（agent 每步 save() 高频调用，避免反复建连）；
+# WAL + busy_timeout 解决多会话并发写导致的 `database is locked`。
+_thread_local = threading.local()
+
+_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS tasks ("
+    "  id TEXT PRIMARY KEY,"
+    "  conversation_id TEXT NOT NULL,"
+    "  status TEXT NOT NULL DEFAULT 'running',"
+    "  step INTEGER NOT NULL DEFAULT 0,"
+    "  total_tokens INTEGER NOT NULL DEFAULT 0,"
+    "  last_compaction_step INTEGER NOT NULL DEFAULT 0,"
+    "  tool_calls_count INTEGER NOT NULL DEFAULT 0,"
+    "  created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+    "  updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
+    ")"
+)
+
 
 def _get_db() -> sqlite3.Connection:
-    """Get task database connection and ensure schema exists."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS tasks ("
-        "  id TEXT PRIMARY KEY,"
-        "  conversation_id TEXT NOT NULL,"
-        "  status TEXT NOT NULL DEFAULT 'running',"
-        "  step INTEGER NOT NULL DEFAULT 0,"
-        "  total_tokens INTEGER NOT NULL DEFAULT 0,"
-        "  last_compaction_step INTEGER NOT NULL DEFAULT 0,"
-        "  tool_calls_count INTEGER NOT NULL DEFAULT 0,"
-        "  created_at TEXT NOT NULL DEFAULT (datetime('now')),"
-        "  updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
-        ")"
-    )
-    conn.commit()
+    """Get current thread's task database connection (reused, not reopened)."""
+    conn = getattr(_thread_local, "conn", None)
+    if conn is None:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(DB_PATH), timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute(_SCHEMA)
+        conn.commit()
+        _thread_local.conn = conn
     return conn
 
 
 def cleanup_old_tasks() -> None:
-    """清理超过保留时间的已完成/失败任务记录。"""
+    """清理超过保留时间的已完成/失败任务记录。
+
+    updated_at 统一存 UTC（ISO-8601 含时区偏移），SQLite datetime() 会正确换算，
+    与 datetime('now') 对齐比较，避免本地时区导致任务被提前删除。
+    """
     try:
         conn = _get_db()
-        try:
-            conn.execute(
-                "DELETE FROM tasks WHERE status IN ('completed', 'failed') "
-                "AND datetime(updated_at) < datetime('now', ?)",
-                (f"-{_TASK_RETENTION_DAYS} days",),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute(
+            "DELETE FROM tasks WHERE status IN ('completed', 'failed') "
+            "AND datetime(updated_at) < datetime('now', ?)",
+            (f"-{_TASK_RETENTION_DAYS} days",),
+        )
+        conn.commit()
     except Exception as e:
         logger.warning("Failed to cleanup old tasks: %s", e)
 
@@ -84,32 +97,30 @@ class TaskState:
         self.total_tokens = total_tokens
         self.last_compaction_step = last_compaction_step
         self.tool_calls_count = tool_calls_count
-        self.created_at = datetime.now().isoformat()
-        self.updated_at = datetime.now().isoformat()
+        # 统一存 UTC（与 SQLite datetime('now') 同为 UTC，清理比较不再受本地时区影响）
+        self.created_at = datetime.now(timezone.utc).isoformat()
+        self.updated_at = datetime.now(timezone.utc).isoformat()
 
     def save(self):
         """Persist task state to SQLite."""
         conn = _get_db()
-        try:
-            now = datetime.now().isoformat()
-            conn.execute(
-                "INSERT INTO tasks (id, conversation_id, status, step, total_tokens, "
-                "last_compaction_step, tool_calls_count, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET "
-                "status=excluded.status, step=excluded.step, total_tokens=excluded.total_tokens, "
-                "last_compaction_step=excluded.last_compaction_step, "
-                "tool_calls_count=excluded.tool_calls_count, updated_at=excluded.updated_at",
-                (
-                    self.task_id, self.conversation_id, self.status, self.step,
-                    self.total_tokens, self.last_compaction_step, self.tool_calls_count,
-                    self.created_at, now,
-                ),
-            )
-            conn.commit()
-            self.updated_at = now
-        finally:
-            conn.close()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO tasks (id, conversation_id, status, step, total_tokens, "
+            "last_compaction_step, tool_calls_count, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "status=excluded.status, step=excluded.step, total_tokens=excluded.total_tokens, "
+            "last_compaction_step=excluded.last_compaction_step, "
+            "tool_calls_count=excluded.tool_calls_count, updated_at=excluded.updated_at",
+            (
+                self.task_id, self.conversation_id, self.status, self.step,
+                self.total_tokens, self.last_compaction_step, self.tool_calls_count,
+                self.created_at, now,
+            ),
+        )
+        conn.commit()
+        self.updated_at = now
 
     def increment_step(self):
         """Increment the step counter and persist."""
@@ -119,6 +130,11 @@ class TaskState:
     def add_tokens(self, count: int):
         """Add token count and persist."""
         self.total_tokens += count
+        self.save()
+
+    def increment_tool_calls(self, count: int = 1):
+        """Increment the tool-call counter (by tool executions per round) and persist."""
+        self.tool_calls_count += count
         self.save()
 
     def record_compaction(self):
@@ -152,40 +168,34 @@ class TaskState:
     def load(cls, task_id: str) -> Optional["TaskState"]:
         """Load a task state from SQLite."""
         conn = _get_db()
-        try:
-            row = conn.execute(
-                "SELECT id, conversation_id, status, step, total_tokens, "
-                "last_compaction_step, tool_calls_count, created_at "
-                "FROM tasks WHERE id = ?", (task_id,)
-            ).fetchone()
-            if not row:
-                return None
-            return cls(
-                task_id=row[0], conversation_id=row[1], status=row[2],
-                step=row[3], total_tokens=row[4], last_compaction_step=row[5],
-                tool_calls_count=row[6],
-            )
-        finally:
-            conn.close()
+        row = conn.execute(
+            "SELECT id, conversation_id, status, step, total_tokens, "
+            "last_compaction_step, tool_calls_count, created_at "
+            "FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return cls(
+            task_id=row[0], conversation_id=row[1], status=row[2],
+            step=row[3], total_tokens=row[4], last_compaction_step=row[5],
+            tool_calls_count=row[6],
+        )
 
     @classmethod
     def list_by_conversation(cls, conversation_id: str) -> list["TaskState"]:
         """List all tasks for a conversation, newest first."""
         conn = _get_db()
-        try:
-            rows = conn.execute(
-                "SELECT id, conversation_id, status, step, total_tokens, "
-                "last_compaction_step, tool_calls_count, created_at "
-                "FROM tasks WHERE conversation_id = ? ORDER BY created_at DESC",
-                (conversation_id,),
-            ).fetchall()
-            return [
-                cls(
-                    task_id=r[0], conversation_id=r[1], status=r[2],
-                    step=r[3], total_tokens=r[4], last_compaction_step=r[5],
-                    tool_calls_count=r[6],
-                )
-                for r in rows
-            ]
-        finally:
-            conn.close()
+        rows = conn.execute(
+            "SELECT id, conversation_id, status, step, total_tokens, "
+            "last_compaction_step, tool_calls_count, created_at "
+            "FROM tasks WHERE conversation_id = ? ORDER BY created_at DESC",
+            (conversation_id,),
+        ).fetchall()
+        return [
+            cls(
+                task_id=r[0], conversation_id=r[1], status=r[2],
+                step=r[3], total_tokens=r[4], last_compaction_step=r[5],
+                tool_calls_count=r[6],
+            )
+            for r in rows
+        ]
