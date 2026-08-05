@@ -135,7 +135,34 @@ function handleUndo(index: number) {
   }
 }
 
-function handleMessageDelete(messageId: string) { /* not implemented */ }
+function handleMessageDelete(messageId: string) {
+  if (agent.loading) agent.cancel()
+  agent.deleteMessage(messageId)
+}
+
+const copiedId = ref<string | null>(null)
+
+async function handleCopy(messageId: string, text: string) {
+  if (!text) return
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    copiedId.value = messageId
+    setTimeout(() => { if (copiedId.value === messageId) copiedId.value = null }, 1500)
+  } catch (e) {
+    console.error('Copy failed:', e)
+  }
+}
 </script>
 
 <template>
@@ -224,10 +251,16 @@ function handleMessageDelete(messageId: string) { /* not implemented */ }
               <div class="message-footer">
                 <span class="time">{{ msg.timestamp.toLocaleTimeString() }}</span>
                 <div class="message-actions">
-                  <button v-if="msg.role === 'user'" class="icon-btn" @click="handleUndo(idx)" title="Undo">
+                  <div class="btn-wrapper">
+                    <button class="icon-btn" @click="handleCopy(msg.id, msg.content)" title="复制">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    </button>
+                    <span v-if="copiedId === msg.id" class="copy-toast">复制成功</span>
+                  </div>
+                  <button v-if="msg.role === 'user'" class="icon-btn" @click="handleUndo(idx)" title="撤销到此处">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
                   </button>
-                  <button class="icon-btn delete-btn" @click="handleMessageDelete(msg.id)" title="Delete">
+                  <button class="icon-btn delete-btn" @click="handleMessageDelete(msg.id)" title="删除消息">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                   </button>
                 </div>
@@ -432,9 +465,34 @@ function handleMessageDelete(messageId: string) { /* not implemented */ }
 .time { color: var(--text-secondary); opacity: 0.7; }
 .user .time { color: rgba(255,255,255,0.6); }
 .message-actions { display: flex; gap: 6px; align-items: center; }
+.btn-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+.copy-toast {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 4px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: 11px;
+  background: var(--text);
+  color: var(--bg);
+  padding: 2px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+  animation: fadeInOut 1.5s ease-in-out;
+}
+@keyframes fadeInOut {
+  0% { opacity: 0; transform: translateX(-50%) translateY(4px); }
+  15% { opacity: 1; transform: translateX(-50%) translateY(0); }
+  85% { opacity: 1; transform: translateX(-50%) translateY(0); }
+  100% { opacity: 0; transform: translateX(-50%) translateY(-4px); }
+}
 .icon-btn { width: 28px; height: 28px; border-radius: 6px; border: none; background: transparent; color: inherit; opacity: 0.5; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
 .icon-btn:hover { opacity: 1; background: rgba(255,255,255,0.1); }
 .user .icon-btn:hover { background: rgba(255,255,255,0.2); }
+.delete-btn:hover { color: #ef4444 !important; }
 .btn-danger { background: #ef4444; color: #fff; border: none; border-radius: var(--radius); padding: 6px 12px; font-size: 13px; cursor: pointer; }
 .btn-danger:hover { background: #dc2626; }
 .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }

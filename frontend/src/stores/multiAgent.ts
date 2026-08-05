@@ -4,6 +4,7 @@ import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError,
 import {
   sendMultiAgentStream,
   deleteConversation as apiDeleteConversation,
+  deleteMessage as apiDeleteMessage,
   listConversations,
   getConversation,
   renameConversation as apiRenameConversation,
@@ -186,6 +187,17 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           if (event.title) { session.conversationTitle = event.title; loadConversations() }
           if (event.answer) assistantMsg.content = event.answer
           else if (event.content) assistantMsg.content = event.content
+          // 回填服务器生成的消息 id，保证删除/撤销能命中真实消息
+          if (event.assistant_msg_id) assistantMsg.id = event.assistant_msg_id
+          if (event.user_msg_id) {
+            for (let i = session.messages.length - 1; i >= 0; i--) {
+              const m = session.messages[i]
+              if (m.role === 'user' && m.id !== event.user_msg_id) {
+                m.id = event.user_msg_id
+                break
+              }
+            }
+          }
           // 兜底：直播事件缺失时用后端快照回填 agent 面板（如重连/丢事件）
           if (Object.keys(agentsMap).length === 0 && event.agents?.length) {
             assistantMsg.agents = event.agents
@@ -220,10 +232,33 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
   }
 
-  function undoMessage(index: number) {
+  // 撤销到指定索引：本地截断 + 尝试同步后端删除（已落库的消息）
+  async function undoMessage(index: number) {
     if (activeSessionId.value) {
       const s = sessions.value[activeSessionId.value]
-      if (s) s.messages = s.messages.slice(0, index)
+      if (!s) return
+      const removed = s.messages.slice(index)
+      if (s.conversationId) {
+        for (const m of removed) {
+          try { await apiDeleteMessage(s.conversationId, m.id) } catch (e) { console.error('Failed to sync undo:', e) }
+        }
+      }
+      s.messages = s.messages.slice(0, index)
+    }
+  }
+
+  // 删除单条消息：先同步后端（存在会话时），再移除本地
+  async function deleteMessage(messageId: string) {
+    if (activeSessionId.value) {
+      const s = sessions.value[activeSessionId.value]
+      if (s?.conversationId) {
+        try {
+          await apiDeleteMessage(s.conversationId, messageId)
+        } catch (e) {
+          console.error('Failed to delete message from server:', e)
+        }
+      }
+      if (s) s.messages = s.messages.filter(m => m.id !== messageId)
     }
   }
 
@@ -240,7 +275,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   return {
     sessions, activeSessionId, conversations, routingStatus, selectedModel, useVectorDb,
     messages, conversationId, conversationTitle, loading, queuePosition,
-    send, cancel, clear, undoMessage, deleteConversation,
+    send, cancel, clear, undoMessage, deleteMessage, deleteConversation,
     loadConversations, loadConversation, newChat, renameConversation,
   }
 })

@@ -113,3 +113,13 @@ export async function deleteConversation(id: string): Promise<void> {
   const res = await fetchWithTimeout(`${BASE}/conversations/${id}?conv_type=${CONV_TYPE}`, { method: 'DELETE' }, 0)
   if (!res.ok) throw new Error('Failed to delete conversation')
 }
+
+export async function deleteMessage(conversationId: string, messageId: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}/messages/${messageId}`, {
+    method: 'DELETE',
+  }, 0)
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Delete message error: ${err || res.statusText}`)
+  }
+}

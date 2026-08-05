@@ -249,6 +249,8 @@ export interface MultiAgentSSEEvent {
   error_type?: string
   queue_position?: number
   agents?: AgentStreamData[]
+  user_msg_id?: string
+  assistant_msg_id?: string
 }
 
 export interface MultiAgentChatRequest {
