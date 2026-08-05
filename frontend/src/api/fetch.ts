@@ -1,9 +1,14 @@
-import { getUserId } from './auth'
+import { getUserId, getAuthToken, ensureAuth } from './auth'
 
-export function addAuthHeaders(headers?: HeadersInit): Headers {
+export async function addAuthHeaders(headers?: HeadersInit): Promise<Headers> {
+  await ensureAuth()
   const h = new Headers(headers || {})
   if (!h.has('X-User-Id')) {
     h.set('X-User-Id', getUserId())
+  }
+  const token = getAuthToken()
+  if (token && !h.has('X-Auth-Token')) {
+    h.set('X-Auth-Token', token)
   }
   return h
 }
@@ -37,7 +42,8 @@ export async function fetchWithTimeout(
   }
 
   try {
-    return await fetch(url, { ...options, headers: addAuthHeaders(options.headers), signal })
+    const headers = await addAuthHeaders(options.headers)
+    return await fetch(url, { ...options, headers, signal })
   } finally {
     if (timer) clearTimeout(timer)
   }

@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import json
 import logging
 import time as tmod
 import uuid
@@ -283,47 +284,103 @@ class SupervisorAgent(BaseAgent):
         return await self._llm_decompose(question, available_agents)
 
     async def _llm_decompose(self, question: str, available: list[str]) -> list[dict]:
-        """使用 LLM 判断如何分解任务。"""
+        """使用 LLM 判断如何分解任务。
+
+        - 输出先做 JSON 解析 + schema 校验（agent 必须在白名单且可用、question 非空）
+        - 解析/校验失败时带错误信息与格式样例做一次 few-shot 修复重试
+        - 仍失败才回退 rag（记录原因，便于排查路由漂移）
+        """
         routable = [a for a in available if a in self.ROUTABLE_AGENTS] or ["rag"]
-        start = tmod.time()
-        try:
+
+        async def _request(messages: list[dict]) -> tuple[str, dict]:
             response = await litellm.acompletion(
                 model=self._model,
                 api_key=self._api_key,
                 api_base=self._api_base,
-                messages=[
-                    {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
-                    {"role": "user", "content": f"可用的 Agent: {', '.join(routable)}\n\n用户问题: {question}"},
-                ],
+                messages=messages,
                 max_tokens=512,
                 temperature=0.1,
             )
-            dur = (tmod.time() - start) * 1000
             usage = getattr(response, "usage", None)
-            pt = getattr(usage, "prompt_tokens", 0) if usage else 0
-            ct = getattr(usage, "completion_tokens", 0) if usage else 0
-            record_model_call(self._model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
+            usage_dict = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
+                "completion_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+            }
+            return response.choices[0].message.content, usage_dict
 
-            text = response.choices[0].message.content.strip()
-            # 移除可能的 markdown 代码块标记
-            text = text.replace("```json", "").replace("```", "").strip()
-            subtasks = __import__("json").loads(text)
+        start = tmod.time()
+        attempts = []
+        for attempt in range(2):
+            try:
+                if attempt == 0:
+                    messages = [
+                        {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"可用的 Agent: {', '.join(routable)}\n\n用户问题: {question}"},
+                    ]
+                else:
+                    # few-shot 修复：带上一次的错误与合法格式样例
+                    messages = [
+                        {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"可用的 Agent: {', '.join(routable)}\n\n用户问题: {question}"},
+                        {
+                            "role": "assistant",
+                            "content": "抱歉，我需要先输出子任务分解。",
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                "你上一次的输出无法解析，原因如下：\n"
+                                f"{attempts[-1]}\n\n"
+                                "请严格按照以下 JSON 数组格式重新输出（不要 markdown 代码块标记），"
+                                "且 agent 字段只能取 " + ", ".join(routable) + "：\n"
+                                '[\n  {"agent": "rag", "question": "第一个子任务的问题描述"},\n'
+                                '  {"agent": "web_search", "question": "第二个子任务的问题描述"}\n]\n'
+                            ),
+                        },
+                    ]
+                text, usage = await _request(messages)
+                if attempt == 0:
+                    dur = (tmod.time() - start) * 1000
+                    record_model_call(
+                        self._model,
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        completion_tokens=usage.get("completion_tokens", 0),
+                        duration_ms=dur,
+                    )
+                text = text.strip()
+                text = text.replace("```json", "").replace("```", "").strip()
+                subtasks = json.loads(text)
+                validated = self._validate_subtasks(subtasks, routable)
+                if validated:
+                    return validated
+                attempts.append("schema 校验未通过：返回了空/非法的子任务列表")
+            except Exception as e:  # noqa: BLE001
+                attempts.append(f"{type(e).__name__}: {e}")
 
-            # 验证格式（白名单过滤，防止路由到 supervisor 自身）
-            validated = []
-            for st in subtasks:
-                if isinstance(st, dict) and "agent" in st and "question" in st:
-                    if st["agent"] in self.ROUTABLE_AGENTS and st["agent"] in routable:
-                        validated.append(st)
-
-            if validated:
-                return validated
-
-        except Exception as e:
-            logger.warning("LLM decomposition failed: %s, falling back to rag", e)
-
-        # Fallback
+        logger.warning(
+            "LLM decomposition failed after %d attempt(s): %s; falling back to rag",
+            len(attempts), attempts[-1] if attempts else "unknown",
+        )
         return [{"agent": "rag", "question": question}]
+
+    @staticmethod
+    def _validate_subtasks(data, routable: list[str]) -> list[dict]:
+        """校验并规范化 LLM 分解输出，返回合法子任务列表（白名单过滤 + 最多 3 个）。"""
+        if not isinstance(data, list):
+            return []
+        validated: list[dict] = []
+        for st in data:
+            if not isinstance(st, dict):
+                continue
+            agent = st.get("agent")
+            q = st.get("question")
+            if not isinstance(agent, str) or not isinstance(q, str) or not q.strip():
+                continue
+            if agent in routable:
+                validated.append({"agent": agent, "question": q.strip()})
+            if len(validated) >= 3:
+                break
+        return validated
 
     # ═══════════════════════════════════════════════════════════════
     #  并行执行

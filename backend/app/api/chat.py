@@ -44,8 +44,8 @@ def _get_user_id(request: Request) -> str:
     uid = request.headers.get("X-User-Id", "")
     return uid.strip() if uid.strip() else _DEFAULT_USER_ID
 
-# --- 并发控制：限制同时运行的 Agent 任务数 ---
-MAX_CONCURRENT_AGENTS = 2
+# --- 并发控制：限制同时运行的 Agent 任务数（可经 .env 的 MAX_CONCURRENT_AGENTS 调整）---
+MAX_CONCURRENT_AGENTS = settings.max_concurrent_agents
 _agent_semaphore: asyncio.Semaphore | None = None
 _queue_counter = 0  # 正在等待 slot 的请求数
 

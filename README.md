@@ -22,7 +22,7 @@
 | **会话持久化** | IndexedDB 本地缓存 + 服务器 SQLite 双重持久化，页面刷新/SSE 中断不丢失消息 |
 | **会话管理系统** | 归一化会话库：用户/项目/工作区三级隔离、子会话树与 fork、上下文纪元、压缩基线持久化、消息撤销（revert）、AgentBus 任务自动登记为子会话 |
 | **错误重试机制** | 三层重试架构：litellm 内置重试 → AgentBus 事件循环自愈 → 前端自动重试倒计时 + 手动重试按钮 |
-| **并发控制** | 后端 Semaphore 限制同时运行的 Agent 任务数（默认 2），超出自动排队，前端实时显示排队/流式状态 |
+| **并发控制** | 后端全局 Semaphore 限制同时运行的 Agent 任务数（`MAX_CONCURRENT_AGENTS` 默认 4），超出自动排队，前端实时显示排队/流式状态；session.db 使用 SQLite 连接池（WAL + busy_timeout），避免高并发连接反复开关 |
 | **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如搜索、天气、生成文档），Agent 按需调用 |
 | **HTTP 客户端** | Agent 可直接发起 HTTP 请求测试 API 接口（GET/POST/PUT/DELETE），支持自定义 headers 和 body |
@@ -42,6 +42,10 @@
 | **长任务不截断** | 输出上限 `LLM_MAX_TOKENS`（默认 16384）可配置；系统提示强制长内容（>500 字）写入文件、回复只留摘要，避免单轮输出触发截断（对齐 OpenCode 长任务机制） |
 | **子代理超时分级** | 工具密集型子 Agent（如 code）使用更长等待（`SUB_AGENT_TIMEOUT_EXTENDED` 默认 300s）；子 Agent 仍活跃时自动宽限续期；失败时结构化回传已完成步骤 + 失败原因 + 建议 |
 | **上下文压缩** | 消息超阈值（自动 = 可用预算的 80%）时将旧消息压缩为锚定式结构化 checkpoint，保留最近 N 轮工具上下文 |
+| **共享记忆持久化** | Agent 记忆（短期事实/偏好）持久化到 `data/agent_memory.json`，set/delete/clear 即时落盘，重启不丢失 |
+| **SSRF 防护** | 所有出站 HTTP（`http_client` 插件、`tool_execute` 中的 curl/wget/ssh 等命令）经 `check_url`/`_ssrf_check_command` 校验，拦截内网/回环/链路本地/元数据地址及解析到它们的域名；`SSRF_ALLOW_INTERNAL=true` 可跳过（本地调试） |
+| **用户身份签名** | 可选 `AUTH_TOKEN_SECRET`：trust-on-first-use 注册 → 服务端仅存 HMAC 哈希 → 颁发签名 token（`base64(uid).base64(exp).hmac`）；中间件强制每个 `/api/*` 请求携带 `X-User-Id` + `X-Auth-Token`，未配置时全部关闭（默认本地行为） |
+| **多 Agent 工具链** | `code`/`web_search` 子 Agent 使用 LLM 工具调用循环（≤8 轮）+ 工作区文件系统工具（读写/编辑/搜索/执行），复用统一权限系统；外部路径经权限桥发事件并拒绝而非静默失败 |
 
 ---
 
@@ -376,6 +380,28 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 # TOOL_OUTPUT_PRUNE_MINIMUM_TOKENS=20000
 ```
 
+### 安全与系统
+
+```ini
+# ===== Security =====
+# 可选：启用签名身份校验（默认关闭）。设置后中间件强制每个 /api/* 请求携带 X-User-Id + X-Auth-Token
+# AUTH_TOKEN_SECRET=change-me-to-a-long-random-secret
+# 认证 token 有效期（秒，默认 2592000 = 30 天）
+# AUTH_TOKEN_TTL=2592000
+# 注册用户存储路径
+# AUTH_USERS_PATH=data/auth_users.json
+# SSRF 防护：设为 true 时跳过内网/回环校验（仅本地调试用，勿在生产开启）
+# SSRF_ALLOW_INTERNAL=true
+# 并发 Agent 上限（默认 4），与 session 协调器共享
+# MAX_CONCURRENT_AGENTS=4
+# Agent 记忆持久化路径
+# MEMORY_PERSIST_PATH=data/agent_memory.json
+# 工具审批超时（秒，默认 60）
+# PERMISSION_APPROVAL_TIMEOUT=60
+# 外部路径默认策略：ask / allow / deny
+# EXTERNAL_PATH_DEFAULT=ask
+```
+
 ### 切换 LLM 提供商
 
 | 提供商 | LLM_API_BASE | LLM_MODEL 示例 |
@@ -388,7 +414,7 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 
 ## 用户身份认证
 
-所有 API 请求通过 `X-User-Id` 请求头标识用户身份，未携带时后端默认使用 `"anonymous"`。
+默认（`AUTH_TOKEN_SECRET` 未设置）下，所有 API 请求通过 `X-User-Id` 请求头标识用户身份，未携带时后端默认使用 `"anonymous"`。
 
 ```javascript
 fetch("http://localhost:8000/api/chat/", {
@@ -401,13 +427,23 @@ fetch("http://localhost:8000/api/chat/", {
 })
 ```
 
+### 可选：签名身份校验（`AUTH_TOKEN_SECRET`）
+
+在 `.env` 设置 `AUTH_TOKEN_SECRET` 后启用可信身份签名，防止伪造用户 ID：
+
+1. **Trust-on-first-use 注册**：前端生成随机 `user_id` + `device_secret`，`POST /api/auth/register` 上报，服务端仅存 HMAC 哈希（不存明文密钥）
+2. **签发 token**：`POST /api/auth/token` 返回签名 token（`base64(uid).base64(exp).hmac(uid:exp:reg_hash)`），有效期 `auth_token_ttl`（默认 30 天）
+3. **强制校验**：`AuthMiddleware` 要求每个 `/api/*` 请求携带 `X-User-Id` + `X-Auth-Token`（跳过 `/api/auth/*`、非 `/api` 路径、OPTIONS），校验签名与过期时间
+
 | 文件 | 作用 |
 |------|------|
-| `frontend/src/api/auth.ts` | `getUserId()`/`setUserId()` — 读写 localStorage，默认 `"anonymous"` |
-| `frontend/src/api/fetch.ts` | `addAuthHeaders()` 自动注入 `X-User-Id`；`fetchWithTimeout` 封装自动带认证头 |
+| `backend/app/auth.py` | HMAC 哈希、token 签名/校验（`create_signed_token` / `verify_signed_token`）+ `AuthMiddleware`（未配置密钥时跳过） |
+| `backend/app/api/auth.py` | `POST /api/auth/register` + `POST /api/auth/token` 路由 |
+| `frontend/src/api/auth.ts` | `ensureAuth()` — 生成/读取 `user_id` + `device_secret`，自动注册并换取 token（`main.ts` 启动时调用） |
+| `frontend/src/api/fetch.ts` | `addAuthHeaders()` 自动注入 `X-User-Id` + `X-Auth-Token`；`fetchWithTimeout` 封装自动带认证头 |
 | `frontend/src/mobile/SettingsPanel.vue` | 手机端设置面板可查看/编辑用户身份 |
 
-后端通过 `_get_user_id(request)` 统一提取，接入 JWT/OAuth 后只需修改该函数，前端接口不变。
+后端通过 `_get_user_id(request)` 统一提取；启用签名校验后该函数同时验证 token，前端接口不变。
 
 ### 会话类型隔离
 
@@ -460,6 +496,9 @@ fetch("http://localhost:8000/api/chat/", {
 | GET | `/api/generated/download/{filename}` | 下载生成的文档（.docx/.pdf/.xlsx 等） |
 | DELETE | `/api/generated/{filename}` | 删除生成的文档 |
 | GET | `/api/monitor/stats` | 系统监控统计（请求量/模型调用/token 用量/耗时） |
+| POST | `/api/auth/register` | 注册设备身份（`user_id` + `device_secret`，仅存 HMAC 哈希） |
+| POST | `/api/auth/token` | 签发签名 token（需 `AUTH_TOKEN_SECRET`） |
+| GET | `/api/auth/status` | 查询是否启用签名校验（前端据此决定是否自动注册） |
 | GET | `/api/config/summarization` | 查看摘要模型配置 |
 | POST | `/api/config/summarization` | 运行时切换摘要模型 |
 
@@ -488,6 +527,10 @@ fetch("http://localhost:8000/api/chat/", {
 > 截断在 LLM 调用前发生，仅影响 prompt 传入的历史，不影响数据库中的完整记录。
 
 实现路径：`backend/app/api/chat.py` — `_load_conversation` / `_truncate_history` / `_save_conversation`，`backend/app/middleware/summarization.py` — `HierarchicalSummarizationMiddleware`
+
+### 共享记忆持久化（Memory）
+
+`MemoryManager`（`backend/app/agent/memory.py`）提供跨会话的短期记忆（Agent 主动记录的临时事实/偏好），未过期条目在 set/delete/clear 时即时写入 `settings.memory_persist_path`（默认 `data/agent_memory.json`），启动时重载，服务重启不丢失。`persist_path` 为构造函数注入，便于测试隔离。
 
 ---
 
@@ -642,7 +685,7 @@ const activeSessionId = ref<string | undefined>(undefined)
 
 ### 并发控制
 
-后端使用 `asyncio.Semaphore(2)` 限制同时运行的 Agent 任务数，防止多会话同时 streaming 导致资源争抢：
+后端使用全局信号量（`settings.max_concurrent_agents`，默认 4）限制同时运行的 Agent 任务数，防止多会话同时 streaming 导致资源争抢。该信号量由 session 协调器（`app/session/coordinator.py` 的 `global_semaphore`）与旧版 `_get_agent_semaphore()`（`app/api/chat.py`）共享，同一会话内仍严格串行执行：
 
 ```
 Session A 发消息 → 获取 slot #1 → 开始执行
@@ -663,12 +706,15 @@ Session A 完成 → slot #1 释放 → Session C 获得 slot
 
 | 配置 | 默认值 | 说明 |
 |------|--------|------|
-| `MAX_CONCURRENT_AGENTS` | 2 | 同时运行的最大 Agent 任务数 |
+| `MAX_CONCURRENT_AGENTS` | 4 | 同时运行的最大 Agent 任务数 |
+
+**session.db 连接池**：`app/session/db.py` 的 `_ConnectionPool` 维持固定连接（池大小 = `max(6, max_concurrent_agents + 2)`），`_get_db()` 借出、`close()` 归还；WAL 模式 + `busy_timeout=10000` 保证并发写安全。非默认路径的 DB 连接绕过池。
 
 状态 API：`GET /api/chat/stream/status` 返回 `{max_concurrent, active, queue_depth}`
 
 实现路径：
-- 后端：`backend/app/api/chat.py` — `chat_stream()` 中 `_get_agent_semaphore()` + `run_agent()` 的 `async with sem`
+- 后端：`backend/app/session/coordinator.py` — `global_semaphore`；`backend/app/api/chat.py` — `_get_agent_semaphore()` + `run_agent()` 的 `async with sem`
+- 连接池：`backend/app/session/db.py` — `_ConnectionPool._get_db()` / `close()`
 - 前端状态：`frontend/src/stores/chat.ts` — `SessionState.streamPhase` / `queuePosition`
 - 前端显示：`frontend/src/components/ChatHistory.vue`（Sidebar 标签）、`frontend/src/views/ChatView.vue`（Header 标签）
 
@@ -958,7 +1004,7 @@ Agent 创建的文档（通过 docx-generator、pdf-generator、excel-generator�
 | 支持方法 | GET / POST / PUT / DELETE / PATCH / HEAD / OPTIONS |
 | 自定义 Headers | Authorization、Content-Type 等任意 header |
 | 请求体 | JSON Body、Form 表单（`application/x-www-form-urlencoded`） |
-| 目标地址 | 本地接口（`localhost`）、外部 API 均可 |
+| 目标地址 | 本地接口（`localhost`）、外部 API 均可（受 SSRF 防护限制，见下） |
 | SSL 证书 | 跳过验证，支持自签名证书的本地/开发环境 |
 
 | 限制 | 说明 |
@@ -968,6 +1014,7 @@ Agent 创建的文档（通过 docx-generator、pdf-generator、excel-generator�
 | 不支持流式响应 | SSE / chunked 响应一次性读取 |
 | 不支持 WebSocket | urllib 不支持 |
 | 超时 | 默认 30 秒，可调整 |
+| **SSRF 防护** | 所有出站请求经 `check_url` 校验（`app/utils/ssrf.py`）：拦截私网/回环/链路本地/元数据地址（含 `169.254.169.254`）及其解析目标；`tool_execute` 中 curl/wget/ssh/scp/rsync/ping 等网络命令同样校验。本地调试可用 `SSRF_ALLOW_INTERNAL=true` 绕过 |
 
 在聊天框中直接输入需求，Agent 会自动判断需要调用哪些工具来完成你的请求。
 
@@ -1019,6 +1066,10 @@ backend/skills/
 | **系统敏感目录** | 永远拒绝，不弹窗 | `C:\Windows\`, `/etc` |
 | **白名单路径** | 静默允许 | `permissions.json` 中记录的路径 |
 | **其他外盘路径** | 弹窗询问 | `D:\projects\` |
+
+**工作目录配置**：可写工作区由前端「工作目录」面板配置（持久化到 `backend/data/runtime_workspaces.json`，运行时生效、无需重启）。路径不落在任何工作区时按 `EXTERNAL_PATH_DEFAULT`（默认 `ask`）处理，审批等待超过 `PERMISSION_APPROVAL_TIMEOUT`（默认 60s）自动拒绝。
+
+**子 Agent 权限桥**：多 Agent 场景下 `code`/`web_search` 子 Agent 复用同一 `PermissionManager`；外部路径触发 `NeedsPermission` 时发出 `permission_request` 事件到事件队列并返回明确的拒绝信息给 LLM（多 Agent UI 无审批面板，外部路径实际拒绝、工作区内写入照常放行），不会阻塞等待。
 
 ### 交互流程
 
@@ -1380,6 +1431,9 @@ backend/app/config.py    → 配置项（读 .env）
 ```
 backend/app/agent/graph.py    ← ⭐ 最核心：LangGraph 工作流（retrieve → rerank → generate）
 backend/app/agent/tools.py    → 工具定义 + 系统 prompt
+backend/app/agent/memory.py   → 共享记忆（持久化到 data/agent_memory.json）
+backend/app/agent/sub_tools.py → 子 Agent（code/web_search）工具链 + 权限桥
+backend/app/agent/supervisor.py → 多 Agent 路由编排（whitelist 校验 + 子任务超时）
 ```
 
 `graph.py` 是整个大脑，LLM 如何调用、工具如何执行、流式响应如何产生，全在这里。
@@ -1435,7 +1489,7 @@ frontend/src/views/MobileView.vue  → 手机端聊天界面
 frontend/src/api/chat.ts           → 聊天 API 调用 + conv_type 过滤
 frontend/src/api/multiAgent.ts     → 多 Agent API（sendMultiAgentStream + conv_type）
 frontend/src/api/session-cache.ts  → IndexedDB 会话缓存（双重持久化）
-frontend/src/api/auth.ts           → 用户身份工具（getUserId/setUserId）
+frontend/src/api/auth.ts           → 用户身份工具（ensureAuth/注册/换 token，可选签名校验）
 frontend/src/components/           → 各组件（Sidebar、ChatMessage、MultiAgentResponse 等）
 frontend/src/types/index.ts        → 类型定义（Message、ChatError、SSEEvent、MultiAgentSSEEvent）
 ```

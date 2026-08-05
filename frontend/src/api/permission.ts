@@ -8,7 +8,7 @@ export async function fetchPendingRequests(): Promise<{ pending: Array<{
   id: string; path: string; operation: string; tool_name: string;
   tool_args: Record<string, unknown>; created_at: string
 }> }> {
-  const res = await fetch(BASE + '/pending', { headers: addAuthHeaders() })
+  const res = await fetch(BASE + '/pending', { headers: await addAuthHeaders() })
   if (!res.ok) throw new Error('Failed to fetch pending requests')
   return res.json()
 }
@@ -17,7 +17,7 @@ export async function fetchPendingRequests(): Promise<{ pending: Array<{
 export async function respondToRequest(requestId: string, decision: string, remember: boolean = false): Promise<void> {
   const res = await fetch(BASE + '/request/' + encodeURIComponent(requestId) + '/respond', {
     method: 'POST',
-    headers: addAuthHeaders({ 'Content-Type': 'application/json' }),
+    headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ decision, remember }),
   })
   if (!res.ok) {
@@ -28,7 +28,7 @@ export async function respondToRequest(requestId: string, decision: string, reme
 
 // 获取所有可写工作区（主工作区 + 额外工作区）
 export async function fetchWorkspaces(): Promise<{ workspaces: string[] }> {
-  const res = await fetch(BASE + '/workspaces', { headers: addAuthHeaders() })
+  const res = await fetch(BASE + '/workspaces', { headers: await addAuthHeaders() })
   if (!res.ok) throw new Error('Failed to fetch workspaces')
   return res.json()
 }
@@ -37,7 +37,7 @@ export async function fetchWorkspaces(): Promise<{ workspaces: string[] }> {
 export async function addWorkspace(path: string): Promise<{ status: string; path: string; workspaces: string[] }> {
   const res = await fetch(BASE + '/workspaces', {
     method: 'POST',
-    headers: addAuthHeaders({ 'Content-Type': 'application/json' }),
+    headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ path }),
   })
   if (!res.ok) {
@@ -51,7 +51,7 @@ export async function addWorkspace(path: string): Promise<{ status: string; path
 export async function removeWorkspace(path: string): Promise<{ status: string; workspaces: string[] }> {
   const res = await fetch(BASE + '/workspaces?path=' + encodeURIComponent(path), {
     method: 'DELETE',
-    headers: addAuthHeaders(),
+    headers: await addAuthHeaders(),
   })
   if (!res.ok) {
     const err = await res.text()

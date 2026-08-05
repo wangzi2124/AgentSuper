@@ -14,11 +14,10 @@ import json
 import time as tmod
 from typing import AsyncIterator, Optional
 
-import litellm
-
 from app.agent.base import BaseAgent, AgentMessage
 from app.agent.memory import MemoryManager
 from app.agent.stream_events import agent_meta, emit, step_event
+from app.agent.sub_tools import tool_loop_chat
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -109,7 +108,10 @@ class WebSearchAgent(BaseAgent):
                     "agent_id": self._id,
                     "step": step_event("synthesize", "合成回答", "running"),
                 })
-                answer = await self._synthesize(question, search_results, memory_context)
+                answer = await self._synthesize(
+                    question, search_results, memory_context,
+                    event_queue=event_queue, agent_id=self._id,
+                )
                 emit(event_queue, {
                     "type": "agent_step",
                     "agent_id": self._id,
@@ -292,8 +294,10 @@ class WebSearchAgent(BaseAgent):
         question: str,
         search_results: list[dict],
         memory_context: str = "",
+        event_queue=None,
+        agent_id: str = "",
     ) -> str:
-        """使用 LLM 将搜索结果合成为回答。"""
+        """使用 LLM 将搜索结果合成为回答（带文件工具，可按需核对工作区内容）。"""
         if not search_results:
             return "抱歉，我没有找到相关的信息。"
 
@@ -308,7 +312,8 @@ class WebSearchAgent(BaseAgent):
 - 用自然的语言组织信息，不要直接罗列搜索结果
 - 在回答末尾列出信息来源编号
 - 如果搜索结果不足，诚实说明
-- 使用中文回答"""
+- 使用中文回答
+- 必要时可用文件工具读写工作区文件（如保存搜索结果、核对项目内容）"""
 
         user_prompt = f"""用户问题: {question}
 
@@ -320,18 +325,12 @@ class WebSearchAgent(BaseAgent):
 请基于以上信息回答用户问题。"""
 
         try:
-            response = await litellm.acompletion(
-                model=self._model,
-                api_key=self._api_key,
-                api_base=self._api_base,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=1024,
-                temperature=0.3,
+            return await tool_loop_chat(
+                system_prompt=system_prompt,
+                user_message=user_prompt,
+                event_queue=event_queue,
+                agent_id=agent_id,
             )
-            return response.choices[0].message.content.strip()
         except Exception as e:
             logger.error("LLM synthesis failed: %s", e)
             # 回退：直接返回搜索结果摘要

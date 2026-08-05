@@ -395,6 +395,38 @@ def _check_command_blacklist(command: str) -> None:
         i += 1
 
 
+# 出站网络命令：对其 URL 参数做 SSRF 校验（curl/wget 任意 URL、ssh/scp/rsync 目标主机）
+_NET_COMMANDS = frozenset({
+    "curl", "wget", "ssh", "scp", "rsync", "ping", "nslookup", "dig", "traceroute",
+})
+
+
+def _ssrf_check_command(command: str) -> None:
+    """对出站网络命令做 SSRF 校验：URL 目标为内网地址时拦截。"""
+    from app.utils.ssrf import check_url, _host_is_internal
+
+    parts = shlex.split(command)
+    if not parts or parts[0].lower() not in _NET_COMMANDS:
+        return
+    for tok in parts[1:]:
+        t = tok.lower()
+        if "://" in t:
+            check_url(tok)
+            continue
+        if t.startswith(("-", "=")):
+            continue
+        # 裸目标（curl 127.0.0.1 / curl localhost:8000 / ssh 10.0.0.1）
+        candidate = t
+        if ":" in t and not t.endswith(":"):
+            candidate = t.rsplit(":", 1)[0]
+        if candidate in ("", "-"):
+            continue
+        if _host_is_internal(candidate):
+            raise ValueError(
+                f"Command targets internal address '{tok}' which is blocked by SSRF protection"
+            )
+
+
 def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
     """执行shell命令并返回标准输出、标准错误和退出码。"""
     timeout = _coerce_int(timeout, 300)
@@ -404,6 +436,7 @@ def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
         timeout = 5
     _check_command_allowed(command)
     _check_command_blacklist(command)
+    _ssrf_check_command(command)
     resolved_cwd = _resolve(work_dir)
     mgr = get_perm_mgr()
     decision = mgr.check(str(resolved_cwd), "execute")

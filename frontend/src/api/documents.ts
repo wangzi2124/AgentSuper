@@ -1,6 +1,6 @@
 import type { DocumentListResponse, DocumentResponse, DeleteResponse, UploadResponse, TaskProgress } from '../types'
 import { fetchWithTimeout } from './fetch'
-import { getUserId } from './auth'
+import { getUserId, getAuthToken, ensureAuth } from './auth'
 
 // 文档 API 基础路径
 const BASE = '/api/documents'
@@ -24,45 +24,49 @@ export function uploadDocument(
     const form = new FormData()
     form.append('file', file)
 
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', BASE + '/upload')
-    xhr.setRequestHeader('X-User-Id', getUserId())
+    void ensureAuth().then(() => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', BASE + '/upload')
+      xhr.setRequestHeader('X-User-Id', getUserId())
+      const token = getAuthToken()
+      if (token) xhr.setRequestHeader('X-Auth-Token', token)
 
-    const onAbort = () => {
-      xhr.abort()
-      reject(new DOMException('Aborted', 'AbortError'))
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable && onProgress) {
-        onProgress(Math.round((e.loaded / e.total) * 4), `Uploading to server (${Math.round(e.loaded / e.total * 100)}%)`)
+      const onAbort = () => {
+        xhr.abort()
+        reject(new DOMException('Aborted', 'AbortError'))
       }
-    }
+      signal?.addEventListener('abort', onAbort, { once: true })
 
-    xhr.onload = async () => {
-      signal?.removeEventListener('abort', onAbort)
-      if (xhr.status >= 200 && xhr.status < 300) {
-        const { task_id } = JSON.parse(xhr.responseText) as UploadResponse
-        onProgress?.(5, 'Queued for processing')
-
-        try {
-          const doc = await pollTask(task_id, onProgress, signal)
-          resolve(doc)
-        } catch (e) {
-          reject(e)
-        }
-      } else {
-        try {
-          reject(new Error(`Upload failed: ${JSON.parse(xhr.responseText).detail ?? xhr.responseText}`))
-        } catch {
-          reject(new Error(`Upload failed: ${xhr.responseText}`))
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress(Math.round((e.loaded / e.total) * 4), `Uploading to server (${Math.round(e.loaded / e.total * 100)}%)`)
         }
       }
-    }
 
-    xhr.onerror = () => reject(new Error('Upload failed: network error'))
-    xhr.send(form)
+      xhr.onload = async () => {
+        signal?.removeEventListener('abort', onAbort)
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const { task_id } = JSON.parse(xhr.responseText) as UploadResponse
+          onProgress?.(5, 'Queued for processing')
+
+          try {
+            const doc = await pollTask(task_id, onProgress, signal)
+            resolve(doc)
+          } catch (e) {
+            reject(e)
+          }
+        } else {
+          try {
+            reject(new Error(`Upload failed: ${JSON.parse(xhr.responseText).detail ?? xhr.responseText}`))
+          } catch {
+            reject(new Error(`Upload failed: ${xhr.responseText}`))
+          }
+        }
+      }
+
+      xhr.onerror = () => reject(new Error('Upload failed: network error'))
+      xhr.send(form)
+    }).catch((e) => reject(e))
   })
 }
 

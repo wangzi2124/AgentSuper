@@ -13,10 +13,14 @@
 """
 
 import asyncio
+import json
 import time
 import logging
+from pathlib import Path
 from typing import Any, Optional
 from dataclasses import dataclass, field
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +55,73 @@ class MemoryManager:
         mm.cleanup()
     """
 
-    def __init__(self, default_ttl: float = _DEFAULT_TTL):
+    def __init__(self, default_ttl: float = _DEFAULT_TTL, persist_path: Optional[str] = None):
         self._store: dict[str, MemoryEntry] = {}
         self._default_ttl = default_ttl
         self._lock = asyncio.Lock()
+        # 持久化：默认使用 settings.memory_persist_path（空串/None 表示不落盘）
+        self._persist_path = persist_path if persist_path is not None else settings.memory_persist_path
+        self._load()
 
     def _ns_key(self, key: str, namespace: str = "") -> str:
         return f"{namespace}:{key}" if namespace else key
+
+    def _load(self) -> None:
+        """启动时从磁盘加载未过期记忆。"""
+        if not self._persist_path:
+            return
+        try:
+            p = Path(self._persist_path)
+            if not p.exists():
+                return
+            data = json.loads(p.read_text(encoding="utf-8"))
+            now = time.time()
+            for item in data.get("entries", []) if isinstance(data, dict) else []:
+                try:
+                    created = float(item.get("created_at", now))
+                    ttl = float(item.get("ttl", self._default_ttl))
+                    if now - created > ttl:
+                        continue
+                    self._store[self._ns_key(item["key"], item.get("namespace", ""))] = MemoryEntry(
+                        key=item["key"],
+                        value=item.get("value"),
+                        ttl=ttl,
+                        tags=item.get("tags") or [],
+                        namespace=item.get("namespace", ""),
+                        created_at=created,
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+            logger.info("MemoryManager loaded %d entries from %s", len(self._store), p)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("MemoryManager failed to load persistence: %s", e)
+
+    def _persist(self) -> None:
+        """把未过期记忆落盘（值不可序列化时降级为 str）。"""
+        if not self._persist_path:
+            return
+        try:
+            now = time.time()
+            entries = []
+            for e in self._store.values():
+                if e.expired:
+                    continue
+                entries.append({
+                    "key": e.key,
+                    "value": e.value,
+                    "ttl": e.ttl,
+                    "tags": e.tags,
+                    "namespace": e.namespace,
+                    "created_at": e.created_at,
+                })
+            p = Path(self._persist_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(
+                json.dumps({"version": 1, "entries": entries}, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("MemoryManager persist failed: %s", e)
 
     async def set(
         self,
@@ -85,6 +149,7 @@ class MemoryManager:
                 tags=tags or [],
                 namespace=namespace,
             )
+            self._persist()
 
     async def get(self, key: str, default: Any = None, namespace: str = "") -> Any:
         """读取一条记忆。已过期或不存在时返回 default。
@@ -107,7 +172,8 @@ class MemoryManager:
         """删除一条记忆。"""
         async with self._lock:
             full_key = self._ns_key(key, namespace)
-            self._store.pop(full_key, None)
+            if self._store.pop(full_key, None) is not None:
+                self._persist()
 
     async def get_by_tag(self, tag: str, namespace: str = "") -> dict[str, Any]:
         """获取所有带指定标签的未过期记忆。
@@ -159,11 +225,13 @@ class MemoryManager:
                 del self._store[k]
             if keys:
                 logger.debug("MemoryManager cleared namespace '%s' (%d entries)", namespace, len(keys))
+                self._persist()
 
     async def clear(self):
         """清空所有记忆。"""
         async with self._lock:
             self._store.clear()
+            self._persist()
 
     @property
     def size(self) -> int:

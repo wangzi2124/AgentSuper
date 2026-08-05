@@ -10,8 +10,11 @@ session / session_messages / message_parts / context_epoch / session_inputs。
 """
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Optional
+
+from app.config import settings
 
 DB_PATH = Path(__file__).resolve().parents[2] / "data" / "session.db"
 
@@ -120,17 +123,103 @@ CREATE INDEX IF NOT EXISTS idx_tasks_session ON session_tasks(session_id);
 """
 
 
+class _PooledConnection:
+    """sqlite3.Connection 的池化代理：close() 时归还连接池而非真正关闭。
+
+    说明：sqlite3.Connection 是 C 类型，不允许挂载任意属性（'no __dict__'），
+    因此用轻量代理承接 close() 语义；其余属性/方法经 __getattr__/__setattr__
+    全量委托给底层连接，对调用方透明（repository.py 无需改动）。
+    """
+
+    def __init__(self, conn: sqlite3.Connection, pool: Optional["_ConnectionPool"]):
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "_pool", pool)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_conn"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_conn"), name, value)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def close(self) -> None:
+        conn = object.__getattribute__(self, "_conn")
+        pool = object.__getattribute__(self, "_pool")
+        if pool is not None and pool.release(conn):
+            # 已归还池：同一代理再次 close() 将走真正关闭（防双重归还）
+            object.__setattr__(self, "_pool", None)
+            return
+        conn.close()
+
+
+class _ConnectionPool:
+    """session.db 连接池（WAL 模式，连接复用，避免每请求开关）。
+
+    - acquire() 有空闲连接则复用；否则新建（上限 max_size 个池化连接）。
+    - 达到上限时临时新建非池化连接，用完即真正关闭——不阻塞、不泄漏。
+    - release() 在池未满时回收；池满返回 False，由调用方真正关闭。
+    """
+
+    def __init__(self, max_size: int):
+        self._max = max_size
+        self._lock = threading.Lock()
+        self._idle: list[sqlite3.Connection] = []
+        self._created = 0
+
+    def acquire(self) -> sqlite3.Connection:
+        with self._lock:
+            if self._idle:
+                return _PooledConnection(self._idle.pop(), self)
+            if self._created < self._max:
+                self._created += 1
+                pooled = True
+            else:
+                pooled = False
+        return _PooledConnection(self._open(), self if pooled else None)
+
+    def release(self, conn: sqlite3.Connection) -> bool:
+        with self._lock:
+            if len(self._idle) >= self._max:
+                return False
+            self._idle.append(conn)
+            return True
+
+    def _open(self) -> sqlite3.Connection:
+        db_path = DB_PATH
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 10000")
+        conn.executescript(_SCHEMA)
+        conn.commit()
+        return conn
+
+
+# 池大小与并发上限联动（+2 余量），避免多 Agent 同时执行时连接耗尽重建
+_pool = _ConnectionPool(max(6, settings.max_concurrent_agents + 2))
+
+
 def _get_db(path: Optional[Path] = None) -> sqlite3.Connection:
-    """获取连接并初始化表结构（默认使用 session.db）。"""
-    db_path = path or DB_PATH
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.executescript(_SCHEMA)
-    conn.commit()
-    return conn
+    """获取连接并初始化表结构（默认使用 session.db，走连接池）。"""
+    if path is not None:
+        # 自定义路径不走池（rare：测试/迁移），保持独立连接
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.executescript(_SCHEMA)
+        conn.commit()
+        return conn
+    return _pool.acquire()
 
 
 def init_db() -> None:

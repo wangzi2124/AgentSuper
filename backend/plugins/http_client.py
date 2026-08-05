@@ -9,6 +9,8 @@ import urllib.request
 import urllib.parse
 import ssl
 
+from app.utils.ssrf import check_url
+
 PLUGIN_NAME = "http-client"
 PLUGIN_VERSION = "0.1.0"
 PLUGIN_DESCRIPTION = "Send HTTP requests to test APIs or fetch data from endpoints"
@@ -44,6 +46,12 @@ def tool_http_request(
     method = method.upper().strip()
     if method not in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
         return f"Error: Invalid HTTP method '{method}'. Must be one of: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"
+
+    # SSRF 防护：目标地址为内网/保留地址时直接拒绝
+    try:
+        check_url(url)
+    except ValueError as e:
+        return f"Error: {e}"
 
     # Parse headers
     req_headers = {"User-Agent": "KB-Agent-HTTP-Client/1.0"}

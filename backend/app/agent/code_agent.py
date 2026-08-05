@@ -24,6 +24,7 @@ import litellm
 from app.agent.base import BaseAgent, AgentMessage
 from app.agent.memory import MemoryManager
 from app.agent.stream_events import agent_meta, emit, step_event
+from app.agent.sub_tools import tool_loop_chat
 from app.config import settings
 from app.monitor import record_model_call
 
@@ -101,9 +102,11 @@ class CodeAgent(BaseAgent):
                     "agent_id": self._id,
                     "step": step_event("generate", "生成回答", "running"),
                 })
-                answer = await self._ask_llm(
+                answer = await tool_loop_chat(
                     system_prompt=CODE_SYSTEM_PROMPT + memory_context,
                     user_message=question,
+                    event_queue=event_queue,
+                    agent_id=self._id,
                 )
                 emit(event_queue, {
                     "type": "agent_step",

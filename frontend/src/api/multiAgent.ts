@@ -35,7 +35,7 @@ export async function sendMultiAgentStream(
   try {
     res = await fetch(BASE + '/multi-agent/stream', {
       method: 'POST',
-      headers: addAuthHeaders({ 'Content-Type': 'application/json' }),
+      headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(data),
       signal,
     })

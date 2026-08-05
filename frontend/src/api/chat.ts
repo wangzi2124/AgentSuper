@@ -64,7 +64,7 @@ export async function sendMessageStream(
   try {
     res = await fetch(BASE + '/stream', {
       method: 'POST',
-      headers: addAuthHeaders({ 'Content-Type': 'application/json' }),
+      headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(data),
       signal,
     })

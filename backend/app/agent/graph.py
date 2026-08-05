@@ -166,6 +166,8 @@ class RAGAgent:
         )
 
         self._usage_accum: dict[str, int] = dict(_ZERO_USAGE)
+        # 工具热更新锁：refresh_tools 重建 graph 期间与并发请求互斥
+        self._refresh_lock = asyncio.Lock()
 
         self.graph = self._build_graph()
 
@@ -893,16 +895,20 @@ class RAGAgent:
         builder.add_edge("generate", END)
         return builder.compile()
 
-    def refresh_tools(self):
-        """刷新工具列表和系统提示，用于热更新技能和插件。"""
-        self.tools = []
-        self.tools.extend(create_filesystem_tools())
-        if self.skill_loader:
-            self.tools.extend(create_skill_tools(self.skill_loader))
-        if self.plugin_loader:
-            self.tools.extend(create_plugin_tools(self.plugin_loader))
-        self.rebuild_system_prompt()
-        self.graph = self._build_graph()
+    async def refresh_tools(self):
+        """刷新工具列表和系统提示，用于热更新技能和插件。
+
+        加锁避免与并发请求中的 graph 使用竞态（技能/插件切换时原子替换）。
+        """
+        async with self._refresh_lock:
+            self.tools = []
+            self.tools.extend(create_filesystem_tools())
+            if self.skill_loader:
+                self.tools.extend(create_skill_tools(self.skill_loader))
+            if self.plugin_loader:
+                self.tools.extend(create_plugin_tools(self.plugin_loader))
+            self.rebuild_system_prompt()
+            self.graph = self._build_graph()
 
     async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = True, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "", on_activity: Callable[[str], None] | None = None) -> dict:
         """执行完整的RAG流程，返回回答和相关源。

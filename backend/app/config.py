@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     # Authorization: Bearer <token>；不设置时这些接口仅允许本机来源（deps.require_admin）。
     admin_token: Optional[str] = None
 
+    # ── 并发控制 ──
+    # 全局同时执行的 Agent 任务上限（coordinator global_semaphore + chat.py 旧信号量共用）。
+    # 默认 4：RAG Agent 单次执行主要耗时在 LLM 调用（I/O 等待），提高并发不会打满 CPU，
+    # 但 SQLite 连接与 ChromaDB 会有锁竞争，需配合 session.db 连接池（app/session/db.py）。
+    max_concurrent_agents: int = 4
+
     # CORS 允许的源（JSON 数组，环境变量 CORS_ORIGINS）。默认仅本机前端
     # （vite dev 5173 / preview 4173），避免局域网/公网页面调用本服务接口。
     cors_origins: list[str] = [
@@ -100,6 +106,20 @@ class Settings(BaseSettings):
     sub_agent_timeout_extended: float = 300.0
     # 使用 extended 超时的子 Agent 列表（逗号分隔）
     extended_timeout_agents: str = "code"
+
+    # ── 共享记忆持久化 ──
+    # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失
+    memory_persist_path: str = "data/agent_memory.json"
+
+    # ── 用户身份签名（可选，默认关闭）──
+    # 设置 AUTH_TOKEN_SECRET 后启用：X-User-Id 必须携带对应的签名 token
+    # （前端先注册随机 user_id + device_secret，再换取 token），
+    # 防止仅伪造 X-User-Id 头越权读取他人会话。默认（本地部署）不校验。
+    auth_secret: Optional[str] = None
+    # token 有效期（秒），默认 30 天
+    auth_token_ttl: int = 2592000
+    # 已注册用户（user_id → 设备密钥哈希）的持久化文件
+    auth_users_path: str = "data/auth_users.json"
 
 
 settings = Settings()
