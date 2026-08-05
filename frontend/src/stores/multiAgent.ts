@@ -9,6 +9,7 @@ import {
   renameConversation as apiRenameConversation,
   type ConversationMeta,
 } from '../api/multiAgent'
+import { SUPPORTED_MODELS } from './chat'
 
 function genId(): string {
   try { return crypto.randomUUID() }
@@ -29,6 +30,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const activeSessionId = ref<string | undefined>(undefined)
   const conversations = ref<ConversationMeta[]>([])
   const routingStatus = ref<string>('')
+  const selectedModel = ref(SUPPORTED_MODELS[0].value)
+  const useVectorDb = ref(true)
 
   function getOrCreateSession(sessionId: string, title?: string): SessionState {
     if (!sessions.value[sessionId]) {
@@ -122,7 +125,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
     session.messages = [...session.messages, assistantMsg]
 
-    const reqData = { message: text, conversation_id: session.conversationId }
+    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value }
     const controller = new AbortController()
     session.abortController = controller
     const signal = controller.signal
@@ -235,7 +238,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   }
 
   return {
-    sessions, activeSessionId, conversations, routingStatus,
+    sessions, activeSessionId, conversations, routingStatus, selectedModel, useVectorDb,
     messages, conversationId, conversationTitle, loading, queuePosition,
     send, cancel, clear, undoMessage, deleteConversation,
     loadConversations, loadConversation, newChat, renameConversation,

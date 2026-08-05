@@ -254,6 +254,8 @@ export interface MultiAgentSSEEvent {
 export interface MultiAgentChatRequest {
   message: string
   conversation_id?: string
+  model?: string
+  use_vector_db?: boolean
 }
 
 export interface MultiAgentMessage {

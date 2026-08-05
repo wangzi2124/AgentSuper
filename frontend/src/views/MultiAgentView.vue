@@ -2,17 +2,71 @@
 import { computed, nextTick, ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
+import { SUPPORTED_MODELS } from '../stores/chat'
+import { usePermissionStore } from '../stores/permission'
 import MultiAgentResponse from '../components/MultiAgentResponse.vue'
 import ChatInput from '../components/ChatInput.vue'
+import WeatherAlert from '../components/WeatherAlert.vue'
 
 const route = useRoute()
 const router = useRouter()
 const agent = useMultiAgentStore()
+const perm = usePermissionStore()
 const parentRef = ref<HTMLElement>()
 const chatInputRef = ref<any>()
 const isNearBottom = ref(true)
+const isWeatherEnabled = ref(false)
+const showWsPanel = ref(false)
+const wsInput = ref('')
+const wsError = ref('')
+const wsBusy = ref(false)
+const extraWorkspaces = computed(() => perm.workspaces.length > 1 ? perm.workspaces.slice(1) : [])
+const mainWorkspace = computed(() => perm.workspaces[0] || '')
 
 const messages = computed(() => agent.messages)
+
+async function checkWeatherPlugin() {
+  try {
+    const response = await fetch('/api/plugins/weather-alert/status')
+    if (response.ok) {
+      const data = await response.json()
+      isWeatherEnabled.value = data.enabled
+    }
+  } catch (e) {
+    console.error('Failed to check weather plugin status:', e)
+  }
+}
+
+function toggleWsPanel() {
+  showWsPanel.value = !showWsPanel.value
+  wsError.value = ''
+}
+
+async function handleAddWorkspace() {
+  const path = wsInput.value.trim()
+  if (!path) {
+    wsError.value = '请输入绝对路径，如 F:\\tetris'
+    return
+  }
+  wsBusy.value = true
+  wsError.value = ''
+  try {
+    await perm.addWorkspace(path)
+    wsInput.value = ''
+  } catch (e: any) {
+    wsError.value = e?.message || '添加失败'
+  } finally {
+    wsBusy.value = false
+  }
+}
+
+async function handleRemoveWorkspace(path: string) {
+  try {
+    await perm.removeWorkspace(path)
+  } catch (e: any) {
+    wsError.value = e?.message || '移除失败'
+  }
+}
 
 watch(() => messages.value.length, async () => {
   await nextTick()
@@ -46,6 +100,8 @@ watch(() => {
 onMounted(() => {
   const id = route.params.id as string
   if (id) agent.loadConversation(id)
+  checkWeatherPlugin()
+  perm.loadWorkspaces()
 })
 
 watch(() => route.params.id, (newId) => {
@@ -94,6 +150,54 @@ function handleMessageDelete(messageId: string) { /* not implemented */ }
           ⏳ 排队中 #{{ agent.queuePosition }}
         </span>
         <span v-else-if="agent.loading" class="stream-badge running">● agents running</span>
+        <WeatherAlert v-if="isWeatherEnabled" />
+        <div class="ws-manager">
+          <button class="ws-btn" @click="toggleWsPanel" title="管理可写工作目录">
+            📁 工作目录 ({{ extraWorkspaces.length }})
+          </button>
+          <div v-if="showWsPanel" class="ws-panel">
+            <div class="ws-row">
+              <input
+                v-model="wsInput"
+                class="ws-input"
+                placeholder="F:\tetris"
+                @keyup.enter="handleAddWorkspace"
+              />
+              <button class="ws-add" :disabled="wsBusy" @click="handleAddWorkspace">
+                {{ wsBusy ? '添加中...' : '添加' }}
+              </button>
+            </div>
+            <p v-if="wsError" class="ws-error">{{ wsError }}</p>
+            <div class="ws-list">
+              <div v-if="mainWorkspace" class="ws-item fixed" :title="mainWorkspace">
+                <span class="ws-dot"></span>
+                <span class="ws-path">{{ mainWorkspace }}</span>
+                <span class="ws-tag">主</span>
+              </div>
+              <div v-for="w in extraWorkspaces" :key="w" class="ws-item">
+                <span class="ws-dot"></span>
+                <span class="ws-path">{{ w }}</span>
+                <button class="ws-remove" title="移除" @click="handleRemoveWorkspace(w)">×</button>
+              </div>
+              <p v-if="extraWorkspaces.length === 0" class="ws-empty">
+                无额外工作区。添加后 Agent 可写该路径（无需重启）。
+              </p>
+            </div>
+          </div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" v-model="agent.useVectorDb" :disabled="agent.loading" />
+          <span class="toggle-slider"></span>
+          <span class="toggle-label">Vector DB</span>
+        </label>
+        <div class="model-selector">
+          <label for="model-select">Model:</label>
+          <select id="model-select" v-model="agent.selectedModel" :disabled="agent.loading">
+            <option v-for="m in SUPPORTED_MODELS" :key="m.value" :value="m.value">
+              {{ m.label }}
+            </option>
+          </select>
+        </div>
       </div>
     </div>
 
@@ -153,6 +257,160 @@ function handleMessageDelete(messageId: string) { /* not implemented */ }
 .stream-badge.queued { background: rgba(251,191,36,0.12); color: #f59e0b; }
 .stream-badge.running { background: rgba(34,197,94,0.12); color: #22c55e; animation: pulse-stream 1.5s ease-in-out infinite; }
 @keyframes pulse-stream { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+.toggle input { display: none; }
+.toggle-slider {
+  width: 36px; height: 20px;
+  background: var(--border);
+  border-radius: 10px;
+  position: relative;
+  transition: background 0.2s;
+}
+.toggle-slider::after {
+  content: '';
+  position: absolute;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  top: 2px; left: 2px;
+  transition: transform 0.2s;
+}
+.toggle input:checked + .toggle-slider { background: var(--primary, #4f46e5); }
+.toggle input:checked + .toggle-slider::after { transform: translateX(16px); }
+.toggle input:disabled + .toggle-slider { opacity: 0.5; }
+.model-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.model-selector select {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  cursor: pointer;
+  min-width: 200px;
+}
+.model-selector select:focus { border-color: var(--primary); }
+.ws-manager {
+  position: relative;
+  flex-shrink: 0;
+}
+.ws-btn {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ws-btn:hover { border-color: var(--primary); }
+.ws-panel {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  width: 360px;
+  max-width: 70vw;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  padding: 12px;
+  z-index: 50;
+}
+.ws-row {
+  display: flex;
+  gap: 8px;
+}
+.ws-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+}
+.ws-input:focus { border-color: var(--primary); }
+.ws-add {
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--primary, #4f46e5);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ws-add:disabled { opacity: 0.5; cursor: not-allowed; }
+.ws-error { color: #ef4444; font-size: 12px; margin: 6px 0 0; }
+.ws-list {
+  margin-top: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ws-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+.ws-item.fixed { opacity: 0.7; }
+.ws-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  flex-shrink: 0;
+}
+.ws-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+.ws-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(79, 70, 229, 0.1);
+  color: var(--primary, #4f46e5);
+  flex-shrink: 0;
+}
+.ws-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+.ws-remove:hover { color: #ef4444; }
+.ws-empty { font-size: 12px; color: var(--text-secondary); margin: 0; }
 .chat-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--text-secondary); }
 .empty-state .icon { font-size: 48px; }
