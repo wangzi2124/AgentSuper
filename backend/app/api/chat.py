@@ -24,6 +24,7 @@ from app.models.schemas import ChatRequest, ChatResponse, Source, StepEvent, Mul
 from app.session import repository as session_repo
 from app.session import task_bridge
 from app.session.agent_executor import register_request_queue, unregister_request_queue, classify_error
+from app.session.agent_executor import PartBridgeQueue
 from app.session.deps import discover_project_root
 
 # ── 多 Agent 系统 ──
@@ -371,6 +372,24 @@ def _begin_task_session(service, user_id: str, parent_id: str, question: str) ->
     return child.id, thread_id
 
 
+def _persist_multi_agent_parts(session_id: str, message_id: str, answer: str,
+                               agents: list | None = None) -> None:
+    """把多代理 assistant 消息的正文/子代理执行信息落库为 parts。
+
+    子代理步骤先按 agent 归档（agent part + 各步骤/工具 part 带 agent_id），
+    最后以 text part 承载最终答案正文。
+    """
+    bridge = PartBridgeQueue(None, session_id, message_id)
+    try:
+        for a in agents or []:
+            if isinstance(a, dict):
+                bridge.append_agent(a)
+                bridge.replay_agent_steps(a.get("steps") or [], agent_id=a.get("agent_id", ""))
+        bridge.append_text(answer)
+    except Exception:  # noqa: BLE001
+        logger.exception("persist multi-agent parts failed")
+
+
 async def _persist_multi_agent(service, user_id: str, session_id: str, child_id: str,
                                question: str, answer: str, sources: list, steps: list,
                                agents: list | None = None, model: str | None = None) -> tuple[str, str]:
@@ -387,13 +406,15 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
             "role": "assistant", "content": answer, "sources": sources, "steps": steps,
             "agents": agents or [], "parent_id": user_msg.id, "agent": "supervisor", "model": model,
         })
+        _persist_multi_agent_parts(session_id, assistant_msg.id, answer, agents)
     # 子任务会话独立日志（隔离上下文）
     async with service.write_lock(child_id):
         service.append_message(user_id, child_id, "user", {"role": "user", "content": question})
-        service.append_message(user_id, child_id, "assistant", {
+        child_assist = service.append_message(user_id, child_id, "assistant", {
             "role": "assistant", "content": answer, "sources": sources, "steps": steps,
             "agents": agents or [], "parent_id": user_msg.id, "agent": "supervisor", "model": model,
         })
+        _persist_multi_agent_parts(child_id, child_assist.id, answer, agents)
         service.update(user_id, child_id, status="idle")
     return user_msg.id, assistant_msg.id
 

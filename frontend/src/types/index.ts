@@ -37,7 +37,7 @@ export interface ChatResponse {
 
 // SSE 流式事件
 export interface SSEEvent {
-  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'permission_request' | 'tool_output' | 'tool_heartbeat' | 'queued'
+  type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'permission_request' | 'tool_output' | 'tool_heartbeat' | 'queued' | 'text_delta'
   step_id?: string
   name?: string
   status?: string
@@ -46,6 +46,7 @@ export interface SSEEvent {
   tool_name?: string
   tool_args?: Record<string, unknown>
   tool_result?: string
+  delta?: string
   answer?: string
   sources?: Source[]
   conversation_id?: string
@@ -229,6 +230,7 @@ export interface Message {
   timestamp: Date
   isError?: boolean
   errorInfo?: ChatError
+  live?: boolean
 }
 
 // ===== Multi-Agent Types =====

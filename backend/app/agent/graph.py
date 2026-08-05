@@ -447,26 +447,14 @@ class RAGAgent:
             return f"{header}\n{output}"
         return header
 
-    async def _llm_call(self, model: str, messages: list, tool_defs: list) -> litellm.ModelResponse:
-        """调用大语言模型API并记录调用指标。"""
-        start = tmod.time()
-        try:
-            response = await litellm.acompletion(
-                model=model,
-                messages=messages,
-                tools=tool_defs,
-                api_key=self.api_key,
-                api_base=self.api_base,
-                temperature=0.1,
-                max_tokens=settings.llm_max_tokens,
-                timeout=500,
-                num_retries=2,
-            )
-        except Exception as e:
-            dur = (tmod.time() - start) * 1000
-            record_model_call(model, duration_ms=dur)
-            raise
+    def _push_stream_event(self, state: AgentState, event: dict):
+        """流式文本增量事件：只进事件队列，不进 steps（避免污染步骤列表）。"""
+        eq = state.get("_event_queue")
+        if eq:
+            eq.put_nowait(event)
 
+    def _assemble_response(self, model: str, response, start: float, state: AgentState | None, push_text: bool = False):
+        """记录调用指标并累加 token 用量，可选把非流式全文转为 text_delta 推送。"""
         dur = (tmod.time() - start) * 1000
         usage = getattr(response, "usage", None)
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
@@ -481,7 +469,124 @@ class RAGAgent:
             "LLM call | model=%s pt=%d ct=%d dur=%.0fms",
             model, pt, ct, dur,
         )
+        if state is not None and push_text:
+            content = getattr(response.choices[0].message, "content", "") or ""
+            if content:
+                self._push_stream_event(state, {"type": "text_delta", "delta": content})
         return response
+
+    async def _llm_call(self, model: str, messages: list, tool_defs: list, state: AgentState | None = None):
+        """调用大语言模型API（流式）并记录调用指标。
+
+        流式把文本增量经 _push_stream_event 实时转发（type=text_delta），同时累积出
+        完整 message（含 tool_calls/finish_reason），与原有调用在 _generate 中完全兼容。
+        流式建立失败自动回退非流式；流式中断则用已累积内容兜底。
+        """
+        from types import SimpleNamespace
+
+        start = tmod.time()
+        try:
+            stream = await litellm.acompletion(
+                model=model,
+                messages=messages,
+                tools=tool_defs,
+                api_key=self.api_key,
+                api_base=self.api_base,
+                temperature=0.1,
+                max_tokens=settings.llm_max_tokens,
+                timeout=500,
+                num_retries=2,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+        except Exception as e:
+            logger.warning("LLM stream init failed, falling back to non-stream: %s", e)
+            try:
+                response = await litellm.acompletion(
+                    model=model,
+                    messages=messages,
+                    tools=tool_defs,
+                    api_key=self.api_key,
+                    api_base=self.api_base,
+                    temperature=0.1,
+                    max_tokens=settings.llm_max_tokens,
+                    timeout=500,
+                    num_retries=2,
+                )
+            except Exception as exc:
+                dur = (tmod.time() - start) * 1000
+                record_model_call(model, duration_ms=dur)
+                raise exc
+            return self._assemble_response(model, response, start, state, push_text=True)
+
+        text_chunks: list[str] = []
+        tool_slots: dict[int, dict] = {}
+        finish_reason = None
+        usage = None
+        try:
+            async for chunk in stream:
+                u = getattr(chunk, "usage", None)
+                if u is not None:
+                    usage = u
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                choice = choices[0]
+                fr = getattr(choice, "finish_reason", None)
+                if fr:
+                    finish_reason = fr
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+                c = getattr(delta, "content", None)
+                if c:
+                    text_chunks.append(c)
+                    if state is not None:
+                        self._push_stream_event(state, {"type": "text_delta", "delta": c})
+                for tc in (getattr(delta, "tool_calls", None) or []):
+                    idx = getattr(tc, "index", None) or 0
+                    slot = tool_slots.setdefault(
+                        idx,
+                        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                    )
+                    if getattr(tc, "id", None):
+                        slot["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            slot["function"]["name"] += fn.name
+                        if getattr(fn, "arguments", None):
+                            slot["function"]["arguments"] += fn.arguments
+        except Exception:
+            # 流式中断 → 用已累积内容兜底（不再重试）
+            logger.warning("LLM stream interrupted, using accumulated content", exc_info=True)
+
+        content = "".join(text_chunks)
+        dur = (tmod.time() - start) * 1000
+        pt = getattr(usage, "prompt_tokens", 0) if usage else 0
+        ct = getattr(usage, "completion_tokens", 0) if usage else 0
+        record_model_call(model, prompt_tokens=int(pt or 0), completion_tokens=int(ct or 0), duration_ms=dur)
+        if not getattr(self, "_usage_accum", None):
+            self._usage_accum = dict(_ZERO_USAGE)
+        self._usage_accum["input"] += int(pt or 0)
+        self._usage_accum["output"] += int(ct or 0)
+        logger.info(
+            "LLM call | model=%s pt=%d ct=%d dur=%.0fms",
+            model, int(pt or 0), int(ct or 0), dur,
+        )
+
+        tool_calls = None
+        if tool_slots:
+            tool_calls = [
+                SimpleNamespace(
+                    id=slot["id"],
+                    type=slot["type"],
+                    function=SimpleNamespace(name=slot["function"]["name"], arguments=slot["function"]["arguments"]),
+                )
+                for _, slot in sorted(tool_slots.items())
+            ]
+        msg = SimpleNamespace(content=content, tool_calls=tool_calls)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason=finish_reason)], usage=usage)
 
     async def _generate(self, state: AgentState) -> dict:
         """调用LLM生成回答，支持多轮工具调用。"""
@@ -544,7 +649,7 @@ class RAGAgent:
 
         messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
 
-        response = await self._llm_call(model, messages, tool_defs)
+        response = await self._llm_call(model, messages, tool_defs, state=state)
         msg = response.choices[0].message
         # P4: 读取并归一化 finish_reason（对齐 opencode FinishReason：tool-calls/unknown 不算完成）
         finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
@@ -696,7 +801,7 @@ class RAGAgent:
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
             # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）
             final_tool_defs = None if steps_prompt_injected else tool_defs
-            response = await self._llm_call(model, messages, final_tool_defs)
+            response = await self._llm_call(model, messages, final_tool_defs, state=state)
             msg = response.choices[0].message
             finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
 
@@ -744,7 +849,7 @@ class RAGAgent:
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
             # 对齐 opencode max-steps 语义：达到上限后工具禁用，仅注入收尾总结提示（assistant 角色）
             messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
-            response = await self._llm_call(model, messages, None)
+            response = await self._llm_call(model, messages, None, state=state)
             msg = response.choices[0].message
             finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
         if not (msg.content or "").strip():

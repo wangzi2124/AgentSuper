@@ -47,6 +47,8 @@ interface SessionState {
   abortController: AbortController | null
   streamPhase: 'idle' | 'queued' | 'running'  // 流式阶段
   queuePosition: number | null                 // 排队位置
+  liveMsgId: string | null                     // 流式中的占位 assistant 消息 id（text_delta 累积）
+  liveContent: string                          // 流式中的文本增量累积
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -81,6 +83,8 @@ export const useChatStore = defineStore('chat', () => {
         abortController: null,
         streamPhase: 'idle',
         queuePosition: null,
+        liveMsgId: null,
+        liveContent: '',
       }
     }
     return sessions.value[sessionId]
@@ -470,6 +474,23 @@ export const useChatStore = defineStore('chat', () => {
             tool_args: event.tool_args as Record<string, unknown>,
             created_at: new Date().toISOString(),
           })
+        } else if (event.type === 'text_delta') {
+          // 流式文本增量：累积进占位 assistant 消息（对齐 opencode text-delta 事件）
+          session.liveContent += event.delta || ''
+          if (!session.liveMsgId) {
+            session.liveMsgId = 'live-' + genId()
+            session.messages = [...session.messages, {
+              id: session.liveMsgId,
+              role: 'assistant',
+              content: session.liveContent,
+              timestamp: new Date(),
+              live: true,
+            }]
+          } else {
+            session.messages = session.messages.map(m =>
+              m.id === session.liveMsgId ? { ...m, content: session.liveContent } : m
+            )
+          }
         } else if (event.type === 'done') {
           session.conversationId = event.conversation_id
           session.streamPhase = 'idle'
@@ -487,7 +508,16 @@ export const useChatStore = defineStore('chat', () => {
             parts: event.parts,
             timestamp: new Date(),
           }
-          session.messages = [...session.messages, assistantMsg]
+          // 流式期间有占位消息 → 用最终消息替换（保留其位置）
+          if (session.liveMsgId) {
+            session.messages = session.messages.map(m =>
+              m.id === session.liveMsgId ? assistantMsg : m
+            )
+            session.liveMsgId = null
+            session.liveContent = ''
+          } else {
+            session.messages = [...session.messages, assistantMsg]
+          }
           session.currentSteps = []
           if (event.user_msg_id) {
             for (let i = session.messages.length - 1; i >= 0; i--) {
@@ -505,6 +535,12 @@ export const useChatStore = defineStore('chat', () => {
         } else if (event.type === 'error') {
           session.streamPhase = 'idle'
           session.queuePosition = null
+          // 移除流式占位消息，避免与错误消息并存
+          if (session.liveMsgId) {
+            session.messages = session.messages.filter(m => m.id !== session.liveMsgId)
+            session.liveMsgId = null
+            session.liveContent = ''
+          }
           const errorInfo: ChatError = classifySSEError(event)
           session.messages = [...session.messages, {
             id: genId(),
@@ -532,6 +568,11 @@ export const useChatStore = defineStore('chat', () => {
         : classifyNetworkError(err)
       // 除用户主动取消外，任何失败都应展示错误消息（避免静默失败）
       if (!signal.aborted) {
+        if (session.liveMsgId) {
+          session.messages = session.messages.filter(m => m.id !== session.liveMsgId)
+          session.liveMsgId = null
+          session.liveContent = ''
+        }
         session.messages = [...session.messages, {
           id: genId(),
           role: 'assistant',

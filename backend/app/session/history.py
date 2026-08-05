@@ -24,17 +24,26 @@ class HistoryLoad:
         self.parts: dict[str, list] = parts or {}
 
 
-def text_from_parts(parts: list) -> str:
-    """从 parts 提取模型可读文本：拼接所有 text part 的 data.text。"""
+def text_from_parts(parts: list, include_reasoning: bool = False) -> str:
+    """从 parts 提取模型可读文本：拼接所有 text part 的 data.text。
+
+    include_reasoning=True 时把 assistant 的 reasoning part（data.reasoning 或 data.text）
+    也拼进去，使模型视角历史能读到推理内容（对齐 opencode model history 拼接 reasoning）。
+    """
     if not parts:
         return ""
     chunks = []
     for p in parts:
+        ptype = p.type if hasattr(p, "type") else (p.get("type") or "")
         data = p.data if hasattr(p, "data") else (p.get("data") or {})
-        if (p.type if hasattr(p, "type") else p.get("type")) == "text":
+        if ptype == "text":
             t = data.get("text", "")
             if t:
                 chunks.append(t)
+        elif include_reasoning and ptype == "reasoning":
+            t = data.get("reasoning") or data.get("text") or ""
+            if t:
+                chunks.append(f"[reasoning]\n{t}\n[/reasoning]")
     return "\n".join(chunks)
 
 

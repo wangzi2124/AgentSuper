@@ -62,7 +62,7 @@ def _message_to_history(message, parts=None) -> dict[str, Any]:
         "user": "user", "assistant": "assistant", "tool": "tool",
         "compaction": "system", "epoch": "system", "system": "system",
     }.get(message.type, "system")
-    content = session_history.text_from_parts(parts or []) or data.get("content", "")
+    content = session_history.text_from_parts(parts or [], include_reasoning=True) or data.get("content", "")
     return {"id": message.id, "role": role, "content": content}
 
 
@@ -85,6 +85,8 @@ class PartBridgeQueue:
         self._message_id = message_id
         self._tool_parts: dict[str, str] = {}
         self._tool_meta: dict[str, dict] = {}
+        self._text_part_id: str | None = None
+        self._text_buffer = ""
 
     def put_nowait(self, event: dict) -> None:
         try:
@@ -98,9 +100,43 @@ class PartBridgeQueue:
                 pass
 
     def append_text(self, text: str) -> None:
-        """把最终答案追加为 text part（在 invoke 结束后调用一次）。"""
-        if text:
+        """把最终答案追加/覆盖为 text part（在 invoke 结束后调用一次）。
+
+        若期间已有流式 text_delta 建立的 text part，则用权威最终答案覆盖
+        （含截断提示、强制收尾等兜底内容），避免留下不完整增量。
+        """
+        if not text:
+            return
+        if self._text_part_id is not None:
+            repository.update_part(self._session_id, self._text_part_id, {"text": text})
+        else:
             repository.append_part(self._session_id, self._message_id, "text", {"text": text})
+
+    def replay_agent_steps(self, steps: list, agent_id: str = "") -> None:
+        """回放子代理的步骤/工具事件为 parts（多代理子会话按 agent_id 归档）。"""
+        for s in steps or []:
+            if not isinstance(s, dict):
+                continue
+            if s.get("type") in ("step_start", "step_end", "tool_start", "tool_end"):
+                try:
+                    self._persist({**s, "agent_id": agent_id})
+                except Exception:  # noqa: BLE001
+                    logger.exception("replay step persist failed")
+
+    def append_agent(self, info: dict) -> None:
+        """把子代理执行信息落库为 agent part（多代理消息归属展示用）。"""
+        try:
+            repository.append_part(self._session_id, self._message_id, "agent", {
+                "agent_id": info.get("agent_id", ""),
+                "agent_name": info.get("agent_name", info.get("agent_id", "")),
+                "status": info.get("status", "completed"),
+            })
+        except Exception:  # noqa: BLE001
+            logger.exception("append agent part failed")
+
+    def _tool_key(self, event: dict) -> str:
+        agent = event.get("agent_id")
+        return f"{agent}:{event.get('step_id', '')}" if agent else f":{event.get('step_id', '')}"
 
     def _persist(self, event: dict) -> dict:
         """落库 part 并给事件附加 part_id，返回（可能被修改的）事件副本。"""
@@ -124,28 +160,30 @@ class PartBridgeQueue:
             })
             out["part_id"] = part.id
         elif et == "tool_start":
-            step_id = event.get("step_id", "")
-            self._tool_meta[step_id] = {
+            key = self._tool_key(event)
+            self._tool_meta[key] = {
                 "args": event.get("tool_args") or {},
                 "time_start": now,
             }
             part = repository.append_part(self._session_id, self._message_id, "tool", {
-                "step_id": step_id,
+                "agent_id": event.get("agent_id", ""),
+                "step_id": event.get("step_id", ""),
                 "state": "running",
                 "name": event.get("tool_name", ""),
                 "args": event.get("tool_args") or {},
                 "output": "",
                 "time_start": now,
             })
-            self._tool_parts[step_id] = part.id
+            self._tool_parts[key] = part.id
             out["part_id"] = part.id
         elif et == "tool_end":
-            step_id = event.get("step_id", "")
-            pid = self._tool_parts.get(step_id)
+            key = self._tool_key(event)
+            pid = self._tool_parts.get(key)
             if pid:
-                meta = self._tool_meta.get(step_id) or {}
+                meta = self._tool_meta.get(key) or {}
                 updated = repository.update_part(self._session_id, pid, {
-                    "step_id": step_id,
+                    "agent_id": event.get("agent_id", ""),
+                    "step_id": event.get("step_id", ""),
                     "state": event.get("status", "completed"),
                     "name": event.get("tool_name", ""),
                     "args": meta.get("args") or event.get("tool_args") or {},
@@ -155,6 +193,18 @@ class PartBridgeQueue:
                 })
                 if updated:
                     out["part_id"] = updated.id
+        elif et == "text_delta":
+            # 流式文本增量：累积进 text part，实时 update（不产生新 part）
+            self._text_buffer += event.get("delta", "") or ""
+            if self._text_part_id is None:
+                part = repository.append_part(self._session_id, self._message_id, "text", {
+                    "text": self._text_buffer,
+                })
+                self._text_part_id = part.id
+            else:
+                repository.update_part(self._session_id, self._text_part_id, {"text": self._text_buffer})
+            out["part_id"] = self._text_part_id
+            out["delta"] = event.get("delta", "")
         return out
 
 
