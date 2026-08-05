@@ -143,12 +143,26 @@ def build_executor(app):
                     conversation_id=session_id,
                 )
 
-                # 6. 落库 assistant 消息
+                # 6. 落库 assistant 消息（骨架 + 结算字段，对齐 opencode Message）
                 assistant_msg = repository.append_message(session_id, "assistant", {
-                    "role": "assistant", "content": result.get("answer", ""),
+                    "role": "assistant",
+                    "content": result.get("answer", ""),
                     "sources": result.get("sources", []),
                     "steps": result.get("steps", []),
+                    "parent_id": user_msg.id,
+                    "agent": getattr(agent, "agent_id", None) or "rag",
+                    "model": result.get("model"),
+                    "finish": result.get("finish", "stop"),
+                    "tokens": result.get("tokens") or {},
                 })
+                # 会话级 token/费用累加
+                tokens = result.get("tokens") or {}
+                repository.add_session_usage(
+                    session_id,
+                    input_tokens=tokens.get("input", 0),
+                    output_tokens=tokens.get("output", 0),
+                    cost=result.get("cost") or 0.0,
+                )
 
                 if queue is not None:
                     queue.put_nowait({

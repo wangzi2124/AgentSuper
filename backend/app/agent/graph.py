@@ -124,9 +124,14 @@ class AgentState(TypedDict):
     use_vector_db: bool
     files: list[dict]
     steps: list[dict]
+    tokens: dict[str, int]
+    finish: str
     _event_queue: asyncio.Queue | None
     _on_activity: Callable[[str], None] | None
     _task: object | None
+
+
+_ZERO_USAGE = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
 
 
 class RAGAgent:
@@ -159,6 +164,8 @@ class RAGAgent:
             plugin_loader or PluginLoader(""),
             include_filesystem=True,
         )
+
+        self._usage_accum: dict[str, int] = dict(_ZERO_USAGE)
 
         self.graph = self._build_graph()
 
@@ -465,6 +472,11 @@ class RAGAgent:
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
         record_model_call(model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
+        # 累加本次 invoke 的 token 用量（invoke 前重置），供 assistant 消息结算落库
+        if not getattr(self, "_usage_accum", None):
+            self._usage_accum = dict(_ZERO_USAGE)
+        self._usage_accum["input"] += int(pt or 0)
+        self._usage_accum["output"] += int(ct or 0)
         logger.info(
             "LLM call | model=%s pt=%d ct=%d dur=%.0fms",
             model, pt, ct, dur,
@@ -474,6 +486,7 @@ class RAGAgent:
     async def _generate(self, state: AgentState) -> dict:
         """调用LLM生成回答，支持多轮工具调用。"""
         _gen_start = tmod.time()
+        self._usage_accum = dict(_ZERO_USAGE)
         dedup = ToolResultDedup()
         from app.context.compaction import ContextCompactor
         compactor = ContextCompactor(
@@ -754,6 +767,9 @@ class RAGAgent:
         return {
             "answer": answer,
             "messages": [AIMessage(content=answer)],
+            "model": model,
+            "finish": finish_reason,
+            "tokens": dict(self._usage_accum),
         }
 
     def _build_graph(self):
@@ -807,6 +823,8 @@ class RAGAgent:
             use_vector_db=use_vector_db,
             files=files or [],
             steps=[],
+            tokens=dict(_ZERO_USAGE),
+            finish="stop",
             _event_queue=event_queue,
             _on_activity=on_activity,
             _task=task,
@@ -827,4 +845,8 @@ class RAGAgent:
             "steps": result.get("steps", []),
             "messages": result.get("messages", []),
             "task": task.to_dict() if task else {},
+            "model": result.get("model") or self.model,
+            "finish": result.get("finish", "stop"),
+            "tokens": result.get("tokens") or dict(_ZERO_USAGE),
+            "cost": result.get("cost"),
         }

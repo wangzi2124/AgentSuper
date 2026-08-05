@@ -363,7 +363,7 @@ def _begin_task_session(service, user_id: str, parent_id: str, question: str) ->
 
 async def _persist_multi_agent(service, user_id: str, session_id: str, child_id: str,
                                question: str, answer: str, sources: list, steps: list,
-                               agents: list | None = None) -> tuple[str, str]:
+                               agents: list | None = None, model: str | None = None) -> tuple[str, str]:
     """主会话 + 子任务会话各追加 user/assistant 消息；新会话生成标题。
 
     主会话写经 write_lock 串行化（与 /stream 协调器执行体、compact/revert 互斥），
@@ -375,14 +375,14 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
             service.update(user_id, session_id, title=_generate_title([{"role": "user", "content": question}]))
         assistant_msg = service.append_message(user_id, session_id, "assistant", {
             "role": "assistant", "content": answer, "sources": sources, "steps": steps,
-            "agents": agents or [],
+            "agents": agents or [], "parent_id": user_msg.id, "agent": "supervisor", "model": model,
         })
     # 子任务会话独立日志（隔离上下文）
     async with service.write_lock(child_id):
         service.append_message(user_id, child_id, "user", {"role": "user", "content": question})
         service.append_message(user_id, child_id, "assistant", {
             "role": "assistant", "content": answer, "sources": sources, "steps": steps,
-            "agents": agents or [],
+            "agents": agents or [], "parent_id": user_msg.id, "agent": "supervisor", "model": model,
         })
         service.update(user_id, child_id, status="idle")
     return user_msg.id, assistant_msg.id
@@ -520,7 +520,8 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
 
     # 落库：主会话 + 子任务会话
     user_msg_id, assistant_msg_id = await _persist_multi_agent(
-        service, user_id, session_id, child_id, body.message, answer, sources, steps
+        service, user_id, session_id, child_id, body.message, answer, sources, steps,
+        model=body.model,
     )
     task_bridge.unregister(child_id)
 
@@ -640,7 +641,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                 # 落库：主会话 + 子任务会话（先落库以拿到消息 id）
                 user_msg_id, assistant_msg_id = await _persist_multi_agent(
                     service, user_id, session_id, child_id, body.message, answer, sources, steps,
-                    agents=agents,
+                    agents=agents, model=body.model,
                 )
 
                 await event_queue.put({

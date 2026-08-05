@@ -14,6 +14,7 @@ import uuid
 from typing import Any, Optional
 
 from .db import _get_db
+from .ids import new_id
 from .models import ContextEpoch, Message, Part, ProjectInfo, SessionInfo
 
 _DEFAULT_USER = "anonymous"
@@ -106,7 +107,7 @@ def create_session(
     session_id: Optional[str] = None,
 ) -> SessionInfo:
     now = int(time.time() * 1000)
-    sid = session_id or f"ses_{uuid.uuid4().hex[:24]}"
+    sid = session_id or new_id("ses_")
     slug = uuid.uuid4().hex[:8]
     conn = _get_db()
     try:
@@ -242,7 +243,7 @@ def append_message(session_id: str, msg_type: str, data: dict[str, Any]) -> Mess
     conn = _get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        mid = f"msg_{uuid.uuid4().hex[:24]}"
+        mid = new_id("msg_")
         now = int(time.time() * 1000)
         conn.execute(
             "INSERT INTO session_messages (seq, id, session_id, type, data, time_created)"
@@ -305,10 +306,24 @@ def latest_compaction_seq(session_id: str) -> Optional[int]:
         conn.close()
 
 
+def add_session_usage(session_id: str, input_tokens: int = 0, output_tokens: int = 0, cost: float = 0.0) -> None:
+    """累加会话级 token/费用（对齐 sessions 表成本结算列）。"""
+    conn = _get_db()
+    try:
+        conn.execute(
+            "UPDATE sessions SET tokens_input = tokens_input + ?, tokens_output = tokens_output + ?,"
+            " cost = cost + ?, time_updated = ? WHERE id = ?",
+            (int(input_tokens), int(output_tokens), float(cost), int(time.time() * 1000), session_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def append_part(session_id: str, message_id: str, part_type: str, data: dict[str, Any]) -> Part:
     conn = _get_db()
     try:
-        pid = f"pt_{uuid.uuid4().hex[:24]}"
+        pid = new_id("prt_")
         now = int(time.time() * 1000)
         conn.execute(
             "INSERT INTO message_parts (id, session_id, message_id, type, data, time_created)"
@@ -325,7 +340,7 @@ def list_parts(message_id: str) -> list[Part]:
     conn = _get_db()
     try:
         rows = conn.execute(
-            "SELECT * FROM message_parts WHERE message_id = ? ORDER BY time_created", (message_id,)
+            "SELECT * FROM message_parts WHERE message_id = ? ORDER BY time_created, id", (message_id,)
         ).fetchall()
         return [
             Part(id=r["id"], session_id=r["session_id"], message_id=r["message_id"],
@@ -456,7 +471,7 @@ def admit_input(session_id: str, prompt: dict[str, Any], delivery: str = "steer"
     conn = _get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        iid = f"in_{uuid.uuid4().hex[:24]}"
+        iid = new_id("in_")
         now = int(time.time() * 1000)
         conn.execute(
             "INSERT INTO session_inputs (id, session_id, prompt, delivery, admitted_seq, time_created)"
