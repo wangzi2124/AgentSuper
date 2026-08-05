@@ -154,7 +154,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             steps: [],
           }
           assistantMsg.agents = Object.values(agentsMap)
-        } else if (event.type === 'agent_step' && event.step) {
+        } else if (event.type === 'agent_step' && event.step && event.step.step_id) {
           const agent = agentsMap[event.agent_id]
           if (agent) {
             const i = agent.steps.findIndex(s => s.step_id === event.step!.step_id)
@@ -174,15 +174,21 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         } else if (event.type === 'error') {
           routingStatus.value = ''
           assistantMsg.isError = true
-          assistantMsg.errorInfo = { type: event.retryable ? 'server_error' : 'unknown', message: event.error || 'Unknown error', retryable: !!event.retryable, statusCode: event.status_code }
-          assistantMsg.content = `Error: ${event.error}`
+          const msg = event.error || event.detail || 'Unknown error'
+          assistantMsg.errorInfo = { type: event.retryable ? 'server_error' : 'unknown', message: msg, retryable: !!event.retryable, statusCode: event.status_code }
+          assistantMsg.content = `Error: ${msg}`
         } else if (event.type === 'done') {
           routingStatus.value = ''
           session.conversationId = event.conversation_id
           if (event.title) { session.conversationTitle = event.title; loadConversations() }
           if (event.answer) assistantMsg.content = event.answer
           else if (event.content) assistantMsg.content = event.content
-          assistantMsg.agents = Object.values(agentsMap)
+          // 兜底：直播事件缺失时用后端快照回填 agent 面板（如重连/丢事件）
+          if (Object.keys(agentsMap).length === 0 && event.agents?.length) {
+            assistantMsg.agents = event.agents
+          } else {
+            assistantMsg.agents = Object.values(agentsMap)
+          }
         }
       }, signal)
     } catch (err: any) {

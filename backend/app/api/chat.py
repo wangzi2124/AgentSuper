@@ -23,12 +23,13 @@ from app.models.schemas import ChatRequest, ChatResponse, Source, StepEvent, Mul
 # ── Session 管理（session.db）──
 from app.session import repository as session_repo
 from app.session import task_bridge
-from app.session.agent_executor import register_request_queue, unregister_request_queue
+from app.session.agent_executor import register_request_queue, unregister_request_queue, classify_error
 from app.session.deps import discover_project_root
 
 # ── 多 Agent 系统 ──
 from app.agent.base import AgentMessage
 from app.agent.bus import AgentBus
+from app.agent.stream_events import AgentEventCollector
 
 logger = logging.getLogger(__name__)
 
@@ -361,7 +362,8 @@ def _begin_task_session(service, user_id: str, parent_id: str, question: str) ->
 
 
 async def _persist_multi_agent(service, user_id: str, session_id: str, child_id: str,
-                               question: str, answer: str, sources: list, steps: list) -> tuple[str, str]:
+                               question: str, answer: str, sources: list, steps: list,
+                               agents: list | None = None) -> tuple[str, str]:
     """主会话 + 子任务会话各追加 user/assistant 消息；新会话生成标题。
 
     主会话写经 write_lock 串行化（与 /stream 协调器执行体、compact/revert 互斥），
@@ -373,12 +375,14 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
             service.update(user_id, session_id, title=_generate_title([{"role": "user", "content": question}]))
         assistant_msg = service.append_message(user_id, session_id, "assistant", {
             "role": "assistant", "content": answer, "sources": sources, "steps": steps,
+            "agents": agents or [],
         })
     # 子任务会话独立日志（隔离上下文）
     async with service.write_lock(child_id):
         service.append_message(user_id, child_id, "user", {"role": "user", "content": question})
         service.append_message(user_id, child_id, "assistant", {
             "role": "assistant", "content": answer, "sources": sources, "steps": steps,
+            "agents": agents or [],
         })
         service.update(user_id, child_id, status="idle")
     return user_msg.id, assistant_msg.id
@@ -566,6 +570,8 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
 
     event_queue: asyncio.Queue = asyncio.Queue()
     sem = _get_agent_semaphore()
+    # 请求级事件收集器：子 Agent 的实时事件经此转发到 SSE + 记录副本（落库）
+    collector = AgentEventCollector(event_queue)
 
     # 登记子任务会话（kind='task'）+ AgentBus thread
     child_id, thread_id = _begin_task_session(service, user_id, session_id, body.message)
@@ -590,7 +596,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     "detail": "正在分析问题并选择最合适的 Agent...",
                 })
 
-                # 通过 Supervisor 发送请求
+                # 通过 Supervisor 发送请求（_event_queue 经 payload 透传到子 Agent）
                 reply = await agent_bus.send_and_wait(
                     AgentMessage(
                         source="user",
@@ -605,6 +611,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                             "files": [f.model_dump() for f in body.files],
                             "conversation_id": session_id,
                             "user_id": user_id,
+                            "_event_queue": collector,
                         },
                         thread_id=thread_id,
                     ),
@@ -612,9 +619,14 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                 )
 
                 if reply.type == "error":
+                    collector.fail_running(reply.payload.get("error", "Agent error"))
                     await event_queue.put({
                         "type": "error",
+                        "error": reply.payload.get("error", "Agent error"),
                         "detail": reply.payload.get("error", "Agent error"),
+                        "retryable": False,
+                        "status_code": None,
+                        "error_type": "AgentError",
                     })
                     return
 
@@ -623,10 +635,12 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                 sources = payload.get("sources", [])
                 steps = payload.get("steps", [])
                 routed_to = payload.get("routed_to")
+                agents = collector.agents_snapshot()
 
                 # 落库：主会话 + 子任务会话（先落库以拿到消息 id）
                 user_msg_id, assistant_msg_id = await _persist_multi_agent(
-                    service, user_id, session_id, child_id, body.message, answer, sources, steps
+                    service, user_id, session_id, child_id, body.message, answer, sources, steps,
+                    agents=agents,
                 )
 
                 await event_queue.put({
@@ -642,15 +656,22 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     "assistant_msg_id": assistant_msg_id,
                     "steps": steps,
                     "routed_to": routed_to,
+                    "agents": agents,
                 })
 
             except asyncio.TimeoutError:
+                collector.fail_running("请求超时，请重试")
                 await event_queue.put({
                     "type": "error",
+                    "error": "请求超时，请重试",
                     "detail": "请求超时，请重试",
+                    "retryable": True,
+                    "status_code": None,
+                    "error_type": "TimeoutError",
                 })
             except asyncio.CancelledError:
                 service.update(user_id, child_id, status="interrupted")
+                collector.fail_running("请求已取消")
                 await event_queue.put({
                     "type": "error",
                     "detail": "cancelled",
@@ -661,9 +682,12 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
             except Exception as e:
                 logger.exception("multi-agent stream invocation failed")
                 service.update(user_id, child_id, status="error")
+                collector.fail_running(str(e))
                 await event_queue.put({
                     "type": "error",
+                    "error": str(e),
                     "detail": str(e),
+                    **classify_error(e),
                 })
             finally:
                 task_bridge.unregister(child_id)
@@ -892,6 +916,8 @@ async def get_conversation(conversation_id: str, request: Request, conv_type: st
             msg["sources"] = m.data["sources"]
         if m.data.get("steps"):
             msg["steps"] = m.data["steps"]
+        if m.data.get("agents"):
+            msg["agents"] = m.data["agents"]
         messages.append(msg)
     return {
         "id": conversation_id,

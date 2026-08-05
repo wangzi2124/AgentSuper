@@ -14,6 +14,7 @@ from typing import AsyncIterator, Callable, Optional
 
 from app.agent.base import BaseAgent, AgentMessage
 from app.agent.graph import RAGAgent
+from app.agent.stream_events import TaggedEventQueue, agent_meta, emit
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,16 @@ class RAGAgentWrapper(BaseAgent):
 
         try:
             if action == "chat":
-                # 完整 RAG 对话
+                # 完整 RAG 对话（事件桥：把 graph 步骤事件实时转发给前端）
+                event_queue = payload.get("_event_queue")
+                name, avatar = agent_meta(self._id)
+                emit(event_queue, {
+                    "type": "agent_start",
+                    "agent_id": self._id,
+                    "agent_name": name,
+                    "agent_avatar": avatar,
+                })
+                tagged = TaggedEventQueue(event_queue, self._id) if event_queue is not None else None
                 result = await self._inner.invoke(
                     question=payload.get("question", ""),
                     model=payload.get("model"),
@@ -60,7 +70,13 @@ class RAGAgentWrapper(BaseAgent):
                     files=payload.get("files", []),
                     conversation_id=payload.get("conversation_id", ""),
                     on_activity=self._notify,
+                    event_queue=tagged,
                 )
+                emit(event_queue, {
+                    "type": "agent_done",
+                    "agent_id": self._id,
+                    "content": result.get("answer", ""),
+                })
                 yield AgentMessage(
                     source=self._id, target=msg.source,
                     type="response", action="chat",
@@ -121,6 +137,11 @@ class RAGAgentWrapper(BaseAgent):
 
         except Exception as e:
             logger.exception("RAGAgentWrapper error on action=%s", action)
+            emit(payload.get("_event_queue"), {
+                "type": "agent_error",
+                "agent_id": self._id,
+                "error": str(e),
+            })
             yield AgentMessage(
                 source=self._id, target=msg.source,
                 type="error", action=action,

@@ -23,6 +23,7 @@ import litellm
 
 from app.agent.base import BaseAgent, AgentMessage
 from app.agent.memory import MemoryManager
+from app.agent.stream_events import agent_meta, emit, step_event
 from app.config import settings
 from app.monitor import record_model_call
 
@@ -82,14 +83,36 @@ class CodeAgent(BaseAgent):
                 question = payload.get("question", "")
                 language = payload.get("language", "")
                 conv_id = payload.get("conversation_id", "")
+                event_queue = payload.get("_event_queue")
+                name, avatar = agent_meta(self._id)
+                emit(event_queue, {
+                    "type": "agent_start",
+                    "agent_id": self._id,
+                    "agent_name": name,
+                    "agent_avatar": avatar,
+                })
 
                 # 获取相关记忆（按 conversation 隔离）
                 memory_context = await self._build_memory_context(namespace=conv_id)
 
+                start = tmod.time()
+                emit(event_queue, {
+                    "type": "agent_step",
+                    "agent_id": self._id,
+                    "step": step_event("generate", "生成回答", "running"),
+                })
                 answer = await self._ask_llm(
                     system_prompt=CODE_SYSTEM_PROMPT + memory_context,
                     user_message=question,
                 )
+                emit(event_queue, {
+                    "type": "agent_step",
+                    "agent_id": self._id,
+                    "step": step_event(
+                        "generate", "生成回答", "completed",
+                        duration_ms=(tmod.time() - start) * 1000,
+                    ),
+                })
 
                 # 缓存到记忆（按 conversation 隔离）
                 if self._memory:
@@ -101,6 +124,11 @@ class CodeAgent(BaseAgent):
                         namespace=conv_id,  # 🔒 Session 隔离
                     )
 
+                emit(event_queue, {
+                    "type": "agent_done",
+                    "agent_id": self._id,
+                    "content": answer,
+                })
                 yield AgentMessage(
                     source=self._id, target=msg.source,
                     type="response", action="chat",
@@ -163,6 +191,11 @@ class CodeAgent(BaseAgent):
 
         except Exception as e:
             logger.exception("CodeAgent error on action=%s", action)
+            emit(payload.get("_event_queue"), {
+                "type": "agent_error",
+                "agent_id": self._id,
+                "error": str(e),
+            })
             yield AgentMessage(
                 source=self._id, target=msg.source,
                 type="error", action=action,

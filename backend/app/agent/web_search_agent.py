@@ -11,12 +11,14 @@
 import asyncio
 import logging
 import json
+import time as tmod
 from typing import AsyncIterator, Optional
 
 import litellm
 
 from app.agent.base import BaseAgent, AgentMessage
 from app.agent.memory import MemoryManager
+from app.agent.stream_events import agent_meta, emit, step_event
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -63,9 +65,32 @@ class WebSearchAgent(BaseAgent):
                 question = payload.get("question", "")
                 max_results = payload.get("max_results", 5)
                 conv_id = payload.get("conversation_id", "")
+                event_queue = payload.get("_event_queue")
+                name, avatar = agent_meta(self._id)
+                emit(event_queue, {
+                    "type": "agent_start",
+                    "agent_id": self._id,
+                    "agent_name": name,
+                    "agent_avatar": avatar,
+                })
 
                 # 步骤 1: 搜索
+                start = tmod.time()
+                emit(event_queue, {
+                    "type": "agent_step",
+                    "agent_id": self._id,
+                    "step": step_event("search", "搜索网络", "running"),
+                })
                 search_results = await self._search_web(question, max_results)
+                emit(event_queue, {
+                    "type": "agent_step",
+                    "agent_id": self._id,
+                    "step": step_event(
+                        "search", "搜索网络", "completed",
+                        detail=f"找到 {len(search_results)} 条结果",
+                        duration_ms=(tmod.time() - start) * 1000,
+                    ),
+                })
 
                 # 步骤 2: 检查记忆中有无相关上下文（按 conversation 隔离）
                 memory_context = ""
@@ -78,7 +103,21 @@ class WebSearchAgent(BaseAgent):
                         memory_context = f"\n[之前的搜索结果]:\n{previous_searches[:500]}\n"
 
                 # 步骤 3: LLM 合成
+                start = tmod.time()
+                emit(event_queue, {
+                    "type": "agent_step",
+                    "agent_id": self._id,
+                    "step": step_event("synthesize", "合成回答", "running"),
+                })
                 answer = await self._synthesize(question, search_results, memory_context)
+                emit(event_queue, {
+                    "type": "agent_step",
+                    "agent_id": self._id,
+                    "step": step_event(
+                        "synthesize", "合成回答", "completed",
+                        duration_ms=(tmod.time() - start) * 1000,
+                    ),
+                })
 
                 # 步骤 4: 存入记忆（按 conversation 隔离）
                 if self._memory:
@@ -90,6 +129,11 @@ class WebSearchAgent(BaseAgent):
                         namespace=conv_id,  # 🔒 Session 隔离
                     )
 
+                emit(event_queue, {
+                    "type": "agent_done",
+                    "agent_id": self._id,
+                    "content": answer,
+                })
                 yield AgentMessage(
                     source=self._id, target=msg.source,
                     type="response", action="chat",
@@ -137,6 +181,11 @@ class WebSearchAgent(BaseAgent):
 
         except Exception as e:
             logger.exception("WebSearchAgent error on action=%s", action)
+            emit(payload.get("_event_queue"), {
+                "type": "agent_error",
+                "agent_id": self._id,
+                "error": str(e),
+            })
             yield AgentMessage(
                 source=self._id, target=msg.source,
                 type="error", action=action,

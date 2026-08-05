@@ -248,6 +248,7 @@ export interface MultiAgentSSEEvent {
   status_code?: number
   error_type?: string
   queue_position?: number
+  agents?: AgentStreamData[]
 }
 
 export interface MultiAgentChatRequest {

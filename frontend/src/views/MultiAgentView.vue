@@ -32,6 +32,17 @@ watch(() => {
   }
 })
 
+watch(() => {
+  const msgs = messages.value
+  if (msgs.length === 0) return 0
+  return msgs[msgs.length - 1]?.agents?.reduce((n, a) => n + (a.steps?.length || 0), 0) ?? 0
+}, async () => {
+  await nextTick()
+  if (isNearBottom.value && parentRef.value) {
+    parentRef.value.scrollTo({ top: parentRef.value.scrollHeight, behavior: 'smooth' })
+  }
+})
+
 onMounted(() => {
   const id = route.params.id as string
   if (id) agent.loadConversation(id)
