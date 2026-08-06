@@ -251,6 +251,10 @@ class SessionService:
             await self.coordinator.interrupt(sid)
         # 级联取消子会话对应的 AgentBus 任务
         task_bridge.cancel_children(child_ids)
+        # 丢弃排队中的输入：用户已取消，不希望在后续唤醒时再执行旧请求
+        repository.clear_inputs(session_id)
+        for cid in child_ids:
+            repository.clear_inputs(cid)
         repository.update_session(session_id, status="interrupted")
 
     def status(self, user_id: str, session_id: str) -> SessionStatus:

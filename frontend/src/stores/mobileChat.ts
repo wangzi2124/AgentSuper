@@ -10,6 +10,7 @@ import {
   renameConversation as apiRenameConversation,
   type ConversationMeta,
 } from '../api/chat'
+import { interruptSession } from '../api/sessions'
 
 // 支持的模型列表
 export const SUPPORTED_MODELS = [
@@ -200,6 +201,10 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     try {
       await sendMessageStream(reqData, (event: SSEEvent) => {
         if (signal.aborted) return
+        // 尽早记录服务器会话 id（后端在首个事件即注入），保证新会话也能被"停止"打断
+        if (event.conversation_id && !session.conversationId) {
+          session.conversationId = event.conversation_id
+        }
         if (event.type === 'step_start' || event.type === 'step_end' ||
             event.type === 'tool_start' || event.type === 'tool_end') {
           const idx = session.currentSteps.findIndex(s => s.step_id === event.step_id)
@@ -295,7 +300,14 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
       if (session) {
+        // 本地中断 SSE 连接（前端立即停止接收）
         session.abortController?.abort()
+        // 通知后端真正停止 Agent 任务（fire-and-forget，本地 abort 不会让后端停止）
+        if (session.conversationId) {
+          interruptSession(session.conversationId).catch((e) => {
+            console.error('Failed to interrupt session:', e)
+          })
+        }
       }
     }
   }

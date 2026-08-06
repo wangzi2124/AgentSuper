@@ -17,6 +17,7 @@ import {
   mergeServerAndCache,
 } from '../api/session-cache'
 import { usePermissionStore } from './permission'
+import { interruptSession } from '../api/sessions'
 
 export const SUPPORTED_MODELS = [
   { value: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
@@ -415,6 +416,11 @@ export const useChatStore = defineStore('chat', () => {
       await sendMessageStream(reqData, (event: SSEEvent) => {
         if (signal.aborted) return
 
+        // 尽早记录服务器会话 id（后端在首个事件即注入），保证新会话也能被"停止"打断
+        if (event.conversation_id && !session.conversationId) {
+          session.conversationId = event.conversation_id
+        }
+
         // 排队事件：更新排队位置，等待实际执行
         if (event.type === 'queued') {
           session.queuePosition = event.queue_position ?? null
@@ -603,7 +609,14 @@ export const useChatStore = defineStore('chat', () => {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
       if (session) {
+        // 本地中断 SSE 连接（前端立即停止接收）
         session.abortController?.abort()
+        // 通知后端真正停止 Agent 任务（fire-and-forget，本地 abort 不会让后端停止）
+        if (session.conversationId) {
+          interruptSession(session.conversationId).catch((e) => {
+            console.error('Failed to interrupt session:', e)
+          })
+        }
       }
     }
   }

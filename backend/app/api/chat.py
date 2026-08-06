@@ -730,6 +730,9 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
         try:
             while True:
                 event = await event_queue.get()
+                # 注入 conversation_id：前端在流中尽早拿到会话 id，
+                # 使"停止"按钮能调用 /api/sessions/{id}/interrupt 真正打断后台任务
+                event["conversation_id"] = session_id
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event["type"] in ("done", "error"):
                     break
@@ -791,9 +794,12 @@ async def chat_stream(request: Request, body: ChatRequest):
     async def event_generator():
         try:
             if active:
-                yield f"data: {json.dumps({'type': 'queued', 'queue_position': pending + 1}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'queued', 'queue_position': pending + 1, 'conversation_id': session_id}, ensure_ascii=False)}\n\n"
             while True:
                 event = await event_queue.get()
+                # 注入 conversation_id：前端在流中尽早拿到会话 id，
+                # 使"停止"按钮能调用 /api/sessions/{id}/interrupt 真正打断后台任务
+                event["conversation_id"] = session_id
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event["type"] in ("done", "error"):
                     break

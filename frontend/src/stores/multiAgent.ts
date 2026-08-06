@@ -11,6 +11,7 @@ import {
   type ConversationMeta,
 } from '../api/multiAgent'
 import { SUPPORTED_MODELS } from './chat'
+import { interruptSession } from '../api/sessions'
 
 function genId(): string {
   try { return crypto.randomUUID() }
@@ -135,6 +136,11 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       await sendMultiAgentStream(reqData, (event: MultiAgentSSEEvent) => {
         if (signal.aborted) return
 
+        // 尽早记录服务器会话 id（后端在首个事件即注入），保证新会话也能被"停止"打断
+        if (event.conversation_id && !session.conversationId) {
+          session.conversationId = event.conversation_id
+        }
+
         if (event.type === 'queued') {
           session.queuePosition = event.queue_position ?? null
           return
@@ -222,7 +228,19 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   }
 
   function cancel() {
-    if (activeSessionId.value) sessions.value[activeSessionId.value]?.abortController?.abort()
+    if (activeSessionId.value) {
+      const session = sessions.value[activeSessionId.value]
+      if (session) {
+        // 本地中断 SSE 连接（前端立即停止接收）
+        session.abortController?.abort()
+        // 通知后端真正停止 Agent 任务（fire-and-forget，本地 abort 不会让后端停止）
+        if (session.conversationId) {
+          interruptSession(session.conversationId).catch((e) => {
+            console.error('Failed to interrupt session:', e)
+          })
+        }
+      }
+    }
   }
 
   function clear() {
