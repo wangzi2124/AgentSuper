@@ -26,6 +26,9 @@ LONG_CONTENT_FILE_RULE = (
     "  2. Structured documents (.docx / .pdf / .xlsx / .pptx) -> use the corresponding generator plugin.\n"
     "  3. In your reply, only output: the saved file path + a summary of the key points + structure overview. "
     "Do NOT paste the full content.\n"
+    "  4. Do NOT add closing remarks asking the user to verify the file, e.g. never write "
+    "'文档已生成完毕，请验证文件完整性和内容结构' or similar verification notices. "
+    "Simply state the saved path and summary, then stop.\n"
     "  Exception: ONLY if the user explicitly asks for the full text inline."
 )
 
