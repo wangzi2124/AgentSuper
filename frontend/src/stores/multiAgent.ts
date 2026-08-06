@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, reactive } from 'vue'
 import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep } from '../types'
 import {
   sendMultiAgentStream,
@@ -122,9 +122,9 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
     const assistantMsgId = genId()
     const agentsMap: Record<string, AgentStreamData> = {}
-    const assistantMsg: MultiAgentMessage = {
+    const assistantMsg: MultiAgentMessage = reactive({
       id: assistantMsgId, role: 'assistant', content: '', agents: [], timestamp: new Date(),
-    }
+    })
     session.messages = [...session.messages, assistantMsg]
 
     const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value }

@@ -72,42 +72,38 @@ function stepKey(a: string, s: AgentStep): string {
 
         <!-- realtime steps -->
         <div v-if="a.steps.length" class="steps">
-          <div v-for="s in a.steps" :key="s.step_id" class="step" :class="s.status">
-            <span class="step-icon">{{ getStatusIcon(s.status) }}</span>
-            <div class="step-content">
-              <div class="step-top">
-                <span class="step-name">{{ s.name }}</span>
-                <span v-if="s.detail" class="step-detail">{{ s.detail }}</span>
-                <span v-if="s.duration_ms != null" class="step-duration">{{ formatDuration(s.duration_ms) }}</span>
-                <span v-else-if="s.status === 'running'" class="step-duration spinning">...</span>
-              </div>
-              <div v-if="s.tool_name" class="step-tool">
-                🔧 {{ s.tool_name }}
-                <span v-if="s.tool_args && Object.keys(s.tool_args).length" class="step-toggle" @click.stop="toggleArgs(stepKey(a.agent_id, s))">
-                  {{ expandedArgs[stepKey(a.agent_id, s)] ? '收起参数' : argsSummary(s.tool_args) }}
-                </span>
-                <span v-if="s.tool_result && s.status === 'completed'" class="step-toggle" @click.stop="toggleResult(stepKey(a.agent_id, s))">
-                  {{ expandedResults[stepKey(a.agent_id, s)] ? '收起结果' : '查看结果' }}
-                </span>
-              </div>
+          <div v-for="s in a.steps" :key="s.step_id" class="step-item" :class="s.status">
+            <div class="step-row">
+              <span class="step-icon">{{ getStatusIcon(s.status) }}</span>
+              <span class="step-name">{{ s.name }}</span>
+              <span v-if="s.detail" class="step-detail">{{ s.detail }}</span>
+              <span v-if="s.duration_ms != null" class="step-time">{{ formatDuration(s.duration_ms) }}</span>
+              <span v-else-if="s.status === 'running'" class="step-time spinning">...</span>
             </div>
-            <div v-if="s.tool_args && expandedArgs[stepKey(a.agent_id, s)]" class="step-box" @click.stop>
-              <div class="step-box-label">参数</div>
+            <div v-if="s.tool_name" class="step-tool">
+              🔧 {{ s.tool_name }}
+              <span v-if="s.tool_args && Object.keys(s.tool_args).length" class="step-args-toggle" @click.stop="toggleArgs(stepKey(a.agent_id, s))">
+                {{ expandedArgs[stepKey(a.agent_id, s)] ? '收起参数' : argsSummary(s.tool_args) }}
+              </span>
+              <span v-if="s.tool_result && s.status === 'completed'" class="step-result-toggle" @click.stop="toggleResult(stepKey(a.agent_id, s))">
+                {{ expandedResults[stepKey(a.agent_id, s)] ? '收起结果' : '查看结果' }}
+              </span>
+            </div>
+            <div v-if="s.tool_args && expandedArgs[stepKey(a.agent_id, s)]" class="step-args" @click.stop>
               <pre>{{ formatArgs(s.tool_args) }}</pre>
             </div>
-            <div v-if="s.tool_result && expandedResults[stepKey(a.agent_id, s)]" class="step-box" @click.stop>
-              <div class="step-box-label">结果</div>
+            <div v-if="s.tool_result && expandedResults[stepKey(a.agent_id, s)]" class="step-result" @click.stop>
               <pre>{{ s.tool_result }}</pre>
             </div>
           </div>
         </div>
         <div v-else-if="a.status === 'running'" class="steps">
-          <div class="step pending">
-            <span class="step-icon">⏳</span>
-            <div class="step-content">
+          <div class="step-item running">
+            <div class="step-row">
+              <span class="step-icon">⏳</span>
               <span class="step-name">正在初始化...</span>
+              <span class="step-time spinning">...</span>
             </div>
-            <span class="step-duration spinning">...</span>
           </div>
         </div>
 
@@ -142,23 +138,24 @@ function stepKey(a: string, s: AgentStep): string {
 .badge.completed { background: rgba(34,197,94,0.12); color: #22c55e; }
 .badge.failed { background: rgba(239,68,68,0.12); color: #ef4444; }
 .steps { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 2px; }
-.step { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 6px; background: var(--bg); font-size: 12px; }
-.step.running { border-left: 3px solid var(--primary); }
-.step.completed { border-left: 3px solid var(--success); }
-.step.failed { border-left: 3px solid var(--danger); }
-.step.pending { opacity: 0.6; }
-.step-icon { font-size: 12px; }
-.step-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.step-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.step-name { font-weight: 500; color: var(--text); }
-.step-detail { font-size: 11px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.step-duration { font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.step-duration.spinning { color: var(--primary); animation: spin 0.8s linear infinite; }
-.step-tool { font-size: 11px; color: var(--primary); font-family: monospace; }
-.step-toggle { color: var(--text-secondary); cursor: pointer; text-decoration: underline; margin-left: 4px; font-family: inherit; }
-.step-toggle:hover { color: var(--primary); }
-.step-box { margin: 4px 0 0 20px; padding: 6px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; max-height: 200px; overflow-y: auto; width: calc(100% - 20px); }
-.step-box-label { font-size: 10px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; margin-bottom: 4px; }
-.step-box pre { margin: 0; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); font-family: monospace; }
+.step-item { padding: 4px 6px; border-radius: 4px; font-size: 12px; }
+.step-item.completed { background: rgba(16, 185, 129, 0.04); }
+.step-item.failed { background: rgba(239, 68, 68, 0.04); }
+.step-item.running { background: rgba(99, 102, 241, 0.04); }
+.step-row { display: flex; align-items: center; gap: 6px; }
+.step-icon { font-size: 11px; flex-shrink: 0; }
+.step-name { font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.step-detail { color: var(--text-secondary); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.step-time { margin-left: auto; color: var(--text-secondary); font-size: 11px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.step-time.spinning { color: var(--primary); animation: spin 0.8s linear infinite; }
+.step-tool { font-size: 11px; color: var(--primary); font-family: monospace; margin-top: 2px; padding-left: 17px; }
+.step-args-toggle { color: var(--text-secondary); cursor: pointer; text-decoration: underline; margin-left: 4px; font-family: inherit; }
+.step-args-toggle:hover { color: var(--primary); }
+.step-args { margin: 4px 0 0 17px; padding: 6px 8px; background: #f8f9fa; border: 1px solid var(--border); border-radius: 4px; max-height: 200px; overflow-y: auto; }
+.step-args pre { margin: 0; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); font-family: monospace; }
+.step-result-toggle { font-size: 11px; color: var(--primary); cursor: pointer; text-decoration: underline; margin-top: 2px; padding-left: 17px; }
+.step-result-toggle:hover { opacity: 0.8; }
+.step-result { margin: 4px 0 0 17px; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; max-height: 200px; overflow-y: auto; }
+.step-result pre { margin: 0; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text-secondary); font-family: monospace; }
 .err { padding: 8px 12px; background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.2); border-radius: 8px; font-size: 13px; color: #ef4444; margin-top: 4px; }
 </style>
