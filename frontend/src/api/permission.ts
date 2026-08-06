@@ -33,6 +33,18 @@ export async function fetchWorkspaces(): Promise<{ workspaces: string[] }> {
   return res.json()
 }
 
+// 浏览文件系统子目录（供工作目录选择器使用）
+export async function browseDirectories(path: string): Promise<{
+  path: string; parent: string; name: string; dirs: Array<{ name: string; path: string }>
+}> {
+  const res = await fetch(BASE + '/browse?path=' + encodeURIComponent(path), { headers: await addAuthHeaders() })
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Browse error: ${err || res.statusText}`)
+  }
+  return res.json()
+}
+
 // 运行时新增可写工作区（免重启生效）
 export async function addWorkspace(path: string): Promise<{ status: string; path: string; workspaces: string[] }> {
   const res = await fetch(BASE + '/workspaces', {

@@ -4,6 +4,8 @@
 """
 
 import logging
+import os
+import string
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -78,6 +80,51 @@ async def respond(request_id: str, body: RespondRequest, request: Request):
     if not ok:
         raise HTTPException(status_code=404, detail="Request not found or already responded")
     return {"status": "ok"}
+
+
+@router.get("/permission/browse", tags=["Permission"])
+async def browse_dirs(request: Request, path: str = ""):
+    """列出指定目录下的子目录（供前端工作目录选择器使用）。
+
+    - path 为空：Windows 上返回所有盘符（C:\\, D:\\ 等），其他系统返回根目录 /
+    - path 为目录：返回其子目录列表 + 父目录，供逐层下钻
+    """
+    require_admin(request)
+    raw = (path or "").strip().strip('"').strip("'")
+
+    if not raw:
+        if os.name == "nt":
+            drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+            return {
+                "path": "",
+                "parent": "",
+                "name": "",
+                "dirs": [{"name": d.rstrip("\\"), "path": d} for d in drives],
+            }
+        raw = "/"
+
+    p = Path(raw)
+    if not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {raw}")
+
+    dirs: list[dict] = []
+    try:
+        for child in p.iterdir():
+            try:
+                if child.is_dir():
+                    dirs.append({"name": child.name or str(child), "path": str(child)})
+            except (PermissionError, OSError):
+                continue
+    except PermissionError:
+        pass
+
+    dirs.sort(key=lambda d: d["name"].lower())
+    return {
+        "path": str(p),
+        "parent": str(p.parent) if str(p.parent) != str(p) else "",
+        "name": p.name or str(p),
+        "dirs": dirs,
+    }
 
 
 @router.get("/permission/workspaces", tags=["Permission"])

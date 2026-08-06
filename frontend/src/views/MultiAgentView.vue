@@ -7,6 +7,7 @@ import { usePermissionStore } from '../stores/permission'
 import MultiAgentResponse from '../components/MultiAgentResponse.vue'
 import ChatInput from '../components/ChatInput.vue'
 import WeatherAlert from '../components/WeatherAlert.vue'
+import DirPickerModal from '../components/DirPickerModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,6 +21,7 @@ const showWsPanel = ref(false)
 const wsInput = ref('')
 const wsError = ref('')
 const wsBusy = ref(false)
+const showDirPicker = ref(false)
 const extraWorkspaces = computed(() => perm.workspaces.length > 1 ? perm.workspaces.slice(1) : [])
 const mainWorkspace = computed(() => perm.workspaces[0] || '')
 
@@ -66,6 +68,13 @@ async function handleRemoveWorkspace(path: string) {
   } catch (e: any) {
     wsError.value = e?.message || '移除失败'
   }
+}
+
+// 目录选择器选中后回填输入框
+function handleDirPick(path: string) {
+  wsInput.value = path
+  showDirPicker.value = false
+  wsError.value = ''
 }
 
 watch(() => messages.value.length, async () => {
@@ -184,6 +193,9 @@ async function handleCopy(messageId: string, text: string) {
           </button>
           <div v-if="showWsPanel" class="ws-panel">
             <div class="ws-row">
+              <button class="ws-pick-btn" title="选择目录" @click="showDirPicker = true">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              </button>
               <input
                 v-model="wsInput"
                 class="ws-input"
@@ -277,6 +289,8 @@ async function handleCopy(messageId: string, text: string) {
       </button>
       <ChatInput ref="chatInputRef" :loading="agent.loading" @send="handleSend" @cancel="handleCancel" />
     </div>
+
+    <DirPickerModal :show="showDirPicker" @close="showDirPicker = false" @select="handleDirPick" />
   </div>
 </template>
 
@@ -371,6 +385,21 @@ async function handleCopy(messageId: string, text: string) {
   display: flex;
   gap: 8px;
 }
+.ws-pick-btn {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.ws-pick-btn:hover { border-color: var(--primary); color: var(--primary); }
 .ws-input {
   flex: 1;
   padding: 6px 10px;
