@@ -1,7 +1,7 @@
 """Session 数据库连接与建表。
 
-独立于旧的 conversations.db（只读保留），新建 session.db 承载归一化的
-session / session_messages / message_parts / context_epoch / session_inputs。
+session.db 承载归一化的 session / session_messages / message_parts /
+context_epoch / session_inputs（旧的 conversations.db 已移除，数据全部在 session.db）。
 
 对应 opencode 设计：
 - sessions.project_id / workspace_id / parent_id 三级隔离（sql.ts）

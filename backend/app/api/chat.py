@@ -6,10 +6,8 @@
 import asyncio
 import json
 import logging
-import sqlite3
 import uuid
 from datetime import datetime
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -56,7 +54,7 @@ def _get_agent_semaphore() -> asyncio.Semaphore:
         _agent_semaphore = asyncio.Semaphore(MAX_CONCURRENT_AGENTS)
     return _agent_semaphore
 
-DB_PATH = Path(__file__).resolve().parents[2] / "data" / "conversations.db"
+
 # Sliding window: keep up to 80K tokens of history before passing to Agent.
 # The Agent internally truncates to 1M tokens in graph.py, so this threshold
 # is just for DB storage efficiency, not for context management.
@@ -96,70 +94,6 @@ def reset_summarizer():
     _summarizer_model = None
 
 
-def _get_db() -> sqlite3.Connection:
-    """获取对话数据库连接并初始化表结构（含 user_id 列）。"""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS conversations ("
-        "  id TEXT PRIMARY KEY,"
-        "  user_id TEXT NOT NULL DEFAULT '',"
-        "  title TEXT NOT NULL DEFAULT '',"
-        "  messages TEXT NOT NULL,"
-        "  created_at TEXT NOT NULL DEFAULT (datetime('now')),"
-        "  updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
-        ")"
-    )
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
-    for col in ["title", "created_at", "updated_at", "user_id"]:
-        if col not in existing_cols:
-            try:
-                conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
-            except sqlite3.OperationalError:
-                pass
-    if "type" not in existing_cols:
-        try:
-            conn.execute("ALTER TABLE conversations ADD COLUMN type TEXT NOT NULL DEFAULT 'chat'")
-        except sqlite3.OperationalError:
-            pass
-    now = datetime.now().isoformat()
-    conn.execute("UPDATE conversations SET created_at = ? WHERE created_at = ''", (now,))
-    conn.execute("UPDATE conversations SET updated_at = ? WHERE updated_at = ''", (now,))
-    conn.execute("UPDATE conversations SET type = 'chat' WHERE type IS NULL OR type = ''")
-    conn.commit()
-    return conn
-
-
-def _load_conversation(conv_id: str) -> list[dict]:
-    """从数据库加载指定对话的历史消息。"""
-    conn = _get_db()
-    try:
-        row = conn.execute(
-            "SELECT messages FROM conversations WHERE id = ?", (conv_id,)
-        ).fetchone()
-        if row:
-            return json.loads(row[0])
-        return []
-    finally:
-        conn.close()
-
-
-def _check_ownership(conv_id: str, user_id: str) -> bool:
-    """检查对话是否属于指定用户。返回 False 表示对话不存在或不属于该用户。"""
-    conn = _get_db()
-    try:
-        row = conn.execute(
-            "SELECT user_id FROM conversations WHERE id = ?", (conv_id,)
-        ).fetchone()
-        if not row:
-            return False
-        # 空 user_id 表示旧数据，允许访问；否则严格匹配
-        db_uid = row[0] or ""
-        return db_uid == "" or db_uid == user_id
-    finally:
-        conn.close()
-
-
 def _generate_title(messages: list[dict]) -> str:
     """根据用户第一条消息生成对话标题。"""
     for msg in messages:
@@ -168,28 +102,6 @@ def _generate_title(messages: list[dict]) -> str:
             text = text.strip().replace("\n", " ")
             return text[:20] + ("..." if len(text) > 20 else "")
     return "新对话"
-
-
-def _save_conversation(conv_id: str, messages: list[dict], title: str | None = None, user_id: str = "", conv_type: str = "chat"):
-    """保存对话历史到数据库。"""
-    conn = _get_db()
-    try:
-        now = datetime.now().isoformat()
-        if title is not None:
-            conn.execute(
-                "INSERT INTO conversations (id, user_id, title, messages, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(id) DO UPDATE SET title=excluded.title, messages=excluded.messages, type=excluded.type, updated_at=excluded.updated_at",
-                (conv_id, user_id, title, json.dumps(messages), conv_type, now, now),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO conversations (id, user_id, messages, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(id) DO UPDATE SET messages=excluded.messages, type=excluded.type, updated_at=excluded.updated_at",
-                (conv_id, user_id, json.dumps(messages), conv_type, now, now),
-            )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _truncate_history(history: list[dict], max_tokens: int = MAX_HISTORY_TOKENS) -> list[dict]:
@@ -238,7 +150,7 @@ def _sanitize_history(history: list[dict]) -> list[dict]:
 
 # ═══════════════════════════════════════════════════════════════
 #  Session 管理接线（设计文档 P3）：/stream 走 SessionService，
-#  会话 CRUD 统一读 session.db（旧 conversations.db 保留只读 + 惰性迁移）
+#  会话 CRUD 统一读 session.db
 # ═══════════════════════════════════════════════════════════════
 
 def _get_session_service(request: Request):
@@ -257,86 +169,20 @@ def _fmt_time(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000).isoformat() if ms else ""
 
 
-def _migrate_conversation(conv_id: str, user_id: str) -> bool:
-    """一次性迁移旧 conversations.db 行 → session.db（对齐设计文档 §10.2）。
-
-    保持 conversation_id == session.id，前端无需感知。
-    """
-    if not _check_ownership(conv_id, user_id):
-        return False
-    raw = _load_conversation(conv_id)
-    if not raw:
-        return False
-    conn = _get_db()
-    try:
-        row = conn.execute(
-            "SELECT title, type FROM conversations WHERE id = ?", (conv_id,)
-        ).fetchone()
-    finally:
-        conn.close()
-    title = (row[0] if row and row[0] else "") or _generate_title(raw)
-    kind = (row[1] if row and row[1] else "") or "chat"
-    root = discover_project_root()
-    project = session_repo.resolve_project(root)
-    session_repo.create_session(
-        user_id, project.id, root, kind=kind, title=title, session_id=conv_id,
-    )
-    for m in raw:
-        role = m.get("role", "")
-        msg_type = role if role in ("user", "assistant") else "system"
-        session_repo.append_message(conv_id, msg_type, {
-            "role": role or msg_type,
-            "content": m.get("content", ""),
-            "sources": m.get("sources"),
-            "steps": m.get("steps"),
-        })
-    return True
-
-
-def _resolve_session(user_id: str, conv_id: str) -> tuple[object, str]:
-    """解析/创建会话：已存在 → 校验归属；未找到 → 惰性迁移旧库；都没有 → 404。"""
-    service = None  # filled by caller
-    return service, conv_id
-
-
-def _get_legacy_conversation(conv_id: str, user_id: str) -> dict:
-    """读取旧 conversations.db 中的对话（仅未迁移行），只允许本人或匿名（user_id=''）数据。"""
-    conn = _get_db()
-    try:
-        row = conn.execute(
-            "SELECT title, messages, created_at, updated_at FROM conversations "
-            "WHERE id = ? AND (user_id = ? OR user_id = '')",
-            (conv_id, user_id),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    return {
-        "id": conv_id,
-        "title": row[0] or "新对话",
-        "messages": json.loads(row[1]),
-        "created_at": row[2],
-        "updated_at": row[3],
-    }
-
-
 # ═══════════════════════════════════════════════════════════════
 #  Multi-Agent 子任务会话（设计文档 P4）：
 #  每次 send_and_wait 登记为 kind='task' 子会话，级联取消经 task_bridge
 # ═══════════════════════════════════════════════════════════════
 
 def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | None) -> tuple[object, str]:
-    """解析/创建 multi-agent 主会话（session.db，旧库惰性迁移）。"""
+    """解析/创建 multi-agent 主会话（session.db）。"""
     service = _get_session_service(request)
     if conv_id:
         try:
             service.get(user_id, conv_id)
-            return service, conv_id
         except session_repo.SessionNotFound:
-            if not _migrate_conversation(conv_id, user_id):
-                raise HTTPException(status_code=404, detail="Conversation not found")
-            return service, conv_id
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return service, conv_id
     else:
         session = service.create(user_id, directory=discover_project_root(), kind="multi-agent")
         return service, session.id
@@ -422,21 +268,22 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
 
 @router.post("/", response_model=ChatResponse)
 async def chat(request: Request, body: ChatRequest):
-    """处理非流式聊天请求，返回完整响应。"""
+    """处理非流式聊天请求，返回完整响应（消息落库 session.db）。"""
     agent = request.app.state.agent
     user_id = _get_user_id(request)
-
-    conv_id = body.conversation_id or str(uuid.uuid4())
+    service = _get_session_service(request)
 
     if body.conversation_id:
-        if not _check_ownership(conv_id, user_id):
+        session_id = body.conversation_id
+        try:
+            service.get(user_id, session_id)
+        except session_repo.SessionNotFound:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        raw = _load_conversation(conv_id)
-        if not raw and body.conversation_id:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        history = raw
     else:
-        history = []
+        session = service.create(user_id, directory=discover_project_root(), kind="chat")
+        session_id = session.id
+
+    history = _session_history_for(service, user_id, session_id)
 
     summarizer = _get_summarizer()
     if summarizer:
@@ -460,10 +307,16 @@ async def chat(request: Request, body: ChatRequest):
         logger.exception("chat invocation failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    history.append({"id": str(uuid.uuid4()), "role": "user", "content": body.message})
-    history.append({"id": str(uuid.uuid4()), "role": "assistant", "content": result["answer"]})
-    title = _generate_title(history) if not body.conversation_id else None
-    _save_conversation(conv_id, history, title=title, user_id=user_id)
+    async with service.write_lock(session_id):
+        service.append_message(user_id, session_id, "user", {"role": "user", "content": body.message})
+        if session_repo.latest_seq(session_id) == 1:
+            service.update(user_id, session_id, title=_generate_title([{"role": "user", "content": body.message}]))
+        service.append_message(user_id, session_id, "assistant", {
+            "role": "assistant",
+            "content": result["answer"],
+            "sources": result.get("sources", []),
+            "steps": result.get("steps", []),
+        })
 
     return ChatResponse(
         answer=result["answer"],
@@ -475,7 +328,7 @@ async def chat(request: Request, body: ChatRequest):
             )
             for s in result["sources"]
         ],
-        conversation_id=conv_id,
+        conversation_id=session_id,
         steps=[StepEvent(**s) for s in result.get("steps", [])],
     )
 
@@ -763,15 +616,13 @@ async def chat_stream(request: Request, body: ChatRequest):
     user_id = _get_user_id(request)
     service = _get_session_service(request)
 
-    # 解析/创建会话（旧库惰性迁移，conversation_id == session.id）
+    # 解析/创建会话（conversation_id == session.id）
     session_id = body.conversation_id
     if session_id:
         try:
             service.get(user_id, session_id)
         except session_repo.SessionNotFound:
-            if not _migrate_conversation(session_id, user_id):
-                raise HTTPException(status_code=404, detail="Conversation not found")
-            service.get(user_id, session_id)
+            raise HTTPException(status_code=404, detail="Conversation not found")
     else:
         session = service.create(user_id, directory=discover_project_root(), kind="chat")
         session_id = session.id
@@ -827,17 +678,7 @@ async def delete_conversation(conversation_id: str, request: Request):
         service.remove(user_id, conversation_id)
         return {"status": "ok"}
     except session_repo.SessionNotFound:
-        # 旧库兜底
-        if not _check_ownership(conversation_id, user_id):
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        conn = _get_db()
-        try:
-            conn.execute("DELETE FROM conversations WHERE id = ? AND (user_id = ? OR user_id = '')",
-                         (conversation_id, user_id))
-            conn.commit()
-        finally:
-            conn.close()
-        return {"status": "ok"}
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
 
 @router.delete("/conversations/{conversation_id}/messages/{message_id}")
@@ -848,33 +689,11 @@ async def delete_message(conversation_id: str, message_id: str, request: Request
     try:
         service.get(user_id, conversation_id)
     except session_repo.SessionNotFound:
-        pass  # 走旧库
+        raise HTTPException(status_code=404, detail="Conversation not found")
     except session_repo.Forbidden:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    else:
-        if not session_repo.delete_message(conversation_id, message_id):
-            raise HTTPException(status_code=404, detail="Message not found")
-        return {"status": "ok"}
-
-    # 旧库兜底
-    if not _check_ownership(conversation_id, user_id):
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    conn = _get_db()
-    try:
-        row = conn.execute(
-            "SELECT messages FROM conversations WHERE id = ?", (conversation_id,)
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        messages = json.loads(row[0])
-        messages = [m for m in messages if m.get("id") != message_id]
-        conn.execute(
-            "UPDATE conversations SET messages = ?, updated_at = datetime('now') WHERE id = ?",
-            (json.dumps(messages), conversation_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    if not session_repo.delete_message(conversation_id, message_id):
+        raise HTTPException(status_code=404, detail="Message not found")
     return {"status": "ok"}
 
 
@@ -898,7 +717,6 @@ async def stream_status(request: Request):
 async def list_conversations(request: Request, conv_type: str | None = None):
     """获取当前用户的对话列表，按更新时间倒序排列。
     支持 ?conv_type=chat 或 ?conv_type=multi-agent 过滤。
-    新会话读 session.db，旧库未迁移行合并返回。
     """
     user_id = _get_user_id(request)
     service = _get_session_service(request)
@@ -910,43 +728,19 @@ async def list_conversations(request: Request, conv_type: str | None = None):
         for s in sessions
         if (kind is None or s.kind == kind)
     ]
-    # 合并旧 conversations.db（尚未迁移的行）
-    conn = _get_db()
-    try:
-        if conv_type:
-            rows = conn.execute(
-                "SELECT id, title, created_at, updated_at FROM conversations "
-                "WHERE (user_id = ? OR user_id = '') AND type = ? ORDER BY updated_at DESC",
-                (user_id, conv_type),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, title, created_at, updated_at FROM conversations "
-                "WHERE user_id = ? OR user_id = '' ORDER BY updated_at DESC",
-                (user_id,),
-            ).fetchall()
-        existing = {r["id"] for r in result}
-        for r in rows:
-            if r[0] not in existing:
-                result.append({"id": r[0], "title": r[1] or "新对话",
-                               "created_at": r[2], "updated_at": r[3]})
-    finally:
-        conn.close()
     result.sort(key=lambda r: r["updated_at"], reverse=True)
     return result
 
 
 @router.get("/conversations/{conversation_id}")
 async def get_conversation(conversation_id: str, request: Request, conv_type: str | None = None):
-    """获取指定对话的详细信息和消息历史（只能查看自己的对话）。
-    优先读 session.db（含已迁移行），否则回退旧库。
-    """
+    """获取指定对话的详细信息和消息历史（只能查看自己的对话）。"""
     user_id = _get_user_id(request)
     service = _get_session_service(request)
     try:
         session = service.get(user_id, conversation_id)
     except session_repo.SessionNotFound:
-        return _get_legacy_conversation(conversation_id, user_id)
+        raise HTTPException(status_code=404, detail="Conversation not found")
     except session_repo.Forbidden:
         raise HTTPException(status_code=404, detail="Conversation not found")
     if conv_type and session.kind != conv_type:
@@ -990,19 +784,6 @@ async def update_conversation(conversation_id: str, body: dict, request: Request
         service.update(user_id, conversation_id, title=title)
         return {"status": "ok"}
     except session_repo.SessionNotFound:
-        if not _check_ownership(conversation_id, user_id):
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        conn = _get_db()
-        try:
-            conn.execute(
-                "UPDATE conversations SET title = ?, updated_at = datetime('now') WHERE id = ? AND (user_id = ? OR user_id = '')",
-                (title, conversation_id, user_id),
-            )
-            conn.commit()
-            if conn.total_changes == 0:
-                raise HTTPException(status_code=404, detail="Conversation not found")
-        finally:
-            conn.close()
-        return {"status": "ok"}
+        raise HTTPException(status_code=404, detail="Conversation not found")
     except session_repo.Forbidden:
         raise HTTPException(status_code=404, detail="Conversation not found")

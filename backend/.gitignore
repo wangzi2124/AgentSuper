@@ -28,7 +28,6 @@ Thumbs.db
 # Data
 data/vector_store/
 data/uploads/
-data/conversations.db
 data/permissions.json
 
 # Node / Frontend
