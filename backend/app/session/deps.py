@@ -52,7 +52,7 @@ def discover_project_root(directory: str = "") -> str:
     return str(d)
 
 
-def resolve_session_context(
+async def resolve_session_context(
     request: Request,
     session_id: str,
 ) -> SessionContext:
@@ -60,6 +60,10 @@ def resolve_session_context(
 
     对齐 opencode session-location.ts：从 session 行解析 directory，
     为该会话构建所属 project 的上下文。
+
+    注意：必须是 async def —— session.db 连接池在主线程创建，
+    同步依赖会被 FastAPI 丢进线程池执行 → 跨线程使用 SQLite 抛
+    sqlite3.ProgrammingError（见 db.py:_ConnectionPool）。
     """
     service: SessionService = request.app.state.session_service
     user_id = get_user_id(request)

@@ -31,7 +31,7 @@ async def create_session(
     service = _service(request)
     if body.parent_id:
         # 校验父会话归属
-        resolve_session_context(request, body.parent_id)
+        await resolve_session_context(request, body.parent_id)
         parent = repository.get_session(body.parent_id)
         project_id = parent.project_id
         directory = parent.directory

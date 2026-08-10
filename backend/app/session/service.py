@@ -187,8 +187,16 @@ class SessionService:
         async with self.write_lock(session_id):
             if not checkpoint:
                 checkpoint = "[compacted]"
-            repository.append_message(session_id, "compaction", {"content": checkpoint})
-            session_history.replace_epoch_after_compaction(session_id, checkpoint, {})
+            # 定位压缩时模型视角的第一条原文作为 tail 起点 → 压缩后视角无损：
+            # [checkpoint] + [tail 原文] + [压缩后新增]（与脚本/executor 路径一致）
+            tail_snapshot: dict = {}
+            load = session_history.load(session_id)
+            for m in load.messages:
+                if m.type != "compaction":
+                    tail_snapshot = {"tail_start_id": m.id, "tail_start_seq": m.seq}
+                    break
+            repository.append_message(session_id, "compaction", {"content": checkpoint, "mode": "manual"})
+            session_history.replace_epoch_after_compaction(session_id, checkpoint, tail_snapshot)
             repository.update_session(session_id, time_compacted=int(tmod.time() * 1000))
 
     async def revert(self, user_id: str, session_id: str, message_id: str) -> dict[str, Any]:

@@ -411,6 +411,8 @@ def compact(session_id: str, *, force: bool = False, tail_turns: Optional[int] =
     budget = _preserve_budget()
     tail_start, tail_end = select_tail(messages, parts, tail_turns, budget)
     tail_msgs = messages[tail_start:tail_end]
+    if not tail_msgs:
+        return CompactResult(skipped_reason="no user turns to preserve")
     head_msgs = [m for m in candidate if m["seq"] < tail_msgs[0]["seq"]]
     head_text = serialize_history(head_msgs, parts)
     if not head_text.strip():
