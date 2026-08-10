@@ -218,6 +218,23 @@ def _checkpoint_of(compressed: list[dict]) -> str:
     return ""
 
 
+def _tail_start_of(session_id: str, compressed: list[dict]) -> dict:
+    """定位压缩后保留 tail 的起点：首个仍带 id 且位于上次压缩水位之后的消息。
+
+    返回 epoch.snapshot 可用的 {tail_start_id, tail_start_seq}，供 history.load
+    做 tail 回放（摘要 + 原文轮次 + 新增消息）；无保留 tail 时返回 {}（旧行为）。
+    """
+    prev_seq = repository.latest_compaction_seq(session_id) or 0
+    for m in compressed:
+        mid = m.get("id")
+        if not mid:
+            continue
+        seq = repository.seq_of_message(session_id, mid)
+        if seq is not None and seq > prev_seq:
+            return {"tail_start_id": mid, "tail_start_seq": seq}
+    return {}
+
+
 def build_executor(app):
     """构建 SessionService 的 executor 闭包。
 
@@ -245,6 +262,8 @@ def build_executor(app):
             compressed = await summarizer.apply(raw_history)
         else:
             compressed = _truncate_history(raw_history)
+        # 压缩后立即定位保留 tail 的起点（sanitize 会剥掉 id，需在清洗前取值）
+        tail_start = _tail_start_of(session_id, compressed)
         compressed = _sanitize_history(compressed)
 
         # 3-6 持每会话写锁（与 multi-agent 直写 / compact / revert / fork 共享），
@@ -260,7 +279,8 @@ def build_executor(app):
                     "mode": "summarize" if checkpoint else "truncate",
                 })
                 session_history.replace_epoch_after_compaction(
-                    session_id, checkpoint or "[compacted]", {},
+                    session_id, checkpoint or "[compacted]",
+                    tail_start,
                 )
                 repository.update_session(
                     session_id, time_compacted=int(tmod.time() * 1000),

@@ -306,6 +306,22 @@ def latest_compaction_seq(session_id: str) -> Optional[int]:
         conn.close()
 
 
+def seq_of_message(session_id: str, message_id: str) -> Optional[int]:
+    """按消息 id 查 seq（tail 起点水位定位用；id 为 UNIQUE(session_id, id)）。
+
+    压缩时 epoch.snapshot 只落 tail_start_id（旧格式）时，用此函数反查 seq。
+    """
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT seq FROM session_messages WHERE session_id = ? AND id = ?",
+            (session_id, message_id),
+        ).fetchone()
+        return int(row["seq"]) if row else None
+    finally:
+        conn.close()
+
+
 def add_session_usage(session_id: str, input_tokens: int = 0, output_tokens: int = 0, cost: float = 0.0) -> None:
     """累加会话级 token/费用（对齐 sessions 表成本结算列）。"""
     conn = _get_db()
