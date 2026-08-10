@@ -12,6 +12,7 @@ import {
 } from '../api/multiAgent'
 import { SUPPORTED_MODELS } from './chat'
 import { interruptSession } from '../api/sessions'
+import { usePermissionStore } from './permission'
 
 function genId(): string {
   try { return crypto.randomUUID() }
@@ -181,6 +182,16 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         } else if (event.type === 'agent_error') {
           const agent = agentsMap[event.agent_id]
           if (agent) { agent.status = 'failed'; agent.error = event.error; assistantMsg.agents = Object.values(agentsMap) }
+        } else if (event.type === 'permission_request') {
+          const permStore = usePermissionStore()
+          permStore.handleIncoming({
+            id: event.request_id!,
+            path: event.path!,
+            operation: event.operation!,
+            tool_name: event.tool_name!,
+            tool_args: event.tool_args as Record<string, unknown>,
+            created_at: new Date().toISOString(),
+          })
         } else if (event.type === 'error') {
           routingStatus.value = ''
           assistantMsg.isError = true

@@ -6,8 +6,9 @@
 
 - 工作区内操作直接执行（PermissionManager 判定 allow）
 - 外部/未授权路径触发 NeedsPermission 时，把 permission_request 事件经
-  事件队列桥接给前端（multi-agent UI 暂无审批面板），随后立即以拒绝结果
-  反馈 LLM，而不是永久阻塞等待（对齐 graph.py 多 agent 总线路径行为）。
+  事件队列桥接给前端（multi-agent UI 已接审批面板），随后异步等待用户
+  审批结果：allowed 则临时放行并重试执行，denied/超时则以拒绝结果反馈
+  LLM；无事件队列时直接拒绝（对齐 graph.py 行为）。
 """
 
 import asyncio
@@ -203,6 +204,14 @@ def _coerce_args(fn, args: dict) -> dict:
     return {k: v for k, v in args.items() if k in params}
 
 
+def _permission_denied_msg(operation: str, path: str) -> str:
+    return (
+        f"Permission denied: {operation} on '{path}' was not approved (user denied or request timed out). "
+        "Only paths inside the workspace are accessible without approval. "
+        "Adjust to a workspace path and retry, or explain the limitation to the user."
+    )
+
+
 async def run_tool(name: str, args: dict, event_queue=None) -> str:
     """执行子 Agent 工具调用，处理权限桥与错误归一化。"""
     fn = getattr(fs, name, None)
@@ -221,15 +230,15 @@ async def run_tool(name: str, args: dict, event_queue=None) -> str:
             "tool_name": name,
             "tool_args": args,
         })
-        logger.warning(
-            "Sub-agent permission request denied (no approval panel): %s on %s",
-            e.operation, e.path,
-        )
-        return (
-            f"Permission denied: {e.operation} on '{e.path}' is not allowed for this sub-agent. "
-            "Only paths inside the workspace are accessible; external/system paths are blocked. "
-            "Adjust to a workspace path and retry, or explain the limitation to the user."
-        )
+        if not event_queue:
+            # 无事件队列（脱离请求流）时无人能审批，直接拒绝而不是永久等待
+            logger.warning("Permission request denied: no event queue to approve %s", e.path)
+            return _permission_denied_msg(e.operation, e.path)
+        decision = await mgr.await_decision(req.id)
+        if decision == "allowed":
+            mgr.add_temp_approval(e.path)
+            return str(await asyncio.to_thread(fn, **_coerce_args(fn, args)))
+        return _permission_denied_msg(e.operation, e.path)
     except Exception as e:
         return f"Error executing {name}: {e}"
 

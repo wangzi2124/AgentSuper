@@ -246,7 +246,7 @@ export interface AgentStreamData {
 }
 
 export interface MultiAgentSSEEvent {
-  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'done' | 'error' | 'queued'
+  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'error' | 'queued'
   agent_id: string
   agent_name?: string
   agent_avatar?: string
@@ -264,6 +264,11 @@ export interface MultiAgentSSEEvent {
   agents?: AgentStreamData[]
   user_msg_id?: string
   assistant_msg_id?: string
+  request_id?: string
+  path?: string
+  operation?: string
+  tool_name?: string
+  tool_args?: Record<string, unknown>
 }
 
 export interface MultiAgentChatRequest {

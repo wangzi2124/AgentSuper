@@ -120,7 +120,7 @@ class TaggedEventQueue:
     传入本对象即可实现事件透传，无需改动 graph 本身。
 
     - step_start/step_end/tool_start/tool_end → agent_step
-    - permission_request → 原样透传（前端 multi-agent 暂未接审批 UI）
+    - permission_request → 原样透传（前端 multi-agent 已接审批 UI，复用 PermissionDialog）
     - tool_output / tool_heartbeat → 高频噪音，丢弃
     """
 
