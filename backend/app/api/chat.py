@@ -747,6 +747,9 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
+        # 响应头尽早透出会话 id：前端在读取任何 SSE 事件前即可记录 conversation_id，
+        # 使"停止/撤销"按钮在任何时刻都能 POST /interrupt 真正打断后台 Agent 任务
+        headers={"X-Session-Id": session_id},
     )
 
 
@@ -806,7 +809,13 @@ async def chat_stream(request: Request, body: ChatRequest):
         finally:
             unregister_request_queue(request_id)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        # 响应头尽早透出会话 id：前端在读取任何 SSE 事件前即可记录 conversation_id，
+        # 使"停止/撤销"按钮在任何时刻都能 POST /interrupt 真正打断后台 Agent 任务
+        headers={"X-Session-Id": session_id},
+    )
 
 
 @router.delete("/conversations/{conversation_id}")

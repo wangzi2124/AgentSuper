@@ -30,6 +30,7 @@ export async function sendMultiAgentStream(
   data: MultiAgentChatRequest,
   onEvent: (event: MultiAgentSSEEvent) => void,
   signal?: AbortSignal,
+  onSessionId?: (sessionId: string) => void,
 ): Promise<void> {
   let res: Response
   try {
@@ -51,6 +52,12 @@ export async function sendMultiAgentStream(
       statusCode: res.status,
     }
     throw error
+  }
+  // 响应头尽早透出会话 id：后端在返回流式响应的同时注入 X-Session-Id，
+  // 前端在消费任何 SSE 事件前即可记录 conversation_id，保证"停止/撤销"能立刻打断后台任务
+  const sessionId = res.headers.get('X-Session-Id')
+  if (sessionId && onSessionId) {
+    onSessionId(sessionId)
   }
   const reader = res.body?.getReader()
   if (!reader) throw { type: 'network', message: 'No response body', retryable: true } as ChatError

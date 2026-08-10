@@ -178,6 +178,20 @@ function handleUndo(index: number) {
   }
 }
 
+// 步骤面板"撤销上一步"：停止当前 Agent 任务并回退到最近一条用户消息
+function handleStepUndo() {
+  if (chat.loading) chat.cancel()
+  const msgs = messages.value
+  let lastUserIdx = -1
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'user') {
+      lastUserIdx = i
+      break
+    }
+  }
+  if (lastUserIdx >= 0) chat.undoMessage(lastUserIdx)
+}
+
 // 删除指定消息
 function handleMessageDelete(messageId: string) {
   chat.deleteMessage(messageId)
@@ -279,6 +293,8 @@ function handleMessageRetry(messageId: string) {
           v-if="chat.loading"
           :steps="chat.currentSteps"
           :is-running="chat.loading"
+          :on-undo="handleStepUndo"
+          @undo="handleStepUndo"
         />
       </div>
     </div>

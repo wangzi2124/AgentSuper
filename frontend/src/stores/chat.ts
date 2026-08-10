@@ -563,7 +563,13 @@ export const useChatStore = defineStore('chat', () => {
             startAutoRetry(sessionId, text)
           }
         }
-      }, signal)
+      }, signal, (sid) => {
+        // 后端在响应头 X-Session-Id 立即透出会话 id（先于任何 SSE 事件），
+        // 保证新会话在排队/等待全局并发槽位时，"停止/撤销"也能 POST /interrupt 打断后台任务
+        if (!session.conversationId) {
+          session.conversationId = sid
+        }
+      })
     } catch (err: any) {
       session.streamPhase = 'idle'
       session.queuePosition = null
