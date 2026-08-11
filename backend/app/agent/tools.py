@@ -114,7 +114,9 @@ def create_skill_tools(skill_loader: SkillLoader) -> List[ToolDef]:
     for skill in skill_loader.get_enabled_skills():
         content = skill_loader.get_skill_content(skill.name)
         name = f"load_skill_{skill.name.replace('-', '_').replace(' ', '_')}"
-        description = f"Load the '{skill.name}' skill content. Description: {skill.description}"
+        # [token 优化 v3] 描述截断到 200 字符：40 个技能全启用时避免 schema 体积膨胀（完整描述仍在 SKILL.md）
+        _d = " ".join(skill.description.split())
+        description = f"Load the '{skill.name}' skill content. Description: {_d[:200]}{'…' if len(_d) > 200 else ''}"
 
         def make_skill_fn(n: str, desc: str, c: str) -> ToolDef:
             def skill_tool() -> str:
@@ -252,8 +254,12 @@ def build_system_prompt_no_kb(
         )
 
     if enabled_skills:
+        # [token 优化 v3] 描述压缩为单行、截断 100 字符（完整描述见对应工具 schema）
+        def _short(desc: str, limit: int = 100) -> str:
+            d = " ".join(desc.split())
+            return d[:limit] + ("…" if len(d) > limit else "")
         skills_desc = "\n".join(
-            f"   - load_skill_{s.name.replace('-', '_').replace(' ', '_')}() - Load '{s.name}' skill: {s.description}"
+            f"   - load_skill_{s.name.replace('-', '_').replace(' ', '_')}() - {_short(s.description)}"
             for s in enabled_skills
         )
         tool_parts.append(f"Skill tools (load skill files):\n{skills_desc}")
@@ -275,60 +281,28 @@ def build_system_prompt_no_kb(
     parts.extend([
         "",
         "Instructions:",
-        "- There is no knowledge base available (no documents uploaded).",
-        "- Answer based on your own knowledge.",
-        "- If you don't know something, say so honestly.",
-        "- Only call tools that are directly relevant to the user's request. Do NOT call unrelated tools.",
-        "- For document generation, use the docx-generator plugin (plugin_docx-generator_tool_create_docx) for .docx files, or save content using tool_write_file for other formats.",
-        "- For web search (查找信息/搜索), use plugin_internet-search_tool_internet_search.",
-        "  - Use region='cn' for Chinese content, region='global' for international.",
-        "  - Use engine='auto' to auto-select. Engines: tavily (requires TAVILY_API_KEY), bing (requires BING_API_KEY), duckduckgo (free). Avoid 'baidu' (anti-bot, usually returns nothing).",
-        "- For fetching content from a specific URL (查看某个网站的内容), use plugin_internet-search_tool_extract_urls.",
-        "- For HTTP requests (testing APIs, calling endpoints, fetching data from URLs), use plugin_http-client_tool_http_request, plugin_http-client_tool_http_get, or plugin_http-client_tool_http_post.",
-        "  - Pass headers as a JSON string, e.g. {\"Authorization\": \"Bearer xxx\"}.",
-        "  - Pass body as a JSON string for JSON requests, or key=value&key2=value2 for form data.",
-        "  - For simple GET requests, prefer plugin_http-client_tool_http_get.",
-        "  - For simple POST with JSON body, prefer plugin_http-client_tool_http_post.",
-        "- CRITICAL: tool_execute is ONLY for building/testing projects (npm install, npm run build, etc.). NEVER use tool_execute for curl, wget, ping, or any network/web operations. Use the http-client plugin instead.",
-        "- For knowledge base export, use kb-export tools.",
-        "- If the user's request doesn't match any tool's purpose, answer directly without calling tools.",
+        "- No knowledge base available; answer from your own knowledge; say so honestly if unsure.",
+        "- Only call tools directly relevant to the request.",
+        "- Docs: use docx/pdf/excel/pptx generator plugins, or tool_write_file for other formats.",
+        "- Web search: plugin_internet-search_tool_internet_search (region='cn'|'global').",
+        "- URL content: plugin_internet-search_tool_extract_urls.",
+        "- HTTP: plugin_http-client_tool_http_get/_post/_request (headers as JSON string).",
+        "- CRITICAL: tool_execute ONLY for build/install (npm install, npm run build). NEVER for curl/wget/ping/network — use http-client plugin.",
+        "- KB export: kb-export tools.",
+        "- If no tool fits, answer directly without calling tools.",
         "",
-        "IMPORTANT - Skill loading before code/design tasks:",
-        "  When the user asks to create code, web pages, apps, or designs:",
-        "  1. FIRST, call the relevant load_skill_*() tool to get specialized instructions and best practices.",
-        "  2. Then follow the skill's guidance to write files using tool_write_file.",
-        "  3. Only run tool_execute for build/install if the skill instructs you to.",
+        "IMPORTANT - Before code/design tasks: FIRST call the relevant load_skill_*() tool for best practices, "
+        "then write files with tool_write_file; tool_execute only for build/install if the skill says so.",
         "",
-        "IMPORTANT - DOCX / PDF / Excel / PPTX document creation:",
-        "  When the user asks to create a Word document (.docx):",
-        "  - Use the docx-generator plugin (plugin_docx-generator_tool_create_docx).",
-        "    sections JSON supports: heading, paragraph, table, bullet_list.",
-        "  When the user asks to create a PDF document (.pdf):",
-        "  - Use the pdf-generator plugin (plugin_pdf-generator_tool_create_pdf).",
-        "    sections JSON supports: heading, paragraph, table, bullet_list, horizontal_rule.",
-        "  When the user asks to create an Excel spreadsheet (.xlsx):",
-        "  - Use the excel-generator plugin (plugin_excel-generator_tool_create_excel).",
-        "    sheets JSON supports: name, headers, rows. Supports multiple sheets.",
-        "  When the user asks to create a PowerPoint presentation (.pptx):",
-        "  - Use the pptx-generator plugin (plugin_pptx-generator_tool_create_pptx).",
-        "    slides JSON supports types: title, section_header, content, two_column, table.",
-        "    Each slide supports optional bg_color and font_color.",
-        "  Files are saved per the user's specified directory rules.",
+        "IMPORTANT - Documents (.docx/.pdf/.xlsx/.pptx): use the matching generator plugin "
+        "(docx/pdf/excel/pptx-generator); section/slide schemas are in each tool's description. Files saved per your directory rules.",
         "",
-        "IMPORTANT - Order of operations for creating projects:",
-        "  1. FIRST, write ALL necessary code files using tool_write_file (it auto-creates directories).",
-        "  2. Do NOT use tool_execute with mkdir or Set-Content to create files — use tool_write_file instead.",
-        "  3. ONLY AFTER all files are written, run tool_execute for npm install or build if needed.",
-        "  Do NOT run 'npm create', 'npx create-react-app', 'npm create vite' etc. Write files manually.",
+        "IMPORTANT - Projects: write ALL code files first via tool_write_file (auto-creates dirs); do NOT use "
+        "mkdir/Set-Content or 'npm create'/'create-react-app'/'create vite'; only then run tool_execute for install/build.",
         "",
-        "IMPORTANT - Writing large files:",
-        "  A single tool call cannot carry very large content (LLM output is limited). For content larger than",
-        "  roughly 6KB (about 150 lines), do NOT try to write it all at once:",
-        "  1. Use tool_write_file(path, content, overwrite=True) to write the first chunk.",
-        "  2. Then append the remaining chunks with tool_append_file(path, content), one chunk per call.",
-        "  This avoids truncated/corrupted files. You may also use tool_read_file to verify after writing.",
-        "",
-        LONG_CONTENT_FILE_RULE,
+        "IMPORTANT - Long content MUST be written to files, NOT pasted in replies (≈500 Chinese chars / 1000 tokens):",
+        "  Write text/code with tool_write_file (first chunk, then tool_append_file for large files); generator plugins for .docx/.pdf/.xlsx/.pptx.",
+        "  Reply with only: saved path + summary + structure. No 'please verify' closing remarks.",
         "",
         "IMPORTANT - Working paths / workspace:",
         "  The following absolute paths are writable workspaces (you MUST write files under one of them):",
@@ -340,15 +314,8 @@ def build_system_prompt_no_kb(
         "  To search files in a configured workspace, pass root=<absolute path> to tool_glob / tool_grep.",
         "  tool_grep / tool_glob return absolute paths when searching a custom root.",
         "",
-        "IMPORTANT - Planning & final report for multi-step tasks:",
-        "  When the task needs multiple steps or multiple files (e.g. building a project):",
-        "  1. FIRST output a short plan block marked '## 实施计划' listing the steps as a checklist.",
-        "  2. As you work, keep the plan visible and mark each step's progress.",
-        "  3. ALWAYS end your final answer with a '## 完成情况' section listing:",
-        "     - 已完成 (what was completed)",
-        "     - 未完成 (what was NOT completed, if any)",
-        "     - 下一步 (concrete next steps to finish the task)",
-        "  4. When the step limit is reached, you MUST give this report without calling more tools.",
+        "IMPORTANT - Multi-step tasks: start with plan block '## 实施计划'; end with '## 完成情况' "
+        "(已完成 / 未完成 / 下一步). At step limit, give this report without calling more tools.",
     ])
 
     return "\n".join(parts)

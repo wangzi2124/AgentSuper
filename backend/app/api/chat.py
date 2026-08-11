@@ -55,10 +55,9 @@ def _get_agent_semaphore() -> asyncio.Semaphore:
     return _agent_semaphore
 
 
-# Sliding window: keep up to 48K tokens of history before passing to Agent.
-# The Agent internally truncates to 1M tokens in graph.py, so this threshold
-# is just for DB storage efficiency, not for context management.
-MAX_HISTORY_TOKENS = 48_000
+# [token 优化 v3] Sliding window: keep up to 32K tokens of history before passing to Agent.
+# graph.py 通过 config.max_context_tokens(48K) 做上下文管理，此阈值仅控制历史注入量。
+MAX_HISTORY_TOKENS = 32_000
 
 _summarizer: HierarchicalSummarizationMiddleware | None = None
 _summarizer_model: str | None = None
