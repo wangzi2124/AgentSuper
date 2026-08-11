@@ -29,15 +29,15 @@ from app.tools import filesystem as fs
 logger = logging.getLogger(__name__)
 
 # 子 Agent 工具循环最大轮数（含最终无工具收尾调用前的最多执行轮）
-SUB_AGENT_MAX_ROUNDS = 5
+SUB_AGENT_MAX_ROUNDS = 4  # [token 优化 v2] 5->4（3 轮工具 + 1 次收尾）
 
 # 工具结果回传 LLM 时的截断长度，避免 context 膨胀
 _TOOL_RESULT_TRUNC = 1500
 
 # 子 Agent 可见的工具白名单（仅文件读写与搜索，不暴露插件/generator 等）
 # ── [token 优化] 子 Agent 上下文截断:控制 tool 循环 context 膨胀 ──
-_SUB_CTX_MAX_TOKENS = 16_000  # 软上限（估算 token），超出即裁剪最旧轮次
-_SUB_CTX_KEEP_ROUNDS = 4      # 裁剪时从尾部保留的完整工具轮数
+_SUB_CTX_MAX_TOKENS = 12_000  # [token 优化 v2] 软上限 16K->12K，进一步压缩 context 膨胀
+_SUB_CTX_KEEP_ROUNDS = 3      # [token 优化 v2] 保留轮数 4->3
 
 
 def _trim_messages(messages: list[dict]) -> list[dict]:

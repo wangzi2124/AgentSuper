@@ -225,7 +225,7 @@ class RAGAgent:
         import functools
         try:
             results = await asyncio.to_thread(
-                functools.partial(self.retriever.invoke, state["question"], k=5)
+                functools.partial(self.retriever.invoke, state["question"], k=3)  # [token 优化 v2] 5->3
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("retrieve failed, returning empty context: %s", e)
@@ -606,19 +606,16 @@ class RAGAgent:
         )
         self._push_event(state, {"type": "step_start", "step_id": "generate", "name": "生成回答", "status": "running"})
 
+        context_text = ""
         if state["context"]:
             context_parts = [
                 f"[Source {i+1}]: {c['content']}"
                 for i, c in enumerate(state["context"])
             ]
             context_text = "\n\n".join(context_parts)
-            full_system_prompt = (
-                self._system_prompt_with_kb()
-                + "\n\n"
-                + f"Retrieved Context:\n{context_text}"
-            )
-        else:
-            full_system_prompt = self.system_prompt
+        # [token 优化 v2] system 保持完全稳定 → 最大化 DeepSeek 前缀缓存命中（命中按 0.1x 计费）
+        # RAG 检索结果改放 user 消息前缀（见下方 user 消息构建），避免 system 每次变化导致缓存整体失效。
+        full_system_prompt = self.system_prompt
 
         tool_defs = self._build_tool_defs()
 
@@ -629,9 +626,14 @@ class RAGAgent:
             messages.extend(state["history"])
 
         # Build user content: text only or multimodal if files attached
+        # [token 优化 v2] RAG 上下文改放 user 消息前缀（system 保持稳定 → 命中前缀缓存）
+        user_question = (
+            f"Retrieved Context:\n{context_text}\n\n---\n\n{state['question']}"
+            if context_text else state["question"]
+        )
         user_files = state.get("files", [])
         if user_files:
-            user_content: list[dict] = [{"type": "text", "text": state["question"]}]
+            user_content: list[dict] = [{"type": "text", "text": user_question}]
             for f in user_files:
                 if f.get("mime_type", "").startswith("image/"):
                     user_content.append({
@@ -640,7 +642,7 @@ class RAGAgent:
                     })
             messages.append({"role": "user", "content": user_content})
         else:
-            messages.append({"role": "user", "content": state["question"]})
+            messages.append({"role": "user", "content": user_question})
 
         model = state.get("model") or self.model
         if "/" not in model:
