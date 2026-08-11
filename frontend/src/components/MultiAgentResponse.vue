@@ -113,7 +113,7 @@ function stepKey(a: string, s: AgentStep): string {
     </div>
 
     <!-- final answer -->
-    <div v-if="message.content && (!message.agents.length || !isLast)" class="text" v-text="message.content"></div>
+    <div v-if="message.content" class="text" v-text="message.content"></div>
 
     <!-- error -->
     <div v-if="message.isError && message.errorInfo" class="err">
@@ -123,39 +123,39 @@ function stepKey(a: string, s: AgentStep): string {
 </template>
 
 <style scoped>
-.response { font-size: 14px; line-height: 1.6; }
+.response { font-size: 15px; line-height: 1.8; }
 .routing { display: flex; align-items: center; gap: 8px; padding: 8px 0; font-size: 13px; color: var(--text-secondary); }
 .spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .text { white-space: pre-wrap; word-break: break-word; }
-.agents { display: flex; flex-direction: column; gap: 8px; }
-.agent { border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
-.agent-h { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 13px; }
-.avatar { font-size: 18px; }
+.agents { display: flex; flex-direction: column; gap: 12px; }
+.agent { border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; background: var(--bg); }
+.agent-h { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 15px; }
+.avatar { font-size: 22px; }
 .name { font-weight: 600; }
-.badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-left: auto; }
+.badge { font-size: 13px; padding: 3px 10px; border-radius: 10px; margin-left: auto; }
 .badge.running { background: rgba(99,102,241,0.12); color: var(--primary); }
 .badge.completed { background: rgba(34,197,94,0.12); color: #22c55e; }
 .badge.failed { background: rgba(239,68,68,0.12); color: #ef4444; }
-.steps { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 2px; }
-.step-item { padding: 4px 6px; border-radius: 4px; font-size: 12px; }
+.steps { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 4px; }
+.step-item { padding: 8px 10px; border-radius: 8px; font-size: 15px; }
 .step-item.completed { background: rgba(16, 185, 129, 0.04); }
 .step-item.failed { background: rgba(239, 68, 68, 0.04); }
 .step-item.running { background: rgba(99, 102, 241, 0.04); }
-.step-row { display: flex; align-items: center; gap: 6px; }
-.step-icon { font-size: 11px; flex-shrink: 0; }
+.step-row { display: flex; align-items: center; gap: 8px; }
+.step-icon { font-size: 15px; flex-shrink: 0; }
 .step-name { font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.step-detail { color: var(--text-secondary); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.step-time { margin-left: auto; color: var(--text-secondary); font-size: 11px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.step-detail { color: var(--text-secondary); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.step-time { margin-left: auto; color: var(--text-secondary); font-size: 14px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .step-time.spinning { color: var(--primary); animation: spin 0.8s linear infinite; }
-.step-tool { font-size: 11px; color: var(--primary); font-family: monospace; margin-top: 2px; padding-left: 17px; }
+.step-tool { font-size: 14px; color: var(--primary); font-family: monospace; margin-top: 4px; padding-left: 23px; }
 .step-args-toggle { color: var(--text-secondary); cursor: pointer; text-decoration: underline; margin-left: 4px; font-family: inherit; }
 .step-args-toggle:hover { color: var(--primary); }
-.step-args { margin: 4px 0 0 17px; padding: 6px 8px; background: #f8f9fa; border: 1px solid var(--border); border-radius: 4px; max-height: 200px; overflow-y: auto; }
-.step-args pre { margin: 0; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); font-family: monospace; }
-.step-result-toggle { font-size: 11px; color: var(--primary); cursor: pointer; text-decoration: underline; margin-top: 2px; padding-left: 17px; }
+.step-args { margin: 4px 0 0 23px; padding: 8px 10px; background: #f8f9fa; border: 1px solid var(--border); border-radius: 6px; max-height: 200px; overflow-y: auto; }
+.step-args pre { margin: 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); font-family: monospace; }
+.step-result-toggle { font-size: 14px; color: var(--primary); cursor: pointer; text-decoration: underline; margin-top: 4px; padding-left: 23px; }
 .step-result-toggle:hover { opacity: 0.8; }
-.step-result { margin: 4px 0 0 17px; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; max-height: 200px; overflow-y: auto; }
-.step-result pre { margin: 0; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text-secondary); font-family: monospace; }
+.step-result { margin: 4px 0 0 23px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; max-height: 200px; overflow-y: auto; }
+.step-result pre { margin: 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text-secondary); font-family: monospace; }
 .err { padding: 8px 12px; background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.2); border-radius: 8px; font-size: 13px; color: #ef4444; margin-top: 4px; }
 </style>

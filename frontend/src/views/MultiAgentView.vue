@@ -485,8 +485,8 @@ async function handleCopy(messageId: string, text: string) {
 .chat-message { display: flex; gap: 12px; margin-bottom: 16px; }
 .chat-message.user { flex-direction: row-reverse; }
 .avatar { width: 36px; height: 36px; border-radius: 50%; background: var(--bg); display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
-.bubble { max-width: 80%; padding: 12px 16px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); line-height: 1.6; font-size: 14px; }
-.user .bubble { background: var(--primary); color: white; border-color: var(--primary); }
+.bubble { flex: 1; width: 100%; max-width: 100%; padding: 12px 16px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); line-height: 1.7; font-size: 15px; box-sizing: border-box; }
+.user .bubble { flex: none; width: auto; max-width: 80%; background: var(--primary); color: white; border-color: var(--primary); }
 .content { white-space: pre-wrap; word-break: break-word; }
 .is-error .bubble { background: rgba(239,68,68,0.06); border-color: rgba(239,68,68,0.3); }
 .message-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 11px; }
