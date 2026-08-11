@@ -12,6 +12,7 @@ const navItems = [
   { path: '/documents', label: 'Documents', icon: '📄' },
   { path: '/skills', label: 'Skills', icon: '🧠' },
   { path: '/plugins', label: 'Plugins', icon: '🔌' },
+  { path: '/custom-tools', label: 'Custom Tools', icon: '🧰' },
   { path: '/vectors', label: 'Vectors', icon: '🔢' },
   { path: '/generated', label: 'Generated', icon: '📝' },
   { path: '/monitoring', label: 'Monitoring', icon: '📊' },

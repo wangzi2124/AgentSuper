@@ -70,7 +70,7 @@ class PermissionManager:
         whitelist_path: str = "",
         extra_workspaces: Optional[list] = None,
         external_default: str = "ask",
-        approval_timeout: int = 60,
+        approval_timeout: int = 3600,
     ):
         """初始化权限管理器，设置工作目录、白名单文件路径和额外工作区。"""
         self.workspace = Path(workspace).resolve() if workspace else Path.cwd()

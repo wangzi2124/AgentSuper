@@ -49,6 +49,11 @@ const router = createRouter({
       component: () => import('../views/PluginsView.vue'),
     },
     {
+      path: '/custom-tools',
+      name: 'CustomTools',
+      component: () => import('../views/CustomToolsView.vue'),
+    },
+    {
       path: '/vectors',
       name: 'Vectors',
       component: () => import('../views/VectorsView.vue'),

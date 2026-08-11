@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config, weather, auth as auth_api
+from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config, weather, auth as auth_api, custom_tools as custom_tools_api
 from app.api.chat import MAX_CONCURRENT_AGENTS
 from app.auth import AuthMiddleware
 from app.config import settings
@@ -66,6 +66,7 @@ app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 app.include_router(sessions_router, prefix="/api/sessions", tags=["Sessions"])
 app.include_router(skills.router, prefix="/api/skills", tags=["Skills"])
 app.include_router(plugins.router, prefix="/api/plugins", tags=["Plugins"])
+app.include_router(custom_tools_api.router, prefix="/api/custom-tools", tags=["Custom Tools"])
 app.include_router(vectors.router, prefix="/api/vectors", tags=["Vectors"])
 app.include_router(generated.router, prefix="/api/generated", tags=["Generated"])
 app.include_router(perm_api.router, prefix="/api", tags=["Permission"])

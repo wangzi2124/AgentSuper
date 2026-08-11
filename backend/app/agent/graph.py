@@ -108,6 +108,7 @@ from app.agent.tools import (
     create_plugin_tools,
     build_system_prompt_no_kb,
 )
+from app.skills.custom_tools import CustomToolStore  # [token 优化 v6]
 from app.monitor import record_model_call
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
 
@@ -143,11 +144,13 @@ class RAGAgent:
         skill_loader: SkillLoader | None = None,
         plugin_loader: PluginLoader | None = None,
         reranker: Reranker | None = None,
+        custom_tools: CustomToolStore | None = None,  # [token 优化 v6] 前端添加的自定义工具/固定工具
     ):
         self.retriever = retriever
         self.reranker = reranker
         self.skill_loader = skill_loader
         self.plugin_loader = plugin_loader
+        self.custom_tools = custom_tools
         self.model = settings.llm_model
         self.api_key = settings.llm_api_key
         self.api_base = settings.llm_api_base
@@ -280,11 +283,101 @@ class RAGAgent:
             "\n\n" + LONG_CONTENT_FILE_RULE
         )
 
-    def _build_tool_defs(self) -> list[dict] | None:
-        """构建OpenAI格式的工具定义列表。"""
+    # [token 优化 v5] 按需挂载工具 schema：核心文件工具常驻，技能/插件按意图关键词 + 已使用保留
+    _CORE_TOOL_PREFIXES = ("tool_",)
+    _WEATHER_TOOL_PREFIXES = ("plugin_weather", "plugin_weather-alert")
+    _WEATHER_RESULT_LIMIT = 1500  # 字符
+    # 意图关键词 → 需要挂载的工具名前缀（任一词命中即挂载该类工具）
+    _INTENT_RULES: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+        (("天气", "台风", "气象", "温度", "降雨", "下雪", "weather", "typhoon", "forecast"),
+         ("plugin_weather", "plugin_weather-alert")),
+        (("文档", "word", "docx", "pdf", "excel", "xlsx", "ppt", "pptx", "表格", "幻灯片", "报告"),
+         ("plugin_docx-generator", "plugin_pdf-generator", "plugin_excel-generator", "plugin_pptx-generator",
+          "load_skill_docx", "load_skill_pdf", "load_skill_xlsx", "load_skill_pptx", "load_skill_doc_coauthoring")),
+        (("网页", "前端", "react", "vue", "html", "css", "网站", "页面", "artifact", "frontend", "web"),
+         ("load_skill_frontend_design", "load_skill_web_artifacts_builder", "load_skill_webapp_testing",
+          "load_skill_theme_factory", "load_skill_canvas_design")),
+        (("搜索", "查一下", "新闻", "资讯", "上网", "search", "news", "internet"),
+         ("plugin_internet-search_",)),
+        (("图片", "海报", "设计", "艺术", "绘图", "生成图", "image", "poster", "art", "draw"),
+         ("load_skill_canvas_design", "load_skill_algorithmic_art", "load_skill_slack_gif_creator")),
+        (("语音", "声音", "配音", "克隆", "合成", "voice", "audio", "speech"),
+         ("plugin_voice-clone_",)),
+        (("角色", "人物", "对话", "台词", "character", "dialogue"),
+         ("plugin_character-analysis_",)),
+        (("知识库", "kb", "导出"),
+         ("plugin_kb-export_",)),
+        (("代码", "编程", "bug", "调试", "重构", "code", "debug", "test", "tdd", "review", "实现"),
+         ("load_skill_tdd", "load_skill_code_review", "load_skill_diagnosing_bugs", "load_skill_implement",
+          "load_skill_to_tickets", "load_skill_grilling", "load_skill_grill_me", "load_skill_codebase_design")),
+        (("技能", "skill"),
+         ("load_skill_",)),
+        (("插件", "plugin"),
+         ("plugin_",)),
+        (("教学", "学习", "teach"),
+         ("load_skill_teach",)),
+        (("研究", "research"),
+         ("load_skill_research",)),
+        (("模型", "api", "claude", "大模型"),
+         ("load_skill_claude_api",)),
+        (("架构", "模块", "设计模式", "architecture"),
+         ("load_skill_codebase_design", "load_skill_domain_modeling", "load_skill_improve_codebase_architecture")),
+    ]
+
+    def _tool_matches_intent(self, t: ToolDef, question_lower: str) -> bool:
+        """意图关键词命中：问题包含关键词且工具名前缀匹配 → 挂载该工具 schema。"""
+        for keywords, prefixes in self._INTENT_RULES:
+            if not any(k in question_lower for k in keywords):
+                continue
+            if t.name.startswith(prefixes):
+                return True
+        return False
+
+    def _build_tool_defs(self, question: str = "", used_names: set | None = None) -> list[dict] | None:
+        """[token 优化 v5] 按需挂载 OpenAI 工具定义。
+
+        system prompt 已列出全部工具名（模型知道所有工具存在），此处只把本轮可能用到的
+        schema 发给 LLM：核心文件工具常驻 + 意图关键词命中 + 已使用工具保留。
+        schema 固定开销从 8-12K 降到 2-4K。若模型调用了未挂载工具，
+        _execute_tool 仍可执行（self.tools 全量），下一轮该工具自动保留。
+        """
         if not self.tools:
             return None
-        return [t.to_openai_tool() for t in self.tools]
+        used = used_names or set()
+        q = (question or "").lower()
+        # [token 优化 v6] 固定（pin）工具集合只读一次，避免循环内反复读 pinned_tools.json
+        pinned = self._pinned_tool_names()
+        selected: list[ToolDef] = []
+        for t in self.tools:
+            # [token 优化 v6] 前端固定（pin）的工具始终挂载，不受意图筛选影响
+            if t.name in pinned:
+                selected.append(t)
+                continue
+            if t.name in used:
+                selected.append(t)
+                continue
+            if t.name.startswith(self._CORE_TOOL_PREFIXES):
+                selected.append(t)
+                continue
+            if self._tool_matches_intent(t, q):
+                selected.append(t)
+                continue
+        return [t.to_openai_tool() for t in selected]
+
+    def _pinned_tool_names(self) -> set[str]:
+        """[token 优化 v6] 返回前端固定（pin）的工具名集合（始终挂载 schema）。"""
+        try:
+            if self.custom_tools:
+                return set(self.custom_tools.pinned_tools())
+        except Exception:
+            pass
+        return set()
+
+    def _bound_plugin_result(self, name: str, result: str) -> str:
+        """[token 优化 v5] 大块结构化插件结果（天气/台风）截断，避免整块数据躺进历史每轮重发。"""
+        if name.startswith(self._WEATHER_TOOL_PREFIXES) and len(result) > self._WEATHER_RESULT_LIMIT:
+            return result[:self._WEATHER_RESULT_LIMIT] + "\n…[已截断：天气/台风数据过长，仅保留前 1500 字符]"
+        return result
 
     async def _execute_tool(self, name: str, args: dict, state: dict | None = None) -> str:
         """执行指定的工具函数，处理权限检查和错误。"""
@@ -303,7 +396,7 @@ class RAGAgent:
                             result = await asyncio.to_thread(_sync_execute, **args)
                             return str(result)
                     result = await asyncio.to_thread(t.fn, **args)
-                    return str(result)
+                    return self._bound_plugin_result(name, str(result))
                 except NeedsPermission as e:
                     mgr = get_perm_mgr()
                     req = mgr.create_request(e.path, e.operation, name, args)
@@ -333,7 +426,7 @@ class RAGAgent:
                             except Exception as e2:
                                 logger.warning("tool_execute streaming failed on retry, falling back: %s", e2)
                         result = await asyncio.to_thread(t.fn, **args)
-                        return str(result)
+                        return self._bound_plugin_result(name, str(result))
                     return _permission_denied_msg(e.operation, e.path, name)
                 except Exception as e:
                     return f"Error executing {name}: {e}"
@@ -617,7 +710,8 @@ class RAGAgent:
         # RAG 检索结果改放 user 消息前缀（见下方 user 消息构建），避免 system 每次变化导致缓存整体失效。
         full_system_prompt = self.system_prompt
 
-        tool_defs = self._build_tool_defs()
+        # [token 优化 v5] 按需挂载：首轮按问题关键词筛选工具 schema
+        tool_defs = self._build_tool_defs(state.get("question", ""))
 
         messages = [
             {"role": "system", "content": full_system_prompt},
@@ -681,6 +775,8 @@ class RAGAgent:
         steps_prompt_injected = False
         rounds = 0
         tool_calls_count = 0
+        # [token 优化 v5] 已使用工具集合：每轮重挂载时保留，避免模型想复用却被移除
+        used_tools: set[str] = set()
         while (
             msg.tool_calls or finish_reason == "tool-calls"
         ) and rounds < max_tool_rounds:
@@ -721,6 +817,8 @@ class RAGAgent:
             early_results: dict[str, str] = {}
             for tc in msg.tool_calls:
                 tool_name = tc.function.name
+                # [token 优化 v5] 记录已使用工具 → 下轮重挂载时保留
+                used_tools.add(tool_name)
                 try:
                     args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError as e:
@@ -814,6 +912,8 @@ class RAGAgent:
                 messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
 
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
+            # [token 优化 v5] 每轮按需重挂载（核心常驻 + 意图命中 + 已使用保留），schema 固定开销大降
+            tool_defs = self._build_tool_defs(state.get("question", ""), used_tools)
             # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）
             final_tool_defs = None if steps_prompt_injected else tool_defs
             response = await self._llm_call(model, messages, final_tool_defs, state=state)

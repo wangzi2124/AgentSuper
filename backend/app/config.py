@@ -48,7 +48,8 @@ class Settings(BaseSettings):
     # Token 成本控制
     # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
     # 对齐 opencode overflow.ts：usable = max_context_tokens - context_reserve_tokens
-    max_context_tokens: int = 48_000
+    # [token 优化 v5] 48K → 32K：配合 v4 压缩（信息不丢），单次调用天花板 -33%
+    max_context_tokens: int = 32_000
     # 输出预留：留给模型回答的 token（≈ min(20_000, maxOutputTokens)，默认 8_192）
     context_reserve_tokens: int = 8_192
     # 压缩触发阈值（token）；0 表示自动 = 0.8 × usable，长工具循环在截断兜底之前先压缩

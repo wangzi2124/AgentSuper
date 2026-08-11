@@ -110,6 +110,15 @@ def _do_init(app):
     # 同时让 backend/app、backend/plugins 等关键目录落入保护范围）
     _base_dir = Path(__file__).resolve().parents[1]
     _data_dir = _base_dir / "data"
+
+    # [token 优化 v6] 自定义工具存储：脚本型写 plugins/custom_*.py（复用插件加载链路），
+    # 固定型（pin）写 data/pinned_tools.json（按需挂载时始终保留该工具 schema）
+    from app.skills.custom_tools import CustomToolStore
+    custom_tools = CustomToolStore(
+        plugins_dir=settings.plugins_dir,
+        pinned_path=str(_data_dir / "pinned_tools.json"),
+    )
+
     perm_mgr = PermissionManager(
         workspace=str(_base_dir),
         whitelist_path=str(_data_dir / "permissions.json"),
@@ -118,7 +127,7 @@ def _do_init(app):
     )
     set_perm_manager(perm_mgr)
 
-    agent = RAGAgent(retriever, skill_loader, plugin_loader, reranker=reranker)
+    agent = RAGAgent(retriever, skill_loader, plugin_loader, reranker=reranker, custom_tools=custom_tools)
 
     # ── 初始化多 Agent 系统（bus 创建 + 注册，但 start_all 在异步上下文中调用）──
     agent_bus = AgentBus()
@@ -154,5 +163,6 @@ def _do_init(app):
     )
     app.state.skill_loader = skill_loader
     app.state.plugin_loader = plugin_loader
+    app.state.custom_tools = custom_tools
     app.state.task_manager = TaskManager()
     return app.state
