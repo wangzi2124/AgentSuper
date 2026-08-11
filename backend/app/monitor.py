@@ -99,6 +99,8 @@ def record_model_call(
     tool_rounds: int = 0,
     tool_calls: int = 0,
 ):
+    from app.trace_log import trace as _tr  # [token trace v7]
+    _tr("monitor.record_model_call", model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, duration_ms=duration_ms, tool_rounds=tool_rounds, tool_calls=tool_calls)
     """记录一次模型调用的统计信息（模型名、token 数、耗时、工具调用轮数与次数）。"""
     with _stats_lock:
         _stats["model_calls_total"] += 1

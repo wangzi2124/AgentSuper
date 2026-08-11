@@ -110,6 +110,7 @@ from app.agent.tools import (
 )
 from app.skills.custom_tools import CustomToolStore  # [token 优化 v6]
 from app.monitor import record_model_call
+from app.trace_log import trace, trace_messages  # [token trace v7]
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
 
 
@@ -554,6 +555,7 @@ class RAGAgent:
         usage = getattr(response, "usage", None)
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
+        trace("llm.usage", where="assemble", model=model, pt=pt, ct=ct, duration_ms=dur)  # [token trace v7]
         record_model_call(model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
         # 累加本次 invoke 的 token 用量（invoke 前重置），供 assistant 消息结算落库
         if not getattr(self, "_usage_accum", None):
@@ -610,6 +612,7 @@ class RAGAgent:
                 )
             except Exception as exc:
                 dur = (tmod.time() - start) * 1000
+                trace("llm.usage", where="error", model=model, pt=0, ct=0, duration_ms=dur)  # [token trace v7]
                 record_model_call(model, duration_ms=dur)
                 raise exc
             return self._assemble_response(model, response, start, state, push_text=True)
@@ -660,6 +663,7 @@ class RAGAgent:
         dur = (tmod.time() - start) * 1000
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
+        trace("llm.usage", where="invoke", model=model, pt=int(pt or 0), ct=int(ct or 0), duration_ms=dur)  # [token trace v7]
         record_model_call(model, prompt_tokens=int(pt or 0), completion_tokens=int(ct or 0), duration_ms=dur)
         if not getattr(self, "_usage_accum", None):
             self._usage_accum = dict(_ZERO_USAGE)
@@ -757,6 +761,7 @@ class RAGAgent:
                 state["_task"].record_compaction()
             self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
         messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
+        trace_messages("graph.entry_ready", messages)  # [token trace v7]
 
         response = await self._llm_call(model, messages, tool_defs, state=state)
         msg = response.choices[0].message
@@ -784,12 +789,14 @@ class RAGAgent:
 
             # Compaction: compress old messages when context grows large
             # （先回溯清理旧工具输出，再判断是否触发压缩）
+            trace_messages("graph.round_start", messages)  # [token trace v7]
             messages = prune_tool_outputs(
                 messages,
                 protect_tokens=settings.tool_output_protect_tokens,
                 minimum_tokens=settings.tool_output_prune_minimum_tokens,
                 tail_turns=settings.context_tail_turns,
             )
+            trace_messages("graph.pre_compact", messages, threshold=compaction_threshold_tokens())  # [token trace v7]
             if compactor.should_compact(messages):
                 self._push_event(state, {"type": "step_start", "step_id": "compaction", "name": "压缩上下文", "status": "running"})
                 old_count = len(messages)
@@ -912,6 +919,7 @@ class RAGAgent:
                 messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
 
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
+            trace_messages("graph.round_ready", messages)  # [token trace v7]
             # [token 优化 v5] 每轮按需重挂载（核心常驻 + 意图命中 + 已使用保留），schema 固定开销大降
             tool_defs = self._build_tool_defs(state.get("question", ""), used_tools)
             # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）
@@ -924,6 +932,7 @@ class RAGAgent:
             model, duration_ms=(tmod.time() - _gen_start) * 1000,
             tool_rounds=rounds, tool_calls=tool_calls_count,
         )
+        trace("graph.finish", rounds=rounds, tool_calls=tool_calls_count, duration_ms=(tmod.time() - _gen_start) * 1000)  # [token trace v7]
 
         # If tool calls remain (max rounds reached) or content is empty, force a final answer
         if msg.tool_calls:
