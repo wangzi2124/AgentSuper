@@ -126,17 +126,19 @@ PATCHES: list[dict] = [
     ),
     # G4 入口截断后（首轮 LLM 前）
     # 注意：8 空格截断行是 12 空格行的子串（前 4 空格+正文），需带后续行消歧
+    # [token 优化 P9] 入口截断已带 tool_defs=tool_defs（预算扣 schema）
     dict(
         file="app/agent/graph.py",
-        old="        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))\n\n        response = await self._llm_call(model, messages, tool_defs, state=state)",
-        new="        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))\n        trace_messages(\"graph.entry_ready\", messages)  # [token trace v7]\n\n        response = await self._llm_call(model, messages, tool_defs, state=state)",
+        old="        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0, tool_defs=tool_defs))\n\n        response = await self._llm_call(model, messages, tool_defs, state=state)",
+        new="        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0, tool_defs=tool_defs))\n        trace_messages(\"graph.entry_ready\", messages)  # [token trace v7]\n\n        response = await self._llm_call(model, messages, tool_defs, state=state)",
         desc="G4: 入口上下文就绪（新请求批次起点）",
     ),
     # G5 每轮截断后（发送 LLM 前）——带 v5 重挂载注释行消歧（区别于 max-steps 强制收尾路径）
+    # [token 优化 P9] 循环已重排：tool_defs/final_tool_defs 先构建，截断带 tool_defs=final_tool_defs
     dict(
         file="app/agent/graph.py",
-        old="            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))\n            # [token 优化 v5] 每轮按需重挂载（核心常驻 + 意图命中 + 已使用保留），schema 固定开销大降",
-        new="            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))\n            trace_messages(\"graph.round_ready\", messages)  # [token trace v7]\n            # [token 优化 v5] 每轮按需重挂载（核心常驻 + 意图命中 + 已使用保留），schema 固定开销大降",
+        old="            # [token 优化 v5] 每轮按需重挂载（核心常驻 + 意图命中 + 已使用保留），schema 固定开销大降\n            # [token 优化 P9] 先构建本轮 schema 再截断，预算需扣除 tools 序列化开销（tool_defs 移到此处理）\n            tool_defs = self._build_tool_defs(state.get(\"question\", \"\"), used_tools)\n            # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）\n            final_tool_defs = None if steps_prompt_injected else tool_defs\n            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0, tool_defs=final_tool_defs))\n            response = await self._llm_call(model, messages, final_tool_defs, state=state)",
+        new="            # [token 优化 v5] 每轮按需重挂载（核心常驻 + 意图命中 + 已使用保留），schema 固定开销大降\n            # [token 优化 P9] 先构建本轮 schema 再截断，预算需扣除 tools 序列化开销（tool_defs 移到此处理）\n            tool_defs = self._build_tool_defs(state.get(\"question\", \"\"), used_tools)\n            # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）\n            final_tool_defs = None if steps_prompt_injected else tool_defs\n            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0, tool_defs=final_tool_defs))\n            trace_messages(\"graph.round_ready\", messages)  # [token trace v7]\n            response = await self._llm_call(model, messages, final_tool_defs, state=state)",
         desc="G5: 每轮截断后、发送 LLM 前的上下文规模",
     ),
     # G6 _assemble_response 内 LLM 返回 usage

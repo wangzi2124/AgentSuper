@@ -52,7 +52,14 @@ class Settings(BaseSettings):
     max_context_tokens: int = 32_000
     # 输出预留：留给模型回答的 token（≈ min(20_000, maxOutputTokens)，默认 8_192）
     context_reserve_tokens: int = 8_192
-    # 压缩触发阈值（token）；0 表示自动 = 0.8 × usable，长工具循环在截断兜底之前先压缩
+    # [token 优化 P8] cl100k_base 对 DeepSeek tokenizer 系统性低估（实测 +13.2%：
+    # round8 估算 20,851 vs 实际 23,599）。用于 token_counter 估算校正，避免
+    # 截断/压缩判断"以为没超、实际已超"（实测 round9 实际 25,779 超 usable 23,808）
+    token_estimate_correction: float = 1.13
+    # [token 优化 P8] 压缩触发比例：usable × ratio。原 0.8 实测 round 8 才触发、
+    # 压缩后下一轮仍超限；降到 0.65 提前 2-3 轮介入，压平长工具循环 token 曲线
+    compaction_threshold_ratio: float = 0.65
+    # 压缩触发阈值（token）；0 表示自动 = usable × compaction_threshold_ratio，长工具循环在截断兜底之前先压缩
     compaction_threshold_tokens: int = 0
     # 压缩时尾部保留的最近轮次（对齐 opencode tail_turns，默认 2）
     context_tail_turns: int = 2

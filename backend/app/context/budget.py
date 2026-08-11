@@ -27,4 +27,5 @@ def compaction_threshold_tokens() -> int:
     """
     if settings.compaction_threshold_tokens > 0:
         return settings.compaction_threshold_tokens
-    return max(1, int(usable_context_tokens() * 0.8))
+    ratio = getattr(settings, "compaction_threshold_ratio", 0.65)
+    return max(1, int(usable_context_tokens() * ratio))

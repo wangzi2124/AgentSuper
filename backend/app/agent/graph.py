@@ -760,7 +760,7 @@ class RAGAgent:
             if state.get("_task"):
                 state["_task"].record_compaction()
             self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
-        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
+        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0, tool_defs=tool_defs))
         trace_messages("graph.entry_ready", messages)  # [token trace v7]
 
         response = await self._llm_call(model, messages, tool_defs, state=state)
@@ -918,12 +918,13 @@ class RAGAgent:
                 steps_prompt_injected = True
                 messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
 
-            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
-            trace_messages("graph.round_ready", messages)  # [token trace v7]
             # [token 优化 v5] 每轮按需重挂载（核心常驻 + 意图命中 + 已使用保留），schema 固定开销大降
+            # [token 优化 P9] 先构建本轮 schema 再截断，预算需扣除 tools 序列化开销（tool_defs 移到此处理）
             tool_defs = self._build_tool_defs(state.get("question", ""), used_tools)
             # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）
             final_tool_defs = None if steps_prompt_injected else tool_defs
+            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0, tool_defs=final_tool_defs))
+            trace_messages("graph.round_ready", messages)  # [token trace v7]
             response = await self._llm_call(model, messages, final_tool_defs, state=state)
             msg = response.choices[0].message
             finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
@@ -970,7 +971,26 @@ class RAGAgent:
                 bounded_result = bound_tool_output(result_str, tool_name)
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tc_id, "tool_name": tool_name, "content": bounded_result})
+            # [token 优化 P8] 强制收尾路径补齐"清理→压缩→截断"闭环：此前仅截断，
+            # 且截断基于低估估算可能不触发（实测收尾轮裸发 25,779 超 usable 23,808）。
+            # 与主循环保持同款处理，避免收尾调用成为单请求内最大单次 pt。
+            trace_messages("graph.final_round_start", messages)  # [token trace v8]
+            messages = prune_tool_outputs(
+                messages,
+                protect_tokens=settings.tool_output_protect_tokens,
+                minimum_tokens=settings.tool_output_prune_minimum_tokens,
+                tail_turns=settings.context_tail_turns,
+            )
+            if compactor.should_compact(messages):
+                self._push_event(state, {"type": "step_start", "step_id": "compaction", "name": "压缩上下文", "status": "running"})
+                old_count = len(messages)
+                messages = await compactor.compact(messages)
+                messages = sanitize_tool_messages(messages)
+                if state.get("_task"):
+                    state["_task"].record_compaction()
+                self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
+            trace_messages("graph.final_round_ready", messages)  # [token trace v8]
             # 对齐 opencode max-steps 语义：达到上限后工具禁用，仅注入收尾总结提示（assistant 角色）
             messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
             response = await self._llm_call(model, messages, None, state=state)

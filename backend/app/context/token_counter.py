@@ -4,12 +4,32 @@ Provides accurate token estimation for LLM context window management.
 Falls back to character-based heuristic when tiktoken is unavailable.
 """
 
+import json
 import logging
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 _encoder = None
+_correction = None
+
+
+def _estimate_correction() -> float:
+    """cl100k_base → DeepSeek tokenizer 的估算校正系数。
+
+    [token 优化 P8] 实测 tiktoken cl100k_base 对 DeepSeek tokenizer 系统性低估
+    ~13%（analyze_token_trace：round8 估算 20,851 vs 实际 23,599）。在
+    estimate_tokens 一处校正，truncate_messages / compactor.should_compact 等
+    所有下游判断自动随之修正。惰性求值避免模块加载顺序问题。
+    """
+    global _correction
+    if _correction is None:
+        try:
+            from app.config import settings
+            _correction = max(1.0, float(getattr(settings, "token_estimate_correction", 1.13)))
+        except Exception:
+            _correction = 1.13
+    return _correction
 
 
 def _get_encoder():
@@ -36,13 +56,33 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     enc = _get_encoder()
+    corr = _estimate_correction()
     if enc and enc is not False:
         try:
-            return len(enc.encode(text))
+            return max(1, round(len(enc.encode(text)) * corr))
         except Exception:
             pass
     # Fallback: ~4 chars per token (conservative for English)
-    return max(1, len(text) // 4)
+    return max(1, round(len(text) / 4 * corr))
+
+
+def _estimate_single_message(msg: dict) -> int:
+    """Estimate tokens of a single message including tool_calls and overhead."""
+    content = msg.get("content", "")
+    n = 0
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                n += estimate_tokens(part.get("text", ""))
+    elif isinstance(content, str):
+        n += estimate_tokens(content)
+    tcs = msg.get("tool_calls") or []
+    for tc in tcs:
+        fn = tc.get("function") or {}
+        n += estimate_tokens(fn.get("name", ""))
+        n += estimate_tokens(fn.get("arguments", ""))
+        n += 8
+    return n + 4
 
 
 def estimate_tokens_messages(messages: list[dict]) -> int:
@@ -50,19 +90,22 @@ def estimate_tokens_messages(messages: list[dict]) -> int:
 
     Counts message content plus per-message overhead (role, formatting).
     """
-    total = 0
-    for msg in messages:
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            # Multimodal: sum text parts
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    total += estimate_tokens(part.get("text", ""))
-        elif isinstance(content, str):
-            total += estimate_tokens(content)
-        # Per-message overhead: ~4 tokens (role framing, separators)
-        total += 4
-    return total
+    return sum(_estimate_single_message(msg) for msg in messages)
+
+
+def estimate_tools(tool_defs: list[dict] | None) -> int:
+    """Estimate tokens of serialized OpenAI-style tool definitions (schema).
+
+    DeepSeek 把本轮发送的 tools schema 序列化为 JSON 计入 prompt_tokens，
+    而 estimate_tokens_messages 只统计消息体。truncate_messages 预算须减去该
+    开销，否则截断后实际 pt 仍会越界。
+    """
+    if not tool_defs:
+        return 0
+    try:
+        return estimate_tokens(json.dumps(tool_defs, ensure_ascii=False))
+    except Exception:
+        return 0
 
 
 def count_message_tokens(messages: list[dict]) -> int:
@@ -74,6 +117,7 @@ def truncate_messages(
     messages: list[dict],
     max_tokens: int = 1_000_000,
     reserve_tokens: int = 4096,
+    tool_defs: list[dict] | None = None,
 ) -> list[dict]:
     """Truncate message list to fit within token budget.
 
@@ -84,6 +128,8 @@ def truncate_messages(
         messages: List of message dicts with 'role' and 'content' keys.
         max_tokens: Maximum token budget for the entire message list.
         reserve_tokens: Tokens reserved for the model's response.
+        tool_defs: [token 优化 P9] 本轮将要随请求发送的 tools schema；
+            其序列化 token 数从预算中扣除，保证截断后实际 pt 不越界。
 
     Returns:
         Truncated message list with system message preserved.
@@ -91,7 +137,8 @@ def truncate_messages(
     if not messages:
         return messages
 
-    total = estimate_tokens_messages(messages)
+    schema_tokens = estimate_tools(tool_defs)
+    total = estimate_tokens_messages(messages) + schema_tokens
     if total <= max_tokens:
         return messages
 
@@ -99,12 +146,12 @@ def truncate_messages(
     rest = messages[1:] if system_msg else messages
 
     system_tokens = estimate_tokens(system_msg.get("content", "")) + 4 if system_msg else 0
-    budget = max_tokens - system_tokens - reserve_tokens
+    budget = max_tokens - system_tokens - reserve_tokens - schema_tokens
 
     kept = []
     current = 0
     for msg in reversed(rest):
-        msg_tokens = estimate_tokens(msg.get("content", "")) + 4
+        msg_tokens = _estimate_single_message(msg)
         if current + msg_tokens > budget:
             break
         current += msg_tokens
