@@ -253,15 +253,24 @@ class SupervisorAgent(BaseAgent):
             "文档", "小说", "角色", "对话", "章节", "故事", "内容", "知识库",
             "人物", "情节", "书中", "记载", "来源", "character", "dialogue",
             "novel", "chapter", "story",
+            # [token 优化] 扩充
+            "摘要", "总结", "作者", "主角", "配角", "人物关系", "出场", "设定",
+            "世界观", "结局", "大意", "简介", "summary", "author", "plot",
         ]
         code_keywords = [
             "代码", "编程", "函数", "bug", "debug", "程序", "算法",
             "python", "javascript", "typescript", "前端", "后端",
             "code", "function", "programming",
+            # [token 优化] 扩充
+            "脚本", "接口", "api", "报错", "异常", "重构", "依赖", "配置",
+            "测试", "部署", "数据库", "sql", "react", "vue", "node", "docker", "git",
         ]
         web_keywords = [
             "新闻", "最新", "天气", "搜索", "查找", "实时",
             "news", "weather", "search", "latest", "today",
+            # [token 优化] 扩充
+            "热搜", "公告", "发布", "汇率", "股价", "比赛", "比分", "排行榜",
+            "政策", "法规", "通知", "announcement", "release",
         ]
 
         needs_kb = any(kw in q for kw in kb_keywords) and "rag" in available_agents
@@ -278,6 +287,10 @@ class SupervisorAgent(BaseAgent):
         if needs_web:
             return [{"agent": "web_search", "question": question}]
         if needs_kb:
+            return [{"agent": "rag", "question": question}]
+
+        # ── [token 优化] 简短问题(≤24字符)直接走 rag,免 LLM 分解 ──
+        if len(question.strip()) <= 24:
             return [{"agent": "rag", "question": question}]
 
         # ── 默认: 尝试 LLM 分解 ──
@@ -310,7 +323,7 @@ class SupervisorAgent(BaseAgent):
 
         start = tmod.time()
         attempts = []
-        for attempt in range(2):
+        for attempt in range(1):  # [token 优化] 分解失败重试 2→1,失败直接回退 rag
             try:
                 if attempt == 0:
                     messages = [

@@ -29,12 +29,47 @@ from app.tools import filesystem as fs
 logger = logging.getLogger(__name__)
 
 # 子 Agent 工具循环最大轮数（含最终无工具收尾调用前的最多执行轮）
-SUB_AGENT_MAX_ROUNDS = 8
+SUB_AGENT_MAX_ROUNDS = 5
 
 # 工具结果回传 LLM 时的截断长度，避免 context 膨胀
-_TOOL_RESULT_TRUNC = 4000
+_TOOL_RESULT_TRUNC = 1500
 
 # 子 Agent 可见的工具白名单（仅文件读写与搜索，不暴露插件/generator 等）
+# ── [token 优化] 子 Agent 上下文截断:控制 tool 循环 context 膨胀 ──
+_SUB_CTX_MAX_TOKENS = 16_000  # 软上限（估算 token），超出即裁剪最旧轮次
+_SUB_CTX_KEEP_ROUNDS = 4      # 裁剪时从尾部保留的完整工具轮数
+
+
+def _trim_messages(messages: list[dict]) -> list[dict]:
+    """按估算 token 裁剪 messages；按“轮”丢弃最旧内容，保持 tool_call 配对完整。"""
+    def _size(ms: list[dict]) -> int:
+        return sum(
+            len(str(m.get("content") or "")) + len(str(m.get("tool_calls") or ""))
+            for m in ms
+        )
+
+    if len(messages) <= 2 or _size(messages) <= _SUB_CTX_MAX_TOKENS:
+        return messages
+
+    head = messages[:2]  # system + user 永远保留
+    tail = messages[2:]
+    recent: list[dict] = []
+    rounds = 0
+    i = len(tail) - 1
+    while i >= 0 and rounds < _SUB_CTX_KEEP_ROUNDS:
+        m = tail[i]
+        recent.append(m)
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            rounds += 1
+        i -= 1
+    recent.reverse()
+    trimmed = head + recent
+    # 极端兜底:仍超限则去掉 tool 消息(此时已不依赖 tool_call 配对)
+    if _size(trimmed) > _SUB_CTX_MAX_TOKENS:
+        trimmed = [m for m in trimmed if m.get("role") != "tool"]
+    return trimmed
+
+
 _AVAILABLE_TOOLS = (
     "tool_ls",
     "tool_read_file",
@@ -281,6 +316,7 @@ async def tool_loop_chat(
         return kwargs
 
     for rnd in range(1, SUB_AGENT_MAX_ROUNDS + 1):
+        messages[:] = _trim_messages(messages)  # [token 优化] 每轮前裁剪,防 context 无限膨胀
         use_tools = rnd < SUB_AGENT_MAX_ROUNDS
         start = tmod.time()
         response = await litellm.acompletion(**_llm_call(use_tools))
