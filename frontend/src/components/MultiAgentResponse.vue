@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import type { MultiAgentMessage, AgentStep } from '../types'
 
 const props = defineProps<{
@@ -9,6 +9,18 @@ const props = defineProps<{
 }>()
 
 defineEmits<{ undo: [] }>()
+
+// 单 Agent 路由时，最终答案与 Agent 面板内容完全一致，
+// 再渲染一遍会造成"两条最终答案"的重复。仅在内容有新增信息时才展示。
+const showFinalAnswer = computed(() => {
+  const content = props.message.content
+  if (!content) return false
+  const agents = props.message.agents
+  if (agents.length === 1 && agents[0].content && agents[0].content.trim() === content.trim()) {
+    return false
+  }
+  return true
+})
 
 const expandedResults = ref<Record<string, boolean>>({})
 const expandedArgs = ref<Record<string, boolean>>({})
@@ -113,7 +125,7 @@ function stepKey(a: string, s: AgentStep): string {
     </div>
 
     <!-- final answer -->
-    <div v-if="message.content" class="text" v-text="message.content"></div>
+    <div v-if="showFinalAnswer" class="text" v-text="message.content"></div>
 
     <!-- error -->
     <div v-if="message.isError && message.errorInfo" class="err">
