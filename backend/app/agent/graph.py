@@ -651,6 +651,17 @@ class RAGAgent:
             elif self.api_base and "openai" in self.api_base:
                 model = f"openai/{model}"
 
+        # [token 优化 v4] 压缩优先于硬截断：首轮若已超压缩阈值，先 LLM 压缩（保留事实摘要），
+        # 避免直接丢弃旧历史导致模型失忆重做（重做比压缩更贵）。截断仅作最后兜底。
+        # 工具循环内每轮已有同款 压缩→截断 闭环，此处在入口补齐，覆盖多轮对话 history 场景。
+        if compactor.should_compact(messages):
+            self._push_event(state, {"type": "step_start", "step_id": "compaction", "name": "压缩上下文", "status": "running"})
+            old_count = len(messages)
+            messages = await compactor.compact(messages)
+            messages = sanitize_tool_messages(messages)
+            if state.get("_task"):
+                state["_task"].record_compaction()
+            self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
         messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
 
         response = await self._llm_call(model, messages, tool_defs, state=state)

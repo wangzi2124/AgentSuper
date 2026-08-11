@@ -28,6 +28,9 @@ from app.monitor import record_model_call
 
 logger = logging.getLogger(__name__)
 
+# ── [token 优化 v4] 多 Agent 汇总截断：子 Agent 完整答案已直通用户，汇总只需要点 ──
+SUB_RESULT_TRUNC = 3000  # 字符
+
 # ── 分解提示词 ──
 DECOMPOSE_SYSTEM_PROMPT = """你是一个任务分解专家。将用户的复杂问题拆解成多个可以并行执行的子任务。
 
@@ -549,8 +552,13 @@ class SupervisorAgent(BaseAgent):
         segments = []
         for i, r in enumerate(results):
             agent_label = {"rag": "知识库", "web_search": "网络搜索", "code": "代码分析"}.get(r["agent"], r["agent"])
+            # [token 优化 v4] 子 Agent 结果超长时截断，避免多结果汇总输入膨胀
+            # （完整答案已由单 Agent 路由直接返回给用户；汇总仅需其要点）
+            answer = r.get("answer", "")
+            if len(answer) > SUB_RESULT_TRUNC:
+                answer = answer[:SUB_RESULT_TRUNC] + f"\n…[子 Agent 结果过长，已截断前 {SUB_RESULT_TRUNC} 字符]"
             segments.append(
-                f"[{agent_label} — {r.get('original_question', '')[:50]}]\n{r['answer']}"
+                f"[{agent_label} — {r.get('original_question', '')[:50]}]\n{answer}"
             )
 
         context = "\n\n---\n\n".join(segments)

@@ -22,6 +22,7 @@ import litellm
 
 from app.agent.stream_events import emit, step_event
 from app.config import settings
+from app.context.token_counter import estimate_tokens
 from app.monitor import record_model_call
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
 from app.tools import filesystem as fs
@@ -42,9 +43,11 @@ _SUB_CTX_KEEP_ROUNDS = 3      # [token 优化 v2] 保留轮数 4->3
 
 def _trim_messages(messages: list[dict]) -> list[dict]:
     """按估算 token 裁剪 messages；按“轮”丢弃最旧内容，保持 tool_call 配对完整。"""
+    # [token 优化 v4] 用真实 token 估算替代字符数：12K token ≈ 4~5 万字符，
+    # 原字符数口径在中文场景把上限压到 ~3K token，过早裁剪导致子 Agent 失忆重做。
     def _size(ms: list[dict]) -> int:
         return sum(
-            len(str(m.get("content") or "")) + len(str(m.get("tool_calls") or ""))
+            estimate_tokens(str(m.get("content") or "")) + estimate_tokens(str(m.get("tool_calls") or ""))
             for m in ms
         )
 
