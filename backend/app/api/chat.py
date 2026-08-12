@@ -174,7 +174,7 @@ def _fmt_time(ms: int) -> str:
 #  每次 send_and_wait 登记为 kind='task' 子会话，级联取消经 task_bridge
 # ═══════════════════════════════════════════════════════════════
 
-def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | None) -> tuple[object, str]:
+def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | None, directory: str = "") -> tuple[object, str]:
     """解析/创建 multi-agent 主会话（session.db）。"""
     service = _get_session_service(request)
     if conv_id:
@@ -184,7 +184,7 @@ def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | N
             raise HTTPException(status_code=404, detail="Conversation not found")
         return service, conv_id
     else:
-        session = service.create(user_id, directory=body.directory or discover_project_root(), kind="multi-agent")
+        session = service.create(user_id, directory=directory or discover_project_root(), kind="multi-agent")
         return service, session.id
 
 
