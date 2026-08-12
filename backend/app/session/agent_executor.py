@@ -312,7 +312,10 @@ def build_executor(app):
                 bridge = PartBridgeQueue(queue, session_id, assistant_msg.id)
 
                 # 6. 调用 Agent（事件桥接到请求队列）
+                #     [会话目录] 会话绑定的工作目录（opencode ctx.directory）传入 agent：
+                #     文件工具以其为相对路径基准 + 可写作用域
                 agent = app.state.agent
+                session_row = repository.get_session(session_id)
                 result = await agent.invoke(
                     prompt.get("text", ""),
                     model=prompt.get("model"),
@@ -321,6 +324,7 @@ def build_executor(app):
                     files=prompt.get("files") or [],
                     event_queue=bridge,
                     conversation_id=session_id,
+                    directory=(session_row.directory if session_row else "") or "",
                 )
 
                 # 7. 回填 assistant 结算字段 + 最终答案（text part 承载正文）

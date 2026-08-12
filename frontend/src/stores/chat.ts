@@ -63,6 +63,14 @@ export const useChatStore = defineStore('chat', () => {
   const selectedModel = ref(SUPPORTED_MODELS[0].value)
   // 是否启用向量数据库检索
   const useVectorDb = ref(false)
+  // 当前/新建会话绑定的工作目录（opencode ctx.directory）。首条消息发送时
+  // 随 ChatRequest.directory 创建会话；已有会话在 loadConversation 时同步为服务器值。
+  const sessionDirectory = ref('')
+
+  // 设置当前会话的工作目录（新建对话时选择）
+  function setSessionDirectory(dir: string) {
+    sessionDirectory.value = dir || ''
+  }
 
   // --- 重试机制 ---
   const AUTO_RETRY_DELAY = 5 // 秒
@@ -306,6 +314,10 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const detail = await getConversation(id, CONV_TYPE)
       session.conversationTitle = detail.title
+      // 同步会话绑定目录（服务器为准）
+      if (detail.directory) {
+        sessionDirectory.value = detail.directory
+      }
 
       const serverMessages = detail.messages
         .filter(m => !(m.role === 'assistant' && (!m.content || m.content.trim() === '')))
@@ -404,6 +416,7 @@ export const useChatStore = defineStore('chat', () => {
       model: selectedModel.value,
       use_vector_db: useVectorDb.value,
       files: files.length > 0 ? files : undefined,
+      directory: sessionDirectory.value || undefined,
     }
 
     const controller = new AbortController()
@@ -699,6 +712,7 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     sessions, activeSessionId, conversations, selectedModel, useVectorDb,
+    sessionDirectory, setSessionDirectory,
     messages, conversationId, conversationTitle, loading, currentSteps,
     streamPhase, queuePosition,
     retryCountdown,

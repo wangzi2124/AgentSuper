@@ -8,6 +8,7 @@ const BASE = '/api/chat'
 export interface ConversationMeta {
   id: string
   title: string
+  directory?: string
   created_at: string
   updated_at: string
 }

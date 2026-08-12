@@ -52,6 +52,7 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     use_vector_db: bool = False
     files: list[FileContent] = []
+    directory: str = ""  # 会话绑定的工作目录（opencode ctx.directory），首条消息时创建会话用
 
 
 class ChatResponse(BaseModel):

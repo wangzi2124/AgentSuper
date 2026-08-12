@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from app.permission import get_manager as get_perm_mgr, NeedsPermission
+from app.permission import get_manager as get_perm_mgr, NeedsPermission, current_session_workspace
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
@@ -34,10 +34,15 @@ _MIME_MAP = {
 
 
 def _resolve(path_str: str) -> Path:
-    """将路径字符串解析为绝对路径，相对路径基于工作目录解析。"""
+    """将路径字符串解析为绝对路径，相对路径基于当前会话工作目录解析。
+
+    [会话目录] 本会话绑定了工作目录（opencode ctx.directory）时，相对路径
+    以该目录为基准；否则回退到 backend/ 工作区根。
+    """
     p = Path(path_str)
     if not p.is_absolute():
-        p = WORKSPACE / p
+        base = current_session_workspace() or str(WORKSPACE)
+        p = Path(base) / p
     return p.resolve()
 
 

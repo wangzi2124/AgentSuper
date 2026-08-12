@@ -100,6 +100,8 @@ export interface ChatRequest {
   model?: string
   use_vector_db?: boolean
   files?: FileContent[]
+  /** 会话绑定的工作目录（opencode ctx.directory），首条消息创建会话时生效 */
+  directory?: string
 }
 
 // 文档信息

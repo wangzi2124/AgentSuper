@@ -226,9 +226,13 @@ def create_plugin_tools(plugin_loader: PluginLoader) -> List[ToolDef]:
 
 
 def build_system_prompt_no_kb(
-    skill_loader: SkillLoader, plugin_loader: PluginLoader, include_filesystem: bool = True
+    skill_loader: SkillLoader, plugin_loader: PluginLoader, include_filesystem: bool = True, cwd: str = ""
 ) -> str:
-    """构建无知识库时的系统提示词，包含可用工具说明。"""
+    """构建无知识库时的系统提示词，包含可用工具说明。
+
+    cwd: 当前会话绑定的工作目录（opencode ctx.directory）。非空时写入提示词，
+    告知 LLM 相对路径以该目录为基准解析。
+    """
     enabled_skills = skill_loader.get_enabled_skills()
     enabled_plugins = plugin_loader.get_enabled_plugins()
 
@@ -304,8 +308,10 @@ def build_system_prompt_no_kb(
         "",
         "IMPORTANT - Working paths / workspace:",
         "  The following absolute paths are writable workspaces (you MUST write files under one of them):",
+        *[f"    - {cwd}  (current session working directory)" for cwd in [cwd] if cwd],
         *[f"    - {w}" for w in _writable_workspaces()],
-        "  Relative paths resolve under the first workspace above. If the user asks to write to a path",
+        "  Relative paths resolve under the current session working directory above (if set), "
+        "otherwise under the first workspace above. If the user asks to write to a path",
         "  NOT in this list, you will get a Permission denied error telling you the reason — do NOT",
         "  blindly retry; instead report it, or ask the user to add the path to the workspace list in",
         "  the UI (workspace list updates take effect immediately).",

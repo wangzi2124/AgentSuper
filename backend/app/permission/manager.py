@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import json
 import logging
 import tempfile
@@ -31,6 +32,33 @@ def set_manager(m: "PermissionManager"):
     """设置全局权限管理器实例。"""
     global _manager
     _manager = m
+
+
+# ── 会话级工作目录（opencode ctx.directory 对齐）────────────────────────────
+# 用 contextvar 而非全局可变状态：多会话并发时互不干扰；asyncio.to_thread 会
+# 复制当前 context，因此工具在 worker 线程内仍能看到本会话的目录。
+_session_workspace_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "session_workspace", default=""
+)
+
+
+def set_session_workspace(directory: str) -> contextvars.Token:
+    """把会话绑定的工作目录写入当前上下文，返回 token 供 reset。
+
+    相对路径以此解析（见 filesystem._resolve），路径分类视其下为可写 workspace。
+    仅设置该变量，不修改全局 PermissionManager 状态。
+    """
+    d = str(directory or "").strip()
+    return _session_workspace_var.set(str(Path(d).resolve()) if d else "")
+
+
+def reset_session_workspace(token: contextvars.Token) -> None:
+    _session_workspace_var.reset(token)
+
+
+def current_session_workspace() -> str:
+    """当前上下文（本会话）绑定的工作目录；未设置返回空串。"""
+    return _session_workspace_var.get()
 
 
 class NeedsPermission(Exception):
@@ -171,6 +199,15 @@ class PermissionManager:
         for extra in self.extra_workspaces:
             try:
                 p.relative_to(extra)
+                return "workspace"
+            except (ValueError, OSError):
+                pass
+        # 会话绑定目录：当前上下文（本会话）的工作目录视为可写 workspace，
+        # 与全局 extra_workspaces 同权（opencode：文件工具在 ctx.directory 下操作）
+        sw = _session_workspace_var.get()
+        if sw:
+            try:
+                p.relative_to(Path(sw))
                 return "workspace"
             except (ValueError, OSError):
                 pass

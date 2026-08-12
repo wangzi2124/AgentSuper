@@ -209,6 +209,9 @@ function handleMessageRetry(messageId: string) {
       <div>
         <h2>Chat with Knowledge Base</h2>
         <p>Ask questions and get answers powered by RAG + AI Agent</p>
+        <p v-if="chat.sessionDirectory" class="session-dir" :title="chat.sessionDirectory">
+          📁 {{ chat.sessionDirectory }}
+        </p>
       </div>
       <div class="header-controls">
         <span v-if="chat.streamPhase === 'queued'" class="stream-badge queued">
@@ -341,6 +344,16 @@ function handleMessageRetry(messageId: string) {
   margin: 0;
   font-size: 13px;
   color: var(--text-secondary);
+}
+.chat-header p.session-dir {
+  margin-top: 4px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 420px;
 }
 .header-controls {
   display: flex;

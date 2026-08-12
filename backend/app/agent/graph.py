@@ -131,6 +131,7 @@ class AgentState(TypedDict):
     _event_queue: asyncio.Queue | None
     _on_activity: Callable[[str], None] | None
     _task: object | None
+    _cwd: str
 
 
 _ZERO_USAGE = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
@@ -713,6 +714,14 @@ class RAGAgent:
         # [token 优化 v2] system 保持完全稳定 → 最大化 DeepSeek 前缀缓存命中（命中按 0.1x 计费）
         # RAG 检索结果改放 user 消息前缀（见下方 user 消息构建），避免 system 每次变化导致缓存整体失效。
         full_system_prompt = self.system_prompt
+        # [会话目录] 本会话绑定的工作目录追加为 system 末尾（同一目录内保持稳定）
+        if state.get("_cwd"):
+            full_system_prompt += (
+                "\n\n[会话工作目录]\n"
+                f"Current session working directory: {state['_cwd']}\n"
+                "Relative paths in file tools (tool_ls/read_file/write_file/append_file/edit_file/"
+                "glob/grep/execute) resolve under this directory. Files written here are allowed without permission."
+            )
 
         # [token 优化 v5] 按需挂载：首轮按问题关键词筛选工具 schema
         tool_defs = self._build_tool_defs(state.get("question", ""))
@@ -1052,11 +1061,14 @@ class RAGAgent:
             self.rebuild_system_prompt()
             self.graph = self._build_graph()
 
-    async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = False, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "", on_activity: Callable[[str], None] | None = None) -> dict:
+    async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = False, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "", on_activity: Callable[[str], None] | None = None, directory: str = "") -> dict:
         """执行完整的RAG流程，返回回答和相关源。
 
         参数:
             conversation_id: 对话ID，传入时会自动创建并跟踪 TaskState。
+            directory: 会话绑定的工作目录（opencode ctx.directory）。非空时写入
+                system prompt，并把该目录挂为本次执行的文件作用域（相对路径基准
+                + 可写权限），执行结束自动解除。
         """
         # 可选：集成 TaskState 跟踪（当 conversation_id 不为空时）
         task = None
@@ -1065,41 +1077,48 @@ class RAGAgent:
             task = TaskState(conversation_id=conversation_id)
             task.save()
 
-        state = AgentState(
-            messages=[HumanMessage(content=question)],
-            question=question,
-            context=[],
-            answer="",
-            sources=[],
-            model=model,
-            history=history or [],
-            use_vector_db=use_vector_db,
-            files=files or [],
-            steps=[],
-            tokens=dict(_ZERO_USAGE),
-            finish="stop",
-            _event_queue=event_queue,
-            _on_activity=on_activity,
-            _task=task,
-        )
+        from app.permission import set_session_workspace, reset_session_workspace
+        ws_token = set_session_workspace(directory) if directory else None
         try:
-            result = await self.graph.ainvoke(state)
-        except Exception as e:
+            state = AgentState(
+                messages=[HumanMessage(content=question)],
+                question=question,
+                context=[],
+                answer="",
+                sources=[],
+                model=model,
+                history=history or [],
+                use_vector_db=use_vector_db,
+                files=files or [],
+                steps=[],
+                tokens=dict(_ZERO_USAGE),
+                finish="stop",
+                _event_queue=event_queue,
+                _on_activity=on_activity,
+                _task=task,
+                _cwd=directory or "",
+            )
+            try:
+                result = await self.graph.ainvoke(state)
+            except Exception as e:
+                if task:
+                    task.mark_failed(str(e))
+                raise
+
             if task:
-                task.mark_failed(str(e))
-            raise
+                task.mark_completed()
 
-        if task:
-            task.mark_completed()
-
-        return {
-            "answer": result.get("answer", ""),
-            "sources": result.get("sources", []),
-            "steps": result.get("steps", []),
-            "messages": result.get("messages", []),
-            "task": task.to_dict() if task else {},
-            "model": result.get("model") or self.model,
-            "finish": result.get("finish", "stop"),
-            "tokens": result.get("tokens") or dict(_ZERO_USAGE),
-            "cost": result.get("cost"),
-        }
+            return {
+                "answer": result.get("answer", ""),
+                "sources": result.get("sources", []),
+                "steps": result.get("steps", []),
+                "messages": result.get("messages", []),
+                "task": task.to_dict() if task else {},
+                "model": result.get("model") or self.model,
+                "finish": result.get("finish", "stop"),
+                "tokens": result.get("tokens") or dict(_ZERO_USAGE),
+                "cost": result.get("cost"),
+            }
+        finally:
+            if ws_token is not None:
+                reset_session_workspace(ws_token)

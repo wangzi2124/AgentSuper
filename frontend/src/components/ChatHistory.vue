@@ -2,68 +2,68 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChatStore } from '../stores/chat'
+import { usePermissionStore } from '../stores/permission'
 import { deleteConversation } from '../api/chat'
 import type { ConversationMeta } from '../api/chat'
+import DirPickerModal from './DirPickerModal.vue'
 
 // 路由实例
 const router = useRouter()
 // 聊天状态管理
 const chat = useChatStore()
+// 工作目录管理（新建对话选目录用）
+const perm = usePermissionStore()
 // 搜索关键词
 const searchQuery = ref('')
 // 当前正在编辑的对话ID
 const editingId = ref<string | null>(null)
 // 编辑中的对话标题
 const editingTitle = ref('')
+// 新建对话目录选择
+const showDirMenu = ref(false)
+const showDirPicker = ref(false)
 
-// 组件挂载时加载对话列表
+// 组件挂载时加载对话列表与工作目录
 onMounted(() => {
   chat.loadConversations()
+  perm.loadWorkspaces()
 })
 
-// 按时间分组对话列表
-const groupedConversations = computed(() => {
-  const now = new Date()
-  const today = now.toDateString()
-  const yesterday = new Date(now.getTime() - 86400000).toDateString()
-  const weekAgo = new Date(now.getTime() - 7 * 86400000)
-
-  const filtered = chat.conversations.filter(c =>
-    !searchQuery.value || c.title.toLowerCase().includes(searchQuery.value.toLowerCase())
-  )
-
-  const groups: { label: string; items: ConversationMeta[] }[] = []
-  const todayItems: ConversationMeta[] = []
-  const yesterdayItems: ConversationMeta[] = []
-  const weekItems: ConversationMeta[] = []
-  const olderItems: ConversationMeta[] = []
-
-  for (const c of filtered) {
-    const d = new Date(c.updated_at)
-    if (d.toDateString() === today) {
-      todayItems.push(c)
-    } else if (d.toDateString() === yesterday) {
-      yesterdayItems.push(c)
-    } else if (d > weekAgo) {
-      weekItems.push(c)
-    } else {
-      olderItems.push(c)
-    }
-  }
-
-  if (todayItems.length) groups.push({ label: '今天', items: todayItems })
-  if (yesterdayItems.length) groups.push({ label: '昨天', items: yesterdayItems })
-  if (weekItems.length) groups.push({ label: '最近7天', items: weekItems })
-  if (olderItems.length) groups.push({ label: '更早', items: olderItems })
-
-  return groups
-})
-
-// 创建新对话
-function handleNewChat() {
+// 新建对话（opencode 式：可选绑定工作目录，目录成为会话 cwd）
+function handleNewChat(dir?: string) {
+  if (dir !== undefined) chat.setSessionDirectory(dir)
+  showDirMenu.value = false
   chat.newChat()
   router.push({ name: 'Chat' })
 }
+
+function pickCustomDir() {
+  showDirMenu.value = false
+  showDirPicker.value = true
+}
+
+function handleDirPicked(path: string) {
+  showDirPicker.value = false
+  handleNewChat(path)
+}
+
+// 按目录分组对话列表（对齐 opencode 按 project/directory 分组）
+const directoryGroups = computed(() => {
+  const filtered = chat.conversations.filter(c =>
+    !searchQuery.value || c.title.toLowerCase().includes(searchQuery.value.toLowerCase())
+  )
+  const map = new Map<string, ConversationMeta[]>()
+  for (const c of filtered) {
+    const key = c.directory || ''
+    if (!map.has(key)) map.set(key, [])
+    map.get(key)!.push(c)
+  }
+  return Array.from(map.entries()).map(([dir, items]) => ({
+    directory: dir,
+    label: dir || '默认目录',
+    items: [...items].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1)),
+  }))
+})
 
 // 选择并加载指定对话
 function selectConversation(id: string) {
@@ -116,12 +116,22 @@ function getSessionQueuePosition(id: string): number | null {
 <template>
   <div class="chat-history">
     <div class="history-header">
-      <button class="new-chat-btn" @click="handleNewChat" title="新建对话">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 5v14M5 12h14"/>
-        </svg>
-        新建对话
-      </button>
+      <div class="new-chat-wrap">
+        <button class="new-chat-btn" @click="showDirMenu = !showDirMenu" title="新建对话（可选择工作目录）">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+          新建对话
+        </button>
+        <div v-if="showDirMenu" class="dir-menu" @click.stop>
+          <div class="dir-menu-title">在哪个目录下创建对话？</div>
+          <button class="dir-menu-item" @click="handleNewChat('')">📦 默认（backend/）</button>
+          <template v-for="w in perm.workspaces" :key="w">
+            <button class="dir-menu-item" :title="w" @click="handleNewChat(w)">📁 {{ w }}</button>
+          </template>
+          <button class="dir-menu-item pick" @click="pickCustomDir">⋯ 选择其他目录…</button>
+        </div>
+      </div>
     </div>
     <div class="search-box">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -131,11 +141,13 @@ function getSessionQueuePosition(id: string): number | null {
       <input v-model="searchQuery" placeholder="搜索对话..." />
     </div>
     <div class="history-list">
-      <div v-if="groupedConversations.length === 0" class="empty-hint">
+      <div v-if="directoryGroups.length === 0" class="empty-hint">
         {{ searchQuery ? '无匹配结果' : '暂无历史对话' }}
       </div>
-      <div v-for="group in groupedConversations" :key="group.label" class="group">
-        <div class="group-label">{{ group.label }}</div>
+      <div v-for="group in directoryGroups" :key="group.directory" class="group">
+        <div class="group-label" :title="group.directory">
+          {{ group.label }}
+        </div>
         <div
           v-for="c in group.items"
           :key="c.id"
@@ -181,6 +193,7 @@ function getSessionQueuePosition(id: string): number | null {
         </div>
       </div>
     </div>
+    <DirPickerModal :show="showDirPicker" @close="showDirPicker = false" @select="handleDirPicked" />
   </div>
 </template>
 
@@ -349,4 +362,71 @@ function getSessionQueuePosition(id: string): number | null {
   color: var(--text);
   outline: none;
 }
+
+/* 新建对话目录选择 */
+.new-chat-wrap {
+  position: relative;
+  flex: 1;
+}
+.dir-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 6px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.dir-menu-title {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.dir-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dir-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.dir-menu-item.pick {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 8px;
+  color: var(--primary);
+}
+
+/* 目录分组 */
+.group-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 10px 12px 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: none;
+}
+.group + .group {
+  margin-top: 4px;
+}
+
 </style>

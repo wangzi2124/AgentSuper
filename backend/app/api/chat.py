@@ -282,12 +282,14 @@ async def chat(request: Request, body: ChatRequest):
     if body.conversation_id:
         session_id = body.conversation_id
         try:
-            service.get(user_id, session_id)
+            existing = service.get(user_id, session_id)
         except session_repo.SessionNotFound:
             raise HTTPException(status_code=404, detail="Conversation not found")
+        session_directory = existing.directory or body.directory
     else:
-        session = service.create(user_id, directory=discover_project_root(), kind="chat")
+        session = service.create(user_id, directory=body.directory or discover_project_root(), kind="chat")
         session_id = session.id
+        session_directory = session.directory
 
     history = _session_history_for(service, user_id, session_id)
 
@@ -308,7 +310,7 @@ async def chat(request: Request, body: ChatRequest):
             })
 
     try:
-        result = await agent.invoke(body.message, model=body.model, history=compressed, use_vector_db=body.use_vector_db, files=[f.model_dump() for f in body.files])
+        result = await agent.invoke(body.message, model=body.model, history=compressed, use_vector_db=body.use_vector_db, files=[f.model_dump() for f in body.files], directory=session_directory)
     except Exception as e:
         logger.exception("chat invocation failed")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -631,7 +633,7 @@ async def chat_stream(request: Request, body: ChatRequest):
         except session_repo.SessionNotFound:
             raise HTTPException(status_code=404, detail="Conversation not found")
     else:
-        session = service.create(user_id, directory=discover_project_root(), kind="chat")
+        session = service.create(user_id, directory=body.directory or discover_project_root(), kind="chat")
         session_id = session.id
 
     # 请求级事件桥（request_id 不入库，executor 按此回填事件队列）
@@ -730,7 +732,8 @@ async def list_conversations(request: Request, conv_type: str | None = None):
     kind = conv_type if conv_type in ("chat", "multi-agent") else None
     sessions = service.list_sessions(user_id, archived=False, limit=1000)
     result = [
-        {"id": s.id, "title": s.title or "新对话", "created_at": _fmt_time(s.time_created),
+        {"id": s.id, "title": s.title or "新对话", "directory": s.directory or "",
+         "created_at": _fmt_time(s.time_created),
          "updated_at": _fmt_time(s.time_updated)}
         for s in sessions
         if (kind is None or s.kind == kind)
@@ -773,6 +776,7 @@ async def get_conversation(conversation_id: str, request: Request, conv_type: st
     return {
         "id": conversation_id,
         "title": session.title or "新对话",
+        "directory": session.directory or "",
         "messages": messages,
         "created_at": _fmt_time(session.time_created),
         "updated_at": _fmt_time(session.time_updated),
