@@ -74,7 +74,8 @@ class SessionCoordinator:
                     return
                 entry = _Entry()
                 self._active[session_id] = entry
-                asyncio.create_task(self._drive(session_id, entry, force=False))
+                task = asyncio.create_task(self._drive(session_id, entry, force=False))
+                entry.owner = task
         try:
             asyncio.get_running_loop()
         except RuntimeError:
