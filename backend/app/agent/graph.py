@@ -220,7 +220,7 @@ class RAGAgent:
         start = tmod.time()
         self._push_event(state, {"type": "step_start", "step_id": "retrieve", "name": "检索中", "status": "running"})
 
-        if self.retriever.is_empty or not state.get("use_vector_db", True):
+        if self.retriever.is_empty or not state.get("use_vector_db", False):
             reason = "知识库为空" if self.retriever.is_empty else "已禁用向量检索"
             dur = (tmod.time() - start) * 1000
             self._push_event(state, {"type": "step_end", "step_id": "retrieve", "name": "检索中", "status": "completed", "detail": reason, "duration_ms": round(dur, 1)})
@@ -1052,7 +1052,7 @@ class RAGAgent:
             self.rebuild_system_prompt()
             self.graph = self._build_graph()
 
-    async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = True, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "", on_activity: Callable[[str], None] | None = None) -> dict:
+    async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = False, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "", on_activity: Callable[[str], None] | None = None) -> dict:
         """执行完整的RAG流程，返回回答和相关源。
 
         参数:

@@ -294,9 +294,12 @@ def compaction_threshold() -> int:
         from app.config import settings
         if settings.compaction_threshold_tokens > 0:
             return settings.compaction_threshold_tokens
+        # [token 优化 v9] 跟随 config 的 compaction_threshold_ratio（默认 0.6），不再硬编码 0.8
+        ratio = float(getattr(settings, "compaction_threshold_ratio", 0.6))
+        return int(usable_tokens() * ratio)
     except Exception:
         pass
-    return int(usable_tokens() * 0.8)
+    return int(usable_tokens() * 0.6)
 
 
 def _preserve_budget() -> int:

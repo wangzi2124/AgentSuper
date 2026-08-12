@@ -50,7 +50,7 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
     model: Optional[str] = None
-    use_vector_db: bool = True
+    use_vector_db: bool = False
     files: list[FileContent] = []
 
 

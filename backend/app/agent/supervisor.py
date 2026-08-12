@@ -106,6 +106,11 @@ class SupervisorAgent(BaseAgent):
         if action == "chat":
             question = payload.get("question", "")
 
+            # [token 优化 v9] 本次请求的 LLM 用量汇总（分解 + 子 Agent + 汇总），
+            # 随 response payload 落库，与单 Agent executor 口径对齐。
+            # 注：bus 事件循环对每个 agent 串行处理消息，无并发写冲突。
+            self._usage = {"input": 0, "output": 0}
+
             # ── 尝试任务分解 ──
             subtasks = await self._decompose(question)
 
@@ -171,6 +176,11 @@ class SupervisorAgent(BaseAgent):
             )
 
             if reply.type == "response":
+                # [token 优化 v9] 子 Agent 用量计入本次请求汇总
+                if getattr(self, "_usage", None) is not None:
+                    _tk = reply.payload.get("tokens") or {}
+                    self._usage["input"] += _tk.get("input", 0)
+                    self._usage["output"] += _tk.get("output", 0)
                 yield AgentMessage(
                     source=self._id,
                     target="user",  # 由 bus.send 路由回 original 的调用者
@@ -179,6 +189,7 @@ class SupervisorAgent(BaseAgent):
                     payload={
                         **reply.payload,
                         "routed_to": target_agent,
+                        "tokens": dict(getattr(self, "_usage", {"input": 0, "output": 0})),
                     },
                     thread_id=original_thread_id,  # 🔧 使用原始 thread_id 回复
                 )
@@ -322,6 +333,10 @@ class SupervisorAgent(BaseAgent):
                 "prompt_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
                 "completion_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
             }
+            # [token 优化 v9] 分解调用的用量计入本次请求汇总
+            if getattr(self, "_usage", None) is not None:
+                self._usage["input"] += usage_dict.get("prompt_tokens", 0)
+                self._usage["output"] += usage_dict.get("completion_tokens", 0)
             return response.choices[0].message.content, usage_dict
 
         start = tmod.time()
@@ -446,6 +461,8 @@ class SupervisorAgent(BaseAgent):
                     "original_question": st["question"],
                     "answer": reply.payload.get("answer", ""),
                     "sources": reply.payload.get("sources", []),
+                    # [token 优化 v9] 透传子 Agent 用量，便于汇总
+                    "tokens": reply.payload.get("tokens") or {},
                 }
             except asyncio.TimeoutError:
                 completed = self._bus.agent_progress(st["agent"])
@@ -476,6 +493,13 @@ class SupervisorAgent(BaseAgent):
 
         # 并行执行所有子任务
         task_results = await asyncio.gather(*[run_one(st) for st in subtasks])
+
+        # [token 优化 v9] 各子 Agent 用量计入本次请求汇总
+        if getattr(self, "_usage", None) is not None:
+            for r in task_results:
+                _tk = r.get("tokens") or {}
+                self._usage["input"] += _tk.get("input", 0)
+                self._usage["output"] += _tk.get("output", 0)
 
         for r in task_results:
             if r.get("error"):
@@ -514,6 +538,7 @@ class SupervisorAgent(BaseAgent):
                     "sources": r.get("sources", []),
                     "steps": [],
                     "routed_to": r["agent"],
+                    "tokens": dict(getattr(self, "_usage", {"input": 0, "output": 0})),
                 },
                 thread_id=original_thread_id,
             )
@@ -536,6 +561,7 @@ class SupervisorAgent(BaseAgent):
                     "sources": all_sources,
                     "steps": [],
                     "routed_to": "+".join(r["agent"] for r in results),
+                    "tokens": dict(getattr(self, "_usage", {"input": 0, "output": 0})),
                 },
                 thread_id=original_thread_id,
             )
@@ -580,6 +606,10 @@ class SupervisorAgent(BaseAgent):
             usage = getattr(response, "usage", None)
             pt = getattr(usage, "prompt_tokens", 0) if usage else 0
             ct = getattr(usage, "completion_tokens", 0) if usage else 0
+            # [token 优化 v9] 汇总调用的用量计入本次请求
+            if getattr(self, "_usage", None) is not None:
+                self._usage["input"] += pt
+                self._usage["output"] += ct
             record_model_call(self._model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
             return response.choices[0].message.content.strip()
         except Exception as e:

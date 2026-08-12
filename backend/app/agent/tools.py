@@ -254,12 +254,10 @@ def build_system_prompt_no_kb(
         )
 
     if enabled_skills:
-        # [token 优化 v3] 描述压缩为单行、截断 100 字符（完整描述见对应工具 schema）
-        def _short(desc: str, limit: int = 100) -> str:
-            d = " ".join(desc.split())
-            return d[:limit] + ("…" if len(d) > limit else "")
+        # [token 优化 v9] 只列技能名，不再带描述：技能用途见对应 load_skill_* 工具 schema
+        # （意图命中时 schema 会挂载并携带截断描述），系统提示词体积显著下降。
         skills_desc = "\n".join(
-            f"   - load_skill_{s.name.replace('-', '_').replace(' ', '_')}() - {_short(s.description)}"
+            f"   - load_skill_{s.name.replace('-', '_').replace(' ', '_')}()"
             for s in enabled_skills
         )
         tool_parts.append(f"Skill tools (load skill files):\n{skills_desc}")

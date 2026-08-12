@@ -43,13 +43,15 @@ class Settings(BaseSettings):
 
     # 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
     # 默认 16_384 ≈ 模型原生上限的常用值；长任务配合系统提示"长内容写文件"规则避免截断。
-    llm_max_tokens: int = 16_384
+    # [token 优化 v9] 16_384 → 8_192：普通问答用不到那么大输出，压低超长输出兜底成本。
+    llm_max_tokens: int = 8_192
 
     # Token 成本控制
     # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
     # 对齐 opencode overflow.ts：usable = max_context_tokens - context_reserve_tokens
     # [token 优化 v5] 48K → 32K：配合 v4 压缩（信息不丢），单次调用天花板 -33%
-    max_context_tokens: int = 32_000
+    # [token 优化 v9] 32K → 24K：usable ≈ 15.8K，进一步压平单次调用体积（配套 MAX_HISTORY_TOKENS 16K）
+    max_context_tokens: int = 24_000
     # 输出预留：留给模型回答的 token（≈ min(20_000, maxOutputTokens)，默认 8_192）
     context_reserve_tokens: int = 8_192
     # [token 优化 P8] cl100k_base 对 DeepSeek tokenizer 系统性低估（实测 +13.2%：
@@ -58,7 +60,8 @@ class Settings(BaseSettings):
     token_estimate_correction: float = 1.13
     # [token 优化 P8] 压缩触发比例：usable × ratio。原 0.8 实测 round 8 才触发、
     # 压缩后下一轮仍超限；降到 0.65 提前 2-3 轮介入，压平长工具循环 token 曲线
-    compaction_threshold_ratio: float = 0.65
+    # [token 优化 v9] 0.65 → 0.6：usable 降为 15.8K 后保持"压缩早于截断"的窗口
+    compaction_threshold_ratio: float = 0.6
     # 压缩触发阈值（token）；0 表示自动 = usable × compaction_threshold_ratio，长工具循环在截断兜底之前先压缩
     compaction_threshold_tokens: int = 0
     # 压缩时尾部保留的最近轮次（对齐 opencode tail_turns，默认 2）
@@ -104,7 +107,8 @@ class Settings(BaseSettings):
     max_steps: int = 24
     # 硬兜底：单次请求内最多 LLM 调用轮数（每轮都是一次完整 LLM 调用）。
     # 当 MAX_STEPS >= MAX_TOOL_ROUNDS 时，MAX_STEPS 生效上限即等于该值。
-    max_tool_rounds: int = 16
+    # [token 优化 v9] 16 → 8：每轮工具调用都会重发整段上下文，减少轮数即减少 token 累积。
+    max_tool_rounds: int = 8
     # Doom-loop 检测：同一组工具调用指纹连续重复 N 轮后，注入策略变更提示（≥2）
     doom_loop_threshold: int = 3
     # Doom-loop 升级：首次提示之后，再次连续触发 N 次相同指纹即强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具），

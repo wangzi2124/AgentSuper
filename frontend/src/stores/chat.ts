@@ -62,7 +62,7 @@ export const useChatStore = defineStore('chat', () => {
   // 当前选中的模型
   const selectedModel = ref(SUPPORTED_MODELS[0].value)
   // 是否启用向量数据库检索
-  const useVectorDb = ref(true)
+  const useVectorDb = ref(false)
 
   // --- 重试机制 ---
   const AUTO_RETRY_DELAY = 5 // 秒

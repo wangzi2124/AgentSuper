@@ -34,7 +34,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const conversations = ref<ConversationMeta[]>([])
   const routingStatus = ref<string>('')
   const selectedModel = ref(SUPPORTED_MODELS[0].value)
-  const useVectorDb = ref(true)
+  const useVectorDb = ref(false)
 
   function getOrCreateSession(sessionId: string, title?: string): SessionState {
     if (!sessions.value[sessionId]) {

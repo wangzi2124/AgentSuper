@@ -66,7 +66,7 @@ class RAGAgentWrapper(BaseAgent):
                     question=payload.get("question", ""),
                     model=payload.get("model"),
                     history=payload.get("history", []),
-                    use_vector_db=payload.get("use_vector_db", True),
+                    use_vector_db=payload.get("use_vector_db", False),
                     files=payload.get("files", []),
                     conversation_id=payload.get("conversation_id", ""),
                     on_activity=self._notify,
@@ -84,6 +84,8 @@ class RAGAgentWrapper(BaseAgent):
                         "answer": result.get("answer", ""),
                         "sources": result.get("sources", []),
                         "steps": result.get("steps", []),
+                        # [token 优化 v9] 透传子 Agent 真实 LLM 用量，供 supervisor 汇总落库
+                        "tokens": result.get("tokens") or {},
                     },
                     thread_id=msg.thread_id,
                 )

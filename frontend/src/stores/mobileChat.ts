@@ -52,7 +52,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
   // 当前选中的模型
   const selectedModel = ref(SUPPORTED_MODELS[0].value)
   // 是否启用向量数据库检索
-  const useVectorDb = ref(true)
+  const useVectorDb = ref(false)
   // 是否显示侧边栏
   const showSidebar = ref(false)
   // 是否显示设置面板

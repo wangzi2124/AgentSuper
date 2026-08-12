@@ -56,8 +56,9 @@ def _get_agent_semaphore() -> asyncio.Semaphore:
 
 
 # [token 优化 v3] Sliding window: keep up to 32K tokens of history before passing to Agent.
-# graph.py 通过 config.max_context_tokens(v5 后为 32K，usable ≈ 23.8K) 做上下文管理，此阈值仅控制历史注入量。
-MAX_HISTORY_TOKENS = 32_000
+# graph.py 通过 config.max_context_tokens(v9 后为 24K，usable ≈ 15.8K) 做上下文管理，此阈值仅控制历史注入量。
+# [token 优化 v9] 32K → 16K：历史注入量减半，长会话首条消息不再重发整段 32K 历史。
+MAX_HISTORY_TOKENS = 16_000
 
 _summarizer: HierarchicalSummarizationMiddleware | None = None
 _summarizer_model: str | None = None
@@ -237,11 +238,15 @@ def _persist_multi_agent_parts(session_id: str, message_id: str, answer: str,
 
 async def _persist_multi_agent(service, user_id: str, session_id: str, child_id: str,
                                question: str, answer: str, sources: list, steps: list,
-                               agents: list | None = None, model: str | None = None) -> tuple[str, str]:
+                               agents: list | None = None, model: str | None = None,
+                               tokens: dict | None = None) -> tuple[str, str]:
     """主会话 + 子任务会话各追加 user/assistant 消息；新会话生成标题。
 
     主会话写经 write_lock 串行化（与 /stream 协调器执行体、compact/revert 互斥），
     保证同一会话的消息顺序不被交错。
+
+    [token 优化 v9] tokens 参数：supervisor 汇总的本次请求真实 LLM 用量
+    （分解 + 子 Agent + 汇总），与单 Agent executor 落库口径对齐，供前端/DB 展示。
     """
     async with service.write_lock(session_id):
         user_msg = service.append_message(user_id, session_id, "user", {"role": "user", "content": question})
@@ -250,6 +255,7 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
         assistant_msg = service.append_message(user_id, session_id, "assistant", {
             "role": "assistant", "content": answer, "sources": sources, "steps": steps,
             "agents": agents or [], "parent_id": user_msg.id, "agent": "supervisor", "model": model,
+            "tokens": tokens or {},
         })
         _persist_multi_agent_parts(session_id, assistant_msg.id, answer, agents)
     # 子任务会话独立日志（隔离上下文）
@@ -258,6 +264,7 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
         child_assist = service.append_message(user_id, child_id, "assistant", {
             "role": "assistant", "content": answer, "sources": sources, "steps": steps,
             "agents": agents or [], "parent_id": user_msg.id, "agent": "supervisor", "model": model,
+            "tokens": tokens or {},
         })
         _persist_multi_agent_parts(child_id, child_assist.id, answer, agents)
         service.update(user_id, child_id, status="idle")
@@ -404,7 +411,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     # 落库：主会话 + 子任务会话
     user_msg_id, assistant_msg_id = await _persist_multi_agent(
         service, user_id, session_id, child_id, body.message, answer, sources, steps,
-        model=body.model,
+        model=body.model, tokens=payload.get("tokens"),
     )
     task_bridge.unregister(child_id)
 
@@ -524,7 +531,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                 # 落库：主会话 + 子任务会话（先落库以拿到消息 id）
                 user_msg_id, assistant_msg_id = await _persist_multi_agent(
                     service, user_id, session_id, child_id, body.message, answer, sources, steps,
-                    agents=agents, model=body.model,
+                    agents=agents, model=body.model, tokens=payload.get("tokens"),
                 )
 
                 await event_queue.put({
@@ -541,6 +548,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     "steps": steps,
                     "routed_to": routed_to,
                     "agents": agents,
+                    "tokens": payload.get("tokens") or {},
                 })
 
             except asyncio.TimeoutError:

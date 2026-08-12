@@ -317,7 +317,7 @@ def build_executor(app):
                     prompt.get("text", ""),
                     model=prompt.get("model"),
                     history=compressed,
-                    use_vector_db=prompt.get("use_vector_db", True),
+                    use_vector_db=prompt.get("use_vector_db", False),
                     files=prompt.get("files") or [],
                     event_queue=bridge,
                     conversation_id=session_id,
