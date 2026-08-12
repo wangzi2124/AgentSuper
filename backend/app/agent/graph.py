@@ -111,6 +111,7 @@ from app.agent.tools import (
 from app.skills.custom_tools import CustomToolStore  # [token 优化 v6]
 from app.monitor import record_model_call
 from app.trace_log import trace, trace_messages  # [token trace v7]
+from app.prompt_log import log_prompt  # [prompt log v1]
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
 
 
@@ -606,6 +607,7 @@ class RAGAgent:
         from types import SimpleNamespace
 
         start = tmod.time()
+        log_prompt("graph.llm_call", messages, model=model, tool_count=len(tool_defs or []))  # [prompt log v1]
         try:
             stream = await litellm.acompletion(
                 model=model,

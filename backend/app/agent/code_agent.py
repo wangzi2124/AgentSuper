@@ -27,6 +27,7 @@ from app.agent.stream_events import agent_meta, emit, step_event
 from app.agent.sub_tools import tool_loop_chat
 from app.config import settings
 from app.monitor import record_model_call
+from app.prompt_log import log_prompt  # [prompt log v1]
 
 logger = logging.getLogger(__name__)
 
@@ -225,14 +226,16 @@ class CodeAgent(BaseAgent):
     async def _ask_llm(self, system_prompt: str, user_message: str) -> str:
         """调用 LLM 生成回答。"""
         start = tmod.time()
+        _msgs = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        log_prompt("code_agent.ask_llm", _msgs, model=self._model)  # [prompt log v1]
         response = await litellm.acompletion(
             model=self._model,
             api_key=self._api_key,
             api_base=self._api_base,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
+            messages=_msgs,
             max_tokens=2048,
             temperature=0.3,
         )
