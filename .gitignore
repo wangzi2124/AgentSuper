@@ -12,3 +12,5 @@ wheels/
 .venv
 backend/.env
 backend/data.zip
+*.bak_*
+backend/logs/
