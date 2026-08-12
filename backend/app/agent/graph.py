@@ -359,8 +359,9 @@ class RAGAgent:
     def _build_tool_defs(self, question: str = "", used_names: set | None = None) -> list[dict] | None:
         """[token 优化 v5] 按需挂载 OpenAI 工具定义。
 
-        system prompt 已列出全部工具名（模型知道所有工具存在），此处只把本轮可能用到的
-        schema 发给 LLM：核心文件工具常驻 + 意图关键词命中 + 已使用工具保留。
+        system prompt 只列常驻工具名 + 一行 skill 提示（[token 优化 v10]），技能清单与
+        描述依赖此处按意图把 load_skill_* schema 挂载给 LLM；此处只发本轮可能用到的
+        schema：核心文件工具常驻 + 意图关键词命中 + 已使用工具保留。
         schema 固定开销从 8-12K 降到 2-4K。若模型调用了未挂载工具，
         _execute_tool 仍可执行（self.tools 全量），下一轮该工具自动保留。
         """

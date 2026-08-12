@@ -258,13 +258,15 @@ def build_system_prompt_no_kb(
         )
 
     if enabled_skills:
-        # [token 优化 v9] 只列技能名，不再带描述：技能用途见对应 load_skill_* 工具 schema
-        # （意图命中时 schema 会挂载并携带截断描述），系统提示词体积显著下降。
-        skills_desc = "\n".join(
-            f"   - load_skill_{s.name.replace('-', '_').replace(' ', '_')}()"
-            for s in enabled_skills
+        # [token 优化 v10] 不再逐一列出全部技能名（30+ 技能约 1.3K 字符，固定随每次调用发出）。
+        # 技能清单 + 截断描述已由 graph._build_tool_defs 按意图把 load_skill_* schema 按需挂载，
+        # 系统提示词只保留一行提示，使前缀保持完全静态，最大化 DeepSeek 前缀缓存命中。
+        tool_parts.append(
+            "Skill tools (load_skill_<name>()): specialized skills are available. The inventory and "
+            "descriptions of relevant skills are mounted into the tool schema based on your request — "
+            "call the matching load_skill_<name>() tool when the task calls for one (documents, "
+            "web/frontend, design, coding practices, teaching, research, etc.)."
         )
-        tool_parts.append(f"Skill tools (load skill files):\n{skills_desc}")
 
     if enabled_plugins:
         lines = []
