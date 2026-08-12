@@ -596,6 +596,7 @@ class RAGAgent:
                 num_retries=2,
                 stream=True,
                 stream_options={"include_usage": True},
+                cache_prompt=True,
             )
         except Exception as e:
             logger.warning("LLM stream init failed, falling back to non-stream: %s", e)

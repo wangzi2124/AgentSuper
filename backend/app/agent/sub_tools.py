@@ -312,6 +312,7 @@ async def tool_loop_chat(
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": 0.2,
+            "cache_prompt": True
         }
         if with_tools:
             kwargs["tools"] = _TOOL_SCHEMAS
