@@ -180,6 +180,9 @@ async function handleCopy(messageId: string, text: string) {
       <div>
         <h2>Multi-Agent Supervisor</h2>
         <p>Send a message to all agents simultaneously</p>
+        <p v-if="agent.sessionDirectory" class="session-dir" :title="agent.sessionDirectory">
+          📁 {{ agent.sessionDirectory }}
+        </p>
       </div>
       <div class="header-controls">
         <span v-if="agent.queuePosition != null" class="stream-badge queued">
@@ -299,6 +302,16 @@ async function handleCopy(messageId: string, text: string) {
 .chat-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .chat-header h2 { margin: 0 0 2px; font-size: 20px; }
 .chat-header p { margin: 0; font-size: 13px; color: var(--text-secondary); }
+.chat-header p.session-dir {
+  margin-top: 4px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 420px;
+}
 .header-controls { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
 .stream-badge { font-size: 12px; padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
 .stream-badge.queued { background: rgba(251,191,36,0.12); color: #f59e0b; }

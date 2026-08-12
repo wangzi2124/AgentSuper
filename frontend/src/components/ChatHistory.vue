@@ -373,8 +373,8 @@ function getSessionQueuePosition(id: string): number | null {
   top: calc(100% + 6px);
   left: 0;
   right: 0;
-  z-index: 50;
-  background: var(--panel);
+  z-index: 100;
+  background: var(--surface, #ffffff);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);

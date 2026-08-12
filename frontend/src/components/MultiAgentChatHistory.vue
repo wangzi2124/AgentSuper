@@ -2,42 +2,61 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
+import { usePermissionStore } from '../stores/permission'
 import { deleteConversation as apiDelete } from '../api/multiAgent'
 import type { ConversationMeta } from '../api/multiAgent'
+import DirPickerModal from './DirPickerModal.vue'
 
 const router = useRouter()
 const agent = useMultiAgentStore()
+const perm = usePermissionStore()
 const searchQuery = ref('')
 const editingId = ref<string | null>(null)
 const editingTitle = ref('')
+const showDirMenu = ref(false)
+const showDirPicker = ref(false)
 
-onMounted(() => { agent.loadConversations() })
+onMounted(() => {
+  agent.loadConversations()
+  perm.loadWorkspaces()
+})
 
-const groupedConversations = computed(() => {
-  const now = new Date()
-  const today = now.toDateString()
-  const yesterday = new Date(now.getTime() - 86400000).toDateString()
-  const weekAgo = new Date(now.getTime() - 7 * 86400000)
+// 按目录分组对话列表（对齐 opencode 按 project/directory 分组）
+const directoryGroups = computed(() => {
   const filtered = agent.conversations.filter(c =>
     !searchQuery.value || c.title.toLowerCase().includes(searchQuery.value.toLowerCase())
   )
-  const groups: { label: string; items: ConversationMeta[] }[] = []
-  const todayItems: ConversationMeta[] = []; const yesterdayItems: ConversationMeta[] = []; const weekItems: ConversationMeta[] = []; const olderItems: ConversationMeta[] = []
+  const map = new Map<string, ConversationMeta[]>()
   for (const c of filtered) {
-    const d = new Date(c.updated_at)
-    if (d.toDateString() === today) todayItems.push(c)
-    else if (d.toDateString() === yesterday) yesterdayItems.push(c)
-    else if (d > weekAgo) weekItems.push(c)
-    else olderItems.push(c)
+    const key = c.directory || ''
+    if (!map.has(key)) map.set(key, [])
+    map.get(key)!.push(c)
   }
-  if (todayItems.length) groups.push({ label: 'Today', items: todayItems })
-  if (yesterdayItems.length) groups.push({ label: 'Yesterday', items: yesterdayItems })
-  if (weekItems.length) groups.push({ label: 'Last 7 days', items: weekItems })
-  if (olderItems.length) groups.push({ label: 'Older', items: olderItems })
-  return groups
+  return Array.from(map.entries()).map(([dir, items]) => ({
+    directory: dir,
+    label: dir || '默认目录',
+    items: [...items].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1)),
+  }))
 })
 
-function handleNewChat() { agent.newChat(); router.push({ name: 'MultiAgent' }) }
+// 新建对话（可选绑定工作目录，目录成为会话 cwd）
+function handleNewChat(dir?: string) {
+  if (dir !== undefined) agent.setSessionDirectory(dir)
+  showDirMenu.value = false
+  agent.newChat()
+  router.push({ name: 'MultiAgent' })
+}
+
+function pickCustomDir() {
+  showDirMenu.value = false
+  showDirPicker.value = true
+}
+
+function handleDirPicked(path: string) {
+  showDirPicker.value = false
+  handleNewChat(path)
+}
+
 function selectConversation(id: string) { agent.loadConversation(id); router.push({ name: 'MultiAgentConversation', params: { id } }) }
 function startRename(c: ConversationMeta) { editingId.value = c.id; editingTitle.value = c.title }
 function saveRename() { if (editingId.value && editingTitle.value.trim()) { agent.renameConversation(editingId.value, editingTitle.value.trim()) }; editingId.value = null }
@@ -48,19 +67,29 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
 <template>
   <div class="chat-history">
     <div class="history-header">
-      <button class="new-chat-btn" @click="handleNewChat">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-        New Multi-Agent Chat
-      </button>
+      <div class="new-chat-wrap">
+        <button class="new-chat-btn" @click="showDirMenu = !showDirMenu" title="新建对话（可选择工作目录）">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          New Multi-Agent Chat
+        </button>
+        <div v-if="showDirMenu" class="dir-menu" @click.stop>
+          <div class="dir-menu-title">在哪个目录下创建对话？</div>
+          <button class="dir-menu-item" @click="handleNewChat('')">📦 默认（backend/）</button>
+          <template v-for="w in perm.workspaces" :key="w">
+            <button class="dir-menu-item" :title="w" @click="handleNewChat(w)">📁 {{ w }}</button>
+          </template>
+          <button class="dir-menu-item pick" @click="pickCustomDir">⋯ 选择其他目录…</button>
+        </div>
+      </div>
     </div>
     <div class="search-box">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
       <input v-model="searchQuery" placeholder="Search..." />
     </div>
     <div class="history-list">
-      <div v-if="groupedConversations.length === 0" class="empty-hint">{{ searchQuery ? 'No matches' : 'No history' }}</div>
-      <div v-for="group in groupedConversations" :key="group.label" class="group">
-        <div class="group-label">{{ group.label }}</div>
+      <div v-if="directoryGroups.length === 0" class="empty-hint">{{ searchQuery ? 'No matches' : 'No history' }}</div>
+      <div v-for="group in directoryGroups" :key="group.directory" class="group">
+        <div class="group-label" :title="group.directory">{{ group.label }}</div>
         <div v-for="c in group.items" :key="c.id" class="history-item" :class="{ active: agent.conversationId === c.id }" @click="selectConversation(c.id)">
           <div class="item-content">
             <template v-if="editingId === c.id">
@@ -81,6 +110,7 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
         </div>
       </div>
     </div>
+    <DirPickerModal :show="showDirPicker" @close="showDirPicker = false" @select="handleDirPicked" />
   </div>
 </template>
 
@@ -107,4 +137,37 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
 .action-btn:hover { background: rgba(255,255,255,0.1); color: var(--text); }
 .action-btn.delete:hover { color: #ef4444; }
 .rename-input { width: 100%; border: 1px solid var(--primary); border-radius: 4px; padding: 2px 6px; font-size: 13px; background: var(--bg); color: var(--text); outline: none; }
+
+/* 新建对话目录选择 */
+.new-chat-wrap { position: relative; flex: 1; }
+.dir-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: var(--surface, #ffffff);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 6px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.dir-menu-title { font-size: 11px; color: var(--text-secondary); padding: 6px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.dir-menu-item {
+  display: block; width: 100%; text-align: left; padding: 8px 10px;
+  border: none; border-radius: 6px; background: transparent; color: var(--text);
+  font-size: 13px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dir-menu-item:hover { background: rgba(255, 255, 255, 0.08); }
+.dir-menu-item.pick { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; color: var(--primary); }
+
+/* 目录分组 */
+.group-label {
+  font-size: 11px; font-weight: 600; color: var(--text-secondary);
+  padding: 10px 12px 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  user-select: none;
+}
+.group + .group { margin-top: 4px; }
 </style>

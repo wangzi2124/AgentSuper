@@ -7,6 +7,7 @@ const CONV_TYPE = 'multi-agent'
 export interface ConversationMeta {
   id: string
   title: string
+  directory?: string
   created_at: string
   updated_at: string
 }

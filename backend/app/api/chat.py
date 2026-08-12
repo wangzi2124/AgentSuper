@@ -184,7 +184,7 @@ def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | N
             raise HTTPException(status_code=404, detail="Conversation not found")
         return service, conv_id
     else:
-        session = service.create(user_id, directory=discover_project_root(), kind="multi-agent")
+        session = service.create(user_id, directory=body.directory or discover_project_root(), kind="multi-agent")
         return service, session.id
 
 

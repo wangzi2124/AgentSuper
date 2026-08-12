@@ -278,6 +278,8 @@ export interface MultiAgentChatRequest {
   conversation_id?: string
   model?: string
   use_vector_db?: boolean
+  /** 会话绑定的工作目录（opencode ctx.directory），首条消息创建会话时生效 */
+  directory?: string
 }
 
 export interface MultiAgentMessage {

@@ -35,6 +35,13 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const routingStatus = ref<string>('')
   const selectedModel = ref(SUPPORTED_MODELS[0].value)
   const useVectorDb = ref(false)
+  // 当前/新建会话绑定的工作目录（opencode ctx.directory）。首条消息发送时
+  // 随请求 directory 创建会话；已有会话在 loadConversation 时同步为服务器值。
+  const sessionDirectory = ref('')
+
+  function setSessionDirectory(dir: string) {
+    sessionDirectory.value = dir || ''
+  }
 
   function getOrCreateSession(sessionId: string, title?: string): SessionState {
     if (!sessions.value[sessionId]) {
@@ -75,6 +82,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     try {
       const detail = await getConversation(id)
       session.conversationTitle = detail.title
+      // 同步会话绑定目录（服务器为准）
+      if (detail.directory) sessionDirectory.value = detail.directory
       session.messages = detail.messages.map(m => ({
         id: m.id,
         role: m.role as 'user' | 'assistant',
@@ -128,7 +137,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     })
     session.messages = [...session.messages, assistantMsg]
 
-    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value }
+    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, directory: sessionDirectory.value || undefined }
     const controller = new AbortController()
     session.abortController = controller
     const signal = controller.signal
@@ -309,6 +318,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
   return {
     sessions, activeSessionId, conversations, routingStatus, selectedModel, useVectorDb,
+    sessionDirectory, setSessionDirectory,
     messages, conversationId, conversationTitle, loading, queuePosition,
     send, cancel, clear, undoMessage, deleteMessage, deleteConversation,
     loadConversations, loadConversation, newChat, renameConversation,
