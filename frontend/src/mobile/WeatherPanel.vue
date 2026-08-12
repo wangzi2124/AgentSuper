@@ -61,9 +61,10 @@ async function fetchWeather() {
   isLoading.value = true
   errorMsg.value = ''
   try {
+    const { addAuthHeaders } = await import('../api/fetch')
     const response = await fetch('/api/plugins/weather-alert/call/tool_get_weather_alert', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ args: { city: selectedCity.value } }),
     })
     if (!response.ok) throw new Error('Failed to fetch weather')

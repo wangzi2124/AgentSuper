@@ -19,6 +19,21 @@ export async function getGeneratedContent(filename: string): Promise<string> {
   return res.text()
 }
 
+// 下载生成文件（带鉴权头，需用户代理或 blob URL 触发浏览器下载）
+export async function downloadGenerated(filename: string): Promise<void> {
+  const res = await fetchWithTimeout(BASE + '/download/' + encodeURIComponent(filename))
+  if (!res.ok) throw new Error(`下载失败: ${res.statusText}`)
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
 // 删除指定生成文件
 export async function deleteGenerated(filename: string): Promise<void> {
   const res = await fetchWithTimeout(BASE + '/' + encodeURIComponent(filename), { method: 'DELETE' })

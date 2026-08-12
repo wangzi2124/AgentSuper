@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useGeneratedStore } from '../stores/generated'
-import { getGeneratedContent } from '../api/generated'
+import { getGeneratedContent, downloadGenerated } from '../api/generated'
 
 // 生成文件状态管理
 const store = useGeneratedStore()
@@ -37,9 +37,13 @@ function isJsFile(filename: string): boolean {
   return filename.endsWith('.js')
 }
 
-// 获取文件下载URL
-function getFileUrl(filename: string): string {
-  return `/api/generated/download/${encodeURIComponent(filename)}`
+// 下载文件（带鉴权头，通过 blob 触发浏览器下载）
+async function handleDownload(filename: string) {
+  try {
+    await downloadGenerated(filename)
+  } catch (err: any) {
+    alert(err.message || '下载失败')
+  }
 }
 
 // 在浏览器沙箱中运行JavaScript文件
@@ -144,7 +148,7 @@ function closeOutput() {
           </div>
         </div>
         <div class="file-actions">
-          <a :href="getFileUrl(f.filename)" class="btn" download>Download</a>
+          <button class="btn" @click="handleDownload(f.filename)">Download</button>
           <button
             v-if="isJsFile(f.filename)"
             class="btn btn-run"

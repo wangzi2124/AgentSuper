@@ -1,4 +1,4 @@
-"""轻量用户身份鉴权：X-User-Id 绑定签名 token。
+"""轻量用户身份鉴权：X-User-Id 绑定 JWT。
 
 威胁模型：X-User-Id 请求头即身份，无认证时可在局域网中伪造头越权读取他人会话。
 本模块提供两类身份（信任模型对齐 opencode device / account）：
@@ -10,9 +10,8 @@
    - POST /api/auth/account/register 注册用户名/密码（服务端存储 PBKDF2 加盐哈希）
    - POST /api/auth/account/login 校验密码并签发 token
 
-token = base64(uid) . base64(exp) . hmac(secret, "uid:exp:seed")，
-seed 为账号的随机 token_seed 或设备的密钥哈希。中间件校验每个 /api/* 请求的
-X-User-Id + X-Auth-Token；伪造 uid 无法通过签名校验。
+签发的 token 为标准 JWT（HS256，RFC 7519），claims 含 sub(user_id)/exp/iat；
+伪造 uid 无法通过签名校验。中间件校验每个 /api/* 请求的 X-User-Id + X-Auth-Token。
 
 未配置 AUTH_TOKEN_SECRET 时所有校验关闭（保持默认本地部署行为）。
 """
@@ -37,6 +36,10 @@ _users_cache: dict[str, dict] | None = None  # user_id -> 身份记录
 
 # PBKDF2 迭代次数（密码哈希）
 _PBKDF2_ITERATIONS = 200_000
+
+# JWT
+_JWT_HEADER = {"alg": "HS256", "typ": "JWT"}
+_JWT_ISSUER = "agent-super"
 
 
 def enabled() -> bool:
@@ -68,6 +71,67 @@ def _pbkdf2(password: str, salt_hex: str) -> str:
     return hashlib.pbkdf2_hmac(
         "sha256", password.encode(), bytes.fromhex(salt_hex), _PBKDF2_ITERATIONS
     ).hex()
+
+
+# ── JWT 编解码（HS256，stdlib 实现，无第三方依赖）───────────────────────────
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _b64url_decode(part: str) -> bytes:
+    return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+
+
+def _jwt_claims(user_id: str, exp: int) -> dict:
+    return {
+        "iss": _JWT_ISSUER,
+        "sub": user_id,
+        "iat": int(time.time()),
+        "exp": exp,
+    }
+
+
+def issue_token(user_id: str) -> tuple[str, int]:
+    """为已注册 user_id 签发 JWT，返回 (token, expires_at_epoch)。"""
+    exp = int(time.time()) + settings.auth_token_ttl
+    header = _b64url(json.dumps(_JWT_HEADER, separators=(",", ":")).encode())
+    payload = _b64url(
+        json.dumps(_jwt_claims(user_id, exp), separators=(",", ":")).encode()
+    )
+    signing_input = f"{header}.{payload}"
+    sig = hmac.new(
+        settings.auth_secret.encode(), signing_input.encode(), hashlib.sha256
+    ).digest()
+    return f"{signing_input}.{_b64url(sig)}", exp
+
+
+def verify_token(user_id: str, token: str) -> bool:
+    """校验 JWT 是否绑定 user_id 且未过期（签名 + exp + sub）。"""
+    if not enabled() or not token:
+        return False
+    try:
+        header, payload, sig_b = token.split(".")
+        # 1) 校验签名（防伪造）
+        expected = hmac.new(
+            settings.auth_secret.encode(), f"{header}.{payload}".encode(),
+            hashlib.sha256,
+        ).digest()
+        actual = _b64url_decode(sig_b)
+        if not hmac.compare_digest(expected, actual):
+            return False
+        # 2) 解析 payload
+        claims = json.loads(_b64url_decode(payload).decode())
+        # 3) 校验过期时间
+        if int(claims.get("exp", 0)) < time.time():
+            return False
+        # 4) 校验主题（绑定 X-User-Id）
+        if str(claims.get("sub", "")) != user_id:
+            return False
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _load_users() -> dict[str, dict]:
@@ -110,14 +174,6 @@ def _save_users(users: dict[str, dict]) -> None:
 
 def _record(user_id: str) -> dict | None:
     return _load_users().get(user_id)
-
-
-def _token_seed(user_id: str) -> str:
-    """token 签名绑定的种子：账号用 token_seed，设备用 device_hash。"""
-    rec = _load_users().get(user_id)
-    if isinstance(rec, dict):
-        return rec.get("token_seed") or rec.get("device_hash") or ""
-    return rec if isinstance(rec, str) else ""
 
 
 def register(user_id: str, device_secret: str) -> tuple[bool, str]:
@@ -241,39 +297,6 @@ def account_info(user_id: str) -> dict | None:
     }
 
 
-def issue_token(user_id: str) -> tuple[str, int]:
-    """为已注册 user_id 签发签名 token，返回 (token, expires_at_epoch)。"""
-    exp = int(time.time()) + settings.auth_token_ttl
-    uid_b = base64.urlsafe_b64encode(user_id.encode()).decode().rstrip("=")
-    exp_b = base64.urlsafe_b64encode(str(exp).encode()).decode().rstrip("=")
-    seed = _token_seed(user_id)
-    sig = hmac.new(
-        settings.auth_secret.encode(), f"{user_id}:{exp}:{seed}".encode(), hashlib.sha256
-    ).hexdigest()
-    return f"{uid_b}.{exp_b}.{sig}", exp
-
-
-def verify_token(user_id: str, token: str) -> bool:
-    """校验 token 是否绑定 user_id 且未过期。"""
-    if not enabled() or not token:
-        return False
-    try:
-        uid_b, exp_b, sig = token.split(".")
-        uid = base64.urlsafe_b64decode(uid_b + "=" * (-len(uid_b) % 4)).decode()
-        exp = int(base64.urlsafe_b64decode(exp_b + "=" * (-len(exp_b) % 4)).decode())
-    except Exception:  # noqa: BLE001
-        return False
-    if uid != user_id:
-        return False
-    if exp < time.time():
-        return False
-    seed = _token_seed(user_id)
-    expected = hmac.new(
-        settings.auth_secret.encode(), f"{user_id}:{exp}:{seed}".encode(), hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(expected, sig)
-
-
 class AuthMiddleware:
     """校验每个 /api/* 请求的 X-User-Id + X-Auth-Token。
 
@@ -309,6 +332,9 @@ class AuthMiddleware:
         token = headers.get("x-auth-token", "").strip()
         if not uid or not verify_token(uid, token):
             await _send_json(send, 401, {
+                "code": 401,
+                "message": "未登录或会话已过期，请重新登录",
+                "data": None,
                 "detail": "Unauthorized: invalid or missing X-Auth-Token for X-User-Id",
             })
             return

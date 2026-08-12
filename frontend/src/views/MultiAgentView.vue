@@ -29,7 +29,8 @@ const messages = computed(() => agent.messages)
 
 async function checkWeatherPlugin() {
   try {
-    const response = await fetch('/api/plugins/weather-alert/status')
+    const { addAuthHeaders } = await import('../api/fetch')
+    const response = await fetch('/api/plugins/weather-alert/status', { headers: await addAuthHeaders() })
     if (response.ok) {
       const data = await response.json()
       isWeatherEnabled.value = data.enabled

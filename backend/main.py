@@ -1,12 +1,15 @@
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config, weather, auth as auth_api, custom_tools as custom_tools_api
 from app.api.chat import MAX_CONCURRENT_AGENTS
+from app.api.responses import ApiError, error_response
 from app.auth import AuthMiddleware
 from app.config import settings
 from app.monitor import RequestLogMiddleware, get_stats
@@ -59,6 +62,26 @@ app.add_middleware(
 
 app.add_middleware(RequestLogMiddleware)  # type: ignore
 app.add_middleware(AuthMiddleware)  # type: ignore
+
+
+# ── 统一异常 → 统一响应体 {code, message, data, detail} ─────────────────────
+@app.exception_handler(ApiError)
+async def api_error_handler(request: Request, exc: ApiError):
+    return error_response(exc.code, exc.message, exc.status, exc.data)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    detail = exc.detail
+    if not isinstance(detail, str):
+        detail = json.dumps(detail, ensure_ascii=False) if detail is not None else "请求失败"
+    return error_response(exc.status_code, detail, exc.status_code)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return error_response(422, "请求参数校验失败", 422)
+
 
 app.include_router(auth_api.router, prefix="/api/auth", tags=["Auth"])
 app.include_router(documents.router, prefix="/api/documents", tags=["Documents"])

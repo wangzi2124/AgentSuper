@@ -37,17 +37,8 @@ async function handleDelete(filename: string) {
 // 下载指定文件
 async function handleDownload(filename: string) {
   try {
-    const url = `/api/generated/download/${encodeURIComponent(filename)}`
-    const res = await fetch(url)
-    if (!res.ok) throw new Error(`下载失败: ${res.statusText}`)
-    const blob = await res.blob()
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(a.href)
+    const { downloadGenerated } = await import('../api/generated')
+    await downloadGenerated(filename)
   } catch (err: any) {
     alert(err.message || '下载失败')
   }

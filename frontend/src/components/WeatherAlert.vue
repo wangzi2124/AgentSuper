@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
+import { addAuthHeaders } from '../api/fetch'
 
 // 天气数据接口定义
 interface WeatherData {
@@ -191,8 +192,8 @@ async function fetchWeather() {
     const init: RequestInit = useCache
       ? { method: 'GET' }
       : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ city: selectedCity.value }) }
-    
-    const response = await fetch(url, init)
+
+    const response = await fetch(url, { ...init, headers: await addAuthHeaders(init.headers) })
     
     if (!response.ok) {
       throw new Error('Failed to fetch weather')
@@ -229,7 +230,7 @@ async function fetchTyphoons() {
   try {
     const response = await fetch(`/api/plugins/weather-alert/call/tool_get_typhoon_info`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ args: {} }),
     })
     
