@@ -341,13 +341,32 @@ _ALLOWED_COMMANDS = frozenset({
 })
 
 
-def _check_command_allowed(command: str) -> None:
-    """Check the base command against the whitelist. Raises ValueError if not allowed."""
-    base_cmd = shlex.split(command)[0].lower() if command else ""
+def _check_command_allowed(command: str, cwd: str | None = None) -> None:
+    """Check the base command against the whitelist. Raises ValueError if not allowed.
+
+    白名单校验首个 token；若首 token 含路径分隔符（如 `.venv/Scripts/python.exe`），
+    则放行能解析到工作区（会话目录或 backend/ 根）内真实文件的命令。
+    """
+    parts = shlex.split(command)
+    base_cmd = parts[0].lower() if parts else ""
     if not base_cmd:
         raise ValueError("Empty command")
-    if base_cmd not in _ALLOWED_COMMANDS:
-        raise ValueError(f"Command '{base_cmd}' is not in the allowed whitelist")
+    if base_cmd in _ALLOWED_COMMANDS:
+        return
+    if "/" in base_cmd or "\\" in base_cmd:
+        bases = [Path(cwd)] if cwd else []
+        session = current_session_workspace()
+        if session:
+            bases.append(Path(session))
+        bases.append(WORKSPACE)
+        for base in bases:
+            candidate = (base / parts[0]).resolve()
+            if candidate.is_file() and candidate.is_relative_to(base):
+                return
+        raise ValueError(
+            f"Command '{base_cmd}' is not in the allowed whitelist (path must point to an existing file inside the workspace)"
+        )
+    raise ValueError(f"Command '{base_cmd}' is not in the allowed whitelist")
 
 
 # 解释器类命令的 -c/-e/-Command 参数中禁止出现的高危模式
@@ -373,15 +392,15 @@ def _check_command_blacklist(command: str) -> None:
     parts = shlex.split(command)
     if not parts:
         return
-    base_cmd = parts[0].lower()
+    interp = Path(parts[0]).name.lower() or parts[0].lower()
     interpreter_flag: str | None = None
-    if base_cmd in ("python", "python3", "py"):
+    if interp in ("python", "python3", "py", "python.exe", "py.exe"):
         interpreter_flag = "-c"
-    elif base_cmd == "node":
+    elif interp in ("node", "node.exe"):
         interpreter_flag = "-e"
-    elif base_cmd == "powershell":
+    elif interp in ("powershell", "powershell.exe", "pwsh", "pwsh.exe"):
         interpreter_flag = "-Command"
-    elif base_cmd == "cmd":
+    elif interp in ("cmd", "cmd.exe"):
         interpreter_flag = "/c"
     if interpreter_flag is None:
         return
@@ -393,7 +412,7 @@ def _check_command_blacklist(command: str) -> None:
             for pat in _DANGEROUS_PATTERNS:
                 if pat in lowered:
                     raise ValueError(
-                        f"Command contains dangerous pattern '{pat}' in {base_cmd} -c argument; "
+                        f"Command contains dangerous pattern '{pat}' in {interp} -c argument; "
                         "inline code execution is blocked"
                     )
             return
@@ -439,10 +458,10 @@ def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
         timeout = 600
     if timeout < 1:
         timeout = 5
-    _check_command_allowed(command)
+    resolved_cwd = _resolve(work_dir)
+    _check_command_allowed(command, cwd=resolved_cwd)
     _check_command_blacklist(command)
     _ssrf_check_command(command)
-    resolved_cwd = _resolve(work_dir)
     mgr = get_perm_mgr()
     decision = mgr.check(str(resolved_cwd), "execute")
     if decision == "ask":
