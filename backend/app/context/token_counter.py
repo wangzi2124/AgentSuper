@@ -146,7 +146,10 @@ def truncate_messages(
     rest = messages[1:] if system_msg else messages
 
     system_tokens = estimate_tokens(system_msg.get("content", "")) + 4 if system_msg else 0
-    budget = max_tokens - system_tokens - reserve_tokens - schema_tokens
+    # Add a conservative slack buffer to account for model-specific tokenization overhead
+    # and any prompt framing not covered by message token estimates.
+    slack = max(128, int(max_tokens * 0.03))
+    budget = max_tokens - system_tokens - reserve_tokens - schema_tokens - slack
 
     kept = []
     current = 0

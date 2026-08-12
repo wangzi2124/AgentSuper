@@ -798,7 +798,7 @@ class RAGAgent:
                 state["_task"].record_compaction()
             self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
         messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0, tool_defs=tool_defs))
-        trace_messages("graph.entry_ready", messages)  # [token trace v7]
+        trace_messages("graph.entry_ready", messages, tool_defs=tool_defs)  # [token trace v7]
 
         response = await self._llm_call(model, messages, tool_defs, state=state)
         msg = response.choices[0].message
@@ -961,7 +961,7 @@ class RAGAgent:
             # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）
             final_tool_defs = None if steps_prompt_injected else tool_defs
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0, tool_defs=final_tool_defs))
-            trace_messages("graph.round_ready", messages)  # [token trace v7]
+            trace_messages("graph.round_ready", messages, tool_defs=final_tool_defs)  # [token trace v7]
             response = await self._llm_call(model, messages, final_tool_defs, state=state)
             msg = response.choices[0].message
             finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
@@ -1011,7 +1011,7 @@ class RAGAgent:
             # [token 优化 P8] 强制收尾路径补齐"清理→压缩→截断"闭环：此前仅截断，
             # 且截断基于低估估算可能不触发（实测收尾轮裸发 25,779 超 usable 23,808）。
             # 与主循环保持同款处理，避免收尾调用成为单请求内最大单次 pt。
-            trace_messages("graph.final_round_start", messages)  # [token trace v8]
+            trace_messages("graph.final_round_start", messages, tool_defs=None)  # [token trace v8]
             messages = prune_tool_outputs(
                 messages,
                 protect_tokens=settings.tool_output_protect_tokens,
@@ -1027,7 +1027,7 @@ class RAGAgent:
                     state["_task"].record_compaction()
                 self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
-            trace_messages("graph.final_round_ready", messages)  # [token trace v8]
+            trace_messages("graph.final_round_ready", messages, tool_defs=None)  # [token trace v8]
             # 对齐 opencode max-steps 语义：达到上限后工具禁用，仅注入收尾总结提示（assistant 角色）
             messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
             response = await self._llm_call(model, messages, None, state=state)

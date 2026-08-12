@@ -10,6 +10,9 @@ dependencies = [
     "qwen-tts>=0.1.1",
     "soundfile>=0.13.1",
     "torch>=2.10.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "python-multipart>=0.0.9",
 ]
 
 [tool.uv]

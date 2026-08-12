@@ -46,8 +46,9 @@ PATCHES = [
             "    # 截断/压缩判断\"以为没超、实际已超\"（实测 round9 实际 25,779 超 usable 23,808）\n"
             "    token_estimate_correction: float = 1.13\n"
             "    # [token 优化 P8] 压缩触发比例：usable × ratio。原 0.8 实测 round 8 才触发、\n"
-            "    # 压缩后下一轮仍超限；降到 0.65 提前 2-3 轮介入，压平长工具循环 token 曲线\n"
-            "    compaction_threshold_ratio: float = 0.65\n"
+            "    # 压缩后下一轮仍超限；降到 0.6 提前 2-3 轮介入，压平长工具循环 token 曲线\n"
+            "    # [token 优化 v9] 0.65 → 0.6：usable 降为 15.8K 后保持\"压缩早于截断\"的窗口\n"
+            "    compaction_threshold_ratio: float = 0.6\n"
             "    # 压缩触发阈值（token）；0 表示自动 = usable × compaction_threshold_ratio，长工具循环在截断兜底之前先压缩\n"
             "    compaction_threshold_tokens: int = 0\n"
         ),
