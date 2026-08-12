@@ -5,8 +5,6 @@ import {
   loginAccount,
   registerAccount,
   logout as logoutLocal,
-  getUserId,
-  getUsername,
 } from '../api/auth'
 
 // 登录态管理：auth 启用（AUTH_TOKEN_SECRET）时控制应用是否放行。
@@ -31,9 +29,10 @@ export const useAuthStore = defineStore('auth', () => {
       username.value = info.session.username || info.session.user_id
       accountType.value = info.session.account_type
     } else {
-      user_id.value = getUserId()
-      username.value = getUsername() || user_id.value
-      accountType.value = user_id.value && user_id.value !== 'anonymous' ? 'device' : ''
+      // 无有效会话 → 保持未登录（不回落 anonymous），强制走登录页
+      user_id.value = ''
+      username.value = ''
+      accountType.value = ''
     }
     ready.value = true
   }
