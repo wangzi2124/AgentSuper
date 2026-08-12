@@ -9,7 +9,7 @@ logs/token_trace_YYYYMMDD.jsonl，供 token_patch/analyze_token_trace.py 分析�
   graph.round_start       工具循环每轮开始时（prune 前）的上下文规模
   graph.pre_compact       本轮 prune 后、压缩判断前（threshold 附在 payload）
   graph.round_ready       本轮 truncate 后、发送 LLM 前的上下文规模
-  llm.usage               每次 LLM 返回的实际 usage（pt/ct/dur/model/where）
+  llm.usage               每次 LLM 返回的实际 usage（pt/ct/dur/model/where，前缀缓存命中/未命中 cache_hit/cache_miss）
   monitor.record_model_call  monitor.py 记账总入口（兜底，防漏）
   graph.finish            整个请求结束（rounds / tool_calls / 总耗时）
 

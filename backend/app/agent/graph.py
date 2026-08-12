@@ -137,6 +137,26 @@ class AgentState(TypedDict):
 _ZERO_USAGE = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
 
 
+def _extract_cache_usage(usage, pt: int = 0):
+    """从 LLM usage 提取前缀缓存命中/未命中 token。
+
+    DeepSeek 原生字段为 usage.prompt_tokens_details.cached_tokens；
+    litellm 透传为 usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens。
+    两者取一，返回 (hit, miss)；miss 缺失时用 pt - hit 兜底，保证 hit + miss == pt。
+    """
+    if usage is None:
+        return 0, 0
+    hit = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)
+    miss = int(getattr(usage, "prompt_cache_miss_tokens", 0) or 0)
+    if not hit and not miss:
+        det = getattr(usage, "prompt_tokens_details", None)
+        if det is not None:
+            hit = int(getattr(det, "cached_tokens", 0) or 0)
+    if miss == 0 and pt > hit:
+        miss = pt - hit
+    return hit, miss
+
+
 class RAGAgent:
     """RAG（检索增强生成）代理，负责协调检索、重排序和生成回答的流程。"""
 
@@ -556,16 +576,19 @@ class RAGAgent:
         usage = getattr(response, "usage", None)
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
-        trace("llm.usage", where="assemble", model=model, pt=pt, ct=ct, duration_ms=dur)  # [token trace v7]
+        hit, miss = _extract_cache_usage(usage, pt=pt)
+        trace("llm.usage", where="assemble", model=model, pt=pt, ct=ct, cache_hit=hit, cache_miss=miss, duration_ms=dur)  # [token trace v7]
         record_model_call(model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
         # 累加本次 invoke 的 token 用量（invoke 前重置），供 assistant 消息结算落库
         if not getattr(self, "_usage_accum", None):
             self._usage_accum = dict(_ZERO_USAGE)
         self._usage_accum["input"] += int(pt or 0)
         self._usage_accum["output"] += int(ct or 0)
+        self._usage_accum["cache_read"] += hit
+        self._usage_accum["cache_write"] += miss
         logger.info(
-            "LLM call | model=%s pt=%d ct=%d dur=%.0fms",
-            model, pt, ct, dur,
+            "LLM call | model=%s pt=%d ct=%d cache_hit=%d cache_miss=%d dur=%.0fms",
+            model, pt, ct, hit, miss, dur,
         )
         if state is not None and push_text:
             content = getattr(response.choices[0].message, "content", "") or ""
@@ -611,6 +634,7 @@ class RAGAgent:
                     max_tokens=settings.llm_max_tokens,
                     timeout=500,
                     num_retries=2,
+                    cache_prompt=True,
                 )
             except Exception as exc:
                 dur = (tmod.time() - start) * 1000
@@ -665,15 +689,18 @@ class RAGAgent:
         dur = (tmod.time() - start) * 1000
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
-        trace("llm.usage", where="invoke", model=model, pt=int(pt or 0), ct=int(ct or 0), duration_ms=dur)  # [token trace v7]
+        hit, miss = _extract_cache_usage(usage, pt=int(pt or 0))
+        trace("llm.usage", where="invoke", model=model, pt=int(pt or 0), ct=int(ct or 0), cache_hit=hit, cache_miss=miss, duration_ms=dur)  # [token trace v7]
         record_model_call(model, prompt_tokens=int(pt or 0), completion_tokens=int(ct or 0), duration_ms=dur)
         if not getattr(self, "_usage_accum", None):
             self._usage_accum = dict(_ZERO_USAGE)
         self._usage_accum["input"] += int(pt or 0)
         self._usage_accum["output"] += int(ct or 0)
+        self._usage_accum["cache_read"] += hit
+        self._usage_accum["cache_write"] += miss
         logger.info(
-            "LLM call | model=%s pt=%d ct=%d dur=%.0fms",
-            model, int(pt or 0), int(ct or 0), dur,
+            "LLM call | model=%s pt=%d ct=%d cache_hit=%d cache_miss=%d dur=%.0fms",
+            model, int(pt or 0), int(ct or 0), hit, miss, dur,
         )
 
         tool_calls = None
