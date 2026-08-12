@@ -1,4 +1,5 @@
 from pathlib import Path
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
@@ -125,9 +126,10 @@ class Settings(BaseSettings):
 
     # ── 用户身份签名（可选，默认关闭）──
     # 设置 AUTH_TOKEN_SECRET 后启用：X-User-Id 必须携带对应的签名 token
-    # （前端先注册随机 user_id + device_secret，再换取 token），
+    # （前端通过 /login 页面注册账号/登录后换取 token），
     # 防止仅伪造 X-User-Id 头越权读取他人会话。默认（本地部署）不校验。
-    auth_secret: Optional[str] = None
+    # validation_alias 保证 .env 中的 AUTH_TOKEN_SECRET 正确映射到该字段。
+    auth_secret: Optional[str] = Field(default=None, validation_alias="AUTH_TOKEN_SECRET")
     # token 有效期（秒），默认 30 天
     auth_token_ttl: int = 2592000
     # 已注册用户（user_id → 设备密钥哈希）的持久化文件

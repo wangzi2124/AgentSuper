@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import ChatHistory from './ChatHistory.vue'
 import MultiAgentChatHistory from './MultiAgentChatHistory.vue'
 import PermissionDialog from './PermissionDialog.vue'
+import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()
+const router = useRouter()
+const auth = useAuthStore()
 
 const navItems = [
   { path: '/chat', label: 'Chat', icon: '💬' },
@@ -17,6 +20,11 @@ const navItems = [
   { path: '/generated', label: 'Generated', icon: '📝' },
   { path: '/monitoring', label: 'Monitoring', icon: '📊' },
 ]
+
+function handleLogout() {
+  auth.logout()
+  router.push({ name: 'Login' })
+}
 </script>
 
 <template>
@@ -41,6 +49,16 @@ const navItems = [
     <MultiAgentChatHistory v-else-if="route.path.startsWith('/multi-agent')" class="sidebar-history" />
     <div class="sidebar-bottom">
       <PermissionDialog />
+      <div v-if="auth.enabled && auth.isLoggedIn" class="user-card">
+        <span class="user-avatar">{{ (auth.username || '?').slice(0, 1).toUpperCase() }}</span>
+        <div class="user-meta">
+          <span class="user-name" :title="auth.username">{{ auth.username }}</span>
+          <span class="user-id" :title="auth.user_id">{{ auth.user_id }}</span>
+        </div>
+        <button class="logout-btn" title="退出登录" @click="handleLogout">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        </button>
+      </div>
       <div class="sidebar-footer">
         v0.1.0
       </div>
@@ -51,5 +69,68 @@ const navItems = [
 <style scoped>
 .sidebar-bottom {
   flex-shrink: 0;
+}
+.user-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.user-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--primary, #4f46e5);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.user-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+.user-name {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-id {
+  font-size: 10px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+.logout-btn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.logout-btn:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
 }
 </style>

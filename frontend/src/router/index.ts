@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
 
 // 应用路由配置
 const router = createRouter({
@@ -7,6 +8,12 @@ const router = createRouter({
     {
       path: '/',
       redirect: '/chat',
+    },
+    {
+      path: '/login',
+      name: 'Login',
+      component: () => import('../views/LoginView.vue'),
+      meta: { public: true },
     },
     {
       path: '/m',
@@ -74,6 +81,17 @@ const router = createRouter({
       component: () => import('../views/NotFoundView.vue'),
     },
   ],
+})
+
+// 全局登录守卫：后端启用身份签名时，未登录跳转 /login；已登录访问 /login 跳回首页。
+router.beforeEach(async (to) => {
+  const auth = useAuthStore()
+  if (!auth.ready) await auth.init()
+  if (!auth.enabled) return true
+  if (to.meta.public) {
+    return auth.isLoggedIn ? { name: 'Chat' } : true
+  }
+  return auth.isLoggedIn ? true : { name: 'Login', query: { redirect: to.fullPath } }
 })
 
 export default router
