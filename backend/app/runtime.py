@@ -105,11 +105,27 @@ def _do_init(app):
 
     # 可写工作目录完全由前端「工作目录」面板配置（持久化于 data/runtime_workspaces.json），
     # 不再支持 .env 的 EXTRA_WORKSPACES。
-    # 工作区根 = backend/（与 app/tools/filesystem.py 的相对路径基准一致，
-    # 避免 LLM 把文件写到仓库根导致 glob/grep（基于 backend/）找不到，
-    # 同时让 backend/app、backend/plugins 等关键目录落入保护范围）
+    # 文件工具的相对路径基准 = 项目 worktree（git 仓库根，见 app/tools/filesystem.py `_workspace()`）；
+    # 源码保护（app/plugins/skills/config/main.py 等）仍以 backend/ 为基准判定，
+    # 权限层通过 project_worktree 将仓库根下路径识别为 workspace。
     _base_dir = Path(__file__).resolve().parents[1]
     _data_dir = _base_dir / "data"
+
+    # ── opencode 风格文件系统:项目模型 + 分层存储 + 目录扫描缓存 ──
+    # 项目:优先 git rev-parse 定位 worktree,ID 取 git 根哈希(持久化到 .git/opencode)
+    from app.filesystem import Project, ScanCache, set_project
+    from app.storage.paths import global_paths, project_scoped
+
+    project = Project.from_git(_base_dir)
+    set_project(project)
+    _storage_paths = global_paths(_base_dir)      # data/cache/config/state/log/bin
+    _project_storage = project_scoped(project.id)  # 按 projectID 隔离的 session/cache/log
+    app.state.project = project
+    app.state.project_id = project.id
+    app.state.scan_cache = ScanCache()
+    app.state.storage_paths = _storage_paths
+    app.state.project_storage = _project_storage
+    logger.info("project initialized: id=%s worktree=%s", project.id, project.worktree)
 
     # [token 优化 v6] 自定义工具存储：脚本型写 plugins/custom_*.py（复用插件加载链路），
     # 固定型（pin）写 data/pinned_tools.json（按需挂载时始终保留该工具 schema）
@@ -125,6 +141,7 @@ def _do_init(app):
         external_default=settings.external_path_default,
         approval_timeout=settings.permission_approval_timeout,
         allow_source_writes=settings.allow_source_writes,
+        project_worktree=project.worktree,
     )
     set_perm_manager(perm_mgr)
 
@@ -157,7 +174,7 @@ def _do_init(app):
     app.state.chapter_store = chapter_store
     app.state.reranker = reranker
     app.state.agent = agent
-    app.state.file_store = FileStore(settings.upload_dir)
+    app.state.file_store = FileStore(str(_storage_paths["data"] / "uploads"))
     app.state.doc_processor = DocumentProcessor(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,

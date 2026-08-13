@@ -9,8 +9,6 @@ from typing import Annotated, Callable, TypedDict
 
 logger = logging.getLogger(__name__)
 
-WORKSPACE = Path(__file__).resolve().parents[2]
-
 # P3: 循环护栏提示词（对齐 opencode MAX_STEPS_PROMPT 的收尾语义）
 MAX_STEPS_PROMPT = (
     "CRITICAL - MAXIMUM STEPS REACHED\n\n"
@@ -464,10 +462,8 @@ class RAGAgent:
             timeout = 5
         work_dir = args.get("work_dir", ".")
 
-        resolved_cwd = Path(work_dir)
-        if not resolved_cwd.is_absolute():
-            resolved_cwd = Path(WORKSPACE) / resolved_cwd
-        resolved_cwd = resolved_cwd.resolve()
+        from app.tools.filesystem import _resolve as _fs_resolve
+        resolved_cwd = _fs_resolve(work_dir)
 
         from app.permission import get_manager as _get_perm_mgr, NeedsPermission as _NeedsPermission
         mgr = _get_perm_mgr()

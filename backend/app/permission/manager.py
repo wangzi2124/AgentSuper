@@ -100,14 +100,19 @@ class PermissionManager:
         external_default: str = "ask",
         approval_timeout: int = 3600,
         allow_source_writes: bool = False,
+        project_worktree: str = "",
     ):
         """初始化权限管理器，设置工作目录、白名单文件路径和额外工作区。
 
         allow_source_writes=True 时放行主工作区内受保护源码路径（app/plugins/
         skills/config/main.py 等）的写/执行；.git/.env/数据库等仍始终保护。
+        project_worktree：git worktree（仓库根）。提供时其下路径也识别为
+        workspace（对齐 opencode 的 worktree 语义），便于多项目/仓库根读写；
+        源码保护仍以 self.workspace（backend/）相对路径判定，不受其影响。
         """
         self.workspace = Path(workspace).resolve() if workspace else Path.cwd()
         self.allow_source_writes = bool(allow_source_writes)
+        self.project_worktree = str(Path(project_worktree).resolve()) if project_worktree else ""
         whitelist_dir = Path(whitelist_path) if whitelist_path else self.workspace.parent / "data"
         self.whitelist_path = whitelist_dir / "permissions.json" if whitelist_dir.is_dir() else whitelist_dir
         self.runtime_workspaces_path = self.whitelist_path.parent / "runtime_workspaces.json"
@@ -208,6 +213,16 @@ class PermissionManager:
                 return "workspace"
             except (ValueError, OSError):
                 pass
+        # 项目 worktree（git 仓库根）：其下路径视为 workspace（opencode worktree 语义）。
+        # 与主工作区 backend/ 的关系：源码保护（_is_critical_write/_is_critical_read）
+        # 仅以 self.workspace 相对路径判定，因此仓库根下但 backend/ 之外的部分
+        # 不受 app/plugins/skills 保护名单约束。
+        if self.project_worktree:
+            try:
+                p.relative_to(Path(self.project_worktree))
+                return "workspace"
+            except (ValueError, OSError):
+                pass
         # 会话绑定目录：当前上下文（本会话）的工作目录视为可写 workspace，
         # 与全局 extra_workspaces 同权（opencode：文件工具在 ctx.directory 下操作）
         sw = _session_workspace_var.get()
@@ -218,6 +233,10 @@ class PermissionManager:
             except (ValueError, OSError):
                 pass
         return "external"
+
+    def _is_git_path(self, p: Path) -> bool:
+        """路径任意层级含 .git（目录或 .git 文件）即为 git 内部路径，读写均拒绝。"""
+        return any(part.lower() == ".git" for part in p.parts)
 
     def _is_critical_read(self, p: Path) -> bool:
         """判断是否为禁止读取的敏感路径（密钥/数据库/凭据文件）。"""
@@ -270,6 +289,8 @@ class PermissionManager:
             return "allow"
         p = Path(path_str).resolve()
         if cls == "workspace":
+            if self._is_git_path(p):
+                return "deny"
             if self._is_critical_read(p):
                 return "deny"
             if operation in ("write", "execute") and self._is_critical_write(p):

@@ -9,9 +9,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from app.filesystem import ScanCache, get_project
 from app.permission import get_manager as get_perm_mgr, NeedsPermission, current_session_workspace
 
-WORKSPACE = Path(__file__).resolve().parents[2]
+# 回退基准：项目上下文未初始化时使用 backend/（历史行为）
+_WORKSPACE_FALLBACK = Path(__file__).resolve().parents[2]
+
+_scan_cache = ScanCache()
+
+
+def _workspace() -> Path:
+    """统一路径基准：git worktree（仓库根）。未初始化项目上下文时回退 backend/。
+
+    对应 opencode instance-context.ts 的 worktree（git root）：相对路径、glob/grep
+    输出、命令校验均以 worktree 为基准，而不是硬编码 backend/。
+    """
+    try:
+        return Path(get_project().worktree)
+    except Exception:
+        return _WORKSPACE_FALLBACK
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
 _TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml", ".log", ".py", ".js", ".ts", ".vue", ".html", ".css", ".scss", ".less", ".sh", ".bat", ".ps1", ".env", ".env.example", ".ini", ".cfg", ".conf", ".toml", ".sql", ".sqlite"}
 _PDF_EXTS = {".pdf"}
@@ -46,11 +62,11 @@ def _resolve(path_str: str) -> Path:
     """将路径字符串解析为绝对路径，相对路径基于当前会话工作目录解析。
 
     [会话目录] 本会话绑定了工作目录（opencode ctx.directory）时，相对路径
-    以该目录为基准；否则回退到 backend/ 工作区根。
+    以该目录为基准；否则回退到项目 worktree（git 仓库根）。
     """
     p = Path(path_str)
     if not p.is_absolute():
-        base = current_session_workspace() or str(WORKSPACE)
+        base = current_session_workspace() or str(_workspace())
         p = Path(base) / p
     return p.resolve()
 
@@ -104,15 +120,16 @@ def tool_ls(path: str = ".") -> str:
     if not target.is_dir():
         return f"Error: '{path}' is not a directory"
     rows = []
-    for entry in sorted(target.iterdir()):
+    for node in _scan_cache.list_dir(target):
+        entry = Path(node.path)
         try:
             st = entry.stat()
             size = st.st_size
             mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-            kind = "d" if entry.is_dir() else "f"
-            rows.append(f"{kind} {size:>10}  {mtime}  {entry.name}")
+            kind = "d" if node.type == "dir" else "f"
+            rows.append(f"{kind} {size:>10}  {mtime}  {node.name}")
         except OSError:
-            rows.append(f"? {'':>10}  {'':19}  {entry.name}")
+            rows.append(f"? {'':>10}  {'':19}  {node.name}")
     return "\n".join(rows) if rows else "(empty)"
 
 
@@ -209,6 +226,7 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> str:
     try:
         target.write_text(str(content), encoding="utf-8")
         action = "Overwritten" if existed else "Created"
+        _scan_cache.invalidate(target.parent)
         return f"{action} {path} ({target.stat().st_size} bytes)"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -225,6 +243,7 @@ def tool_append_file(path: str, content: str) -> str:
             f.write(str(content))
         total = target.stat().st_size
         action = "Appended to" if existed else "Created"
+        _scan_cache.invalidate(target.parent)
         return f"{action} {path} ({total} bytes total)"
     except Exception as e:
         return f"Error appending to file: {e}"
@@ -532,6 +551,7 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
         return f"Error: {e}"
     try:
         target.write_text(content_new, encoding="utf-8")
+        _scan_cache.invalidate(target.parent)
         return f"Edited {path}"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -547,8 +567,8 @@ def tool_glob(pattern: str, root: str = ".") -> str:
     if not matches:
         return f"No files found for: {pattern}"
     matches.sort(key=lambda m: os.path.getmtime(m), reverse=True)
-    if root_path == WORKSPACE:
-        lines = [str(m.relative_to(WORKSPACE)) for m in matches[:100]]
+    if root_path == _workspace():
+        lines = [str(m.relative_to(_workspace())) for m in matches[:100]]
     else:
         lines = [str(m.resolve()) for m in matches[:100]]
     if len(matches) > 100:
@@ -566,11 +586,13 @@ def tool_delete_file(path: str) -> str:
     if target.is_dir():
         try:
             target.rmdir()
+            _scan_cache.invalidate(target.parent)
             return f"Deleted directory {path}"
         except OSError as e:
             return f"Error deleting directory: {e}"
     try:
         target.unlink()
+        _scan_cache.invalidate(target.parent)
         return f"Deleted {path}"
     except Exception as e:
         return f"Error deleting file: {e}"
@@ -589,6 +611,8 @@ def tool_rename_file(path: str, new_path: str) -> str:
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
         src.rename(dst)
+        _scan_cache.invalidate(src.parent)
+        _scan_cache.invalidate(dst.parent)
         return f"Renamed {path} -> {new_path}"
     except Exception as e:
         return f"Error renaming: {e}"
@@ -632,8 +656,8 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
     total_matches = 0
     truncated = False
     for f, found_positions in file_matches:
-        if root_path == WORKSPACE:
-            rel = str(f.relative_to(WORKSPACE))
+        if root_path == _workspace():
+            rel = str(f.relative_to(_workspace()))
         else:
             rel = str(f.resolve())
         if files_only:
@@ -724,7 +748,7 @@ def _check_command_allowed(command: str, cwd: str | None = None) -> None:
         session = current_session_workspace()
         if session:
             bases.append(Path(session))
-        bases.append(WORKSPACE)
+        bases.append(_workspace())
         for base in bases:
             candidate = (base / parts[0]).resolve()
             if candidate.is_file() and candidate.is_relative_to(base):
