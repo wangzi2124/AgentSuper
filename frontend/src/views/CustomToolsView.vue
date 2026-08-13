@@ -90,8 +90,8 @@ const pinCandidates = () => store.catalog.filter((t) => !pinnedNames().has(t.nam
 
 <template>
   <div class="page-header">
-    <h2>Custom Tools</h2>
-    <p>Add script-based tools or pin existing tools so their schema is always mounted (token 优化 v6)</p>
+    <h2>自定义工具</h2>
+    <p>创建脚本工具或固定已有工具，使其 schema 始终挂载（token 优化 v6）</p>
   </div>
   <div class="page-content" style="display:flex;flex-direction:column;gap:16px;">
     <!-- 创建入口 -->
@@ -157,13 +157,13 @@ const pinCandidates = () => store.catalog.filter((t) => !pinnedNames().has(t.nam
 
     <div v-else-if="store.items.length === 0" class="empty-state">
       <div class="icon">🧰</div>
-      <p>No custom tools</p>
+      <p>暂无自定义工具</p>
       <p style="font-size:13px;margin-top:4px;">创建脚本工具或固定已有工具，使其 schema 始终挂载。</p>
     </div>
 
     <div v-else style="display:flex;flex-direction:column;gap:8px;">
       <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px;">
-        {{ store.items.length }} custom tool(s)
+        {{ store.items.length }} 个自定义工具
       </div>
       <div v-for="item in store.items" :key="item.type + ':' + item.name" class="card" style="display:flex;align-items:center;gap:14px;">
         <div style="font-size:24px;">{{ item.type === 'script' ? '🧩' : '📌' }}</div>
@@ -177,7 +177,7 @@ const pinCandidates = () => store.catalog.filter((t) => !pinnedNames().has(t.nam
           <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">{{ item.path }}</div>
         </div>
         <span class="badge" :class="item.enabled ? 'badge-enabled' : 'badge-disabled'">
-          {{ item.enabled ? 'Enabled' : 'Disabled' }}
+          {{ item.enabled ? '已启用' : '已禁用' }}
         </span>
         <button
           class="btn"
@@ -185,9 +185,9 @@ const pinCandidates = () => store.catalog.filter((t) => !pinnedNames().has(t.nam
           style="font-size:12px;padding:6px 12px;"
           @click="handleToggle(item, item.enabled)"
         >
-          {{ item.enabled ? 'Disable' : 'Enable' }}
+          {{ item.enabled ? '禁用' : '启用' }}
         </button>
-        <button class="btn btn-danger" style="font-size:12px;padding:6px 12px;" @click="handleDelete(item)">Delete</button>
+        <button class="btn btn-danger" style="font-size:12px;padding:6px 12px;" @click="handleDelete(item)">删除</button>
       </div>
     </div>
   </div>

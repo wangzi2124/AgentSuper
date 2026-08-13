@@ -241,7 +241,7 @@ const meaningfulSteps = computed(() => {
         </div>
       </div>
       <div v-if="message.sources && message.sources.length > 0" class="sources">
-        <div class="sources-title">Sources:</div>
+        <div class="sources-title">来源：</div>
         <div v-for="(s, i) in message.sources" :key="i" class="source-item">
           <span class="source-score">{{ (s.score * 100).toFixed(0) }}%</span>
           <span class="source-text">{{ s.content.slice(0, 120) }}...</span>

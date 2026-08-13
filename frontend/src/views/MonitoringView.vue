@@ -36,8 +36,8 @@ function num(v: number): string {
 
 <template>
   <div class="page-header">
-    <h2>Monitoring</h2>
-    <p>System usage statistics</p>
+    <h2>系统监控</h2>
+    <p>系统使用统计</p>
   </div>
   <div class="page-content">
     <div v-if="loading" style="display:flex;justify-content:center;padding:40px;">
@@ -45,21 +45,21 @@ function num(v: number): string {
     </div>
 
     <div v-else-if="error" class="empty-state">
-      <p style="color:var(--danger);">Failed to load stats: {{ error }}</p>
+      <p style="color:var(--danger);">统计数据加载失败：{{ error }}</p>
     </div>
 
     <div v-if="stats" style="display:flex;flex-direction:column;gap:20px;">
       <!-- HTTP Requests -->
       <section>
-        <h3 style="margin-bottom:8px;">HTTP Requests</h3>
+        <h3 style="margin-bottom:8px;">HTTP 请求</h3>
         <div class="card" style="padding:16px;">
           <div class="stat-grid">
             <div class="stat-item">
               <div class="stat-value">{{ num(stats.requests.total) }}</div>
-              <div class="stat-label">Total Requests</div>
+              <div class="stat-label">请求总数</div>
             </div>
           </div>
-          <h4 style="margin:12px 0 6px;font-size:13px;">By Path</h4>
+          <h4 style="margin:12px 0 6px;font-size:13px;">按路径</h4>
           <div class="list-table">
             <div
               v-for="(count, path) in stats.requests.by_path"
@@ -70,7 +70,7 @@ function num(v: number): string {
               <span class="badge">{{ num(count) }}</span>
             </div>
           </div>
-          <h4 style="margin:12px 0 6px;font-size:13px;">By Status</h4>
+          <h4 style="margin:12px 0 6px;font-size:13px;">按状态码</h4>
           <div class="list-table">
             <div
               v-for="(count, status) in stats.requests.by_status"
@@ -86,39 +86,39 @@ function num(v: number): string {
 
       <!-- Model Calls -->
       <section>
-        <h3 style="margin-bottom:8px;">LLM Calls</h3>
+        <h3 style="margin-bottom:8px;">LLM 调用</h3>
         <div class="card" style="padding:16px;">
           <div class="stat-grid stat-grid-4">
             <div class="stat-item">
               <div class="stat-value">{{ num(stats.model_calls.total) }}</div>
-              <div class="stat-label">Total Calls</div>
+              <div class="stat-label">调用总数</div>
             </div>
             <div class="stat-item">
               <div class="stat-value">{{ num(stats.model_calls.total_prompt_tokens) }}</div>
-              <div class="stat-label">Prompt Tokens</div>
+              <div class="stat-label">输入 Token</div>
             </div>
             <div class="stat-item">
               <div class="stat-value">{{ num(stats.model_calls.total_completion_tokens) }}</div>
-              <div class="stat-label">Completion Tokens</div>
+              <div class="stat-label">输出 Token</div>
             </div>
             <div class="stat-item">
               <div class="stat-value">{{ ms(stats.model_calls.total_duration_ms) }}</div>
-              <div class="stat-label">Total Duration</div>
+              <div class="stat-label">总耗时</div>
             </div>
             <div class="stat-item">
               <div class="stat-value">{{ ms(stats.model_calls.avg_duration_ms) }}</div>
-              <div class="stat-label">Avg Duration</div>
+              <div class="stat-label">平均耗时</div>
             </div>
             <div class="stat-item">
               <div class="stat-value">{{ num(stats.model_calls.tool_rounds_total) }}</div>
-              <div class="stat-label">Tool Rounds</div>
+              <div class="stat-label">工具轮数</div>
             </div>
             <div class="stat-item">
               <div class="stat-value">{{ stats.model_calls.avg_tool_rounds }}</div>
-              <div class="stat-label">Avg Tool Rounds</div>
+              <div class="stat-label">平均工具轮数</div>
             </div>
           </div>
-          <h4 style="margin:12px 0 6px;font-size:13px;">By Model</h4>
+          <h4 style="margin:12px 0 6px;font-size:13px;">按模型</h4>
           <div class="list-table">
             <div
               v-for="(count, model) in stats.model_calls.by_model"

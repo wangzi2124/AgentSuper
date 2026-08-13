@@ -1,8 +1,8 @@
 <template>
   <div class="not-found">
     <h1>404</h1>
-    <p>Page not found</p>
-    <router-link to="/chat">Go to Chat</router-link>
+    <p>页面不存在</p>
+    <router-link to="/chat">前往对话</router-link>
   </div>
 </template>
 

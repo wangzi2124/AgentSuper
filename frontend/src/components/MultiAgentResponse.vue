@@ -79,7 +79,7 @@ function stepKey(a: string, s: AgentStep): string {
         <div class="agent-h">
           <span class="avatar">{{ a.agent_avatar || '🤖' }}</span>
           <span class="name">{{ a.agent_name }}</span>
-          <span class="badge" :class="a.status">{{ a.status === 'running' ? '● running' : a.status === 'completed' ? '✓ done' : '✗ failed' }}</span>
+          <span class="badge" :class="a.status">{{ a.status === 'running' ? '● 运行中' : a.status === 'completed' ? '✓ 完成' : '✗ 失败' }}</span>
         </div>
 
         <!-- realtime steps -->

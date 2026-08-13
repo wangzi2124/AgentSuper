@@ -49,8 +49,8 @@ async function submit() {
   <div class="login-view">
     <div class="login-card">
       <div class="login-logo">🧠</div>
-      <h1 class="login-title">Knowledge Base</h1>
-      <p class="login-subtitle">Agent + RAG System</p>
+      <h1 class="login-title">知识库</h1>
+      <p class="login-subtitle">Agent + RAG 系统</p>
 
       <div class="tabs">
         <button class="tab" :class="{ active: mode === 'login' }" @click="mode = 'login'">登录</button>

@@ -102,7 +102,7 @@ _TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "tool_read_file",
-            "description": "读取文本文件内容，支持按行偏移和行数限制；多模态文件（图片/PDF/音视频）返回 base64。",
+            "description": "读取文本文件内容（cat -n 格式返回，含行号；超长行截断），支持按行偏移和行数限制；多模态文件（图片/PDF/音视频）返回 base64。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -118,7 +118,7 @@ _TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "tool_glob",
-            "description": "在指定目录中按 glob 模式搜索文件名，返回匹配路径列表。",
+            "description": "在指定目录中按 glob 模式搜索文件名，返回匹配路径列表（按修改时间排序，最多 100 条）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -133,7 +133,7 @@ _TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "tool_grep",
-            "description": "在文本文件中按正则表达式搜索内容，支持文件过滤、上下文显示与只列文件名。",
+            "description": "在文本文件中按正则表达式搜索内容，支持文件过滤、上下文显示与只列文件名（最多 100 条匹配）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -179,7 +179,7 @@ _TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "tool_edit_file",
-            "description": "在文件中查找并替换指定字符串，支持单次或全部替换。",
+            "description": "在文件中查找并替换指定字符串。支持模糊匹配；old_string 匹配到多处时会报错（除非 replace_all=True 全部替换）。",
             "parameters": {
                 "type": "object",
                 "properties": {

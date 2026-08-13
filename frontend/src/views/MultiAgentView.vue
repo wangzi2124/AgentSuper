@@ -179,8 +179,8 @@ async function handleCopy(messageId: string, text: string) {
   <div class="multi-agent-view">
     <div class="chat-header">
       <div>
-        <h2>Multi-Agent Supervisor</h2>
-        <p>Send a message to all agents simultaneously</p>
+        <h2>多智能体编排</h2>
+        <p>同时向所有智能体发送消息，并行处理你的请求</p>
         <p v-if="agent.sessionDirectory" class="session-dir" :title="agent.sessionDirectory">
           📁 {{ agent.sessionDirectory }}
         </p>
@@ -189,7 +189,7 @@ async function handleCopy(messageId: string, text: string) {
         <span v-if="agent.queuePosition != null" class="stream-badge queued">
           ⏳ 排队中 #{{ agent.queuePosition }}
         </span>
-        <span v-else-if="agent.loading" class="stream-badge running">● agents running</span>
+        <span v-else-if="agent.loading" class="stream-badge running">● 智能体运行中</span>
         <WeatherAlert v-if="isWeatherEnabled" />
         <div class="ws-manager">
           <button class="ws-btn" @click="toggleWsPanel" title="管理可写工作目录">
@@ -231,10 +231,10 @@ async function handleCopy(messageId: string, text: string) {
         <label class="toggle">
           <input type="checkbox" v-model="agent.useVectorDb" :disabled="agent.loading" />
           <span class="toggle-slider"></span>
-          <span class="toggle-label">Vector DB</span>
+          <span class="toggle-label">向量库检索</span>
         </label>
         <div class="model-selector">
-          <label for="model-select">Model:</label>
+          <label for="model-select">模型：</label>
           <select id="model-select" v-model="agent.selectedModel" :disabled="agent.loading">
             <option v-for="m in SUPPORTED_MODELS" :key="m.value" :value="m.value">
               {{ m.label }}
@@ -247,8 +247,8 @@ async function handleCopy(messageId: string, text: string) {
     <div class="chat-body">
       <div v-if="messages.length === 0" class="empty-state">
         <div class="icon">🤖</div>
-        <p>Ask a question to all agents</p>
-        <p class="hint">Multiple AI agents will process your request in parallel</p>
+        <p>向所有智能体提问</p>
+        <p class="hint">多个 AI 智能体将并行处理你的请求</p>
       </div>
 
       <div v-else ref="parentRef" class="message-list" @scroll="onScroll">

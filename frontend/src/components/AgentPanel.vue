@@ -42,15 +42,15 @@ function toggleArgs(id: string) { expandedArgs.value[id] = !expandedArgs.value[i
     <div class="agent-header">
       <span class="agent-avatar">{{ agent.agent_avatar || '🤖' }}</span>
       <span class="agent-name">{{ agent.agent_name }}</span>
-      <span v-if="isRunning" class="agent-status">● running</span>
-      <span v-else-if="isCompleted" class="agent-status done">✓ done</span>
-      <span v-else-if="isFailed" class="agent-status err">✗ failed</span>
+      <span v-if="isRunning" class="agent-status">● 运行中</span>
+      <span v-else-if="isCompleted" class="agent-status done">✓ 完成</span>
+      <span v-else-if="isFailed" class="agent-status err">✗ 失败</span>
     </div>
 
     <div v-if="agent.steps.length" class="agent-steps">
       <div class="steps-header" @click="stepsExpanded = !stepsExpanded">
         <span class="steps-toggle">{{ stepsExpanded ? '▾' : '▸' }}</span>
-        <span class="steps-label">Steps ({{ agent.steps.length }})</span>
+        <span class="steps-label">步骤（{{ agent.steps.length }}）</span>
       </div>
       <div v-if="stepsExpanded" class="steps-list">
         <div v-for="s in agent.steps" :key="s.step_id" class="step-item" :class="s.status">
@@ -63,14 +63,14 @@ function toggleArgs(id: string) { expandedArgs.value[id] = !expandedArgs.value[i
           <div v-if="s.tool_name" class="step-tool">
             🔧 {{ s.tool_name }}
             <span v-if="s.tool_args && Object.keys(s.tool_args).length" class="step-args-toggle" @click.stop="toggleArgs(s.step_id)">
-              {{ expandedArgs[s.step_id] ? 'hide args' : argsSummary(s.tool_args) }}
+              {{ expandedArgs[s.step_id] ? '隐藏参数' : argsSummary(s.tool_args) }}
             </span>
           </div>
           <div v-if="s.tool_args && expandedArgs[s.step_id]" class="step-args" @click.stop>
             <pre>{{ formatArgs(s.tool_args) }}</pre>
           </div>
           <div v-if="s.tool_result" class="step-result-toggle" @click.stop="toggleResult(s.step_id)">
-            {{ expandedResults[s.step_id] ? 'hide result' : 'view result' }}
+            {{ expandedResults[s.step_id] ? '隐藏结果' : '查看结果' }}
           </div>
           <div v-if="s.tool_result && expandedResults[s.step_id]" class="step-result" @click.stop>
             <pre>{{ s.tool_result }}</pre>
@@ -81,7 +81,7 @@ function toggleArgs(id: string) { expandedArgs.value[id] = !expandedArgs.value[i
 
     <div v-if="isRunning && !agent.content" class="agent-thinking">
       <div class="dot-pulse"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
-      <span>Thinking...</span>
+      <span>思考中...</span>
     </div>
 
     <div v-if="agent.content" class="agent-content" v-text="agent.content"></div>

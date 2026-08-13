@@ -70,7 +70,7 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
       <div class="new-chat-wrap">
         <button class="new-chat-btn" @click="showDirMenu = !showDirMenu" title="新建对话（可选择工作目录）">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-          New Multi-Agent Chat
+          新建多智能体对话
         </button>
         <div v-if="showDirMenu" class="dir-menu" @click.stop>
           <div class="dir-menu-title">在哪个目录下创建对话？</div>
@@ -84,10 +84,10 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
     </div>
     <div class="search-box">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-      <input v-model="searchQuery" placeholder="Search..." />
+      <input v-model="searchQuery" placeholder="搜索..." />
     </div>
     <div class="history-list">
-      <div v-if="directoryGroups.length === 0" class="empty-hint">{{ searchQuery ? 'No matches' : 'No history' }}</div>
+      <div v-if="directoryGroups.length === 0" class="empty-hint">{{ searchQuery ? '无匹配结果' : '暂无历史对话' }}</div>
       <div v-for="group in directoryGroups" :key="group.directory" class="group">
         <div class="group-label" :title="group.directory">{{ group.label }}</div>
         <div v-for="c in group.items" :key="c.id" class="history-item" :class="{ active: agent.conversationId === c.id }" @click="selectConversation(c.id)">

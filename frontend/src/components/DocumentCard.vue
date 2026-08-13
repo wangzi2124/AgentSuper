@@ -21,13 +21,13 @@ function formatSize(bytes: number): string {
       <div class="doc-name">{{ doc.filename }}</div>
       <div class="doc-meta">
         <span>{{ formatSize(doc.size) }}</span>
-        <span v-if="doc.chunk_count"> · {{ doc.chunk_count }} chunks</span>
+        <span v-if="doc.chunk_count"> · {{ doc.chunk_count }} 个分块</span>
         <span> · {{ new Date(doc.created_at).toLocaleDateString() }}</span>
       </div>
     </div>
     <button class="btn btn-danger btn-sm" :disabled="deleting" @click="emit('delete', doc.id)">
       <span v-if="deleting" class="spinner-sm"></span>
-      <span v-else>Delete</span>
+      <span v-else>删除</span>
     </button>
   </div>
 </template>

@@ -35,8 +35,8 @@ async function handleDelete(id: string) {
 
 <template>
   <div class="page-header">
-    <h2>Documents</h2>
-    <p>Upload and manage your knowledge base documents</p>
+    <h2>文档管理</h2>
+    <p>上传并管理你的知识库文档</p>
   </div>
   <div class="page-content">
     <FileUpload :loading="docs.loading" :progress="docs.uploadProgress" :stage="docs.uploadStage" @upload="handleUpload" />
@@ -47,13 +47,13 @@ async function handleDelete(id: string) {
 
     <div v-else-if="docs.documents.length === 0" class="empty-state">
       <div class="icon">📄</div>
-      <p>No documents uploaded yet</p>
-      <p style="font-size:13px;margin-top:4px;">Upload .txt, .md, or .pdf files to build your knowledge base.</p>
+      <p>还没有上传文档</p>
+      <p style="font-size:13px;margin-top:4px;">上传 .txt、.md 或 .pdf 文件来构建你的知识库。</p>
     </div>
 
     <div v-else style="margin-top:20px;display:flex;flex-direction:column;gap:8px;">
       <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px;">
-        {{ docs.documents.length }} document(s)
+        {{ docs.documents.length }} 个文档
       </div>
       <DocumentCard
         v-for="doc in docs.documents"

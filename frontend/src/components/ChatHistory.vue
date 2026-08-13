@@ -172,7 +172,7 @@ function getSessionQueuePosition(id: string): number | null {
                 ⏳ #{{ getSessionQueuePosition(c.id) }}
               </span>
               <span v-else-if="getSessionPhase(c.id) === 'running'" class="session-badge running">
-                ● streaming
+                ● 流式传输中
               </span>
             </template>
           </div>

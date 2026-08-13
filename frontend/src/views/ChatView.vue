@@ -208,8 +208,8 @@ function handleMessageRetry(messageId: string) {
   <div class="chat-view">
     <div class="chat-header">
       <div>
-        <h2>Chat with Knowledge Base</h2>
-        <p>Ask questions and get answers powered by RAG + AI Agent</p>
+        <h2>知识库对话</h2>
+        <p>基于 RAG + AI Agent 的智能问答</p>
         <p v-if="chat.sessionDirectory" class="session-dir" :title="chat.sessionDirectory">
           📁 {{ chat.sessionDirectory }}
         </p>
@@ -262,10 +262,10 @@ function handleMessageRetry(messageId: string) {
         <label class="toggle">
           <input type="checkbox" v-model="chat.useVectorDb" :disabled="chat.loading" />
           <span class="toggle-slider"></span>
-          <span class="toggle-label">Vector DB</span>
+          <span class="toggle-label">向量库检索</span>
         </label>
         <div class="model-selector">
-          <label for="model-select">Model:</label>
+          <label for="model-select">模型：</label>
           <select id="model-select" v-model="chat.selectedModel" :disabled="chat.loading">
             <option v-for="m in SUPPORTED_MODELS" :key="m.value" :value="m.value">
               {{ m.label }}
@@ -278,8 +278,8 @@ function handleMessageRetry(messageId: string) {
     <div class="chat-body">
       <div v-if="messages.length === 0" class="empty-state">
         <div class="icon">💬</div>
-        <p>Ask a question to get started</p>
-        <p class="hint">The AI agent will retrieve relevant documents and answer based on your knowledge base.</p>
+        <p>输入问题开始对话</p>
+        <p class="hint">AI Agent 将检索相关文档，并基于知识库内容进行回答。</p>
       </div>
 
       <div v-else ref="parentRef" class="message-list" @scroll="onScroll">

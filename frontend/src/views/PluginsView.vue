@@ -22,8 +22,8 @@ async function handleToggle(name: string, enabled: boolean) {
 
 <template>
   <div class="page-header">
-    <h2>Plugins</h2>
-    <p>Manage third-party plugins integrated with the agent</p>
+    <h2>插件管理</h2>
+    <p>管理集成到智能体的第三方插件</p>
   </div>
   <div class="page-content">
     <div v-if="plugins.loading" style="display:flex;justify-content:center;padding:40px;">
@@ -32,13 +32,13 @@ async function handleToggle(name: string, enabled: boolean) {
 
     <div v-else-if="plugins.plugins.length === 0" class="empty-state">
       <div class="icon">🔌</div>
-      <p>No plugins installed</p>
-      <p style="font-size:13px;margin-top:4px;">Install third-party plugins to extend agent capabilities.</p>
+      <p>未安装任何插件</p>
+      <p style="font-size:13px;margin-top:4px;">安装第三方插件以扩展智能体能力。</p>
     </div>
 
     <div v-else style="display:flex;flex-direction:column;gap:8px;">
       <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px;">
-        {{ plugins.plugins.length }} plugin(s) installed
+        {{ plugins.plugins.length }} 个插件已安装
       </div>
       <div v-for="plugin in plugins.plugins" :key="plugin.name" class="card" style="display:flex;align-items:center;gap:14px;">
         <div style="font-size:24px;">🔌</div>
@@ -48,7 +48,7 @@ async function handleToggle(name: string, enabled: boolean) {
           <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">v{{ plugin.version }}</div>
         </div>
         <span class="badge" :class="plugin.enabled ? 'badge-enabled' : 'badge-disabled'">
-          {{ plugin.enabled ? 'Enabled' : 'Disabled' }}
+          {{ plugin.enabled ? '已启用' : '已禁用' }}
         </span>
         <button
           class="btn"
@@ -56,7 +56,7 @@ async function handleToggle(name: string, enabled: boolean) {
           style="font-size:12px;padding:6px 12px;"
           @click="handleToggle(plugin.name, plugin.enabled)"
         >
-          {{ plugin.enabled ? 'Disable' : 'Enable' }}
+          {{ plugin.enabled ? '禁用' : '启用' }}
         </button>
       </div>
     </div>

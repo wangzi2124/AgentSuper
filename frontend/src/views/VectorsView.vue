@@ -48,32 +48,32 @@ function goToPage(page: number) {
 
 <template>
   <div class="page-header">
-    <h2>Vector Store</h2>
-    <p>Browse and search chunks stored in the vector database</p>
+    <h2>向量库</h2>
+    <p>浏览和搜索存储在向量数据库中的分块</p>
   </div>
   <div class="page-content">
     <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
       <select v-model="selectedDocId" @change="onFilterChange" style="flex:1;min-width:180px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;">
-        <option value="">All documents</option>
+        <option value="">全部文档</option>
         <option v-for="doc in ds.documents" :key="doc.id" :value="doc.id">{{ doc.filename }} ({{ doc.chunk_count }} chunks)</option>
       </select>
       <div style="display:flex;gap:4px;flex:2;min-width:200px;">
         <input
           v-model="searchText"
           type="text"
-          placeholder="Search chunk content..."
+          placeholder="搜索分块内容..."
           style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;"
           @keyup.enter="onSearch"
         />
-        <button class="btn" @click="onSearch">Search</button>
-        <button v-if="vs.searchQuery" class="btn" @click="searchText = ''; onSearch()">Clear</button>
+        <button class="btn" @click="onSearch">搜索</button>
+        <button v-if="vs.searchQuery" class="btn" @click="searchText = ''; onSearch()">清除</button>
       </div>
     </div>
 
     <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
-      {{ vs.total }} chunk(s)
-      <template v-if="vs.searchQuery"> — matching "{{ vs.searchQuery }}"</template>
-      <template v-if="vs.chunks.length > 0"> — page {{ currentPage }} / {{ totalPages }}</template>
+      {{ vs.total }} 个分块
+      <template v-if="vs.searchQuery"> — 匹配 "{{ vs.searchQuery }}"</template>
+      <template v-if="vs.chunks.length > 0"> — 第 {{ currentPage }} / {{ totalPages }} 页</template>
     </div>
 
     <div v-if="vs.loading && vs.chunks.length === 0" style="display:flex;justify-content:center;padding:40px;">
@@ -82,8 +82,8 @@ function goToPage(page: number) {
 
     <div v-else-if="vs.chunks.length === 0" class="empty-state">
       <div class="icon">📦</div>
-      <p>No chunks found</p>
-      <p style="font-size:13px;margin-top:4px;">Upload documents first to populate the vector store.</p>
+      <p>未找到分块</p>
+      <p style="font-size:13px;margin-top:4px;">请先上传文档以填充向量库。</p>
     </div>
 
     <div v-else>
@@ -92,9 +92,9 @@ function goToPage(page: number) {
           <thead>
             <tr style="background:var(--bg);text-align:left;">
               <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;white-space:nowrap;">#</th>
-              <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;">Source</th>
-              <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;">Chapter</th>
-              <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;">Content</th>
+              <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;">来源</th>
+              <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;">章节</th>
+              <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;">内容</th>
             </tr>
           </thead>
           <tbody>
@@ -119,14 +119,14 @@ function goToPage(page: number) {
       </div>
 
       <div v-if="totalPages > 1" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px;">
-        <button class="btn" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">Prev</button>
+        <button class="btn" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">上一页</button>
         <span style="font-size:13px;color:var(--text-secondary);">
           <select :value="currentPage" @change="goToPage(Number(($event.target as HTMLSelectElement).value))" style="padding:4px 6px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;">
-            <option v-for="p in totalPages" :key="p" :value="p">Page {{ p }}</option>
+            <option v-for="p in totalPages" :key="p" :value="p">第 {{ p }} 页</option>
           </select>
           / {{ totalPages }}
         </span>
-        <button class="btn" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">Next</button>
+        <button class="btn" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">下一页</button>
       </div>
     </div>
   </div>

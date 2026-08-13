@@ -10,15 +10,15 @@ const router = useRouter()
 const auth = useAuthStore()
 
 const navItems = [
-  { path: '/chat', label: 'Chat', icon: '💬' },
-  { path: '/multi-agent', label: 'Multi-Agent', icon: '🤖' },
-  { path: '/documents', label: 'Documents', icon: '📄' },
-  { path: '/skills', label: 'Skills', icon: '🧠' },
-  { path: '/plugins', label: 'Plugins', icon: '🔌' },
-  { path: '/custom-tools', label: 'Custom Tools', icon: '🧰' },
-  { path: '/vectors', label: 'Vectors', icon: '🔢' },
-  { path: '/generated', label: 'Generated', icon: '📝' },
-  { path: '/monitoring', label: 'Monitoring', icon: '📊' },
+  { path: '/chat', label: '对话', icon: '💬' },
+  { path: '/multi-agent', label: '多智能体', icon: '🤖' },
+  { path: '/documents', label: '文档管理', icon: '📄' },
+  { path: '/skills', label: '技能', icon: '🧠' },
+  { path: '/plugins', label: '插件', icon: '🔌' },
+  { path: '/custom-tools', label: '自定义工具', icon: '🧰' },
+  { path: '/vectors', label: '向量库', icon: '🔢' },
+  { path: '/generated', label: '生成文件', icon: '📝' },
+  { path: '/monitoring', label: '系统监控', icon: '📊' },
 ]
 
 function handleLogout() {
@@ -30,8 +30,8 @@ function handleLogout() {
 <template>
   <aside class="sidebar">
     <div class="sidebar-header">
-      <h1>Knowledge Base</h1>
-      <p>Agent + RAG System</p>
+      <h1>知识库</h1>
+      <p>Agent + RAG 系统</p>
     </div>
     <nav class="sidebar-nav">
       <router-link

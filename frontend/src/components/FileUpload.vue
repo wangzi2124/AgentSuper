@@ -55,9 +55,9 @@ function triggerInput() {
     />
     <div v-if="!uploading" class="upload-icon">📁</div>
     <div v-else class="spinner"></div>
-    <p v-if="!uploading">Drop files here or click to upload</p>
-    <p v-else class="upload-status">{{ stage || 'Uploading...' }}</p>
-    <p class="hint">Supports .txt, .md, .pdf</p>
+    <p v-if="!uploading">将文件拖到此处，或点击上传</p>
+    <p v-else class="upload-status">{{ stage || '上传中...' }}</p>
+    <p class="hint">支持 .txt、.md、.pdf</p>
     <div v-if="uploading" class="progress-bar">
       <div class="progress-fill" :style="{ width: (progress ?? 0) + '%' }"></div>
     </div>

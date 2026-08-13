@@ -22,8 +22,8 @@ async function handleToggle(name: string, enabled: boolean) {
 
 <template>
   <div class="page-header">
-    <h2>Skills</h2>
-    <p>Manage skill.md files that define agent capabilities</p>
+    <h2>技能管理</h2>
+    <p>管理定义智能体能力的 skill.md 文件</p>
   </div>
   <div class="page-content">
     <div v-if="skills.loading" style="display:flex;justify-content:center;padding:40px;">
@@ -32,13 +32,13 @@ async function handleToggle(name: string, enabled: boolean) {
 
     <div v-else-if="skills.skills.length === 0" class="empty-state">
       <div class="icon">🧠</div>
-      <p>No skills loaded</p>
-      <p style="font-size:13px;margin-top:4px;">Skills are loaded from the backend skills directory.</p>
+      <p>未加载任何技能</p>
+      <p style="font-size:13px;margin-top:4px;">技能从后端技能目录加载。</p>
     </div>
 
     <div v-else style="display:flex;flex-direction:column;gap:8px;">
       <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px;">
-        {{ skills.skills.length }} skill(s) available
+        {{ skills.skills.length }} 个技能可用
       </div>
       <div v-for="skill in skills.skills" :key="skill.name" class="card" style="display:flex;align-items:center;gap:14px;">
         <div style="font-size:24px;">🧠</div>
@@ -48,7 +48,7 @@ async function handleToggle(name: string, enabled: boolean) {
           <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">{{ skill.path }}</div>
         </div>
         <span class="badge" :class="skill.enabled ? 'badge-enabled' : 'badge-disabled'">
-          {{ skill.enabled ? 'Enabled' : 'Disabled' }}
+          {{ skill.enabled ? '已启用' : '已禁用' }}
         </span>
         <button
           class="btn"
@@ -56,7 +56,7 @@ async function handleToggle(name: string, enabled: boolean) {
           style="font-size:12px;padding:6px 12px;"
           @click="handleToggle(skill.name, skill.enabled)"
         >
-          {{ skill.enabled ? 'Disable' : 'Enable' }}
+          {{ skill.enabled ? '禁用' : '启用' }}
         </button>
       </div>
     </div>
