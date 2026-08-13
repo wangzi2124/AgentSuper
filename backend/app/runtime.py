@@ -124,6 +124,7 @@ def _do_init(app):
         whitelist_path=str(_data_dir / "permissions.json"),
         external_default=settings.external_path_default,
         approval_timeout=settings.permission_approval_timeout,
+        allow_source_writes=settings.allow_source_writes,
     )
     set_perm_manager(perm_mgr)
 

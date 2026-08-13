@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     external_path_default: str = "ask"
     # 权限审批等待超时（秒），默认 60；超时视为拒绝
     permission_approval_timeout: int = 60
+    # 是否放行主工作区内受保护源码路径（app/、plugins/、skills/、config/、main.py 等）的写/执行。
+    # 默认 false：这些路径硬保护，添加再多工作区也不能改；
+    # 设为 true 后（如开发本系统自身时）允许 Agent 修改 backend 源码。
+    # .git、.env、*.db、permissions.json 始终保护，不受此开关影响。
+    allow_source_writes: bool = False
 
     # ── Agent 执行循环护栏（对齐 opencode prompt.ts / processor.ts / max-steps.ts）──
     # 主步骤上限（对齐 opencode agent.steps，默认 40）：到达上限的最后一轮注入收尾提示，

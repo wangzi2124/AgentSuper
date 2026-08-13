@@ -99,9 +99,15 @@ class PermissionManager:
         extra_workspaces: Optional[list] = None,
         external_default: str = "ask",
         approval_timeout: int = 3600,
+        allow_source_writes: bool = False,
     ):
-        """初始化权限管理器，设置工作目录、白名单文件路径和额外工作区。"""
+        """初始化权限管理器，设置工作目录、白名单文件路径和额外工作区。
+
+        allow_source_writes=True 时放行主工作区内受保护源码路径（app/plugins/
+        skills/config/main.py 等）的写/执行；.git/.env/数据库等仍始终保护。
+        """
         self.workspace = Path(workspace).resolve() if workspace else Path.cwd()
+        self.allow_source_writes = bool(allow_source_writes)
         whitelist_dir = Path(whitelist_path) if whitelist_path else self.workspace.parent / "data"
         self.whitelist_path = whitelist_dir / "permissions.json" if whitelist_dir.is_dir() else whitelist_dir
         self.runtime_workspaces_path = self.whitelist_path.parent / "runtime_workspaces.json"
@@ -230,7 +236,17 @@ class PermissionManager:
         return False
 
     def _is_critical_write(self, p: Path) -> bool:
-        """判断是否为禁止写入/执行的敏感代码路径（源码、配置、插件、技能）。"""
+        """判断是否为禁止写入/执行的敏感代码路径（源码、配置、插件、技能）。
+
+        allow_source_writes=True 时放行这些源码路径（.git 仍始终拒绝）；
+        .env/数据库/permissions.json 的写入由 _is_critical_read 兜底拒绝。
+        """
+        if self.allow_source_writes:
+            try:
+                rel = p.relative_to(self.workspace)
+            except ValueError:
+                return False
+            return rel.parts and rel.parts[0].lower() == ".git"
         try:
             rel = p.relative_to(self.workspace)
         except ValueError:

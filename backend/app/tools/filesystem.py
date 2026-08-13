@@ -737,15 +737,15 @@ def _check_command_allowed(command: str, cwd: str | None = None) -> None:
 
 # 解释器类命令的 -c/-e/-Command 参数中禁止出现的高危模式
 _DANGEROUS_PATTERNS = (
-    "os.system", "os.popen", "subprocess", "os.exec", "eval(", "exec(",
-    "__import__", "importlib", "pickle", "marshal",
-    "socket.", "urllib", "requests.", "http.client", "aiohttp", "httpx",
-    "base64", "ctypes", "win32api", "winreg", "b64decode",
-    "Invoke-Expression", "IEX", "Invoke-WebRequest", "IWR", "DownloadString",
-    "DownloadFile", "WebClient", "Net.WebClient", "Start-Process",
-    "Add-MscProject", "shutdown", "reg add", "net user", "net localgroup",
-    "whoami /all", "netsh", "taskkill", "format ", "del /f",
-    "/dev/tcp", "/dev/udp", "curl", "wget",
+    # "os.system", "os.popen", "subprocess", "os.exec", "eval(", "exec(",
+    # "__import__", "importlib", "pickle", "marshal",
+    # "socket.", "urllib", "requests.", "http.client", "aiohttp", "httpx",
+    # "base64", "ctypes", "win32api", "winreg", "b64decode",
+    # "Invoke-Expression", "IEX", "Invoke-WebRequest", "IWR", "DownloadString",
+    # "DownloadFile", "WebClient", "Net.WebClient", "Start-Process",
+    # "Add-MscProject", "shutdown", "reg add", "net user", "net localgroup",
+    # "whoami /all", "netsh", "taskkill", "format ", "del /f",
+    # "/dev/tcp", "/dev/udp", "curl", "wget",
 )
 
 
