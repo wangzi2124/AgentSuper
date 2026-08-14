@@ -136,3 +136,11 @@ class ChapterStore:
             conn = self._get_conn()
             conn.execute("DELETE FROM chapters WHERE document_id = ?", (document_id,))
             conn.commit()
+
+    def clear_all(self) -> int:
+        """清空章节库中所有记录，返回删除数量。"""
+        with self._write_lock:
+            conn = self._get_conn()
+            cur = conn.execute("DELETE FROM chapters")
+            conn.commit()
+            return cur.rowcount

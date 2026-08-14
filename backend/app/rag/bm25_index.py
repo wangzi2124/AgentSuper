@@ -58,6 +58,14 @@ class BM25Index:
             self._tokenized = [_tokenize(d) for d in self.documents]
             self.bm25 = BM25Okapi(self._tokenized) if self.documents else None
 
+    def clear(self) -> None:
+        """清空 BM25 索引。"""
+        with self._lock:
+            self.bm25 = None
+            self.documents = []
+            self.metadata = []
+            self._tokenized = []
+
     def search(self, query: str, k: int = 5) -> List[Tuple[dict, float]]:
         """执行 BM25 检索，返回 (文档条目, 得分) 列表。"""
         with self._lock:

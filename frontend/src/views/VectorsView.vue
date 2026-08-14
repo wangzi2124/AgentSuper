@@ -22,6 +22,7 @@ const totalPages = computed(() => Math.ceil(vs.total / vs.limit))
 onMounted(() => {
   ds.fetchAll()
   vs.fetch()
+  vs.loadConfig()
 })
 
 // 筛选条件变化时重置分页并刷新
@@ -44,12 +45,49 @@ function goToPage(page: number) {
   vs.offset = (page - 1) * vs.limit
   vs.fetch()
 }
+
+// 清空全部知识库数据（向量库 + 章节库 + BM25 + 上传文件）
+async function handleClearAll() {
+  const confirmMsg = '确定要清空全部知识库数据吗？\n\n将删除：\n- 向量库全部分块\n- 章节库全部记录\n- BM25 索引\n- 全部上传文件\n\n此操作不可撤销！'
+  if (!confirm(confirmMsg)) return
+  try {
+    await vs.clearAll()
+    ds.fetchAll()
+    alert('知识库数据已全部清空')
+  } catch (e: any) {
+    alert(`清空失败：${e.message || e}`)
+  }
+}
+
+// 手动触发 TTL 过期清理
+async function handleClearExpired() {
+  if (!confirm('按 TTL 配置清理所有过期文档？')) return
+  try {
+    const res = await vs.clearExpired()
+    ds.fetchAll()
+    alert(res.message)
+  } catch (e: any) {
+    alert(`清理失败：${e.message || e}`)
+  }
+}
 </script>
 
 <template>
   <div class="page-header">
     <h2>向量库</h2>
     <p>浏览和搜索存储在向量数据库中的分块</p>
+  </div>
+  <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">
+    <div style="display:flex;gap:8px;align-items:center;margin-left:auto;">
+      <template v-if="vs.config">
+        <span style="font-size:12px;color:var(--text-secondary);">
+          TTL: {{ vs.config.ttl_days > 0 ? vs.config.ttl_days + ' 天' : '未启用' }}
+          <template v-if="vs.config.ttl_days > 0">· 每 {{ vs.config.cleanup_interval_hours }}h 检查</template>
+        </span>
+        <button v-if="vs.config.ttl_days > 0" class="btn" @click="handleClearExpired">清理过期</button>
+      </template>
+      <button class="btn btn-danger" @click="handleClearAll">清空向量库</button>
+    </div>
   </div>
   <div class="page-content">
     <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;">

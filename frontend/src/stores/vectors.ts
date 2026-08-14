@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { Chunk } from '../types'
-import { listChunks } from '../api/vectors'
+import { listChunks, getVectorConfig, clearVectors, clearExpiredVectors, type VectorStoreConfig } from '../api/vectors'
 
 // 向量存储管理 Store
 export const useVectorStore = defineStore('vectors', () => {
@@ -19,6 +19,8 @@ export const useVectorStore = defineStore('vectors', () => {
   const filterDocId = ref('')
   // 搜索关键词
   const searchQuery = ref('')
+  // 清理配置
+  const config = ref<VectorStoreConfig | null>(null)
 
   // 获取分块数据，支持追加模式
   async function fetch(append = false) {
@@ -46,5 +48,32 @@ export const useVectorStore = defineStore('vectors', () => {
     fetch()
   }
 
-  return { chunks, total, offset, limit, loading, filterDocId, searchQuery, fetch, reset }
+  // 加载清理配置
+  async function loadConfig() {
+    try {
+      config.value = await getVectorConfig()
+    } catch {
+      config.value = null
+    }
+  }
+
+  // 清空全部知识库数据
+  async function clearAll() {
+    await clearVectors()
+    chunks.value = []
+    total.value = 0
+    offset.value = 0
+    await loadConfig()
+    await fetch()
+  }
+
+  // 手动触发 TTL 过期清理
+  async function clearExpired() {
+    const res = await clearExpiredVectors()
+    await loadConfig()
+    await fetch()
+    return res
+  }
+
+  return { chunks, total, offset, limit, loading, filterDocId, searchQuery, config, fetch, reset, loadConfig, clearAll, clearExpired }
 })

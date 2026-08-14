@@ -80,6 +80,20 @@ class FileStore:
         """获取指定文档的元数据。"""
         return self.metadata.get(doc_id)
 
+    def clear_all(self) -> int:
+        """清空所有上传文件及元数据，返回删除数量。"""
+        count = len(self.metadata)
+        for meta in self.metadata.values():
+            path = Path(meta.get("path", ""))
+            if path and path.exists():
+                try:
+                    path.unlink()
+                except OSError as e:
+                    logger.warning("Failed to remove file %s: %s", path, e)
+        self.metadata = {}
+        self._save_metadata()
+        return count
+
     def list_all(self) -> list[dict]:
         """列出所有文档的元数据信息。"""
         return [

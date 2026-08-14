@@ -65,6 +65,14 @@ class VectorStore:
         if existing["ids"]:
             self.collection.delete(ids=existing["ids"])
 
+    def clear_all(self) -> int:
+        """清空向量库中所有文档分块，返回删除数量。"""
+        ids = self.collection.get()["ids"]
+        if ids:
+            for i in range(0, len(ids), CHROMA_MAX_BATCH_SIZE):
+                self.collection.delete(ids=ids[i : i + CHROMA_MAX_BATCH_SIZE])
+        return len(ids)
+
     def get_all(self) -> Tuple[List[str], List[dict]]:
         """获取向量库中所有文档文本和元数据。"""
         results = self.collection.get(include=["documents", "metadatas"])

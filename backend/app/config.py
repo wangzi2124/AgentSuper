@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     # Authorization: Bearer <token>；不设置时这些接口仅允许本机来源（deps.require_admin）。
     admin_token: Optional[str] = None
 
+    # ── 向量库 / 章节库清理 ──
+    # 启动时清空全部向量库 + 章节库 + BM25 + 上传文件（默认 false，谨慎开启）
+    vector_store_auto_clear: bool = False
+    # 数据保留天数（TTL）：>0 时按文档创建时间定期清理过期数据；0 = 不启用
+    vector_store_ttl_days: int = 0
+    # 定时清理检查间隔（小时），配合 VECTOR_STORE_TTL_DAYS 使用
+    vector_store_cleanup_interval_hours: int = 24
+
     # ── 并发控制 ──
     # 全局同时执行的 Agent 任务上限（coordinator global_semaphore + chat.py 旧信号量共用）。
     # 默认 4：RAG Agent 单次执行主要耗时在 LLM 调用（I/O 等待），提高并发不会打满 CPU，

@@ -30,6 +30,14 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     """应用生命周期管理，启动时初始化运行时状态。"""
     await asyncio.to_thread(ensure_runtime_state, app)
+    # 启动清空：VECTOR_STORE_AUTO_CLEAR=true 时清空全部知识库数据（向量+章节+BM25+上传文件）
+    if settings.vector_store_auto_clear:
+        from app.services.kb_cleanup import clear_all_kb
+
+        result = await clear_all_kb(app)
+        logging.getLogger(__name__).info(
+            "Auto-clear on startup: %s", result,
+        )
     # Session 管理（session.db）：建表 + 注入执行体（agent 惰性读取）
     init_db()
     app.state.session_service = SessionService(executor=build_executor(app), global_limit=MAX_CONCURRENT_AGENTS)
@@ -39,10 +47,32 @@ async def lifespan(app: FastAPI):
         task_bridge.bind_bus(agent_bus)
         agent_bus.start_all()
     weather.load_weather_on_startup()
+    # 定时 TTL 清理：VECTOR_STORE_TTL_DAYS>0 时按间隔定期清理过期文档
+    _ttl_task = None
+    if settings.vector_store_ttl_days > 0:
+
+        async def _ttl_loop():
+            interval = max(settings.vector_store_cleanup_interval_hours, 1) * 3600
+            logger = logging.getLogger(__name__)
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    from app.services.kb_cleanup import clear_expired
+
+                    removed = await clear_expired(app)
+                    if removed:
+                        logger.info("Scheduled TTL cleanup removed %d expired documents", removed)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Scheduled TTL cleanup failed: %s", e)
+
+        _ttl_task = asyncio.create_task(_ttl_loop())
     try:
         yield
     except asyncio.CancelledError:
         pass
+    finally:
+        if _ttl_task:
+            _ttl_task.cancel()
 
 
 app = FastAPI(

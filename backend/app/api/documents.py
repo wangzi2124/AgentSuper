@@ -39,11 +39,9 @@ def _get_doc_processing_lock(request: Request) -> asyncio.Lock:
     上传的处理任务与删除都改写共享的 ChromaDB / BM25 / 章节库，
     串行化避免并发重建索引与删除交叉导致的数据错位。
     """
-    lock = getattr(request.app.state, "_doc_processing_lock", None)
-    if lock is None:
-        lock = asyncio.Lock()
-        request.app.state._doc_processing_lock = lock
-    return lock
+    from app.services.kb_cleanup import get_processing_lock
+
+    return get_processing_lock(request.app.state)
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -164,18 +162,12 @@ async def list_documents(request: Request):
 async def delete_document(request: Request, doc_id: str):
     """删除指定文档及其关联的向量数据。"""
     fs = request.app.state.file_store
-    vs = request.app.state.vector_store
 
     if not fs.get(doc_id):
         raise HTTPException(status_code=404, detail="Document not found")
 
+    from app.services.kb_cleanup import delete_document_data
+
     async with _get_doc_processing_lock(request):
-        fs.delete(doc_id)
-        vs.delete_by_metadata("document_id", doc_id)
-        cs = getattr(request.app.state, "chapter_store", None)
-        if cs:
-            cs.delete_by_document(doc_id)
-        bm25 = getattr(request.app.state, "bm25_index", None)
-        if bm25:
-            await asyncio.to_thread(bm25.remove_by_metadata, "document_id", doc_id)
+        await asyncio.to_thread(delete_document_data, request.app.state, doc_id)
     return DeleteResponse(message="Document deleted")
