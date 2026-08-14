@@ -91,7 +91,7 @@ _TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "tool_ls",
-            "description": "列出指定目录下的文件和子目录，显示类型、大小和修改时间。",
+            "description": "列出指定目录下的文件和子目录，显示类型、大小和修改时间（被 .gitignore 忽略的项不列出）。",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "目录路径（相对工作区，默认当前目录）"}},
@@ -108,7 +108,7 @@ _TOOL_SCHEMAS = [
                 "properties": {
                     "path": {"type": "string"},
                     "offset": {"type": "integer", "description": "起始行号（从 1 开始）"},
-                    "limit": {"type": "integer", "description": "读取行数，0 表示全部"},
+                    "limit": {"type": "integer", "description": "读取行数上限，默认 2000，0 表示默认 2000；大文件请用 offset 分页续读"},
                 },
                 "required": ["path"],
             },
@@ -220,7 +220,7 @@ _TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "tool_execute",
-            "description": "在工作区内执行白名单 shell 命令（如 python/node/git），有 120s 超时限制。",
+            "description": "在工作区内执行白名单 shell 命令（如 python/node/git）。支持管道/重定向/&& 等 shell 语义，每个命令段都会做白名单校验，默认 300s 超时（上限 600s）。",
             "parameters": {
                 "type": "object",
                 "properties": {

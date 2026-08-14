@@ -146,13 +146,13 @@ def create_filesystem_tools() -> List[ToolDef]:
     # Manual parameter descriptions for each tool
     _PARAM_DOCS: dict[str, dict[str, str]] = {
         "tool_ls": {"path": "Directory path to list (default: current directory)"},
-        "tool_read_file": {"path": "File path to read", "offset": "Line number to start reading from (1-indexed, default: 1)", "limit": "Maximum number of lines to read (0 = all)"},
+        "tool_read_file": {"path": "File path to read", "offset": "Line number to start reading from (1-indexed, default: 1)", "limit": "Maximum number of lines to read (default: 2000; 0 also means 2000; for large files paginate via offset)"},
         "tool_write_file": {"path": "File path to create", "content": "Text content to write into the file", "overwrite": "If true, overwrite existing file (default: false)"},
         "tool_append_file": {"path": "File path to append to (created if missing)", "content": "Text content to append to the end of the file"},
         "tool_edit_file": {"path": "File path to edit", "old_string": "Text to search for and replace", "new_string": "Replacement text", "replace_all": "If true, replace ALL occurrences; if false, replace only the first. Multiple matches without replace_all cause an error (default: false)"},
         "tool_glob": {"pattern": "Glob pattern to match files (e.g. **/*.py)", "root": "Directory to search in (default: workspace; absolute paths allowed, e.g. F:\\tetris)"},
         "tool_grep": {"pattern": "Regex pattern to search for", "include": "File glob pattern to restrict search (e.g. *.py)", "context": "Number of context lines before/after each match", "count_only": "If true, return only match counts per file", "files_only": "If true, return only file paths", "root": "Directory to search in (default: workspace; absolute paths allowed, e.g. F:\\tetris)"},
-        "tool_execute": {"command": "Shell command to run", "timeout": "Max execution time in seconds (default 300, max 600)", "work_dir": "Working directory for the command (default: current directory)"},
+        "tool_execute": {"command": "Shell command to run (supports pipes/redirects/&&; every command segment is whitelist-checked)", "timeout": "Max execution time in seconds (default 300, max 600)", "work_dir": "Working directory for the command (default: current directory)"},
         "tool_delete_file": {"path": "File or empty directory path to delete"},
         "tool_rename_file": {"path": "Source path to rename/move", "new_path": "Destination path"},
     }
@@ -176,7 +176,7 @@ def create_filesystem_tools() -> List[ToolDef]:
         # Use a concise description for the tool
         _DESC = {
             "tool_ls": "List files and directories",
-            "tool_read_file": "Read file content (text with cat -n line numbers, truncated long lines; or base64 for images/pdf/audio/video)",
+            "tool_read_file": "Read file content (text with line numbers; max 2000 lines / 50KB per call, paginate via offset; base64 for images/pdf/audio/video)",
             "tool_write_file": "Create a new file with text content (auto-creates parent directories)",
             "tool_append_file": "Append text content to a file (creates it if missing). Use for large files: write the first chunk then append in chunks.",
             "tool_edit_file": "Edit a file by replacing text (fuzzy matching; errors when multiple matches unless replace_all)",
@@ -245,8 +245,8 @@ def build_system_prompt_no_kb(
     if include_filesystem:
         tool_parts.append(
             "Built-in filesystem tools (for reading/writing/searching local files):\n"
-            "   - tool_ls(path) - List directory contents\n"
-            "   - tool_read_file(path, offset, limit) - Read file content\n"
+            "   - tool_ls(path) - List directory contents (gitignored items omitted)\n"
+            "   - tool_read_file(path, offset, limit) - Read file content (default 2000 lines, max 50KB; paginate via offset)\n"
             "   - tool_write_file(path, content, overwrite) - Create a new file\n"
             "   - tool_append_file(path, content) - Append content to a file (creates if missing)\n"
             "   - tool_edit_file(path, old_string, new_string, replace_all) - Edit a file\n"

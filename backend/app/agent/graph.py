@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
+import os
 import shlex
+import subprocess
 import time as tmod
 from collections.abc import Sequence
 from pathlib import Path
@@ -50,6 +52,32 @@ def _normalize_finish_reason(finish_reason: str | None) -> str:
     if not finish_reason:
         return "stop"
     return _FINISH_REASON_MAP.get(str(finish_reason).strip().lower(), "unknown")
+
+
+async def _async_kill_process_tree(process: asyncio.subprocess.Process) -> None:
+    """杀掉进程及其整个后代进程树（Windows 用 taskkill /T /F，POSIX 用 killpg）。"""
+    if os.name == "nt":
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "taskkill", "/pid", str(process.pid), "/T", "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+    else:
+        try:
+            import signal as _signal
+            os.killpg(os.getpgid(process.pid), _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                process.kill()
+            except Exception:
+                pass
 
 
 def _permission_denied_msg(operation: str, path: str, tool_name: str = "") -> str:
@@ -474,10 +502,9 @@ class RAGAgent:
             raise _NeedsPermission(str(resolved_cwd), "execute", "tool_execute", args)
 
         # Apply whitelist check (same as filesystem.tool_execute)
-        from app.tools.file_tools import _check_command_allowed, _check_command_blacklist
+        from app.tools.file_tools import _validate_shell_command, _needs_shell
         try:
-            _check_command_allowed(command)
-            _check_command_blacklist(command)
+            _validate_shell_command(command, cwd=str(resolved_cwd))
         except ValueError as e:
             return f"Error: {e}"
 
@@ -523,14 +550,32 @@ class RAGAgent:
                     pass
 
         try:
-            # Use exec (no shell) to prevent shell injection
-            cmd_args = shlex.split(command)
-            process = await asyncio.create_subprocess_exec(
-                *cmd_args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
-            )
+            # 无 shell 语义 → exec 防注入；否则走真实 shell（与 tool_execute 对齐）
+            if _needs_shell(command):
+                if os.name == "nt":
+                    process = await asyncio.create_subprocess_shell(
+                        command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                    )
+                else:
+                    process = await asyncio.create_subprocess_shell(
+                        command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
+                        start_new_session=True,
+                    )
+            else:
+                cmd_args = shlex.split(command)
+                process = await asyncio.create_subprocess_exec(
+                    *cmd_args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
+                )
         except Exception as e:
             return f"Error starting command: {e}"
 
@@ -541,7 +586,7 @@ class RAGAgent:
         try:
             await asyncio.wait_for(process.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            process.kill()
+            await _async_kill_process_tree(process)
             await process.wait()
             timed_out = True
 

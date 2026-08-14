@@ -1,7 +1,9 @@
 import base64
 import json
 import os
+import re
 import shlex
+import signal
 import stat
 import subprocess
 import time
@@ -77,6 +79,10 @@ _MIME_MAP = {
 
 DEFAULT_READ_LIMIT = 2000
 MAX_LINE_LENGTH = 2000
+MAX_LINE_SUFFIX = f"... (line truncated to {MAX_LINE_LENGTH} chars)"
+MAX_BYTES = 50 * 1024
+MAX_BYTES_LABEL = f"{MAX_BYTES // 1024} KB"
+SAMPLE_BYTES = 4096
 
 _BINARY_EXTS = frozenset({
     ".zip", ".tar", ".gz", ".exe", ".dll", ".so", ".class", ".jar", ".war",
@@ -141,13 +147,19 @@ def _is_read_allowed(path: Path) -> bool:
 
 
 def tool_ls(path: str = ".") -> str:
-    """列出指定目录下的文件和子目录，显示类型、大小和修改时间。"""
+    """列出指定目录下的文件和子目录，显示类型、大小和修改时间。
+
+    与 opencode list 语义对齐：被 .gitignore 忽略的项（如 node_modules/.venv）不列出；
+    worktree 之外的路径（自定义 root）不做忽略过滤。
+    """
     target = _resolve(path)
     _ensure_safe(target, "read")
     if not target.is_dir():
         return f"Error: '{path}' is not a directory"
     rows = []
     for node in _scan_cache.list_dir(target):
+        if node.ignored:
+            continue
         entry = Path(node.path)
         try:
             st = entry.stat()
@@ -161,17 +173,20 @@ def tool_ls(path: str = ".") -> str:
 
 
 def _is_binary(path: Path) -> bool:
-    """检测文件是否为二进制（opencode read.ts 同款逻辑：扩展名黑名单 + NUL 字节 + 非打印字符占比）。"""
+    """检测文件是否为二进制（opencode read.ts 同款逻辑：扩展名黑名单 + NUL 字节 + 非打印字符占比）。
+
+    只读前 SAMPLE_BYTES(4KB) 样本判定，避免大文件整读。
+    """
     ext = path.suffix.lower()
     if ext in _BINARY_EXTS:
         return True
     try:
-        raw = path.read_bytes()
+        with open(path, "rb") as f:
+            sample = f.read(SAMPLE_BYTES)
     except OSError:
         return False
-    if not raw:
+    if not sample:
         return False
-    sample = raw[:4096]
     if b"\x00" in sample:
         return True
     non_printable = sum(1 for b in sample if b < 9 or (13 < b < 32))
@@ -196,11 +211,18 @@ def _file_not_found_suggestion(path_str: str, target: Path) -> str:
 
 
 def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
-    """读取文件内容，文本文件按 cat -n 格式返回并支持行偏移/限制，图片/PDF/音视频返回base64。"""
+    """读取文件内容，文本文件按行号格式返回并支持行偏移/限制，图片/PDF/音视频返回base64。
+
+    与 opencode read.ts 对齐：limit 未传/<=0 时默认 DEFAULT_READ_LIMIT(2000) 行，
+    输出受 MAX_BYTES(50KB) 字节硬上限约束（超出即截断并提示续读），
+    offset 越界时报错。行级流式读取，不整文件载入内存。
+    """
     target = _resolve(path)
     _ensure_safe(target, "read")
     offset = _coerce_int(offset, 1)
     limit = _coerce_int(limit, 0)
+    if limit <= 0:
+        limit = DEFAULT_READ_LIMIT
     if not target.is_file():
         return _file_not_found_suggestion(path, target)
     ext = target.suffix.lower()
@@ -214,35 +236,90 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
             return f"Error reading file: {e}"
     if ext not in _TEXT_EXTS and _is_binary(target):
         return f"Cannot read binary file: {path}"
+    start = offset - 1
+    selected: list[str] = []
+    count = 0
+    bytes_used = 0
+    cut = False
+    more = False
     try:
-        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+        with open(target, "r", encoding="utf-8", errors="replace") as f:
+            for text in f:
+                text = text.rstrip("\r\n")
+                count += 1
+                if count <= start:
+                    continue
+                if len(selected) >= limit:
+                    more = True
+                    continue
+                line = text if len(text) <= MAX_LINE_LENGTH else text[:MAX_LINE_LENGTH] + MAX_LINE_SUFFIX
+                size = len(line.encode("utf-8")) + (1 if selected else 0)
+                if bytes_used + size > MAX_BYTES:
+                    cut = True
+                    more = True
+                    break
+                selected.append(line)
+                bytes_used += size
     except Exception as e:
         return f"Error reading text file: {e}"
-    if offset < 1:
-        offset = 1
-    start = offset - 1
-    total = len(lines)
-    if limit > 0:
-        selected = lines[start:start + limit]
-    else:
-        selected = lines[start:]
+    if count < offset and not (count == 0 and offset == 1):
+        return f"Offset {offset} is out of range for this file ({count} lines)"
     content_lines = []
     for i, line in enumerate(selected):
-        line_no = start + i + 1
-        if len(line) > MAX_LINE_LENGTH:
-            line = line[:MAX_LINE_LENGTH] + "..."
+        line_no = offset + i
         content_lines.append(f"{line_no:05d}| {line}")
     content = "\n".join(content_lines)
-    last_read = start + len(selected)
-    if total > last_read:
-        footer = f"\n\n(File has more lines. Use 'offset' parameter to read beyond line {last_read})"
+    last_read = offset + len(selected) - 1
+    next_offset = last_read + 1
+    if cut:
+        footer = f"\n\n(Output capped at {MAX_BYTES_LABEL}. Showing lines {offset}-{last_read}. Use offset={next_offset} to continue.)"
+    elif more:
+        footer = f"\n\n(Showing lines {offset}-{last_read} of {count}. Use offset={next_offset} to continue.)"
     else:
-        footer = f"\n\n(End of file - total {total} lines)"
+        footer = f"\n\n(End of file - total {count} lines)"
     return f"<file>\n{content}{footer}\n</file>"
 
 
+def _detect_line_ending(text: str) -> str:
+    """检测文本行尾（opencode edit.ts detectLineEnding 同款）：\r\n 出现次数多于 \n 视为 CRLF。"""
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    return "\r\n" if crlf > lf else "\n"
+
+
+def _normalize_line_endings(text: str) -> str:
+    """将 CRLF 归一化为 LF（opencode edit.ts normalizeLineEndings 同款）。"""
+    return text.replace("\r\n", "\n")
+
+
+def _convert_line_ending(text: str, ending: str) -> str:
+    """将 LF 行尾统一转换为目标行尾（opencode edit.ts convertToLineEnding 同款）。"""
+    if ending == "\n":
+        return text
+    return text.replace("\n", ending)
+
+
+def _read_text_raw(path: Path) -> tuple[str, bool]:
+    """以 newline="" 原样读取文本（不做 universal newlines 转换），返回 (剥离BOM后的文本, 是否有BOM)。"""
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        text = f.read()
+    has_bom = text.startswith("\ufeff")
+    return (text[1:] if has_bom else text), has_bom
+
+
+def _write_text_raw(path: Path, text: str, has_bom: bool = False) -> None:
+    """以 newline="" 原样写入文本（不做 os.linesep 转换），可选补回 UTF-8 BOM。"""
+    if has_bom and not text.startswith("\ufeff"):
+        text = "\ufeff" + text
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
 def tool_write_file(path: str, content: str, overwrite: bool = False) -> str:
-    """创建新文件并写入内容。overwrite=True 时允许覆盖已存在的文件。"""
+    """创建新文件并写入内容。overwrite=True 时允许覆盖已存在的文件。
+
+    行尾按内容原样写入（newline=""），不做系统换行符转换。
+    """
     target = _resolve(path)
     _ensure_safe(target, "write")
     overwrite = _coerce_bool(overwrite)
@@ -251,7 +328,7 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     existed = target.exists()
     try:
-        target.write_text(str(content), encoding="utf-8")
+        _write_text_raw(target, str(content))
         action = "Overwritten" if existed else "Created"
         _scan_cache.invalidate(target.parent)
         return f"{action} {path} ({target.stat().st_size} bytes)"
@@ -266,7 +343,7 @@ def tool_append_file(path: str, content: str) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     existed = target.exists()
     try:
-        with open(target, "a", encoding="utf-8") as f:
+        with open(target, "a", encoding="utf-8", newline="") as f:
             f.write(str(content))
         total = target.stat().st_size
         action = "Appended to" if existed else "Created"
@@ -559,25 +636,32 @@ def _edit_replace(content: str, old_string: str, new_string: str, replace_all: b
 
 
 def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
-    """在文件中查找并替换指定字符串。支持模糊匹配；oldString 匹配到多处时报错（除非 replace_all=True）。"""
+    """在文件中查找并替换指定字符串。支持模糊匹配；oldString 匹配到多处时报错（除非 replace_all=True）。
+
+    与 opencode edit.ts 对齐：读取/写入均保留原文件行尾（LF 或 CRLF）与 UTF-8 BOM；
+    old/new 字符串会归一化后转换到目标文件的行尾再做匹配，避免换行符静默损坏。
+    """
     target = _resolve(path)
     _ensure_safe(target, "write")
     replace_all = _coerce_bool(replace_all)
     if not target.is_file():
         return f"File {path} not found"
     try:
-        text = target.read_text(encoding="utf-8")
+        text, has_bom = _read_text_raw(target)
     except Exception as e:
         return f"Error reading file: {e}"
+    ending = _detect_line_ending(text)
     try:
         if old_string == "":
-            content_new = new_string
+            content_new = _convert_line_ending(_normalize_line_endings(new_string), ending)
         else:
-            content_new = _edit_replace(text, old_string, new_string, replace_all)
+            old = _convert_line_ending(_normalize_line_endings(old_string), ending)
+            replacement = _convert_line_ending(_normalize_line_endings(new_string), ending)
+            content_new = _edit_replace(text, old, replacement, replace_all)
     except ValueError as e:
         return f"Error: {e}"
     try:
-        target.write_text(content_new, encoding="utf-8")
+        _write_text_raw(target, content_new, has_bom)
         _scan_cache.invalidate(target.parent)
         return f"Edited {path}"
     except Exception as e:
@@ -759,7 +843,7 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
 _ALLOWED_COMMANDS = frozenset({
     "python", "python3", "node", "npm", "npx", "pip", "pip3",
     "git", "curl", "wget", "cat", "head", "tail", "less", "more",
-    "ls", "dir", "find", "grep", "rg", "ag", "ack", "sed", "awk",
+    "type", "findstr", "ls", "dir", "find", "grep", "rg", "ag", "ack", "sed", "awk",
     "sort", "uniq", "wc", "cut", "tr", "echo", "printf",
     "cp", "mv", "rm", "mkdir", "rmdir", "touch", "chmod", "chown",
     "zip", "unzip", "tar", "gzip", "gunzip", "bzip2",
@@ -775,20 +859,75 @@ _ALLOWED_COMMANDS = frozenset({
     "ffprobe", "ffmpeg",
     "nproc", "nvidia-smi",
     "cmd", "powershell",
+    "cd",
 })
 
 
-def _check_command_allowed(command: str, cwd: str | None = None) -> None:
-    """Check the base command against the whitelist. Raises ValueError if not allowed.
+# ── shell 语义分段校验（opencode bash 语义对齐）─────────────────────────────
+# 安全模型不变（白名单/黑名单/SSRF 硬校验），但支持管道/重定向/&&/$(...)/反引号：
+# 把命令按 shell 简单命令切段，对【每段】的首命令做白名单校验，每段跑黑名单+SSRF，
+# 防止 `cat x | evil` 之类绕过首 token 白名单。
 
-    白名单校验首个 token；若首 token 含路径分隔符（如 `.venv/Scripts/python.exe`），
-    则放行能解析到工作区（会话目录或 backend/ 根）内真实文件的命令。
+# 分隔符：产生新的简单命令边界
+_SHELL_SEP = {"|", "||", "&&", "&", ";", "(", ")"}
+# 重定向符：其后一个 token 是重定向目标（文件名/文件描述符），不属于新命令
+_REDIRECT_OPS = {">", ">>", "<", "<<", "<&", ">&", "2>", "2>>", "&>", "|&"}
+
+
+def _first_command(seg: list[str]) -> Optional[str]:
+    """取简单命令段的基命令名：跳过环境变量赋值前缀（FOO=bar ...）与命令替换 `$`。"""
+    for tok in seg:
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
+            continue
+        if tok == "$":
+            continue
+        return tok
+    return None
+
+
+def _split_shell_segments(command: str) -> list[list[str]]:
+    """把 shell 命令切分为简单命令 token 组（引号感知）。
+
+    在 ; | || && & ( ) 处断开；重定向符及其目标附加到当前命令段；
+    $(...) 中的子命令因 '(' 断开而自然成为独立段，从而被独立校验。
     """
-    parts = shlex.split(command)
-    base_cmd = parts[0].lower() if parts else ""
-    if not base_cmd:
-        raise ValueError("Empty command")
-    if base_cmd in _ALLOWED_COMMANDS:
+    lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    tokens = list(lex)
+    segments: list[list[str]] = []
+    current: list[str] = []
+    skip_next = False
+    for tok in tokens:
+        if skip_next:
+            skip_next = False
+            current.append(tok)
+            continue
+        if tok in _SHELL_SEP:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        if tok in _REDIRECT_OPS:
+            current.append(tok)
+            skip_next = True
+            continue
+        current.append(tok)
+    if current:
+        segments.append(current)
+    return segments
+
+
+_BACKTICK_RE = re.compile(r"`([^`]*)`")
+
+
+def _backtick_bodies(command: str) -> list[str]:
+    """提取命令中反引号命令替换的内部命令文本。"""
+    return [m.group(1) for m in _BACKTICK_RE.finditer(command)]
+
+
+def _check_single_allowed(base_cmd: str, cwd: str | None = None) -> None:
+    """单个基命令的白名单校验（含路径解析规则，原 _check_command_allowed 核心）。"""
+    if base_cmd.lower() in _ALLOWED_COMMANDS:
         return
     if "/" in base_cmd or "\\" in base_cmd:
         bases = [Path(cwd)] if cwd else []
@@ -797,13 +936,72 @@ def _check_command_allowed(command: str, cwd: str | None = None) -> None:
             bases.append(Path(session))
         bases.append(_workspace())
         for base in bases:
-            candidate = (base / parts[0]).resolve()
+            candidate = (base / base_cmd).resolve()
             if candidate.is_file() and candidate.is_relative_to(base):
                 return
         raise ValueError(
             f"Command '{base_cmd}' is not in the allowed whitelist (path must point to an existing file inside the workspace)"
         )
     raise ValueError(f"Command '{base_cmd}' is not in the allowed whitelist")
+
+
+def _validate_shell_command(command: str, cwd: str | None = None) -> None:
+    """tool_execute / 流式执行共用的完整安全校验：白名单 + 黑名单 + SSRF，逐段执行。
+
+    - 反引号命令替换内部命令递归校验
+    - 每个简单命令段的首命令过白名单（防 `cat x | evil` 绕过）
+    - 每段跑解释器内联黑名单与 SSRF
+    """
+    for inner in _backtick_bodies(command):
+        _validate_shell_command(inner, cwd)
+    segments = _split_shell_segments(command)
+    if not segments:
+        raise ValueError("Empty command")
+    for seg in segments:
+        base = _first_command(seg)
+        if base is None:
+            continue
+        _check_single_allowed(base, cwd)
+        seg_str = " ".join(seg)
+        _check_command_blacklist(seg_str)
+        _ssrf_check_command(seg_str)
+
+
+def _needs_shell(command: str) -> bool:
+    """命令是否包含引号外的 shell 语义（管道/重定向/&&/$VAR/反引号/通配符）？
+
+    是则必须走真实 shell 执行；否则保持安全的 shlex.split + exec 路径。
+    """
+    single = False
+    double = False
+    i = 0
+    n = len(command)
+    while i < n:
+        c = command[i]
+        if c == "'" and not double:
+            single = not single
+        elif c == '"' and not single:
+            double = not double
+        elif not single and not double:
+            if c in "|&;<>()\n":
+                return True
+            if c in "$`*?[~":
+                return True
+            if c == "%" and os.name == "nt":
+                # Windows cmd 环境变量展开（%USERPROFILE%）
+                return True
+        i += 1
+    return False
+
+
+def _check_command_allowed(command: str, cwd: str | None = None) -> None:
+    """Check the base command against the whitelist. Raises ValueError if not allowed.
+
+    兼容入口：调用完整校验（逐段）。若只需首 token 语义，请直接用 _validate_shell_command。
+    白名单校验首个 token；若首 token 含路径分隔符（如 `.venv/Scripts/python.exe`），
+    则放行能解析到工作区（会话目录或 backend/ 根）内真实文件的命令。
+    """
+    _validate_shell_command(command, cwd)
 
 
 # 解释器类命令的 -c/-e/-Command 参数中禁止出现的高危模式
@@ -901,17 +1099,81 @@ def _ssrf_check_command(command: str) -> None:
 MAX_EXECUTE_OUTPUT_LENGTH = 30_000
 
 
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """杀掉进程及其整个后代进程树（Windows 用 taskkill /T /F，POSIX 用 killpg）。"""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/pid", str(proc.pid), "/T", "/F"],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def _run_shell(command: str, resolved_cwd: str, timeout: int) -> tuple[int, str, str]:
+    """通过真实 shell 执行命令（Windows: cmd.exe；POSIX: /bin/sh）。
+
+    进程放入新会话/进程组，超时时杀掉整个进程树（opencode killTree 语义）。
+    """
+    if os.name == "nt":
+        proc = subprocess.Popen(
+            command, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=resolved_cwd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+    else:
+        proc = subprocess.Popen(
+            command, shell=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=resolved_cwd, start_new_session=True,
+        )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, stdout, stderr
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(command, timeout, stdout, stderr)
+
+
+def _format_execute_output(rc: int, stdout: str, stderr: str) -> str:
+    parts = []
+    if stdout:
+        parts.append(stdout.rstrip())
+    if stderr:
+        parts.append(f"[stderr]\n{stderr.rstrip()}")
+    output = "\n".join(parts)
+    header = f"Exit code: {rc}"
+    if len(output) > MAX_EXECUTE_OUTPUT_LENGTH:
+        output = output[:MAX_EXECUTE_OUTPUT_LENGTH]
+        output += "\n\n<bash_metadata>\nbash tool truncated output as it exceeded 30000 char limit\n</bash_metadata>"
+    if output:
+        return f"{header}\n{output}"
+    return header
+
+
 def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
-    """执行shell命令并返回标准输出、标准错误和退出码。"""
+    """执行shell命令并返回标准输出、标准错误和退出码。
+
+    支持管道/重定向/&& 等真实 shell 语义；安全校验（白名单/黑名单/SSRF）逐段生效，
+    防止 `cat x | evil` 绕过首 token 白名单。无 shell 语义时保持原 exec 路径。
+    """
     timeout = _coerce_int(timeout, 300)
     if timeout > 600:
         timeout = 600
     if timeout < 1:
         timeout = 5
     resolved_cwd = _resolve(work_dir)
-    _check_command_allowed(command, cwd=resolved_cwd)
-    _check_command_blacklist(command)
-    _ssrf_check_command(command)
+    try:
+        _validate_shell_command(command, cwd=resolved_cwd)
+    except ValueError as e:
+        return f"Error: {e}"
     mgr = get_perm_mgr()
     decision = mgr.check(str(resolved_cwd), "execute")
     if decision == "ask":
@@ -919,6 +1181,9 @@ def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
     if decision == "deny":
         return f"Error: access denied to directory '{work_dir}'"
     try:
+        if _needs_shell(command):
+            rc, stdout, stderr = _run_shell(command, str(resolved_cwd), timeout)
+            return _format_execute_output(rc, stdout, stderr)
         # Parse command into argument list to avoid shell injection
         args = shlex.split(command)
         result = subprocess.run(
@@ -929,20 +1194,7 @@ def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
             timeout=timeout,
             cwd=str(resolved_cwd),
         )
-        parts = []
-        if result.stdout:
-            parts.append(result.stdout.rstrip())
-        if result.stderr:
-            parts.append(f"[stderr]\n{result.stderr.rstrip()}")
-        output = "\n".join(parts)
-        rc = result.returncode
-        header = f"Exit code: {rc}"
-        if len(output) > MAX_EXECUTE_OUTPUT_LENGTH:
-            output = output[:MAX_EXECUTE_OUTPUT_LENGTH]
-            output += "\n\n<bash_metadata>\nbash tool truncated output as it exceeded 30000 char limit\n</bash_metadata>"
-        if output:
-            return f"{header}\n{output}"
-        return header
+        return _format_execute_output(result.returncode, result.stdout, result.stderr)
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {timeout}s"
     except ValueError as e:
