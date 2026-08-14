@@ -153,6 +153,7 @@ def list_sessions(
     roots_only: bool = False,
     search: Optional[str] = None,
     archived: Optional[bool] = False,
+    kind: Optional[str] = None,
     limit: int = 100,
 ) -> list[SessionInfo]:
     """列出用户可见的会话（对齐 opencode Session.list 的 project 过滤）。"""
@@ -171,6 +172,9 @@ def list_sessions(
         params.append(f"%{search}%")
     if archived is False:
         sql += " AND time_archived IS NULL"
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
     sql += " ORDER BY time_updated DESC LIMIT ?"
     params.append(limit)
     conn = _get_db()

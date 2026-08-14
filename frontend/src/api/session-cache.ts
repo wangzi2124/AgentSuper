@@ -18,6 +18,8 @@ interface CachedSession {
   messages: Message[]
   conversationId?: string
   conversationTitle?: string
+  /** 已删除消息 id（墓碑：防止 merge 时复活已删消息） */
+  deletedIds?: string[]
   updatedAt: number
 }
 
@@ -52,6 +54,7 @@ export async function saveSessionToCache(
   messages: Message[],
   conversationId?: string,
   conversationTitle?: string,
+  deletedIds?: string[],
 ): Promise<void> {
   try {
     const db = await openDB()
@@ -67,6 +70,7 @@ export async function saveSessionToCache(
         })),
         conversationId,
         conversationTitle,
+        deletedIds,
         updatedAt: Date.now(),
       }
       const req = store.put(data)
@@ -149,23 +153,34 @@ export async function deleteSessionFromCache(sessionId: string): Promise<void> {
  * - 以服务器数据为基准（服务器是 source of truth）
  * - 本地缓存中如果有服务器没有的消息（比如 SSE 中断时的 user 消息），补入
  * - 如果同一 ID 的消息两端都有，取 content 更长的版本（服务器的 assistant 回答通常更完整）
+ *
+ * deletedIds：本端已删除的消息 id（墓碑）。被删除的消息不再从缓存复活——
+ * 修复 deleteMessage/undoMessage 后服务器已删除、但 IndexedDB 仍残留旧数据被合并回来的问题。
  */
 export function mergeServerAndCache(
   serverMessages: Message[],
   cachedMessages: Message[],
+  deletedIds?: string[],
 ): Message[] {
-  if (cachedMessages.length === 0) return serverMessages
-  if (serverMessages.length === 0) return cachedMessages
+  const tomb = new Set(deletedIds || [])
+  // 过滤：已删除消息（墓碑）+ 流式占位消息（live）一律不参与合并
+  const filterDeleted = (m: Message) => !m.live && !tomb.has(m.id)
+
+  const server = serverMessages.filter(filterDeleted)
+  const cached = cachedMessages.filter(filterDeleted)
+
+  if (cached.length === 0) return server
+  if (server.length === 0) return cached
 
   const merged = new Map<string, Message>()
 
   // 先放服务器数据
-  for (const msg of serverMessages) {
+  for (const msg of server) {
     merged.set(msg.id, msg)
   }
 
   // 合并本地缓存
-  for (const msg of cachedMessages) {
+  for (const msg of cached) {
     const existing = merged.get(msg.id)
     if (!existing) {
       // 服务器没有这条消息，补入（可能是 SSE 中断时的 user 消息）
@@ -184,13 +199,13 @@ export function mergeServerAndCache(
 
   // 按原始顺序排列（服务器顺序为准，本地特有的追加到末尾）
   const result: Message[] = []
-  const serverIds = new Set(serverMessages.map(m => m.id))
+  const serverIds = new Set(server.map(m => m.id))
 
-  for (const msg of serverMessages) {
+  for (const msg of server) {
     result.push(merged.get(msg.id) || msg)
   }
 
-  for (const msg of cachedMessages) {
+  for (const msg of cached) {
     if (!serverIds.has(msg.id)) {
       result.push(msg)
     }

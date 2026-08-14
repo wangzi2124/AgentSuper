@@ -2,19 +2,6 @@ import type { MultiAgentChatRequest, MultiAgentSSEEvent, ChatError } from '../ty
 import { fetchWithTimeout, addAuthHeaders } from './fetch'
 
 const BASE = '/api/chat'
-const CONV_TYPE = 'multi-agent'
-
-export interface ConversationMeta {
-  id: string
-  title: string
-  directory?: string
-  created_at: string
-  updated_at: string
-}
-
-export interface ConversationDetail extends ConversationMeta {
-  messages: Array<{ id: string; role: string; content: string; agents?: any[] }>
-}
 
 function classifyNetworkError(err: unknown): ChatError {
   const msg = err instanceof Error ? err.message : String(err)
@@ -93,41 +80,5 @@ export async function sendMultiAgentStream(
     throw classifyNetworkError(err)
   } finally {
     reader.releaseLock()
-  }
-}
-
-export async function listConversations(): Promise<ConversationMeta[]> {
-  const res = await fetchWithTimeout(`${BASE}/conversations?conv_type=${CONV_TYPE}`, { method: 'GET' }, 0)
-  if (!res.ok) throw new Error('Failed to list conversations')
-  return res.json()
-}
-
-export async function getConversation(id: string): Promise<ConversationDetail> {
-  const res = await fetchWithTimeout(`${BASE}/conversations/${id}?conv_type=${CONV_TYPE}`, { method: 'GET' }, 0)
-  if (!res.ok) throw new Error('Failed to get conversation')
-  return res.json()
-}
-
-export async function renameConversation(id: string, title: string): Promise<void> {
-  const res = await fetchWithTimeout(`${BASE}/conversations/${id}?conv_type=${CONV_TYPE}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title }),
-  }, 0)
-  if (!res.ok) throw new Error('Failed to rename conversation')
-}
-
-export async function deleteConversation(id: string): Promise<void> {
-  const res = await fetchWithTimeout(`${BASE}/conversations/${id}?conv_type=${CONV_TYPE}`, { method: 'DELETE' }, 0)
-  if (!res.ok) throw new Error('Failed to delete conversation')
-}
-
-export async function deleteMessage(conversationId: string, messageId: string): Promise<void> {
-  const res = await fetchWithTimeout(`${BASE}/conversations/${conversationId}/messages/${messageId}`, {
-    method: 'DELETE',
-  }, 0)
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Delete message error: ${err || res.statusText}`)
   }
 }

@@ -7,7 +7,6 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -162,11 +161,6 @@ def _msg_type_to_role(msg_type: str) -> str:
         "user": "user", "assistant": "assistant", "tool": "tool",
         "compaction": "system", "epoch": "system", "system": "system",
     }.get(msg_type, "system")
-
-
-def _fmt_time(ms: int) -> str:
-    """epoch ms -> ISO 字符串（兼容旧 conversations.created_at 格式）。"""
-    return datetime.fromtimestamp(ms / 1000).isoformat() if ms else ""
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -678,34 +672,6 @@ async def chat_stream(request: Request, body: ChatRequest):
     )
 
 
-@router.delete("/conversations/{conversation_id}")
-async def delete_conversation(conversation_id: str, request: Request):
-    """删除指定对话（只能删除自己的对话）。"""
-    user_id = _get_user_id(request)
-    service = _get_session_service(request)
-    try:
-        service.remove(user_id, conversation_id)
-        return {"status": "ok"}
-    except session_repo.SessionNotFound:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-
-@router.delete("/conversations/{conversation_id}/messages/{message_id}")
-async def delete_message(conversation_id: str, message_id: str, request: Request):
-    """删除对话中的指定消息（只能删除自己的对话）。"""
-    user_id = _get_user_id(request)
-    service = _get_session_service(request)
-    try:
-        service.get(user_id, conversation_id)
-    except session_repo.SessionNotFound:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    except session_repo.Forbidden:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    if not session_repo.delete_message(conversation_id, message_id):
-        raise HTTPException(status_code=404, detail="Message not found")
-    return {"status": "ok"}
-
-
 @router.get("/stream/status")
 async def stream_status(request: Request):
     """返回当前并发状态，前端可轮询。
@@ -720,81 +686,3 @@ async def stream_status(request: Request):
         "active": active,
         "queue_depth": depth,
     }
-
-
-@router.get("/conversations")
-async def list_conversations(request: Request, conv_type: str | None = None):
-    """获取当前用户的对话列表，按更新时间倒序排列。
-    支持 ?conv_type=chat 或 ?conv_type=multi-agent 过滤。
-    """
-    user_id = _get_user_id(request)
-    service = _get_session_service(request)
-    kind = conv_type if conv_type in ("chat", "multi-agent") else None
-    sessions = service.list_sessions(user_id, archived=False, limit=1000)
-    result = [
-        {"id": s.id, "title": s.title or "新对话", "directory": s.directory or "",
-         "created_at": _fmt_time(s.time_created),
-         "updated_at": _fmt_time(s.time_updated)}
-        for s in sessions
-        if (kind is None or s.kind == kind)
-    ]
-    result.sort(key=lambda r: r["updated_at"], reverse=True)
-    return result
-
-
-@router.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str, request: Request, conv_type: str | None = None):
-    """获取指定对话的详细信息和消息历史（只能查看自己的对话）。"""
-    user_id = _get_user_id(request)
-    service = _get_session_service(request)
-    try:
-        session = service.get(user_id, conversation_id)
-    except session_repo.SessionNotFound:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    except session_repo.Forbidden:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    if conv_type and session.kind != conv_type:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    messages = []
-    for m in service.messages(user_id, conversation_id):
-        msg = {
-            "id": m.id,
-            "role": _msg_type_to_role(m.type),
-            "content": m.data.get("content", ""),
-            "seq": m.seq,
-        }
-        if m.data.get("sources"):
-            msg["sources"] = m.data["sources"]
-        if m.data.get("steps"):
-            msg["steps"] = m.data["steps"]
-        if m.data.get("agents"):
-            msg["agents"] = m.data["agents"]
-        parts = session_repo.list_parts(m.id)
-        if parts:
-            msg["parts"] = [p.model_dump() for p in parts]
-        messages.append(msg)
-    return {
-        "id": conversation_id,
-        "title": session.title or "新对话",
-        "directory": session.directory or "",
-        "messages": messages,
-        "created_at": _fmt_time(session.time_created),
-        "updated_at": _fmt_time(session.time_updated),
-    }
-
-
-@router.put("/conversations/{conversation_id}")
-async def update_conversation(conversation_id: str, body: dict, request: Request):
-    """更新对话标题（只能更新自己的对话）。"""
-    user_id = _get_user_id(request)
-    title = body.get("title")
-    if title is None:
-        raise HTTPException(status_code=400, detail="title is required")
-    service = _get_session_service(request)
-    try:
-        service.update(user_id, conversation_id, title=title)
-        return {"status": "ok"}
-    except session_repo.SessionNotFound:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    except session_repo.Forbidden:
-        raise HTTPException(status_code=404, detail="Conversation not found")

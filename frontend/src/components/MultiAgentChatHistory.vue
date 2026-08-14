@@ -3,8 +3,8 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { usePermissionStore } from '../stores/permission'
-import { deleteConversation as apiDelete } from '../api/multiAgent'
-import type { ConversationMeta } from '../api/multiAgent'
+import { deleteConversation as apiDelete } from '../api/sessions'
+import type { ConversationMeta } from '../api/sessions'
 import DirPickerModal from './DirPickerModal.vue'
 
 const router = useRouter()

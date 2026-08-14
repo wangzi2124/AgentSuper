@@ -3,15 +3,16 @@ import { ref, computed, reactive } from 'vue'
 import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep } from '../types'
 import {
   sendMultiAgentStream,
-  deleteConversation as apiDeleteConversation,
-  deleteMessage as apiDeleteMessage,
+} from '../api/multiAgent'
+import {
   listConversations,
   getConversation,
   renameConversation as apiRenameConversation,
+  deleteConversation as apiDeleteConversation,
   type ConversationMeta,
-} from '../api/multiAgent'
+} from '../api/sessions'
 import { SUPPORTED_MODELS } from './chat'
-import { interruptSession } from '../api/sessions'
+import { interruptSession, revertSession, deleteSessionMessage } from '../api/sessions'
 import { usePermissionStore } from './permission'
 
 function genId(): string {
@@ -69,7 +70,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const queuePosition = computed(() => currentSession.value?.queuePosition ?? null)
 
   async function loadConversations() {
-    try { conversations.value = await listConversations() }
+    try { conversations.value = await listConversations('multi-agent') }
     catch (e) { console.error('Failed to load conversations:', e) }
   }
 
@@ -80,7 +81,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (meta) session.conversationTitle = meta.title
     if (session.loading) { activeSessionId.value = id; return }
     try {
-      const detail = await getConversation(id)
+      const detail = await getConversation(id, 'multi-agent')
       session.conversationTitle = detail.title
       // 同步会话绑定目录（服务器为准）
       if (detail.directory) sessionDirectory.value = detail.directory
@@ -276,16 +277,15 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
   }
 
-  // 撤销到指定索引：本地截断 + 尝试同步后端删除（已落库的消息）
+  // 撤销到指定索引：保留 [0, index)，删除其后所有消息（走 /sessions/{id}/revert）
   async function undoMessage(index: number) {
     if (activeSessionId.value) {
       const s = sessions.value[activeSessionId.value]
       if (!s) return
-      const removed = s.messages.slice(index)
-      if (s.conversationId) {
-        for (const m of removed) {
-          try { await apiDeleteMessage(s.conversationId, m.id) } catch (e) { console.error('Failed to sync undo:', e) }
-        }
+      // 目标保留消息 = 撤销点前一条；index===0 无保留消息，仅本地清空
+      const target = index > 0 ? s.messages[index - 1] : undefined
+      if (s.conversationId && target) {
+        try { await revertSession(s.conversationId, target.id) } catch (e) { console.error('Failed to sync undo:', e) }
       }
       s.messages = s.messages.slice(0, index)
     }
@@ -297,7 +297,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       const s = sessions.value[activeSessionId.value]
       if (s?.conversationId) {
         try {
-          await apiDeleteMessage(s.conversationId, messageId)
+          await deleteSessionMessage(s.conversationId, messageId)
         } catch (e) {
           console.error('Failed to delete message from server:', e)
         }

@@ -3,8 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChatStore } from '../stores/chat'
 import { usePermissionStore } from '../stores/permission'
-import { deleteConversation } from '../api/chat'
-import type { ConversationMeta } from '../api/chat'
+import type { ConversationMeta } from '../api/sessions'
 import DirPickerModal from './DirPickerModal.vue'
 
 // 路由实例
@@ -90,14 +89,15 @@ function cancelRename() {
   editingId.value = null
 }
 
-// 删除对话
-function handleDelete(e: Event, id: string) {
+// 删除对话（经 store：同步服务器 + IndexedDB 缓存 + 内存会话）
+async function handleDelete(e: Event, id: string) {
   e.stopPropagation()
-  if (chat.conversationId === id) {
+  const wasActive = chat.conversationId === id
+  if (wasActive) {
     chat.newChat()
     router.push({ name: 'Chat' })
   }
-  deleteConversation(id).then(() => chat.loadConversations())
+  await chat.deleteConversation(id)
 }
 
 // 获取会话的流式阶段

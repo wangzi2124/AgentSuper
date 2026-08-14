@@ -58,6 +58,7 @@ async def list_sessions(
     roots: bool = False,
     search: Optional[str] = None,
     archived: bool = False,
+    kind: Optional[str] = None,
     limit: int = 100,
 ):
     user_id = get_user_id(request)
@@ -68,6 +69,7 @@ async def list_sessions(
         roots_only=roots,
         search=search,
         archived=archived,
+        kind=kind,
         limit=limit,
     )
 
@@ -117,7 +119,20 @@ async def list_messages(
     limit: Optional[int] = None,
     ctx: SessionContext = Depends(resolve_session_context),
 ):
-    return [m.model_dump() for m in ctx.service.messages(ctx.user_id, ctx.session_id, after_seq, limit)]
+    """消息列表；每条消息附加其 message_parts（text/tool/step/agent 等，保持创建顺序）。
+
+    parts 是渲染历史会话时重建步骤面板/工具调用的唯一来源（SSE 流式期间事件桥已
+    把 graph 事件实时落库为 parts，这里按消息批量取回）。
+    """
+    messages = ctx.service.messages(ctx.user_id, ctx.session_id, after_seq, limit)
+    ids = [m.id for m in messages]
+    parts_by_msg = repository.list_parts_for_messages(ids) if ids else {}
+    result = []
+    for m in messages:
+        row = m.model_dump()
+        row["parts"] = [p.model_dump() for p in parts_by_msg.get(m.id, [])]
+        result.append(row)
+    return result
 
 
 @router.get("/{session_id}/context", response_model=dict)
@@ -142,6 +157,21 @@ async def revert_session(
 ):
     """撤销到指定消息（删除其后的消息与部件）。"""
     return await ctx.service.revert(ctx.user_id, ctx.session_id, body.message_id)
+
+
+@router.delete("/{session_id}/messages/{message_id}", status_code=204)
+async def delete_message(
+    message_id: str,
+    ctx: SessionContext = Depends(resolve_session_context),
+):
+    """删除会话中的单条消息（及其 parts）。
+
+    替代旧 /api/chat/conversations/{id}/messages/{message_id}；前端"删除消息"
+    按钮用此端点后仍以墓碑（deletedIds）防止缓存复活。
+    """
+    deleted = ctx.service.delete_message(ctx.user_id, ctx.session_id, message_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Message not found")
 
 
 @router.post("/{session_id}/interrupt", status_code=204)

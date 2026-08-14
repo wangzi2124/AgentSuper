@@ -21,6 +21,9 @@ const expandedArgs = ref<Record<string, boolean>>({})
 // 消息是否携带 parts（对齐 opencode Part 渲染路径）
 const hasParts = computed(() => !!props.message.parts?.length)
 
+// 系统消息（compaction/epoch/tool 等）：渲染为居中横幅而非气泡
+const isSystem = computed(() => props.message.role === 'system' || props.message.role === 'tool')
+
 // 正文：优先取 text parts（对齐设计 §3：正文在 Part），否则回退 message.content
 const displayContent = computed(() => {
   if (hasParts.value) {
@@ -181,7 +184,13 @@ const meaningfulSteps = computed(() => {
 </script>
 
 <template>
-  <div class="chat-message" :class="[message.role, { 'is-error': message.isError }]">
+  <div v-if="isSystem" class="chat-message system-msg">
+    <div class="system-banner">
+      <span class="system-badge">{{ message.role === 'tool' ? '🔧' : '📌' }}</span>
+      <span class="system-text">{{ displayContent }}</span>
+    </div>
+  </div>
+  <div v-else class="chat-message" :class="[message.role, { 'is-error': message.isError }]">
     <div class="avatar">
       {{ message.role === 'user' ? '👤' : (message.isError ? '⚠️' : '🤖') }}
     </div>
@@ -289,6 +298,31 @@ const meaningfulSteps = computed(() => {
   display: flex;
   gap: 12px;
   margin-bottom: 16px;
+}
+.system-msg {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0;
+}
+.system-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 90%;
+  padding: 4px 12px;
+  border-radius: 12px;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1px dashed var(--border);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.system-badge { flex-shrink: 0; }
+.system-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 .chat-message.user { flex-direction: row-reverse; }
 .avatar {

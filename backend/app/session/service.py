@@ -89,11 +89,12 @@ class SessionService:
         roots_only: bool = False,
         search: Optional[str] = None,
         archived: bool = False,
+        kind: Optional[str] = None,
         limit: int = 100,
     ) -> list[SessionInfo]:
         return repository.list_sessions(
             user_id, project_id=project_id, workspace_id=workspace_id,
-            roots_only=roots_only, search=search, archived=archived, limit=limit,
+            roots_only=roots_only, search=search, archived=archived, kind=kind, limit=limit,
         )
 
     def update(self, user_id: str, session_id: str, **fields: Any) -> SessionInfo:
@@ -226,6 +227,14 @@ class SessionService:
             "deleted": deleted,
             "messages": [m.model_dump() for m in remaining],
         }
+
+    def delete_message(self, user_id: str, session_id: str, message_id: str) -> bool:
+        """删除单条消息及其 parts（对齐旧 chat.py 的 messages/{message_id}）。
+
+        不级联子会话/不清输入（单条删除，保留会话其余历史）。
+        """
+        self._authorized(user_id, session_id)
+        return repository.delete_message(session_id, message_id)
 
     # ── 输入 / 执行 ──────────────────────────────────────────────────────
 

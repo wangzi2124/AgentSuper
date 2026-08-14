@@ -454,7 +454,7 @@ fetch("http://localhost:8000/api/chat/", {
 | **单 Agent 聊天** | ChatView、MobileView | `chat` |
 | **多 Agent 编排** | MultiAgentView | `multi-agent` |
 
-后端 `conversations` 表新增 `type` 列，`GET /api/chat/conversations` 支持 `?conv_type=` 参数过滤。三个前端入口各自只加载自己类型的会话。
+前端通过 `GET /api/sessions?kind=` 按会话类型过滤列表（`chat` / `multi-agent`），三个前端入口各自只加载自己类型的会话。
 
 ---
 
@@ -469,14 +469,13 @@ fetch("http://localhost:8000/api/chat/", {
 | POST | `/api/chat/multi-agent/` | 发送聊天消息（多 Agent Supervisor） |
 | POST | `/api/chat/multi-agent/stream` | 流式聊天 SSE（多 Agent），支持 routing/agent_start/agent_stream/agent_done/done 事件 |
 | GET | `/api/chat/stream/status` | 查询并发状态（active/queue_depth） |
-| GET | `/api/chat/conversations?conv_type=chat\|multi-agent` | 按类型过滤会话列表 |
-| GET | `/api/chat/conversations/:id?conv_type=` | 获取指定类型会话详情 |
 | POST | `/api/sessions` | 创建会话 |
-| GET | `/api/sessions` | 会话列表（`project`/`roots`/`search`/`archived`） |
+| GET | `/api/sessions` | 会话列表（`project`/`roots`/`search`/`archived`/`kind`） |
 | GET / PATCH / DELETE | `/api/sessions/{id}` | 详情 / 更新 / 删除（级联子会话） |
 | POST | `/api/sessions/{id}/fork` | 在指定 `message_id` 处 fork 子会话 |
 | POST | `/api/sessions/{id}/prompt` | 投递输入（`delivery: steer\|queue`） |
-| GET | `/api/sessions/{id}/messages?after_seq=` | 分页消息 |
+| GET | `/api/sessions/{id}/messages?after_seq=` | 分页消息（每条附 `parts`） |
+| DELETE | `/api/sessions/{id}/messages/{message_id}` | 删除单条消息 |
 | GET | `/api/sessions/{id}/context` | 模型视角上下文（epoch + 过滤后历史） |
 | POST | `/api/sessions/{id}/compact` | 手动压缩（可选 `checkpoint`） |
 | POST | `/api/sessions/{id}/revert` | 撤销到指定 `message_id` |
@@ -562,11 +561,12 @@ fetch("http://localhost:8000/api/chat/", {
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/sessions` | 创建会话 |
-| GET | `/api/sessions` | 列表（`project`/`roots`/`search`/`archived`） |
+| GET | `/api/sessions` | 列表（`project`/`roots`/`search`/`archived`/`kind`） |
 | GET / PATCH / DELETE | `/api/sessions/{id}` | 详情 / 更新 / 删除（级联） |
 | POST | `/api/sessions/{id}/fork` | 在指定 `message_id` 处 fork 子会话 |
 | POST | `/api/sessions/{id}/prompt` | 投递输入（`delivery: steer\|queue`） |
-| GET | `/api/sessions/{id}/messages` | 分页消息（`after_seq`） |
+| GET | `/api/sessions/{id}/messages` | 分页消息（`after_seq`，每条附 `parts`） |
+| DELETE | `/api/sessions/{id}/messages/{message_id}` | 删除单条消息 |
 | GET | `/api/sessions/{id}/context` | 模型视角上下文（epoch + 过滤后历史） |
 | POST | `/api/sessions/{id}/compact` | 手动压缩（可选 `checkpoint`） |
 | POST | `/api/sessions/{id}/revert` | 撤销到指定 `message_id` |
@@ -1486,8 +1486,9 @@ frontend/src/stores/mobileChat.ts  → 手机端状态管理
 frontend/src/views/ChatView.vue    → 聊天主界面
 frontend/src/views/MultiAgentView.vue → 多 Agent 聊天界面（并行 Agent 面板）
 frontend/src/views/MobileView.vue  → 手机端聊天界面
-frontend/src/api/chat.ts           → 聊天 API 调用 + conv_type 过滤
-frontend/src/api/multiAgent.ts     → 多 Agent API（sendMultiAgentStream + conv_type）
+frontend/src/api/chat.ts           → 聊天 SSE 流式调用（sendMessageStream）
+frontend/src/api/multiAgent.ts     → 多 Agent 流式调用（sendMultiAgentStream）
+frontend/src/api/sessions.ts       → /api/sessions REST client（CRUD + 列表/详情/删除，含 kind 过滤）
 frontend/src/api/session-cache.ts  → IndexedDB 会话缓存（双重持久化）
 frontend/src/api/auth.ts           → 用户身份工具（ensureAuth/注册/换 token，可选签名校验）
 frontend/src/components/           → 各组件（Sidebar、ChatMessage、MultiAgentResponse 等）

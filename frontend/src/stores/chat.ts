@@ -3,13 +3,14 @@ import { ref, computed } from 'vue'
 import type { FileContent, Message, AgentStep, SSEEvent, ChatError, PermissionRequest } from '../types'
 import {
   sendMessageStream,
-  deleteConversation as apiDeleteConversation,
-  deleteMessage as apiDeleteMessage,
+} from '../api/chat'
+import {
   listConversations,
   getConversation,
   renameConversation as apiRenameConversation,
+  deleteConversation as apiDeleteConversation,
   type ConversationMeta,
-} from '../api/chat'
+} from '../api/sessions'
 import {
   saveSessionToCache,
   loadSessionFromCache,
@@ -17,7 +18,7 @@ import {
   mergeServerAndCache,
 } from '../api/session-cache'
 import { usePermissionStore } from './permission'
-import { interruptSession } from '../api/sessions'
+import { interruptSession, revertSession, deleteSessionMessage } from '../api/sessions'
 
 export const SUPPORTED_MODELS = [
   { value: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
@@ -50,6 +51,7 @@ interface SessionState {
   queuePosition: number | null                 // 排队位置
   liveMsgId: string | null                     // 流式中的占位 assistant 消息 id（text_delta 累积）
   liveContent: string                          // 流式中的文本增量累积
+  deletedIds: string[]                         // 已删除消息 id（墓碑，防 merge 复活）
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -94,6 +96,7 @@ export const useChatStore = defineStore('chat', () => {
         queuePosition: null,
         liveMsgId: null,
         liveContent: '',
+        deletedIds: [],
       }
     }
     return sessions.value[sessionId]
@@ -103,12 +106,22 @@ export const useChatStore = defineStore('chat', () => {
   async function persistSession(sessionId: string) {
     const session = sessions.value[sessionId]
     if (!session) return
+    // 持久化前过滤 live 占位消息，防止中断/取消后残留占位泄漏进缓存
+    const messages = session.messages.filter(m => !m.live)
+    // P0.1: 服务器已分配会话 id 后，缓存 key 一律以服务器 id 为准，
+    // 否则新会话（客户端 genId）写完缓存后再按服务器 id 读会永远 miss
+    const cacheKey = session.conversationId || sessionId
     await saveSessionToCache(
-      sessionId,
-      session.messages,
+      cacheKey,
+      messages,
       session.conversationId,
       session.conversationTitle,
+      session.deletedIds,
     )
+    // 清理 genId 孤儿条目（客户端临时 key → 服务器 id 迁移）
+    if (cacheKey !== sessionId) {
+      await deleteSessionFromCache(sessionId)
+    }
   }
 
   // --- 错误分类与格式化 ---
@@ -323,7 +336,7 @@ export const useChatStore = defineStore('chat', () => {
         .filter(m => !(m.role === 'assistant' && (!m.content || m.content.trim() === '')))
         .map(m => ({
           id: m.id,
-          role: m.role as 'user' | 'assistant',
+          role: m.role as Message['role'],
           content: m.content,
           sources: m.sources,
           steps: m.steps,
@@ -334,12 +347,14 @@ export const useChatStore = defineStore('chat', () => {
       // 从 IndexedDB 加载本地缓存（可能有 SSE 中断时的不完整数据）
       const cached = await loadSessionFromCache(id)
       const cachedMessages = cached?.messages || []
+      // 继承已删除消息的墓碑列表，保证被删消息不因缓存而复活
+      session.deletedIds = cached?.deletedIds || []
 
       // 合并：服务器数据为基准，本地缓存补入服务器没有的消息或更完整的 assistant 内容
-      session.messages = mergeServerAndCache(serverMessages, cachedMessages)
+      session.messages = mergeServerAndCache(serverMessages, cachedMessages, session.deletedIds)
 
       // 用合并后的数据更新 IndexedDB 缓存
-      await saveSessionToCache(id, session.messages, id, detail.title)
+      await saveSessionToCache(id, session.messages, id, detail.title, session.deletedIds)
 
       activeSessionId.value = id
     } catch (e) {
@@ -347,7 +362,10 @@ export const useChatStore = defineStore('chat', () => {
       // 服务器获取失败，尝试从 IndexedDB 恢复
       const cached = await loadSessionFromCache(id)
       if (cached) {
-        session.messages = cached.messages
+        // 过滤 live 占位 + 应用墓碑，避免恢复出已删/未完成消息
+        session.deletedIds = cached.deletedIds || []
+        const tomb = new Set(session.deletedIds)
+        session.messages = cached.messages.filter(m => !m.live && !tomb.has(m.id))
         session.conversationTitle = cached.conversationTitle || session.conversationTitle
       }
       activeSessionId.value = id
@@ -549,6 +567,19 @@ export const useChatStore = defineStore('chat', () => {
           }
           // 完成后持久化到 IndexedDB
           persistSession(sessionId)
+          // 内存 key 同步：新会话完成后把 sessions map 从客户端 genId 迁移到服务器 id，
+          // 保证侧边栏（以 server id 列出）点击时命中同一 session 对象而不是重建
+          const serverId = session.conversationId
+          if (serverId && serverId !== sessionId) {
+            sessions.value[serverId] = session
+            delete sessions.value[sessionId]
+            if (activeSessionId.value === sessionId) {
+              activeSessionId.value = serverId
+            }
+            if (autoRetrySessionId.value === sessionId) {
+              autoRetrySessionId.value = serverId
+            }
+          }
           // 成功则取消自动重试
           cancelAutoRetry()
         } else if (event.type === 'error') {
@@ -649,44 +680,69 @@ export const useChatStore = defineStore('chat', () => {
         session.conversationId = undefined
         session.conversationTitle = ''
         session.currentSteps = []
+        session.deletedIds = []
+        session.liveMsgId = null
+        session.liveContent = ''
         // 清空后删除 IndexedDB 缓存
         deleteSessionFromCache(activeSessionId.value)
       }
     }
   }
 
-  // 撤回到指定索引处的消息
-  function undoMessage(index: number) {
-    if (activeSessionId.value) {
-      const session = sessions.value[activeSessionId.value]
-      if (session) {
-        session.messages = session.messages.slice(0, index)
-        persistSession(activeSessionId.value)
+  // 撤回到指定索引处的消息（删除该索引及其之后的消息）
+  async function undoMessage(index: number) {
+    if (!activeSessionId.value) return
+    const session = sessions.value[activeSessionId.value]
+    if (!session) return
+
+    const target = session.messages[index - 1]
+    const removedIds = session.messages.slice(index).map(m => m.id)
+
+    // P0.4: 服务端撤销到目标消息（删除其后所有消息/部件），避免本地截断与服务器不一致
+    if (session.conversationId && target?.id) {
+      try {
+        await revertSession(session.conversationId, target.id)
+      } catch (e) {
+        console.error('Failed to revert session on server:', e)
       }
     }
+
+    session.messages = session.messages.slice(0, index)
+    // 记录墓碑，防止 IndexedDB 缓存把已撤销消息合并复活
+    if (removedIds.length) {
+      session.deletedIds = [...new Set([...session.deletedIds, ...removedIds])]
+    }
+    await persistSession(activeSessionId.value)
   }
 
-  // 删除当前会话
-  async function deleteConversation() {
-    if (activeSessionId.value) {
-      const session = sessions.value[activeSessionId.value]
-      // 取消未执行的自动重试，避免删除后残留定时器再次发送
-      cancelAutoRetry()
-      // 中断正在进行的流式请求，防止 late callback 写回已删除会话
-      session?.abortController?.abort()
-      if (session?.conversationId) {
-        try {
-          await apiDeleteConversation(session.conversationId, CONV_TYPE)
-        } catch (e) {
-          console.error('Failed to delete conversation from server:', e)
-        }
+  // 删除当前会话（或指定 id 的会话）
+  async function deleteConversation(id?: string) {
+    const sid = id || activeSessionId.value
+    if (!sid) return
+    const session = sessions.value[sid]
+    // 取消未执行的自动重试，避免删除后残留定时器再次发送
+    cancelAutoRetry()
+    // 中断正在进行的流式请求，防止 late callback 写回已删除会话
+    session?.abortController?.abort()
+    // 服务器删除：以会话绑定的 conversationId 为准（新会话可能仍为客户端 genId）
+    const serverId = session?.conversationId || sid
+    if (serverId) {
+      try {
+        await apiDeleteConversation(serverId, CONV_TYPE)
+      } catch (e) {
+        console.error('Failed to delete conversation from server:', e)
       }
-      // 删除 IndexedDB 缓存
-      await deleteSessionFromCache(activeSessionId.value)
-      delete sessions.value[activeSessionId.value]
-      activeSessionId.value = undefined
-      loadConversations()
     }
+    // 删除 IndexedDB 缓存（服务器 id + 可能的 genId 临时 key）
+    await deleteSessionFromCache(serverId)
+    if (serverId !== sid) {
+      await deleteSessionFromCache(sid)
+    }
+    delete sessions.value[sid]
+    if (activeSessionId.value === sid) {
+      activeSessionId.value = undefined
+    }
+    loadConversations()
   }
 
   // 删除指定消息
@@ -695,7 +751,7 @@ export const useChatStore = defineStore('chat', () => {
       const session = sessions.value[activeSessionId.value]
       if (session?.conversationId) {
         try {
-          await apiDeleteMessage(session.conversationId, messageId)
+          await deleteSessionMessage(session.conversationId, messageId)
         } catch (e) {
           console.error('Failed to delete message from server:', e)
         }
@@ -704,7 +760,11 @@ export const useChatStore = defineStore('chat', () => {
         const idx = session.messages.findIndex(m => m.id === messageId)
         if (idx >= 0) {
           session.messages = session.messages.filter(m => m.id !== messageId)
-          persistSession(activeSessionId.value)
+          // 记录墓碑，防止 IndexedDB 缓存把已删消息合并复活
+          if (!session.deletedIds.includes(messageId)) {
+            session.deletedIds.push(messageId)
+          }
+          await persistSession(activeSessionId.value)
         }
       }
     }

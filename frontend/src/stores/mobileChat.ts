@@ -3,14 +3,15 @@ import { ref, computed } from 'vue'
 import type { Message, AgentStep, SSEEvent } from '../types'
 import {
   sendMessageStream,
-  deleteConversation as apiDeleteConversation,
-  deleteMessage as apiDeleteMessage,
+} from '../api/chat'
+import {
   listConversations,
   getConversation,
   renameConversation as apiRenameConversation,
+  deleteConversation as apiDeleteConversation,
   type ConversationMeta,
-} from '../api/chat'
-import { interruptSession } from '../api/sessions'
+} from '../api/sessions'
+import { interruptSession, deleteSessionMessage } from '../api/sessions'
 
 // 支持的模型列表
 export const SUPPORTED_MODELS = [
@@ -354,7 +355,7 @@ export const useMobileChatStore = defineStore('mobileChat', () => {
       const session = sessions.value[activeSessionId.value]
       if (session?.conversationId) {
         try {
-          await apiDeleteMessage(session.conversationId, messageId)
+          await deleteSessionMessage(session.conversationId, messageId)
         } catch (e) {
           console.error('Failed to delete message from server:', e)
         }
