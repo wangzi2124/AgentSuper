@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 from .models import FileNode
 
@@ -110,10 +110,14 @@ class ScanCache:
     对应 opencode file/index.ts 中基于 Instance.state 的扫描缓存:
     以 (目录, mtime_ns) 为键,目录内容变化(mtime 变化)时自动失效刷新。
     注意:目录 mtime 在子文件内容变更时不变化,因此编辑场景请调用 invalidate()。
+
+    ignored_checker:可选回调 (Path, is_dir) -> bool,用于填充 FileNode.ignored
+    (.gitignore 判定)。默认 None 表示不填充(ignored 恒为 False)。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ignored_checker: "Callable[[Path, bool], bool] | None" = None) -> None:
         self._entries: dict[str, tuple[float, list[FileNode]]] = {}
+        self._ignored_checker = ignored_checker
 
     def _scan(self, path: Path) -> tuple[float, list[FileNode]]:
         try:
@@ -130,13 +134,19 @@ class ScanCache:
                 is_dir = child.is_dir()
             except OSError:
                 continue
+            ignored = False
+            if self._ignored_checker is not None:
+                try:
+                    ignored = self._ignored_checker(child, is_dir)
+                except OSError:
+                    ignored = False
             entries.append(
                 FileNode(
                     name=child.name,
                     path=str(child),
                     absolute=str(child),
                     type="dir" if is_dir else "file",
-                    ignored=False,
+                    ignored=ignored,
                 )
             )
         return stat.st_mtime_ns, entries

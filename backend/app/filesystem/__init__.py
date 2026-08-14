@@ -13,6 +13,7 @@ opencode 风格文件系统层(后端 AgentSuper)。
 from __future__ import annotations
 
 from .core import ScanCache, contains, find_up, glob_up, normalize_path, overlaps, up
+from .gitignore import GitignoreMatcher, glob_to_regex, parse_gitignore
 from .models import FileContent, FileInfo, FileNode, FileStatus
 from .project import Project
 
@@ -22,13 +23,16 @@ __all__ = [
     "FileInfo",
     "FileNode",
     "FileStatus",
+    "GitignoreMatcher",
     "Project",
     "contains",
     "find_up",
+    "glob_to_regex",
     "glob_up",
     "get_project",
     "normalize_path",
     "overlaps",
+    "parse_gitignore",
     "set_project",
     "up",
 ]

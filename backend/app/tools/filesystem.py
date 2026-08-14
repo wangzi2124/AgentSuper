@@ -9,13 +9,40 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from app.filesystem import ScanCache, get_project
+from app.filesystem import GitignoreMatcher, ScanCache, get_project, glob_to_regex
 from app.permission import get_manager as get_perm_mgr, NeedsPermission, current_session_workspace
 
 # 回退基准：项目上下文未初始化时使用 backend/（历史行为）
 _WORKSPACE_FALLBACK = Path(__file__).resolve().parents[2]
 
-_scan_cache = ScanCache()
+_matcher_cache: dict[str, GitignoreMatcher] = {}
+
+
+def _gitignore_matcher() -> GitignoreMatcher | None:
+    """按 worktree 惰性构建 .gitignore 匹配器(含 .gitignore 文件 mtime 缓存)。"""
+    ws = _workspace()
+    key = str(ws)
+    matcher = _matcher_cache.get(key)
+    if matcher is None:
+        try:
+            matcher = GitignoreMatcher(ws)
+        except Exception:
+            matcher = None
+        _matcher_cache[key] = matcher
+    return matcher
+
+
+def _gitignore_checker(path: Path, is_dir: bool) -> bool:
+    matcher = _gitignore_matcher()
+    if matcher is None:
+        return False
+    try:
+        return matcher.is_ignored(path, is_dir)
+    except OSError:
+        return False
+
+
+_scan_cache = ScanCache(ignored_checker=_gitignore_checker)
 
 
 def _workspace() -> Path:
@@ -563,7 +590,11 @@ def tool_glob(pattern: str, root: str = ".") -> str:
     _ensure_safe(root_path, "read")
     if not root_path.is_dir():
         return f"Error: '{root}' is not a directory"
-    matches = [m for m in root_path.glob(pattern) if _is_read_allowed(m)]
+    matcher = _gitignore_matcher()
+    if matcher is not None:
+        matches = [m for m in matcher.glob(pattern, top=root_path) if _is_read_allowed(m)]
+    else:
+        matches = [m for m in root_path.glob(pattern) if _is_read_allowed(m)]
     if not matches:
         return f"No files found for: {pattern}"
     matches.sort(key=lambda m: os.path.getmtime(m), reverse=True)
@@ -631,11 +662,27 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
     use_re = re.compile(pattern, re.MULTILINE | re.DOTALL)
     file_pattern = include if include else "**/*"
     file_matches: list[tuple[Path, list[int]]] = []
-    for f in root_path.glob(file_pattern):
-        if not f.is_file():
-            continue
+    matcher = _gitignore_matcher()
+    if matcher is not None:
+        glob_rx = glob_to_regex(file_pattern)
+        candidates: Iterable[Path] = (
+            f
+            for dirpath, dirs, files in matcher.walk(root_path)
+            for f in files
+        )
+    else:
+        glob_rx = None
+        candidates = (f for f in root_path.glob(file_pattern) if f.is_file())
+    for f in candidates:
         if not _is_read_allowed(f):
             continue
+        if glob_rx is not None:
+            try:
+                rel = f.relative_to(root_path)
+            except ValueError:
+                rel = Path(f.name)
+            if not glob_rx.match(rel.as_posix()):
+                continue
         ext = f.suffix.lower()
         if ext in _MULTIMODAL_EXTS:
             continue
@@ -761,15 +808,24 @@ def _check_command_allowed(command: str, cwd: str | None = None) -> None:
 
 # 解释器类命令的 -c/-e/-Command 参数中禁止出现的高危模式
 _DANGEROUS_PATTERNS = (
-    # "os.system", "os.popen", "subprocess", "os.exec", "eval(", "exec(",
-    # "__import__", "importlib", "pickle", "marshal",
-    # "socket.", "urllib", "requests.", "http.client", "aiohttp", "httpx",
-    # "base64", "ctypes", "win32api", "winreg", "b64decode",
-    # "Invoke-Expression", "IEX", "Invoke-WebRequest", "IWR", "DownloadString",
-    # "DownloadFile", "WebClient", "Net.WebClient", "Start-Process",
-    # "Add-MscProject", "shutdown", "reg add", "net user", "net localgroup",
-    # "whoami /all", "netsh", "taskkill", "format ", "del /f",
-    # "/dev/tcp", "/dev/udp", "curl", "wget",
+    # Python 任意代码执行 / 进程逃逸
+    "os.system", "os.popen", "os.spawn", "os.startfile", "os.execl", "os.exec",
+    "subprocess", "pty.spawn", "pty.openpty",
+    "eval(", "exec(", "compile(", "globals()", "locals()",
+    "__import__", "importlib", "runpy", "pickle", "marshal", "codecs.decode",
+    # 网络访问 (绕过 SSRF 检查的通道)
+    "socket.", "urllib", "requests.", "http.client", "aiohttp", "httpx",
+    "ftplib", "telnetlib", "smtplib", "poplib", "imaplib", "xmlrpc",
+    # 反序列化 / 本机渗透
+    "base64", "ctypes", "win32api", "winreg", "win32con", "b64decode", "b64encode",
+    "cryptography.", "ssl._create_default_context",
+    # Windows PowerShell / cmd 高危原语
+    "Invoke-Expression", "IEX", "Invoke-WebRequest", "IWR", "DownloadString",
+    "DownloadFile", "WebClient", "Net.WebClient", "Start-Process",
+    "Add-MpPreference", "shutdown", "reg add", "net user", "net localgroup",
+    "whoami", "netsh", "taskkill", "format ", "del /f", "wmic", "sc create",
+    # 常见外联工具 (内联代码里禁 curl/wget 防止 SSRF 绕过)
+    "/dev/tcp", "/dev/udp", "curl", "wget",
 )
 
 
@@ -794,13 +850,14 @@ def _check_command_blacklist(command: str) -> None:
         interpreter_flag = "/c"
     if interpreter_flag is None:
         return
+    flag = interpreter_flag.lower()
     i = 1
     while i < len(parts):
-        if parts[i].lower() == interpreter_flag:
+        if parts[i].lower() == flag:
             inline = " ".join(parts[i + 1:])
             lowered = inline.lower()
             for pat in _DANGEROUS_PATTERNS:
-                if pat in lowered:
+                if pat.lower() in lowered:
                     raise ValueError(
                         f"Command contains dangerous pattern '{pat}' in {interp} -c argument; "
                         "inline code execution is blocked"
