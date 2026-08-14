@@ -137,7 +137,7 @@ def create_skill_tools(skill_loader: SkillLoader) -> List[ToolDef]:
 
 def create_filesystem_tools() -> List[ToolDef]:
     """创建文件系统操作工具列表（ls、read、write、append、edit等）。"""
-    from app.tools.filesystem import (
+    from app.tools.file_tools import (
         tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file,
         tool_glob, tool_grep, tool_execute, tool_delete_file, tool_rename_file,
     )

@@ -1,7 +1,7 @@
 """子 Agent（code/web_search）共享的工具执行器与权限桥。
 
 背景：code/web_search 子 Agent 原先只会单轮 LLM 对话，无法读写项目文件，
-能力与主 RAG Agent 不对称。这里复用 backend/app/tools/filesystem.py 的文件
+能力与主 RAG Agent 不对称。这里复用 backend/app/tools/file_tools.py 的文件
 工具，并遵循与主链路一致的权限模型：
 
 - 工作区内操作直接执行（PermissionManager 判定 allow）
@@ -25,7 +25,7 @@ from app.config import settings
 from app.context.token_counter import estimate_tokens
 from app.monitor import record_model_call
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
-from app.tools import filesystem as fs
+from app.tools import file_tools as fs
 
 logger = logging.getLogger(__name__)
 

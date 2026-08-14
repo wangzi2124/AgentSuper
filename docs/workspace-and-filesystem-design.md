@@ -1,4 +1,4 @@
-# 工作目录管理与文件系统工具设计（对齐 opencode）
+﻿# 工作目录管理与文件系统工具设计（对齐 opencode）
 
 > 参考 opencode 的 **工作目录 / 权限 / 文件系统工具** 设计，适配本项目的
 > **FastAPI + LangGraph + Vue3** 技术栈。
@@ -176,9 +176,9 @@ def tool_grep(pattern, include="", context=0, count_only=False, files_only=False
 | 阶段 | 改动 | 涉及文件 |
 | --- | --- | --- |
 | P1 去掉 EXTRA_WORKSPACES | 删除 env 配置与读取；`PermissionManager` 仅加载前端配置 | `backend/app/config.py`、`backend/app/runtime.py`、`backend/.env.example` |
-| P2 类型化 + 强转 | `_coerce_int`/`_coerce_bool` 辅助函数；filesystem 工具内应用；schema 声明真实类型 | `backend/app/tools/filesystem.py`、`backend/app/agent/tools.py` |
-| P3 append 工具 | 新增 `tool_append_file` 并注册到工具列表与系统提示词 | `backend/app/tools/filesystem.py`、`backend/app/agent/tools.py`、`backend/app/agent/graph.py` |
-| P4 grep/glob root | 增加 `root` 参数 + `_ensure_safe` 权限检查 + 绝对路径输出 | `backend/app/tools/filesystem.py`、`backend/app/agent/tools.py` |
+| P2 类型化 + 强转 | `_coerce_int`/`_coerce_bool` 辅助函数；filesystem 工具内应用；schema 声明真实类型 | `backend/app/tools/file_tools.py`、`backend/app/agent/tools.py` |
+| P3 append 工具 | 新增 `tool_append_file` 并注册到工具列表与系统提示词 | `backend/app/tools/file_tools.py`、`backend/app/agent/tools.py`、`backend/app/agent/graph.py` |
+| P4 grep/glob root | 增加 `root` 参数 + `_ensure_safe` 权限检查 + 绝对路径输出 | `backend/app/tools/file_tools.py`、`backend/app/agent/tools.py` |
 | P5 文档 | 更新 README / AGENTS.md / 本设计文档 | `README.md`、`AGENTS.md`、`docs/` |
 
 ## 5. 验收标准

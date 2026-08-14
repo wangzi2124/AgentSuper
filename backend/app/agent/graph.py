@@ -414,7 +414,7 @@ class RAGAgent:
                             raise
                         except Exception as e:
                             logger.warning("tool_execute streaming failed, falling back to sync: %s", e)
-                            from app.tools.filesystem import tool_execute as _sync_execute
+                            from app.tools.file_tools import tool_execute as _sync_execute
                             result = await asyncio.to_thread(_sync_execute, **args)
                             return str(result)
                     result = await asyncio.to_thread(t.fn, **args)
@@ -462,7 +462,7 @@ class RAGAgent:
             timeout = 5
         work_dir = args.get("work_dir", ".")
 
-        from app.tools.filesystem import _resolve as _fs_resolve
+        from app.tools.file_tools import _resolve as _fs_resolve
         resolved_cwd = _fs_resolve(work_dir)
 
         from app.permission import get_manager as _get_perm_mgr, NeedsPermission as _NeedsPermission
@@ -474,7 +474,7 @@ class RAGAgent:
             raise _NeedsPermission(str(resolved_cwd), "execute", "tool_execute", args)
 
         # Apply whitelist check (same as filesystem.tool_execute)
-        from app.tools.filesystem import _check_command_allowed, _check_command_blacklist
+        from app.tools.file_tools import _check_command_allowed, _check_command_blacklist
         try:
             _check_command_allowed(command)
             _check_command_blacklist(command)

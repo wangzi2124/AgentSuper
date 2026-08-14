@@ -1,4 +1,4 @@
-# AI 助手 Agent 执行循环与权限设计
+﻿# AI 助手 Agent 执行循环与权限设计
 
 > 参考 opencode 的 agent 执行循环设计，适配本项目的 **FastAPI + LangGraph + AgentBus + SQLite** 技术栈。
 >
@@ -32,8 +32,8 @@
 
 | 位置 | 职责 | 与本案例相关的问题 |
 | --- | --- | --- |
-| `backend/app/tools/filesystem.py:14` | `WORKSPACE = backend/` 硬编码 | 工作区唯一，无扩展点 |
-| `backend/app/tools/filesystem.py:36-53` | `_resolve` / `_ensure_safe` | `D:\` 路径 → `PermissionManager.check` → `ask` → `NeedsPermission` |
+| `backend/app/tools/file_tools.py:14` | `WORKSPACE = backend/` 硬编码 | 工作区唯一，无扩展点 |
+| `backend/app/tools/file_tools.py:36-53` | `_resolve` / `_ensure_safe` | `D:\` 路径 → `PermissionManager.check` → `ask` → `NeedsPermission` |
 | `backend/app/permission/manager.py:98-186` | `classify_path` / `check` | `external` 分类一律 `ask`；`temp` 放行；无"扩展工作区"概念 |
 | `backend/app/agent/graph.py:164-215` | `_execute_tool` 权限审批 | 无事件队列（总线路径）时**直接拒绝**；有队列时 `await_decision(timeout=120)` 阻塞 120s |
 | `backend/app/agent/graph.py:217-236` | `_execute_tool_streaming` | 同一套外部路径 `ask` 限制 |
@@ -163,7 +163,7 @@ PERMISSION_APPROVAL_TIMEOUT=60
 
 | 阶段 | 改动 | 涉及文件 |
 | --- | --- | --- |
-| P1 工作区扩展 | 新增 `EXTRA_WORKSPACES` / `EXTERNAL_PATH_DEFAULT` / `PERMISSION_APPROVAL_TIMEOUT` 配置；`PermissionManager` 支持额外工作区 | `backend/app/config.py`、`backend/app/permission/manager.py`、`backend/app/tools/filesystem.py`、`backend/.env.example` |
+| P1 工作区扩展 | 新增 `EXTRA_WORKSPACES` / `EXTERNAL_PATH_DEFAULT` / `PERMISSION_APPROVAL_TIMEOUT` 配置；`PermissionManager` 支持额外工作区 | `backend/app/config.py`、`backend/app/permission/manager.py`、`backend/app/tools/file_tools.py`、`backend/.env.example` |
 | P2 审批通道 | 总线路径自动决策 + 可解释拒绝文案；缩短默认审批超时 | `backend/app/agent/graph.py:164-215` |
 | P3 循环护栏 | `MAX_STEPS` + `MAX_STEPS_PROMPT` 注入；doom-loop 指纹检测（≥3 连续相同） | `backend/app/agent/graph.py`、`backend/app/context/tool_dedup.py` |
 | P4 子代理超时 | 子任务心跳/超时分级，失败结果结构化回传 | `backend/app/agent/supervisor.py`、`backend/app/agent/bus.py` |

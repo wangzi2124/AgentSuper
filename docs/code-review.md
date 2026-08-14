@@ -1,4 +1,4 @@
-# AgentSuper 代码审查报告
+﻿# AgentSuper 代码审查报告
 
 > 审查范围：`backend/main.py` + `app/runtime.py` + `app/config.py` + `app/permission/` + `app/agent/`（base/bus/graph/rag_wrapper/supervisor/web_search/code/memory/tools）+ `app/rag/`（9 文件）+ `app/context/`（6 文件）+ `app/api/`（全部路由）+ `app/session/` + `app/skills/` + `app/plugins/` + `app/monitor.py` + `app/middleware/`。
 >
@@ -12,7 +12,7 @@
 
 ### 1.1 [已核实·修正] `tool_grep` / `tool_glob` 绕过单文件敏感路径检查（可泄露 `.env` / `.db`）
 
-`app/tools/filesystem.py`
+`app/tools/file_tools.py`
 
 - `tool_grep`（:247）与 `tool_glob`（:194）只对**搜索根目录**做一次 `_ensure_safe(root, "read")`（filesystem.py:254/:197），随后遍历 `root_path.glob("**/*")` **逐个读取文件内容而不做 `_is_critical_read` 检查**。
 - 对比：`tool_read_file`（:101）走 `_ensure_safe(target, "read")` → `check()` → `_is_critical_read`（manager.py:179-193）会拦截 `.env` / `*.db` / `permissions.json`。
@@ -185,7 +185,7 @@
 
 ### 3.12 `tool_execute` 权限/命令检查顺序不一致（双路径）
 
-`app/agent/graph.py:343-355` vs `app/tools/filesystem.py:396-404`
+`app/agent/graph.py:343-355` vs `app/tools/file_tools.py:396-404`
 
 - 流式路径先 `check(work_dir,"execute")` 后命令白名单；同步路径先白名单后 `check`。且 `check` 对 workspace 内非关键目录返回 `allow` → 工作区内（除 app/plugins/skills/config）可执行任意白名单命令——需确认 `_check_command_blacklist` 覆盖是否充分。
 

@@ -45,7 +45,7 @@ _session_workspace_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 def set_session_workspace(directory: str) -> contextvars.Token:
     """把会话绑定的工作目录写入当前上下文，返回 token 供 reset。
 
-    相对路径以此解析（见 filesystem._resolve），路径分类视其下为可写 workspace。
+    相对路径以此解析（见 file_tools._resolve），路径分类视其下为可写 workspace。
     仅设置该变量，不修改全局 PermissionManager 状态。
     """
     d = str(directory or "").strip()
