@@ -7,28 +7,13 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: '/chat',
+      redirect: '/multi-agent',
     },
     {
       path: '/login',
       name: 'Login',
       component: () => import('../views/LoginView.vue'),
       meta: { public: true },
-    },
-    {
-      path: '/m',
-      name: 'Mobile',
-      component: () => import('../views/MobileView.vue'),
-    },
-    {
-      path: '/chat',
-      name: 'Chat',
-      component: () => import('../views/ChatView.vue'),
-    },
-    {
-      path: '/chat/:id',
-      name: 'ChatConversation',
-      component: () => import('../views/ChatView.vue'),
     },
     {
       path: '/multi-agent',
@@ -89,7 +74,7 @@ router.beforeEach(async (to) => {
   if (!auth.ready) await auth.init()
   if (!auth.enabled) return true
   if (to.meta.public) {
-    return auth.isLoggedIn ? { name: 'Chat' } : true
+    return auth.isLoggedIn ? { name: 'MultiAgent' } : true
   }
   return auth.isLoggedIn ? true : { name: 'Login', query: { redirect: to.fullPath } }
 })

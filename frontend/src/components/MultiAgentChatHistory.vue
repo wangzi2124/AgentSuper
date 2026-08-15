@@ -96,7 +96,15 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
               <input v-model="editingTitle" class="rename-input" @keyup.enter="saveRename" @keyup.escape="cancelRename" @blur="saveRename" autofocus />
             </template>
             <template v-else>
-              <span class="item-title" @dblclick.stop="startRename(c)">{{ c.title }}</span>
+              <div class="item-title-row">
+                <span class="item-title" @dblclick.stop="startRename(c)">{{ c.title }}</span>
+                <span v-if="agent.sessions[c.id]?.streamPhase === 'queued'" class="stream-badge queued">
+                  ⏳ 排队中 #{{ agent.sessions[c.id]?.queuePosition }}
+                </span>
+                <span v-else-if="agent.sessions[c.id]?.streamPhase === 'running'" class="stream-badge running">
+                  ● 运行中
+                </span>
+              </div>
             </template>
           </div>
           <div class="item-actions">
@@ -130,13 +138,18 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
 .history-item:hover { background: var(--bg); }
 .history-item.active { background: var(--bg); }
 .item-content { flex: 1; min-width: 0; }
-.item-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text); }
+.item-title-row { display: flex; align-items: center; min-width: 0; }
+.item-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text); flex-shrink: 1; }
 .item-actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.15s; }
 .history-item:hover .item-actions { opacity: 1; }
 .action-btn { width: 24px; height: 24px; border: none; border-radius: 4px; background: transparent; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.1s; }
 .action-btn:hover { background: rgba(255,255,255,0.1); color: var(--text); }
 .action-btn.delete:hover { color: #ef4444; }
 .rename-input { width: 100%; border: 1px solid var(--primary); border-radius: 4px; padding: 2px 6px; font-size: 13px; background: var(--bg); color: var(--text); outline: none; }
+.stream-badge { font-size: 11px; padding: 2px 6px; border-radius: 5px; margin-left: 6px; white-space: nowrap; display: inline-block; vertical-align: middle; }
+.stream-badge.queued { background: rgba(251,191,36,0.12); color: #f59e0b; }
+.stream-badge.running { background: rgba(34,197,94,0.12); color: #22c55e; animation: pulse-badge 1.5s ease-in-out infinite; }
+@keyframes pulse-badge { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 /* 新建对话目录选择 */
 .new-chat-wrap { position: relative; flex: 1; }

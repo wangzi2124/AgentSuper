@@ -1,37 +1,35 @@
-"""CodeAgent — 代码辅助 Agent。
+"""CodeAgent — 代码辅助 Agent（对齐 opencode "build agent 即代码 Agent" 设计）。
 
-处理编程相关问题：代码编写、代码审查、性能分析、架构建议等。
-使用 LLM 生成代码，并通过共享记忆了解项目上下文。
-
-安全约束:
-  - 不会直接执行用户提供的代码（仅生成和分析）
-  - 所有生成的代码附带解释说明
-  - 不会访问或修改系统关键文件
+背景：原先 code 子 Agent 只用 4 轮、12K 上下文的简化工具循环，能力远弱于主 Agent
+（丢失文件工具全量 schema、技能、插件、生成器、对话历史、会话工作目录），被路由到
+code 反而"降级"。现在 code 直接委派给共享的主 RAGAgent 执行——它本身就带完整文件
+工具 + 技能 + 插件 + 生成器 + 工作区权限，等价于 opencode 的 primary build agent。
+子 Agent 面板事件（agent_start / agent_step / agent_done）仍由本包装器发出，
+前端 multi-agent UI 无需改动。
 
 支持的动作:
-  - "chat":       回答问题 + 生成代码
-  - "review":     审查代码片段
-  - "explain":    解释代码功能
+  - "chat":     完整代码/文件任务（委派主 Agent，默认关闭向量库，history/directory 透传）
+  - "review":   审查代码片段
+  - "explain":  解释代码功能
 """
 
-import asyncio
 import logging
 import time as tmod
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Callable, Optional
 
 import litellm
 
 from app.agent.base import BaseAgent, AgentMessage
+from app.agent.graph import RAGAgent
 from app.agent.memory import MemoryManager
-from app.agent.stream_events import agent_meta, emit, step_event
-from app.agent.sub_tools import tool_loop_chat
+from app.agent.stream_events import TaggedEventQueue, agent_meta, emit, step_event
 from app.config import settings
 from app.monitor import record_model_call
 from app.prompt_log import log_prompt  # [prompt log v1]
 
 logger = logging.getLogger(__name__)
 
-# 代码生成的安全提示词
+# 代码审查/解释的轻量系统提示词（仅 review/explain 动作使用，chat 已委派主 Agent）
 CODE_SYSTEM_PROMPT = """你是一个专业的代码助手。你可以:
 
 1. **编写代码**: 根据需求编写干净的、有注释的代码
@@ -54,17 +52,21 @@ CODE_SYSTEM_PROMPT = """你是一个专业的代码助手。你可以:
 class CodeAgent(BaseAgent):
     """代码辅助 Agent。
 
-    处理编程相关的查询，使用 LLM 生成代码并提供解释。
-    适合处理 Python、JavaScript、TypeScript 等常见语言的编程问题。
+    chat 动作委派给共享主 RAGAgent（完整工具链 + 工作区权限），
+    review/explain 动作仍走轻量 LLM 调用。
     """
 
     def __init__(
         self,
+        inner: RAGAgent,
         memory: Optional[MemoryManager] = None,
         agent_id: str = "code",
+        heartbeat: Optional[Callable[[str, str], None]] = None,
     ):
+        self._inner = inner
         self._id = agent_id
         self._memory = memory
+        self._heartbeat = heartbeat
         self._model = settings.llm_model
         self._api_key = settings.llm_api_key
         self._api_base = settings.llm_api_base
@@ -72,6 +74,14 @@ class CodeAgent(BaseAgent):
     @property
     def agent_id(self) -> str:
         return self._id
+
+    def _notify(self, progress: str) -> None:
+        """把处理进度转发给总线心跳（用于超时宽限续期 + 已完成步骤回传）。"""
+        if self._heartbeat:
+            try:
+                self._heartbeat(self._id, progress)
+            except Exception:
+                pass
 
     async def handle_message(self, msg: AgentMessage) -> AsyncIterator[AgentMessage]:
         if msg.type != "request":
@@ -83,9 +93,11 @@ class CodeAgent(BaseAgent):
         try:
             if action == "chat":
                 question = payload.get("question", "")
-                language = payload.get("language", "")
                 conv_id = payload.get("conversation_id", "")
                 event_queue = payload.get("_event_queue")
+                history = payload.get("history") or []
+                directory = payload.get("directory", "")
+                task_depth = int(payload.get("_task_depth", 0) or 0)
                 name, avatar = agent_meta(self._id)
                 emit(event_queue, {
                     "type": "agent_start",
@@ -94,20 +106,25 @@ class CodeAgent(BaseAgent):
                     "agent_avatar": avatar,
                 })
 
-                # 获取相关记忆（按 conversation 隔离）
-                memory_context = await self._build_memory_context(namespace=conv_id)
-
+                # 委派主 Agent：完整文件工具 + 技能 + 插件 + 工作区权限（对齐 opencode build agent）
+                tagged = TaggedEventQueue(event_queue, self._id) if event_queue is not None else None
                 start = tmod.time()
                 emit(event_queue, {
                     "type": "agent_step",
                     "agent_id": self._id,
                     "step": step_event("generate", "生成回答", "running"),
                 })
-                answer = await tool_loop_chat(
-                    system_prompt=CODE_SYSTEM_PROMPT + memory_context,
-                    user_message=question,
-                    event_queue=event_queue,
-                    agent_id=self._id,
+                result = await self._inner.invoke(
+                    question=question,
+                    model=payload.get("model"),
+                    history=history,
+                    use_vector_db=payload.get("use_vector_db", False),
+                    files=payload.get("files", []),
+                    conversation_id=conv_id,
+                    on_activity=self._notify,
+                    event_queue=tagged,
+                    directory=directory,
+                    task_depth=task_depth,
                 )
                 emit(event_queue, {
                     "type": "agent_step",
@@ -118,15 +135,19 @@ class CodeAgent(BaseAgent):
                     ),
                 })
 
+                answer = result.get("answer", "")
                 # 缓存到记忆（按 conversation 隔离）
                 if self._memory:
-                    await self._memory.set(
-                        f"code_last_q",
-                        question[:100],
-                        ttl=120,
-                        tags=["code"],
-                        namespace=conv_id,  # 🔒 Session 隔离
-                    )
+                    try:
+                        await self._memory.set(
+                            f"code_last_q",
+                            question[:100],
+                            ttl=120,
+                            tags=["code"],
+                            namespace=conv_id,  # 🔒 Session 隔离
+                        )
+                    except Exception:
+                        pass
 
                 emit(event_queue, {
                     "type": "agent_done",
@@ -136,7 +157,13 @@ class CodeAgent(BaseAgent):
                 yield AgentMessage(
                     source=self._id, target=msg.source,
                     type="response", action="chat",
-                    payload={"answer": answer, "sources": [], "steps": []},
+                    payload={
+                        "answer": answer,
+                        "sources": result.get("sources", []),
+                        "steps": result.get("steps", []),
+                        # 透传主 Agent 真实 LLM 用量，供 supervisor 汇总落库
+                        "tokens": result.get("tokens") or {},
+                    },
                     thread_id=msg.thread_id,
                 )
 
@@ -206,22 +233,6 @@ class CodeAgent(BaseAgent):
                 payload={"error": str(e)},
                 thread_id=msg.thread_id,
             )
-
-    async def _build_memory_context(self, namespace: str = "") -> str:
-        """从共享记忆中构建上下文提示（按 conversation 隔离）。"""
-        if not self._memory:
-            return ""
-
-        try:
-            code_memories = await self._memory.get_by_tag("code", namespace=namespace)
-            if code_memories:
-                return "\n\n[项目上下文]\n" + "\n".join(
-                    f"- {k}: {str(v)[:200]}"
-                    for k, v in code_memories.items()
-                )
-        except Exception:
-            pass
-        return ""
 
     async def _ask_llm(self, system_prompt: str, user_message: str) -> str:
         """调用 LLM 生成回答。"""

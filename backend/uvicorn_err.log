@@ -1,0 +1,62 @@
+E:\AgentSuper\backend\.venv\Lib\site-packages\jieba\_compat.py:18: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+INFO:     Started server process [11196]
+INFO:     Waiting for application startup.
+2026-08-15 12:06:16,749 - modelscope - INFO - Creating symbolic link [E:\AgentSuper\backend\data\models\BAAI\bge-small-zh-v1.5].
+2026-08-15 12:06:16,751 - modelscope - WARNING - Failed to create symbolic link E:\AgentSuper\backend\data\models\BAAI\bge-small-zh-v1.5 for E:\AgentSuper\backend\data\models\BAAI\bge-small-zh-v1___5.
+12:06:16 [INFO] sentence_transformers.base.model: Loading SentenceTransformer model from E:\AgentSuper\backend\data\models\BAAI\bge-small-zh-v1___5.
+Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€| 71/71 [00:00<00:00, 21332.06it/s]
+12:06:16 [INFO] app.rag.reranker: Loading reranker from local path: E:\AgentSuper\backend\data\models\cross-encoder\ms-marco-MiniLM-L6-v2
+12:06:16 [INFO] sentence_transformers.base.model: No device provided, using cpu
+12:06:16 [INFO] sentence_transformers.base.model: No modules.json found for E:\AgentSuper\backend\data\models\cross-encoder\ms-marco-MiniLM-L6-v2, initializing a new CrossEncoder model.
+Loading weights:   0%|          | 0/105 [00:00<?, ?it/s]Loading weights: 100%|¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€| 105/105 [00:00<00:00, 15854.34it/s]
+12:06:17 [WARNING] app.filesystem.project: cannot persist project id to E:\AgentSuper\.git\opencode\project.json (non-git dir or read-only)
+12:06:17 [INFO] app.runtime: project initialized: id=git:f72f47fb3691 worktree=E:\AgentSuper
+12:06:17 [INFO] app.permission.manager: Loaded 2 runtime workspaces
+12:06:17 [INFO] app.agent.memory: MemoryManager loaded 0 entries from data\agent_memory.json
+12:06:17 [INFO] app.agent.bus: \u2705 Agent registered: rag
+12:06:17 [INFO] app.agent.bus: \u2705 Agent registered: web_search
+12:06:17 [INFO] app.agent.bus: \u2705 Agent registered: code
+12:06:17 [INFO] app.agent.bus: \u2705 Agent registered: supervisor
+12:06:17 [INFO] app.runtime: Multi-agent system initialized: ['rag', 'web_search', 'code', 'supervisor']
+12:06:17 [INFO] app.agent.bus: Started 4 agent event loops
+12:06:17 [INFO] app.agent.bus: \U0001f501 Agent event loop started: rag
+12:06:17 [INFO] app.agent.bus: \U0001f501 Agent event loop started: web_search
+12:06:17 [INFO] app.agent.bus: \U0001f501 Agent event loop started: code
+12:06:17 [INFO] app.agent.bus: \U0001f501 Agent event loop started: supervisor
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+12:06:17 [INFO] app.api.weather: Detected city: Ì¨±±ÊÐ
+12:06:19 [INFO] app.api.weather: Weather loaded for Ì¨±±ÊÐ: À×±© 32.1¡ãC
+12:39:02 [INFO] app.monitor: GET /health ¡ú 200 (28ms)
+12:39:58 [INFO] app.monitor: GET /api/auth/account/me ¡ú 401 (12ms)
+12:40:04 [INFO] app.monitor: POST /api/auth/account/login ¡ú 401 (65ms)
+12:40:11 [INFO] app.monitor: POST /api/auth/account/register ¡ú 200 (85ms)
+12:40:18 [INFO] app.monitor: GET /api/sessions ¡ú 200 (13ms)
+12:40:18 [INFO] app.monitor: POST /api/sessions ¡ú 200 (10ms)
+12:40:26 [INFO] app.monitor: GET /api/sessions ¡ú 200 (3ms)
+12:40:38 [INFO] app.monitor: POST /api/sessions ¡ú 200 (4ms)
+12:40:38 [INFO] app.monitor: GET /api/chat/stream/status ¡ú 404 (1ms)
+12:40:55 [INFO] app.agent.supervisor: Supervisor routing to 'rag' (thread=ses_20288tu70g3fd7688:task:3d51e512)
+12:40:55 [INFO] app.agent.rag_wrapper: RAGAgentWrapper handling: action=chat thread=ses_20288tu70g3fd7688:task:3d51e512:sub:21c31edf
+[92m12:40:55 - LiteLLM:INFO[0m: utils.py:4090 - 
+LiteLLM completion() model= deepseek-v4-flash; provider = deepseek
+12:40:55 [INFO] LiteLLM: 
+LiteLLM completion() model= deepseek-v4-flash; provider = deepseek
+12:40:57 [INFO] app.agent.graph: LLM call | model=deepseek/deepseek-v4-flash pt=3230 ct=60 cache_hit=3200 cache_miss=30 dur=1795ms
+12:40:57 [INFO] app.monitor: POST /api/chat/multi-agent ¡ú 200 (1841ms)
+12:41:07 [INFO] app.agent.supervisor: Supervisor routing to 'rag' (thread=ses_20288umjocrd1645a:task:480999af)
+12:41:07 [INFO] app.agent.rag_wrapper: RAGAgentWrapper handling: action=chat thread=ses_20288umjocrd1645a:task:480999af:sub:e2467bd2
+[92m12:41:07 - LiteLLM:INFO[0m: utils.py:4090 - 
+LiteLLM completion() model= deepseek-v4-flash; provider = deepseek
+12:41:07 [INFO] LiteLLM: 
+LiteLLM completion() model= deepseek-v4-flash; provider = deepseek
+12:41:08 [INFO] app.agent.graph: LLM call | model=deepseek/deepseek-v4-flash pt=3230 ct=63 cache_hit=3200 cache_miss=30 dur=1237ms
+12:41:08 [INFO] app.monitor: POST /api/chat/multi-agent/stream ¡ú 200 (1265ms)
+12:41:56 [INFO] app.monitor: GET /api/sessions ¡ú 200 (3ms)
+12:42:04 [INFO] app.monitor: GET /api/sessions/ses_20288tu70g3fd7688/messages ¡ú 200 (3ms)
+12:42:19 [INFO] app.monitor: DELETE /api/sessions/ses_20288rdcxz58745fc ¡ú 204 (2ms)
+12:42:19 [INFO] app.monitor: DELETE /api/sessions/ses_20288sq016q8853ce ¡ú 204 (1ms)
+12:42:19 [INFO] app.monitor: DELETE /api/sessions/ses_20288tu70g3fd7688 ¡ú 204 (2ms)
+12:42:19 [INFO] app.monitor: DELETE /api/sessions/ses_20288umjocrd1645a ¡ú 204 (1ms)
+12:42:19 [INFO] app.monitor: GET /api/sessions ¡ú 200 (0ms)

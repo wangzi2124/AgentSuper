@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from . import repository
 from .deps import SessionContext, create_project_context, get_user_id, resolve_session_context
-from .models import PromptRequest, RevertRequest, SessionCreate, SessionInfo, SessionStatus, SessionUpdate
+from .models import RevertRequest, SessionCreate, SessionInfo, SessionStatus, SessionUpdate
 
 router = APIRouter()
 
@@ -101,15 +101,6 @@ async def fork_session(
     ctx: SessionContext = Depends(resolve_session_context),
 ):
     return await ctx.service.fork(ctx.user_id, ctx.session_id, message_id=message_id)
-
-
-@router.post("/{session_id}/prompt", response_model=dict)
-async def prompt_session(body: PromptRequest, ctx: SessionContext = Depends(resolve_session_context)):
-    """投递输入到会话并唤醒执行（delivery: steer|queue）。"""
-    input_id = ctx.service.prompt(
-        ctx.user_id, ctx.session_id, body.prompt, body.files, delivery=body.delivery
-    )
-    return {"input_id": input_id, "session_id": ctx.session_id}
 
 
 @router.get("/{session_id}/messages", response_model=list)

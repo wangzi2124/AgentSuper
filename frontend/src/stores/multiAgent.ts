@@ -11,7 +11,13 @@ import {
   deleteConversation as apiDeleteConversation,
   type ConversationMeta,
 } from '../api/sessions'
-import { SUPPORTED_MODELS } from './chat'
+import { SUPPORTED_MODELS } from '../config/models'
+import {
+  saveSessionToCache,
+  loadSessionFromCache,
+  deleteSessionFromCache,
+  mergeServerAndCache,
+} from '../api/session-cache'
 import { interruptSession, revertSession, deleteSessionMessage } from '../api/sessions'
 import { usePermissionStore } from './permission'
 
@@ -26,7 +32,11 @@ interface SessionState {
   conversationTitle: string
   loading: boolean
   abortController: AbortController | null
+  streamPhase: 'idle' | 'queued' | 'running'
   queuePosition: number | null
+  liveMsgId: string | null
+  liveContent: string
+  deletedIds: string[]
 }
 
 export const useMultiAgentStore = defineStore('multiAgent', () => {
@@ -40,6 +50,14 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   // 随请求 directory 创建会话；已有会话在 loadConversation 时同步为服务器值。
   const sessionDirectory = ref('')
 
+  // --- 重试机制 ---
+  const AUTO_RETRY_DELAY = 5 // 秒
+  const MAX_AUTO_RETRIES = 2
+  let autoRetryTimer: ReturnType<typeof setTimeout> | null = null
+  const retryCountdown = ref(0)
+  const autoRetrySessionId = ref<string | undefined>(undefined)
+  const retryMessageText = ref('')
+
   function setSessionDirectory(dir: string) {
     sessionDirectory.value = dir || ''
   }
@@ -52,10 +70,32 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         conversationTitle: title || '',
         loading: false,
         abortController: null,
+        streamPhase: 'idle',
         queuePosition: null,
+        liveMsgId: null,
+        liveContent: '',
+        deletedIds: [],
       }
     }
     return sessions.value[sessionId]
+  }
+
+  // 将会话消息持久化到 IndexedDB（过滤 live 占位 + 墓碑）
+  async function persistSession(sessionId: string) {
+    const session = sessions.value[sessionId]
+    if (!session) return
+    const messages = session.messages.filter(m => !m.live)
+    const cacheKey = session.conversationId || sessionId
+    await saveSessionToCache<MultiAgentMessage>(
+      cacheKey,
+      messages,
+      session.conversationId,
+      session.conversationTitle,
+      session.deletedIds,
+    )
+    if (cacheKey !== sessionId) {
+      await deleteSessionFromCache(sessionId)
+    }
   }
 
   const currentSession = computed(() => {
@@ -67,6 +107,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const conversationId = computed(() => currentSession.value?.conversationId)
   const conversationTitle = computed(() => currentSession.value?.conversationTitle)
   const loading = computed(() => currentSession.value?.loading || false)
+  const streamPhase = computed(() => currentSession.value?.streamPhase || 'idle')
   const queuePosition = computed(() => currentSession.value?.queuePosition ?? null)
 
   async function loadConversations() {
@@ -79,22 +120,36 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     const session = getOrCreateSession(id, meta?.title)
     session.conversationId = id
     if (meta) session.conversationTitle = meta.title
-    if (session.loading) { activeSessionId.value = id; return }
+    // 会话正在流式 → 保留本地消息，不覆盖
+    if (session.loading || session.streamPhase !== 'idle') { activeSessionId.value = id; return }
     try {
       const detail = await getConversation(id, 'multi-agent')
       session.conversationTitle = detail.title
       // 同步会话绑定目录（服务器为准）
       if (detail.directory) sessionDirectory.value = detail.directory
-      session.messages = detail.messages.map(m => ({
+      const serverMessages: MultiAgentMessage[] = detail.messages.map(m => ({
         id: m.id,
         role: m.role as 'user' | 'assistant',
         content: m.content || '',
-        agents: m.agents || [],
+        agents: (m as any).agents || [],
         timestamp: new Date(),
       }))
+      // 从 IndexedDB 加载本地缓存（SSE 中断时可能有未同步消息）
+      const cached = await loadSessionFromCache<MultiAgentMessage>(id)
+      session.deletedIds = cached?.deletedIds || []
+      session.messages = mergeServerAndCache(serverMessages, cached?.messages || [], session.deletedIds)
+      await saveSessionToCache(id, session.messages, id, detail.title, session.deletedIds)
       activeSessionId.value = id
     } catch (e) {
       console.error('Failed to load conversation:', e)
+      // 服务器获取失败，尝试从 IndexedDB 恢复
+      const cached = await loadSessionFromCache<MultiAgentMessage>(id)
+      if (cached) {
+        session.deletedIds = cached.deletedIds || []
+        const tomb = new Set(session.deletedIds)
+        session.messages = cached.messages.filter(m => !m.live && !tomb.has(m.id))
+        session.conversationTitle = cached.conversationTitle || session.conversationTitle
+      }
       activeSessionId.value = id
     }
   }
@@ -111,6 +166,131 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
   function newChat() { routingStatus.value = ''; activeSessionId.value = undefined }
 
+  // --- 错误分类 ---
+
+  function classifySSEError(event: MultiAgentSSEEvent): ChatError {
+    const detail = event.error || event.detail || 'Unknown error'
+    if (event.retryable) {
+      if (event.status_code === 429) return { type: 'rate_limit', message: detail, retryable: true, statusCode: 429 }
+      if (event.status_code === 503) return { type: 'server_error', message: detail, retryable: true, statusCode: 503 }
+      if (event.status_code && event.status_code >= 500) return { type: 'server_error', message: detail, retryable: true, statusCode: event.status_code }
+      return { type: 'network', message: detail, retryable: true }
+    }
+    return { type: 'unknown', message: detail, retryable: false }
+  }
+
+  function classifyNetworkError(err: unknown): ChatError {
+    const msg = err instanceof Error ? err.message : String(err)
+    const lower = msg.toLowerCase()
+    if (lower.includes('abort') || lower.includes('aborted')) return { type: 'unknown', message: msg, retryable: false }
+    if (lower.includes('timeout') || lower.includes('timed out')) return { type: 'timeout', message: msg, retryable: true }
+    if (lower.includes('rate limit') || lower.includes('429') || lower.includes('too many requests')) return { type: 'rate_limit', message: msg, retryable: true }
+    if (lower.includes('failed to fetch') || lower.includes('networkerror')) return { type: 'network', message: msg, retryable: true }
+    if (lower.includes('500') || lower.includes('502') || lower.includes('503') || lower.includes('504')) return { type: 'server_error', message: msg, retryable: true }
+    return { type: 'unknown', message: msg, retryable: false }
+  }
+
+  function formatErrorMessage(info: ChatError): string {
+    switch (info.type) {
+      case 'rate_limit': return `请求过于频繁（${info.statusCode || 429}），请稍后重试`
+      case 'server_error': return `服务器错误（${info.statusCode || 500}），请稍后重试`
+      case 'network': return `网络连接中断，请检查网络后重试`
+      case 'timeout': return `请求超时，请稍后重试`
+      default: return `出错了: ${info.message}`
+    }
+  }
+
+  // --- 自动重试 ---
+
+  function startAutoRetry(sessionId: string, text: string) {
+    const session = sessions.value[sessionId]
+    if (!session) return
+
+    // 检查自动重试次数（通过计算连续 error 消息数）
+    let consecutiveErrors = 0
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+      if (session.messages[i].isError) consecutiveErrors++
+      else break
+    }
+    if (consecutiveErrors >= MAX_AUTO_RETRIES) {
+      cancelAutoRetry()
+      return
+    }
+
+    cancelAutoRetry()
+    retryCountdown.value = AUTO_RETRY_DELAY
+    autoRetrySessionId.value = sessionId
+    retryMessageText.value = text
+
+    autoRetryTimer = setInterval(() => {
+      retryCountdown.value--
+      if (retryCountdown.value <= 0) {
+        cancelAutoRetry()
+        retryLastMessage()
+      }
+    }, 1000)
+  }
+
+  function cancelAutoRetry() {
+    if (autoRetryTimer) {
+      clearInterval(autoRetryTimer)
+      autoRetryTimer = null
+    }
+    retryCountdown.value = 0
+    autoRetrySessionId.value = undefined
+    retryMessageText.value = ''
+  }
+
+  // 重试最后一条用户消息
+  async function retryLastMessage() {
+    const sessionId = autoRetrySessionId.value || activeSessionId.value
+    if (!sessionId) return
+    const session = sessions.value[sessionId]
+    if (!session) return
+
+    const lastUserMsg = [...session.messages].reverse().find(m => m.role === 'user')
+    if (!lastUserMsg) return
+
+    // 删除最后一条 error 消息（如果有）
+    const lastMsg = session.messages[session.messages.length - 1]
+    if (lastMsg?.isError) {
+      session.messages = session.messages.slice(0, -1)
+    }
+
+    // 同时移除原 user 消息，避免重试后产生重复的用户消息
+    const lastUserMsgIdx = session.messages.findIndex(m => m.id === lastUserMsg.id)
+    if (lastUserMsgIdx >= 0) {
+      session.messages = session.messages.slice(0, lastUserMsgIdx)
+    }
+
+    await send(lastUserMsg.content)
+  }
+
+  // 手动重试（从 error 消息的 UI 触发）
+  async function manualRetry(messageId: string) {
+    if (!activeSessionId.value) return
+    const session = sessions.value[activeSessionId.value]
+    if (!session) return
+
+    cancelAutoRetry()
+
+    const errorIdx = session.messages.findIndex(m => m.id === messageId)
+    if (errorIdx < 0) return
+
+    let userIdx = -1
+    for (let i = errorIdx - 1; i >= 0; i--) {
+      if (session.messages[i].role === 'user') {
+        userIdx = i
+        break
+      }
+    }
+    if (userIdx < 0) return
+
+    const userMsg = session.messages[userIdx]
+    session.messages = session.messages.slice(0, userIdx)
+    await send(userMsg.content)
+  }
+
   async function send(text: string) {
     let sessionId = activeSessionId.value
     if (!sessionId) {
@@ -123,12 +303,15 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (!session) return
     // 防止同一会话并发发送导致消息/步骤竞态
     if (session.loading) return
+    // 用户主动发送新消息时，取消待执行的自动重试
+    cancelAutoRetry()
 
     const userMsg: MultiAgentMessage = {
       id: genId(), role: 'user', content: text, agents: [], timestamp: new Date(),
     }
     session.messages = [...session.messages, userMsg]
     session.loading = true
+    session.streamPhase = 'queued'
     session.queuePosition = null
 
     const assistantMsgId = genId()
@@ -137,6 +320,12 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       id: assistantMsgId, role: 'assistant', content: '', agents: [], timestamp: new Date(),
     })
     session.messages = [...session.messages, assistantMsg]
+
+    autoRetrySessionId.value = sessionId
+    retryMessageText.value = text
+
+    // 发送后立即持久化（SSE 中断也不丢失 user 消息）
+    persistSession(sessionId)
 
     const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, directory: sessionDirectory.value || undefined }
     const controller = new AbortController()
@@ -153,12 +342,14 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         }
 
         if (event.type === 'queued') {
+          session.streamPhase = 'queued'
           session.queuePosition = event.queue_position ?? null
           return
         }
 
-        // 收到任何执行事件 → 清除排队状态
-        if (session.queuePosition !== null) {
+        // 收到任何执行事件 → 运行阶段
+        if (session.streamPhase !== 'running') {
+          session.streamPhase = 'running'
           session.queuePosition = null
         }
 
@@ -203,12 +394,19 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             created_at: new Date().toISOString(),
           })
         } else if (event.type === 'error') {
+          session.streamPhase = 'idle'
           routingStatus.value = ''
           assistantMsg.isError = true
-          const msg = event.error || event.detail || 'Unknown error'
-          assistantMsg.errorInfo = { type: event.retryable ? 'server_error' : 'unknown', message: msg, retryable: !!event.retryable, statusCode: event.status_code }
-          assistantMsg.content = `Error: ${msg}`
+          const errorInfo = classifySSEError(event)
+          assistantMsg.errorInfo = errorInfo
+          assistantMsg.content = formatErrorMessage(errorInfo)
+          persistSession(sessionId)
+          // 自动重试：仅对可重试错误且未超过最大次数
+          if (errorInfo.retryable && autoRetrySessionId.value === sessionId) {
+            startAutoRetry(sessionId, text)
+          }
         } else if (event.type === 'done') {
+          session.streamPhase = 'idle'
           routingStatus.value = ''
           session.conversationId = event.conversation_id
           if (event.title) { session.conversationTitle = event.title; loadConversations() }
@@ -231,6 +429,16 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           } else {
             assistantMsg.agents = Object.values(agentsMap)
           }
+          // 完成后持久化 + 内存 key 迁移（客户端 genId → 服务器 id）
+          persistSession(sessionId)
+          const serverId = session.conversationId
+          if (serverId && serverId !== sessionId) {
+            sessions.value[serverId] = session
+            delete sessions.value[sessionId]
+            if (activeSessionId.value === sessionId) activeSessionId.value = serverId
+            if (autoRetrySessionId.value === sessionId) autoRetrySessionId.value = serverId
+          }
+          cancelAutoRetry()
         }
       }, signal, (sid) => {
         // 后端在响应头 X-Session-Id 立即透出会话 id（先于任何 SSE 事件），
@@ -240,15 +448,23 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         }
       })
     } catch (err: any) {
+      session.streamPhase = 'idle'
+      session.queuePosition = null
       const isChatError = err && typeof err === 'object' && 'retryable' in err
-      const errorInfo: ChatError = isChatError ? err as ChatError : { type: 'unknown', message: String(err), retryable: false }
+      const errorInfo: ChatError = isChatError ? err as ChatError : classifyNetworkError(err)
       if (!signal.aborted) {
-        assistantMsg.isError = true; assistantMsg.errorInfo = errorInfo; assistantMsg.content = `Error: ${errorInfo.message}`
+        assistantMsg.isError = true; assistantMsg.errorInfo = errorInfo; assistantMsg.content = formatErrorMessage(errorInfo)
         assistantMsg.agents = Object.values(agentsMap)
+        persistSession(sessionId)
+        // 自动重试：仅对可重试错误且未超过最大次数
+        if (errorInfo.retryable && autoRetrySessionId.value === sessionId) {
+          startAutoRetry(sessionId, text)
+        }
       }
     } finally {
       routingStatus.value = ''
       session.loading = false
+      session.streamPhase = 'idle'
       session.queuePosition = null
       if (session.abortController === controller) session.abortController = null
     }
@@ -273,7 +489,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   function clear() {
     if (activeSessionId.value) {
       const s = sessions.value[activeSessionId.value]
-      if (s) { s.messages = []; s.conversationId = undefined; s.conversationTitle = '' }
+      if (s) { s.messages = []; s.conversationId = undefined; s.conversationTitle = ''; s.deletedIds = [] }
+      deleteSessionFromCache(activeSessionId.value)
     }
   }
 
@@ -284,10 +501,16 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       if (!s) return
       // 目标保留消息 = 撤销点前一条；index===0 无保留消息，仅本地清空
       const target = index > 0 ? s.messages[index - 1] : undefined
+      const removedIds = s.messages.slice(index).map(m => m.id)
       if (s.conversationId && target) {
         try { await revertSession(s.conversationId, target.id) } catch (e) { console.error('Failed to sync undo:', e) }
       }
       s.messages = s.messages.slice(0, index)
+      // 记录墓碑，防止 IndexedDB 缓存把已撤销消息合并复活
+      if (removedIds.length) {
+        s.deletedIds = [...new Set([...s.deletedIds, ...removedIds])]
+      }
+      await persistSession(activeSessionId.value)
     }
   }
 
@@ -302,14 +525,23 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           console.error('Failed to delete message from server:', e)
         }
       }
-      if (s) s.messages = s.messages.filter(m => m.id !== messageId)
+      if (s) {
+        s.messages = s.messages.filter(m => m.id !== messageId)
+        if (!s.deletedIds.includes(messageId)) s.deletedIds.push(messageId)
+        await persistSession(activeSessionId.value)
+      }
     }
   }
 
   async function deleteConversation() {
     if (activeSessionId.value) {
+      cancelAutoRetry()
       const s = sessions.value[activeSessionId.value]
-      if (s?.conversationId) { try { await apiDeleteConversation(s.conversationId) } catch (e) { console.error('Failed to delete:', e) } }
+      s?.abortController?.abort()
+      const serverId = s?.conversationId || activeSessionId.value
+      if (serverId) { try { await apiDeleteConversation(serverId) } catch (e) { console.error('Failed to delete:', e) } }
+      await deleteSessionFromCache(serverId)
+      if (serverId !== activeSessionId.value) await deleteSessionFromCache(activeSessionId.value)
       delete sessions.value[activeSessionId.value]
       activeSessionId.value = undefined
       loadConversations()
@@ -319,8 +551,10 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   return {
     sessions, activeSessionId, conversations, routingStatus, selectedModel, useVectorDb,
     sessionDirectory, setSessionDirectory,
-    messages, conversationId, conversationTitle, loading, queuePosition,
+    messages, conversationId, conversationTitle, loading, streamPhase, queuePosition,
+    retryCountdown,
     send, cancel, clear, undoMessage, deleteMessage, deleteConversation,
     loadConversations, loadConversation, newChat, renameConversation,
+    retryLastMessage, manualRetry, cancelAutoRetry,
   }
 })

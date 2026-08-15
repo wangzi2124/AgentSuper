@@ -256,6 +256,12 @@ def build_system_prompt_no_kb(
             "   - tool_delete_file(path) - Delete a file or empty directory\n"
             "   - tool_rename_file(path, new_path) - Rename or move a file/directory"
         )
+        tool_parts.append(
+            "   - tool_task(description, prompt, subagent_type) - Delegate a focused, independent subtask "
+            "to a sub-agent ('web_search' for realtime/news/network info, 'code' for coding/file work) and "
+            "get its final result back. The sub-agent starts with fresh context — include all details. "
+            "Use it for specialized or parallel work; do NOT delegate what you can do directly."
+        )
 
     if enabled_skills:
         # [token 优化 v10] 不再逐一列出全部技能名（30+ 技能约 1.3K 字符，固定随每次调用发出）。

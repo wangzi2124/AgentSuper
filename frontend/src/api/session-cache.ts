@@ -5,17 +5,26 @@
  * - SSE 流式接收时增量写入 IndexedDB
  * - 页面加载时从 IndexedDB 恢复消息
  * - 与服务器数据合并，取最新版本
+ *
+ * 消息类型泛型化：同时服务单 Agent（Message）与多 Agent（MultiAgentMessage）。
  */
-
-import type { Message } from '../types'
 
 const DB_NAME = 'kb-chat-sessions'
 const DB_VERSION = 1
 const STORE_NAME = 'sessions'
 
-interface CachedSession {
+// 缓存所需的消息最小形状（多 Agent 消息多出的 agents/isError 等字段原样透传）
+export interface CacheMessage {
+  id: string
+  role: string
+  content: string
+  timestamp: Date
+  live?: boolean
+}
+
+interface CachedSession<M extends CacheMessage> {
   sessionId: string
-  messages: Message[]
+  messages: M[]
   conversationId?: string
   conversationTitle?: string
   /** 已删除消息 id（墓碑：防止 merge 时复活已删消息） */
@@ -49,9 +58,9 @@ function openDB(): Promise<IDBDatabase> {
 }
 
 /** 保存会话消息到 IndexedDB */
-export async function saveSessionToCache(
+export async function saveSessionToCache<M extends CacheMessage>(
   sessionId: string,
-  messages: Message[],
+  messages: M[],
   conversationId?: string,
   conversationTitle?: string,
   deletedIds?: string[],
@@ -61,7 +70,7 @@ export async function saveSessionToCache(
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite')
       const store = tx.objectStore(STORE_NAME)
-      const data: CachedSession = {
+      const data: CachedSession<M> = {
         sessionId,
         // 序列化时将 Date 转为 ISO 字符串，反序列化时恢复
         messages: messages.map(m => ({
@@ -83,7 +92,7 @@ export async function saveSessionToCache(
 }
 
 /** 从 IndexedDB 加载会话消息 */
-export async function loadSessionFromCache(sessionId: string): Promise<CachedSession | null> {
+export async function loadSessionFromCache<M extends CacheMessage>(sessionId: string): Promise<CachedSession<M> | null> {
   try {
     const db = await openDB()
     return new Promise((resolve, reject) => {
@@ -91,7 +100,7 @@ export async function loadSessionFromCache(sessionId: string): Promise<CachedSes
       const store = tx.objectStore(STORE_NAME)
       const req = store.get(sessionId)
       req.onsuccess = () => {
-        const result = req.result as CachedSession | undefined
+        const result = req.result as CachedSession<M> | undefined
         if (result) {
           // 反序列化：将 ISO 字符串恢复为 Date 对象
           result.messages = result.messages.map(m => ({
@@ -118,7 +127,7 @@ export async function loadAllSessionIds(): Promise<string[]> {
       const store = tx.objectStore(STORE_NAME)
       const req = store.getAll()
       req.onsuccess = () => {
-        const results = req.result as CachedSession[]
+        const results = req.result as CachedSession<CacheMessage>[]
         results.sort((a, b) => b.updatedAt - a.updatedAt)
         resolve(results.map(r => r.sessionId))
       }
@@ -157,14 +166,14 @@ export async function deleteSessionFromCache(sessionId: string): Promise<void> {
  * deletedIds：本端已删除的消息 id（墓碑）。被删除的消息不再从缓存复活——
  * 修复 deleteMessage/undoMessage 后服务器已删除、但 IndexedDB 仍残留旧数据被合并回来的问题。
  */
-export function mergeServerAndCache(
-  serverMessages: Message[],
-  cachedMessages: Message[],
+export function mergeServerAndCache<M extends CacheMessage>(
+  serverMessages: M[],
+  cachedMessages: M[],
   deletedIds?: string[],
-): Message[] {
+): M[] {
   const tomb = new Set(deletedIds || [])
   // 过滤：已删除消息（墓碑）+ 流式占位消息（live）一律不参与合并
-  const filterDeleted = (m: Message) => !m.live && !tomb.has(m.id)
+  const filterDeleted = (m: M) => !m.live && !tomb.has(m.id)
 
   const server = serverMessages.filter(filterDeleted)
   const cached = cachedMessages.filter(filterDeleted)
@@ -172,7 +181,7 @@ export function mergeServerAndCache(
   if (cached.length === 0) return server
   if (server.length === 0) return cached
 
-  const merged = new Map<string, Message>()
+  const merged = new Map<string, M>()
 
   // 先放服务器数据
   for (const msg of server) {
@@ -186,9 +195,9 @@ export function mergeServerAndCache(
       // 服务器没有这条消息，补入（可能是 SSE 中断时的 user 消息）
       merged.set(msg.id, msg)
     } else if (msg.role === 'assistant') {
-      // assistant 消息：优先取有 sources/steps/parts 的版本，其次取 content 更长的
-      const existingHasMeta = !!(existing as any).sources || !!(existing as any).steps || !!(existing as any).parts
-      const cachedHasMeta = !!(msg as any).sources || !!(msg as any).steps || !!(msg as any).parts
+      // assistant 消息：优先取有元数据（sources/steps/parts/agents）的版本，其次取 content 更长的
+      const existingHasMeta = !!(existing as any).sources || !!(existing as any).steps || !!(existing as any).parts || !!(existing as any).agents
+      const cachedHasMeta = !!(msg as any).sources || !!(msg as any).steps || !!(msg as any).parts || !!(msg as any).agents
       if (cachedHasMeta && !existingHasMeta) {
         merged.set(msg.id, msg)
       } else if (msg.content.length > existing.content.length) {
@@ -198,7 +207,7 @@ export function mergeServerAndCache(
   }
 
   // 按原始顺序排列（服务器顺序为准，本地特有的追加到末尾）
-  const result: Message[] = []
+  const result: M[] = []
   const serverIds = new Set(server.map(m => m.id))
 
   for (const msg of server) {

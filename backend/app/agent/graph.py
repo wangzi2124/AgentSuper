@@ -1,10 +1,12 @@
 import asyncio
+import inspect
 import json
 import logging
 import os
 import shlex
 import subprocess
 import time as tmod
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Callable, TypedDict
@@ -118,9 +120,55 @@ from app.context.budget import usable_context_tokens, compaction_threshold_token
 # 读取类工具：只读文件/目录状态，结果可被后续写操作改变，因此缓存仅在"未发生写操作"时有效
 _DEDUP_READONLY_TOOLS = {"tool_ls", "tool_read_file", "tool_glob", "tool_grep"}
 
+# ── [opencode task tool] 主 Agent 可委派聚焦子任务的子 Agent 白名单 ──
+# 排除 rag（= 自身，避免自递归）与 supervisor（编排者不是执行者）。
+_TASK_TOOL_SUBAGENTS = ("web_search", "code")
+
+_TASK_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "tool_task",
+        "description": (
+            "Launch a sub-agent (web_search / code) to handle a focused, multi-step subtask "
+            "autonomously and return its final result. Use this tool when a piece of the request "
+            "is independent/specialized and benefits from a dedicated context (e.g. realtime web "
+            "search, a separate coding task). You continue working while it runs, and may launch "
+            "multiple sub-agents. Do NOT delegate work you can do directly yourself."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "description": "A short (3-5 words) description of the task"},
+                "prompt": {
+                    "type": "string",
+                    "description": "The detailed task for the sub-agent. It starts with fresh context — "
+                    "include all file paths and background needed. Say clearly what to return.",
+                },
+                "subagent_type": {
+                    "type": "string",
+                    "enum": list(_TASK_TOOL_SUBAGENTS),
+                    "description": "web_search for realtime/news/network info; code for coding, "
+                    "file analysis or multi-step implementation work.",
+                },
+            },
+            "required": ["description", "prompt", "subagent_type"],
+        },
+    },
+}
+
+
+def _is_multi_agent_queue(q) -> bool:
+    """判断事件队列是否来自 multi-agent 流（子 Agent 面板事件只有 multi-agent UI 消费）。"""
+    try:
+        from app.agent.stream_events import AgentEventCollector, TaggedEventQueue
+        return isinstance(q, (AgentEventCollector, TaggedEventQueue))
+    except Exception:  # noqa: BLE001
+        return False
+
 import litellm
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
+from app.agent.base import AgentMessage
 from app.rag.retriever import Retriever
 from app.rag.reranker import Reranker
 from app.skills.loader import SkillLoader
@@ -159,6 +207,7 @@ class AgentState(TypedDict):
     _on_activity: Callable[[str], None] | None
     _task: object | None
     _cwd: str
+    _task_depth: int
 
 
 _ZERO_USAGE = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
@@ -210,6 +259,17 @@ class RAGAgent:
             self.tools.extend(create_skill_tools(skill_loader))
         if plugin_loader:
             self.tools.extend(create_plugin_tools(plugin_loader))
+        # [opencode task tool] 主 Agent 自主委派子 Agent（web_search / code）。
+        # fn 仅为 schema 占位：实际执行在 _execute_tool 中特判（需注入任务深度与事件队列）。
+        self.tools.append(ToolDef(
+            name="tool_task",
+            description=_TASK_TOOL_SCHEMA["function"]["description"],
+            parameters=_TASK_TOOL_SCHEMA["function"]["parameters"],
+            fn=self._task_tool_placeholder,
+        ))
+
+        # 子 Agent 消息总线（runtime.py 注入）：供 tool_task 委派使用
+        self.task_bus: object | None = None
 
         self.system_prompt = build_system_prompt_no_kb(
             skill_loader or SkillLoader(""),
@@ -329,6 +389,10 @@ class RAGAgent:
             "\n- plugin_character-analysis_tool_list_characters(): List all characters and their dialogue counts."
             "\n- plugin_character-analysis_tool_get_character_dialogues(character_name, limit): Get all dialogues spoken by a character."
             "\n- plugin_character-analysis_tool_analyze_character_interactions(character_name): Find characters who appear in same chapters."
+            "\n\nYou also have a task tool: tool_task(description, prompt, subagent_type). "
+            "Use it to delegate independent or specialized subtasks (realtime web search via 'web_search', "
+            "or a separate coding/file task via 'code') to a sub-agent and get its final result back — "
+            "it runs with fresh context, so include all needed details. Do NOT delegate work you can do directly."
             "\n\n" + LONG_CONTENT_FILE_RULE
         )
 
@@ -429,11 +493,81 @@ class RAGAgent:
             return result[:self._WEATHER_RESULT_LIMIT] + "\n…[已截断：天气/台风数据过长，仅保留前 1500 字符]"
         return result
 
+    def _task_tool_placeholder(self, description: str = "", prompt: str = "", subagent_type: str = "web_search") -> str:
+        """占位实现：_execute_tool 对 tool_task 特判，这里不会被真正调用。"""
+        return ""
+
+    async def _tool_task(self, args: dict, depth: int = 0, event_queue=None, directory: str = "") -> str:
+        """[opencode task tool] 把聚焦子任务委派给子 Agent 并取回最终结果。
+
+        - subagent_type 白名单排除 rag（= 自身）与 supervisor（编排者非执行者），防自递归
+        - 嵌套深度受 settings.subagent_depth 限制（默认 1 = 主 Agent 只能再委派一层，对齐 opencode）
+        - 子 Agent 以全新上下文执行（对齐 opencode task 工具 "fresh context" 语义），
+          事件队列仅当来自 multi-agent 流时才透传（单 Agent 流不推子 Agent 面板事件）；
+          会话工作目录（directory）透传给子 Agent，文件工具落在会话目录而非 git worktree
+        """
+        prompt = str(args.get("prompt") or "").strip()
+        subagent_type = str(args.get("subagent_type") or "").strip()
+        if not prompt:
+            return "Error: 'prompt' is required for tool_task."
+        if subagent_type not in _TASK_TOOL_SUBAGENTS:
+            return f"Error: unknown subagent_type '{subagent_type}'. Valid: {sorted(_TASK_TOOL_SUBAGENTS)}."
+        bus = getattr(self, "task_bus", None)
+        if bus is None:
+            return "Error: sub-agent bus is unavailable (tool_task disabled)."
+        max_depth = max(1, settings.subagent_depth)
+        if depth >= max_depth:
+            return (
+                f"Error: sub-agent depth limit reached ({max_depth}). "
+                f"Increase SUBAGENT_DEPTH (default 1) to allow nested sub-agents."
+            )
+
+        # 工具密集型子 Agent 使用更长等待，避免长任务被误判超时（对齐 supervisor._timeout_for）
+        timeout = settings.sub_agent_timeout_extended if subagent_type == "code" else settings.sub_agent_timeout
+        sub_thread_id = f"task:{uuid.uuid4().hex[:8]}"
+        reply = await bus.send_and_wait(
+            AgentMessage(
+                source="user",
+                target=subagent_type,
+                type="request",
+                action="chat",
+                payload={
+                    "question": prompt,
+                    "model": self.model,
+                    "history": [],
+                    "use_vector_db": False,
+                    "files": [],
+                    "conversation_id": "",
+                    "directory": directory,
+                    "_task_depth": depth + 1,
+                    "_event_queue": event_queue,
+                },
+                thread_id=sub_thread_id,
+            ),
+            timeout=timeout,
+        )
+        if reply.type == "response":
+            return reply.payload.get("answer", "") or "(no answer)"
+        err = reply.payload.get("error", "sub-agent failed")
+        return f"Error: sub-agent '{subagent_type}' failed: {err}"
+
     async def _execute_tool(self, name: str, args: dict, state: dict | None = None) -> str:
         """执行指定的工具函数，处理权限检查和错误。"""
         for t in self.tools:
             if t.name == name:
                 try:
+                    # [opencode task tool] 主 Agent 自主委派子 Agent 的入口（注入任务深度 + 事件队列）
+                    if name == "tool_task":
+                        depth = int((state or {}).get("_task_depth", 0) or 0)
+                        eq = (state or {}).get("_event_queue")
+                        if not _is_multi_agent_queue(eq):
+                            eq = None  # 单 Agent 流不推子 Agent 面板事件
+                        else:
+                            # 剥掉委派方自己的 TaggedEventQueue，让子 Agent 用自己的 id 重新打标签
+                            from app.agent.stream_events import unwrap_tagged
+                            eq = unwrap_tagged(eq)
+                        return await self._tool_task(args, depth=depth, event_queue=eq,
+                                                     directory=(state or {}).get("_cwd", ""))
                     eq = state.get("_event_queue") if state else None
                     if eq and name == "tool_execute":
                         try:
@@ -445,7 +579,10 @@ class RAGAgent:
                             from app.tools.file_tools import tool_execute as _sync_execute
                             result = await asyncio.to_thread(_sync_execute, **args)
                             return str(result)
-                    result = await asyncio.to_thread(t.fn, **args)
+                    if inspect.iscoroutinefunction(t.fn):
+                        result = await t.fn(**args)
+                    else:
+                        result = await asyncio.to_thread(t.fn, **args)
                     return self._bound_plugin_result(name, str(result))
                 except NeedsPermission as e:
                     mgr = get_perm_mgr()
@@ -475,7 +612,10 @@ class RAGAgent:
                                 pass
                             except Exception as e2:
                                 logger.warning("tool_execute streaming failed on retry, falling back: %s", e2)
-                        result = await asyncio.to_thread(t.fn, **args)
+                        if inspect.iscoroutinefunction(t.fn):
+                            result = await t.fn(**args)
+                        else:
+                            result = await asyncio.to_thread(t.fn, **args)
                         return self._bound_plugin_result(name, str(result))
                     return _permission_denied_msg(e.operation, e.path, name)
                 except Exception as e:
@@ -1133,7 +1273,7 @@ class RAGAgent:
             self.rebuild_system_prompt()
             self.graph = self._build_graph()
 
-    async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = False, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "", on_activity: Callable[[str], None] | None = None, directory: str = "") -> dict:
+    async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = False, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "", on_activity: Callable[[str], None] | None = None, directory: str = "", task_depth: int = 0) -> dict:
         """执行完整的RAG流程，返回回答和相关源。
 
         参数:
@@ -1141,6 +1281,8 @@ class RAGAgent:
             directory: 会话绑定的工作目录（opencode ctx.directory）。非空时写入
                 system prompt，并把该目录挂为本次执行的文件作用域（相对路径基准
                 + 可写权限），执行结束自动解除。
+            task_depth: 当前在子 Agent 委派链中的深度（tool_task 嵌套时逐层 +1），
+                用于 SUBAGENT_DEPTH 深度护栏。
         """
         # 可选：集成 TaskState 跟踪（当 conversation_id 不为空时）
         task = None
@@ -1169,6 +1311,7 @@ class RAGAgent:
                 _on_activity=on_activity,
                 _task=task,
                 _cwd=directory or "",
+                _task_depth=max(0, int(task_depth or 0)),
             )
             try:
                 result = await self.graph.ainvoke(state)

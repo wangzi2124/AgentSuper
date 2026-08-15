@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { useRoute, useRouter } from 'vue-router'
-import ChatHistory from './ChatHistory.vue'
 import MultiAgentChatHistory from './MultiAgentChatHistory.vue'
 import PermissionDialog from './PermissionDialog.vue'
 import { useAuthStore } from '../stores/auth'
@@ -10,7 +9,6 @@ const router = useRouter()
 const auth = useAuthStore()
 
 const navItems = [
-  { path: '/chat', label: '对话', icon: '💬' },
   { path: '/multi-agent', label: '多智能体', icon: '🤖' },
   { path: '/documents', label: '文档管理', icon: '📄' },
   { path: '/skills', label: '技能', icon: '🧠' },
@@ -45,8 +43,7 @@ function handleLogout() {
         {{ item.label }}
       </router-link>
     </nav>
-    <ChatHistory v-if="route.path.startsWith('/chat')" class="sidebar-history" />
-    <MultiAgentChatHistory v-else-if="route.path.startsWith('/multi-agent')" class="sidebar-history" />
+    <MultiAgentChatHistory class="sidebar-history" />
     <div class="sidebar-bottom">
       <PermissionDialog />
       <div v-if="auth.enabled && auth.isLoggedIn" class="user-card">

@@ -290,4 +290,6 @@ export interface MultiAgentMessage {
   timestamp: Date
   isError?: boolean
   errorInfo?: ChatError
+  /** 流式中的占位消息（未完成），持久化/合并时过滤 */
+  live?: boolean
 }

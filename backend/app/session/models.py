@@ -30,7 +30,7 @@ class SessionInfo(BaseModel):
     title: str = ""
     agent: Optional[str] = None
     model: Optional[ModelRef] = None
-    kind: str = "chat"
+    kind: str = "multi-agent"
     status: str = "idle"
     cost: float = 0.0
     tokens_input: int = 0
@@ -193,7 +193,7 @@ class SessionCreate(BaseModel):
     parent_id: Optional[str] = None
     agent: Optional[str] = None
     model: Optional[ModelRef] = None
-    kind: str = "chat"
+    kind: str = "multi-agent"
     title: Optional[str] = None
     directory: Optional[str] = None
 

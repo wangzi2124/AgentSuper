@@ -41,6 +41,17 @@ def emit(queue, event: dict) -> None:
         pass
 
 
+def unwrap_tagged(queue):
+    """若队列已被 TaggedEventQueue 包装（带有委派方 agent_id），剥到底层收集器。
+
+    tool_task 委派时，子 Agent 需要用自己的 agent_id 重新打标签（否则事件会
+    被外层 TaggedEventQueue 误标为委派方，或 agent_step/agent_start 等被丢弃）。
+    """
+    if isinstance(queue, TaggedEventQueue):
+        return getattr(queue, "_collector", None) or queue
+    return queue
+
+
 class AgentEventCollector:
     """请求级事件收集器：转发到 SSE 队列，同时记录副本供落库/兜底快照。"""
 

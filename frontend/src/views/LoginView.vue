@@ -36,7 +36,7 @@ async function submit() {
     } else {
       await auth.login(name, pw)
     }
-    router.push({ name: 'Chat' })
+    router.push({ name: 'MultiAgent' })
   } catch (e: any) {
     error.value = e?.message || '操作失败，请重试'
   } finally {

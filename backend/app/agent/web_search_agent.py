@@ -111,6 +111,8 @@ class WebSearchAgent(BaseAgent):
                 answer = await self._synthesize(
                     question, search_results, memory_context,
                     event_queue=event_queue, agent_id=self._id,
+                    history=payload.get("history") or [],
+                    directory=payload.get("directory", ""),
                 )
                 emit(event_queue, {
                     "type": "agent_step",
@@ -296,6 +298,8 @@ class WebSearchAgent(BaseAgent):
         memory_context: str = "",
         event_queue=None,
         agent_id: str = "",
+        history: Optional[list[dict]] = None,
+        directory: str = "",
     ) -> str:
         """使用 LLM 将搜索结果合成为回答（带文件工具，可按需核对工作区内容）。"""
         if not search_results:
@@ -330,6 +334,8 @@ class WebSearchAgent(BaseAgent):
                 user_message=user_prompt,
                 event_queue=event_queue,
                 agent_id=agent_id,
+                history=history,
+                directory=directory,
             )
         except Exception as e:
             logger.error("LLM synthesis failed: %s", e)

@@ -81,12 +81,6 @@ interface SessionUpdateBody {
   model?: SessionModelRef
 }
 
-interface PromptBody {
-  prompt: string
-  files?: unknown[]
-  delivery?: 'steer' | 'queue'
-}
-
 const BASE = '/api/sessions'
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
@@ -174,20 +168,6 @@ export async function forkSession(sessionId: string, messageId?: string): Promis
   return request<SessionInfo>(`${BASE}/${encodeURIComponent(sessionId)}/fork${qs({ message_id: messageId })}`, {
     method: 'POST',
   }, 15000)
-}
-
-export async function promptSession(
-  sessionId: string,
-  prompt: string,
-  files?: unknown[],
-  delivery: 'steer' | 'queue' = 'steer',
-): Promise<{ input_id: string; session_id: string }> {
-  const body: PromptBody = { prompt, files, delivery }
-  return request<{ input_id: string; session_id: string }>(
-    `${BASE}/${encodeURIComponent(sessionId)}/prompt`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
-    10000,
-  )
 }
 
 export async function getSessionMessages(

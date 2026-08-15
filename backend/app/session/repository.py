@@ -102,7 +102,7 @@ def create_session(
     parent_id: Optional[str] = None,
     agent: Optional[str] = None,
     model: Optional[Any] = None,
-    kind: str = "chat",
+    kind: str = "multi-agent",
     title: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> SessionInfo:

@@ -132,6 +132,8 @@ class Settings(BaseSettings):
     sub_agent_timeout_extended: float = 300.0
     # 使用 extended 超时的子 Agent 列表（逗号分隔）
     extended_timeout_agents: str = "code"
+    # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth，默认 1 = 主 Agent 只能再委派一层）
+    subagent_depth: int = 1
 
     # ── 共享记忆持久化 ──
     # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失

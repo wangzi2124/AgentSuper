@@ -15,13 +15,12 @@ from app.config import settings
 from app.context.token_counter import estimate_tokens
 
 from app.middleware.summarization import HierarchicalSummarizationMiddleware
-from app.models.schemas import ChatRequest, ChatResponse, Source, StepEvent, MultiAgentChatResponse
+from app.models.schemas import ChatRequest, Source, StepEvent, MultiAgentChatResponse
 
 # ── Session 管理（session.db）──
 from app.session import repository as session_repo
 from app.session import task_bridge
-from app.session.agent_executor import register_request_queue, unregister_request_queue, classify_error
-from app.session.agent_executor import PartBridgeQueue
+from app.session.agent_executor import classify_error, PartBridgeQueue
 from app.session.deps import discover_project_root
 
 # ── 多 Agent 系统 ──
@@ -168,18 +167,18 @@ def _msg_type_to_role(msg_type: str) -> str:
 #  每次 send_and_wait 登记为 kind='task' 子会话，级联取消经 task_bridge
 # ═══════════════════════════════════════════════════════════════
 
-def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | None, directory: str = "") -> tuple[object, str]:
-    """解析/创建 multi-agent 主会话（session.db）。"""
+def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | None, directory: str = "") -> tuple[object, str, str]:
+    """解析/创建 multi-agent 主会话（session.db）。返回 (service, session_id, session_directory)。"""
     service = _get_session_service(request)
     if conv_id:
         try:
-            service.get(user_id, conv_id)
+            info = service.get(user_id, conv_id)
         except session_repo.SessionNotFound:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        return service, conv_id
+        return service, conv_id, info.directory or ""
     else:
         session = service.create(user_id, directory=directory or discover_project_root(), kind="multi-agent")
-        return service, session.id
+        return service, session.id, session.directory or ""
 
 
 def _session_history_for(service, user_id: str, session_id: str) -> list[dict]:
@@ -266,75 +265,6 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
 
 
 
-@router.post("/", response_model=ChatResponse)
-async def chat(request: Request, body: ChatRequest):
-    """处理非流式聊天请求，返回完整响应（消息落库 session.db）。"""
-    agent = request.app.state.agent
-    user_id = _get_user_id(request)
-    service = _get_session_service(request)
-
-    if body.conversation_id:
-        session_id = body.conversation_id
-        try:
-            existing = service.get(user_id, session_id)
-        except session_repo.SessionNotFound:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        session_directory = existing.directory or body.directory
-    else:
-        session = service.create(user_id, directory=body.directory or discover_project_root(), kind="chat")
-        session_id = session.id
-        session_directory = session.directory
-
-    history = _session_history_for(service, user_id, session_id)
-
-    summarizer = _get_summarizer()
-    if summarizer:
-        compressed = await summarizer.apply(history)
-    else:
-        compressed = _truncate_history(history)
-    compressed = _sanitize_history(compressed)
-
-    # Build multimodal user content
-    user_content: list[dict] = [{"type": "text", "text": body.message}]
-    for f in body.files:
-        if f.mime_type.startswith("image/"):
-            user_content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{f.mime_type};base64,{f.data}"},
-            })
-
-    try:
-        result = await agent.invoke(body.message, model=body.model, history=compressed, use_vector_db=body.use_vector_db, files=[f.model_dump() for f in body.files], directory=session_directory)
-    except Exception as e:
-        logger.exception("chat invocation failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-    async with service.write_lock(session_id):
-        service.append_message(user_id, session_id, "user", {"role": "user", "content": body.message})
-        if session_repo.latest_seq(session_id) == 1:
-            service.update(user_id, session_id, title=_generate_title([{"role": "user", "content": body.message}]))
-        service.append_message(user_id, session_id, "assistant", {
-            "role": "assistant",
-            "content": result["answer"],
-            "sources": result.get("sources", []),
-            "steps": result.get("steps", []),
-        })
-
-    return ChatResponse(
-        answer=result["answer"],
-        sources=[
-            Source(
-                document_id=s["document_id"],
-                content=s["content"],
-                score=s["score"],
-            )
-            for s in result["sources"]
-        ],
-        conversation_id=session_id,
-        steps=[StepEvent(**s) for s in result.get("steps", [])],
-    )
-
-
 # ═══════════════════════════════════════════════════════════════
 #  多 Agent 聊天端点
 # ═══════════════════════════════════════════════════════════════
@@ -349,7 +279,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     """
     agent_bus: AgentBus = request.app.state.agent_bus
     user_id = _get_user_id(request)
-    service, session_id = _resolve_multi_agent_parent(request, user_id, body.conversation_id)
+    service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id)
 
     history = _session_history_for(service, user_id, session_id)
 
@@ -379,6 +309,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
                     "files": [f.model_dump() for f in body.files],
                     "conversation_id": session_id,
                     "user_id": user_id,
+                    "directory": session_dir,
                 },
                 thread_id=thread_id,
             ),
@@ -444,7 +375,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     """
     agent_bus: AgentBus = request.app.state.agent_bus
     user_id = _get_user_id(request)
-    service, session_id = _resolve_multi_agent_parent(request, user_id, body.conversation_id)
+    service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id)
 
     history = _session_history_for(service, user_id, session_id)
 
@@ -498,6 +429,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                             "files": [f.model_dump() for f in body.files],
                             "conversation_id": session_id,
                             "user_id": user_id,
+                            "directory": session_dir,
                             "_event_queue": collector,
                         },
                         thread_id=thread_id,
@@ -607,82 +539,3 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
         # 使"停止/撤销"按钮在任何时刻都能 POST /interrupt 真正打断后台 Agent 任务
         headers={"X-Session-Id": session_id},
     )
-
-
-@router.post("/stream")
-async def chat_stream(request: Request, body: ChatRequest):
-    """处理流式聊天请求，返回SSE事件流。
-
-    设计文档 P3：消息经 SessionService 落库 session.db，Agent 执行由
-    per-session 协调器串行调度；conversation_id 即 session.id。
-    """
-    user_id = _get_user_id(request)
-    service = _get_session_service(request)
-
-    # 解析/创建会话（conversation_id == session.id）
-    session_id = body.conversation_id
-    if session_id:
-        try:
-            service.get(user_id, session_id)
-        except session_repo.SessionNotFound:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-    else:
-        session = service.create(user_id, directory=body.directory or discover_project_root(), kind="chat")
-        session_id = session.id
-
-    # 请求级事件桥（request_id 不入库，executor 按此回填事件队列）
-    request_id = uuid.uuid4().hex
-    event_queue: asyncio.Queue = asyncio.Queue()
-    register_request_queue(request_id, event_queue)
-
-    # 会话正在执行 → 先发 queued 事件（对齐旧 _agent_semaphore 排队 UX）
-    active = session_id in service.coordinator.active_sessions
-    pending = session_repo.count_pending(session_id) if active else 0
-
-    service.prompt(
-        user_id, session_id, body.message,
-        files=[f.model_dump() for f in body.files],
-        delivery="queue",
-        model=body.model,
-        use_vector_db=body.use_vector_db,
-        request_id=request_id,
-    )
-
-    async def event_generator():
-        try:
-            if active:
-                yield f"data: {json.dumps({'type': 'queued', 'queue_position': pending + 1, 'conversation_id': session_id}, ensure_ascii=False)}\n\n"
-            while True:
-                event = await event_queue.get()
-                # 注入 conversation_id：前端在流中尽早拿到会话 id，
-                # 使"停止"按钮能调用 /api/sessions/{id}/interrupt 真正打断后台任务
-                event["conversation_id"] = session_id
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                if event["type"] in ("done", "error"):
-                    break
-        finally:
-            unregister_request_queue(request_id)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        # 响应头尽早透出会话 id：前端在读取任何 SSE 事件前即可记录 conversation_id，
-        # 使"停止/撤销"按钮在任何时刻都能 POST /interrupt 真正打断后台 Agent 任务
-        headers={"X-Session-Id": session_id},
-    )
-
-
-@router.get("/stream/status")
-async def stream_status(request: Request):
-    """返回当前并发状态，前端可轮询。
-    P3 起 /stream 由 SessionCoordinator 调度：active = 正在执行的会话数，
-    queue_depth = 各活动会话待执行输入数（替代旧全局 _agent_semaphore）。
-    """
-    service = _get_session_service(request)
-    active = len(service.coordinator.active_sessions)
-    depth = sum(session_repo.count_pending(sid) for sid in service.coordinator.active_sessions)
-    return {
-        "max_concurrent": MAX_CONCURRENT_AGENTS,
-        "active": active,
-        "queue_depth": depth,
-    }

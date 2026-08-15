@@ -151,13 +151,16 @@ def _do_init(app):
     agent_bus = AgentBus()
     shared_memory = MemoryManager(default_ttl=300)  # 共享记忆，5 分钟过期
 
+    # [opencode task tool] 主 Agent 注入总线引用，供其自主委派子 Agent
+    agent.task_bus = agent_bus
+
     rag_wrapper = RAGAgentWrapper(agent, agent_id="rag", heartbeat=agent_bus.touch)
     agent_bus.register(rag_wrapper)
 
     web_search = WebSearchAgent(memory=shared_memory, agent_id="web_search")
     agent_bus.register(web_search)
 
-    code_agent = CodeAgent(memory=shared_memory, agent_id="code")
+    code_agent = CodeAgent(inner=agent, memory=shared_memory, agent_id="code")
     agent_bus.register(code_agent)
 
     supervisor = SupervisorAgent(agent_bus, memory=shared_memory)

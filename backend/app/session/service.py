@@ -1,39 +1,28 @@
-"""Session 业务服务：组合 repository + coordinator + history。
+"""Session 业务服务：组合 repository + history。
 
-这是 /api/sessions 与现有 /api/chat/* 共用的门面。Agent 调用通过
-`executor` 回调注入（chat.py 传入 RAGAgent / AgentBus 的执行体），
-由 SessionCoordinator 保证 per-session 串行。
+这是 /api/sessions 与 /api/chat/* 共用的门面。多 Agent 请求经 AgentBus
+（supervisor → 子 Agent）执行，端点侧直接落库；本服务负责会话 CRUD、
+消息/上下文、压缩水位、撤销与级联取消，并保证同一会话的写操作串行。
 """
 
 import asyncio
 import logging
 import time as tmod
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Optional
 
 from . import history as session_history
 from . import repository
 from . import task_bridge
-from .coordinator import SessionCoordinator
 from .models import ContextEpoch, Message, SessionInfo, SessionStatus
 
 logger = logging.getLogger(__name__)
 
-Executor = Callable[[str], Awaitable[None]]
-
 
 class SessionService:
-    """会话门面。
+    """会话门面。"""
 
-    executor(session_id)：该会话一次 drain 的执行体，内部：
-    1. promote 下一条输入（steer 优先）
-    2. 构建上下文（history.load + epoch）
-    3. 调用 Agent，事件流经 SSE 透出
-    4. 落库 user/assistant 消息
-    """
-
-    def __init__(self, executor: Optional[Executor] = None, global_limit: int = 2):
-        self.coordinator = SessionCoordinator(executor or self._default_executor, global_limit=global_limit)
-        # 每会话写串行锁：coordinator 执行体、multi-agent 直写、compact/revert/fork 共享，
+    def __init__(self):
+        # 每会话写串行锁：multi-agent 直写、compact/revert/fork 共享，
         # 保证同一会话的消息追加与撤销不会交错（对齐"per-session 串行"承诺）。
         self._write_locks: dict[str, asyncio.Lock] = {}
 
@@ -59,7 +48,7 @@ class SessionService:
         parent_id: Optional[str] = None,
         agent: Optional[str] = None,
         model: Optional[Any] = None,
-        kind: str = "chat",
+        kind: str = "multi-agent",
         title: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> SessionInfo:
@@ -103,11 +92,8 @@ class SessionService:
 
     def remove(self, user_id: str, session_id: str) -> None:
         self._authorized(user_id, session_id)
-        # 取消该会话及其子会话的后台执行（对齐 session.ts:remove）
+        # 取消该会话及其子会话对应的 AgentBus 任务（对齐 session.ts:remove）
         child_ids = [c.id for c in repository.list_children(session_id)]
-        for sid in [session_id] + child_ids:
-            self.coordinator.cancel_best_effort(sid)
-        # 级联取消子会话对应的 AgentBus 任务（multi-agent kind='task' 子会话）
         task_bridge.cancel_children(child_ids)
         repository.remove_session(session_id)
 
@@ -210,15 +196,11 @@ class SessionService:
             {"deleted": n, "messages": [...]}  剩余消息列表。
         """
         self._authorized(user_id, session_id)
-        # 打断该会话正在执行的 agent（防止其随后续写被撤销的内容）
-        self.coordinator.cancel_best_effort(session_id)
         async with self.write_lock(session_id):
             deleted = repository.revert_to_message(session_id, message_id)
             # 级联撤销任务子会话 + 清除父会话待执行输入
             child_ids = [c.id for c in repository.list_children(session_id) if c.kind == "task"]
             task_bridge.cancel_children(child_ids)
-            for cid in child_ids:
-                self.coordinator.cancel_best_effort(cid)
             for cid in child_ids:
                 repository.remove_session(cid)
             repository.clear_inputs(session_id)
@@ -238,34 +220,10 @@ class SessionService:
 
     # ── 输入 / 执行 ──────────────────────────────────────────────────────
 
-    def prompt(self, user_id: str, session_id: str, text: str, files: Optional[list] = None,
-               delivery: str = "steer", **extra: Any) -> str:
-        """投递输入（steer 打断 / queue 排队），并唤醒执行（对齐 opencode prompt+wake）。
-
-        extra：并入输入 payload 的附加字段（model/use_vector_db/request_id 等），
-        executor promote 后可读取。
-        """
-        self._authorized(user_id, session_id)
-        payload: dict[str, Any] = {"text": text, "files": files or []}
-        payload.update(extra)
-        input_id = repository.admit_input(
-            session_id,
-            payload,
-            delivery=delivery,
-        )
-        self.coordinator.wake(session_id)
-        return input_id
-
-    async def run(self, session_id: str) -> None:
-        """显式启动 drain（对齐 SessionExecution.resume）。"""
-        await self.coordinator.run(session_id)
-
     async def interrupt(self, user_id: str, session_id: str) -> None:
         """打断会话（级联：连同子会话一起打断，对齐 session.ts 级联取消）。"""
         self._authorized(user_id, session_id)
         child_ids = [c.id for c in repository.list_children(session_id)]
-        for sid in [session_id] + child_ids:
-            await self.coordinator.interrupt(sid)
         # 级联取消子会话对应的 AgentBus 任务
         task_bridge.cancel_children(child_ids)
         # 丢弃排队中的输入：用户已取消，不希望在后续唤醒时再执行旧请求
@@ -290,10 +248,3 @@ class SessionService:
         if session.user_id and session.user_id != user_id:
             raise repository.Forbidden(session_id)
         return session
-
-    async def _default_executor(self, session_id: str) -> None:
-        """骨架默认执行体：promote 输入 → 占位（由 chat.py 注入真实 Agent）。"""
-        item = repository.promote_next(session_id)
-        if not item:
-            return
-        logger.warning("SessionService._default_executor: no agent executor injected for %s", session_id)

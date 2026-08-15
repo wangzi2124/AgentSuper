@@ -1,32 +1,18 @@
-"""Agent 执行体：把 SessionCoordinator 的一次 drain 接到 RAGAgent。
+"""Agent 执行体辅助（多 Agent 共用）。
 
-对应设计文档 §7：promote 输入 → 构建上下文（history.load + epoch）→
-调用 agent.invoke（SSE 事件桥接到请求级队列）→ 落库 user/assistant 消息。
-
-executor 由 SessionService 构造时注入，逐 session 串行（coordinator 保证），
-跨 session 由 coordinator 的全局 Semaphore 限流（替代旧 chat.py 的 _agent_semaphore）。
+单 Agent executor（SessionCoordinator + RAGAgent 直连）已随单 Agent 模式移除，
+本模块保留多 Agent 链路共用的两件套：
+- classify_error：统一错误分类（retryable/status_code/error_type）
+- PartBridgeQueue：graph 事件 → message_parts 落库 + SSE 转发
 """
 
-import asyncio
 import logging
 import time as tmod
 from typing import Any, Optional
 
-from . import history as session_history
 from . import repository
 
 logger = logging.getLogger(__name__)
-
-# request_id -> asyncio.Queue：请求级 SSE 事件桥（不入库，请求结束即清理）
-_pending_queues: dict[str, asyncio.Queue] = {}
-
-
-def register_request_queue(request_id: str, queue: asyncio.Queue) -> None:
-    _pending_queues[request_id] = queue
-
-
-def unregister_request_queue(request_id: str) -> None:
-    _pending_queues.pop(request_id, None)
 
 
 def classify_error(exc: Exception) -> dict[str, Any]:
@@ -49,21 +35,6 @@ def classify_error(exc: Exception) -> dict[str, Any]:
     elif "overloaded" in error_str or "service_unavailable" in error_str:
         retryable, status_code = True, 503
     return {"retryable": retryable, "status_code": status_code, "error_type": error_type}
-
-
-def _message_to_history(message, parts=None) -> dict[str, Any]:
-    """把 session_messages 行转成模型历史消息（对齐 chat.py 的消息结构）。
-
-    优先用 parts 里的 text part 拼内容（对齐设计 §3：正文在 Part），
-    无 parts 时回退 data.content（旧数据/compaction/system 消息）。
-    """
-    data = message.data or {}
-    role = data.get("role") or {
-        "user": "user", "assistant": "assistant", "tool": "tool",
-        "compaction": "system", "epoch": "system", "system": "system",
-    }.get(message.type, "system")
-    content = session_history.text_from_parts(parts or [], include_reasoning=True) or data.get("content", "")
-    return {"id": message.id, "role": role, "content": content}
 
 
 class PartBridgeQueue:
@@ -206,184 +177,3 @@ class PartBridgeQueue:
             out["part_id"] = self._text_part_id
             out["delta"] = event.get("delta", "")
         return out
-
-
-def _checkpoint_of(compressed: list[dict]) -> str:
-    """从压缩后的历史中提取 checkpoint（摘要/截断标记）文案，未压缩返回空串。"""
-    for m in compressed:
-        if m.get("role") == "system":
-            c = m.get("content", "")
-            if c.startswith("[Conversation summary]") or c.startswith("[earlier history truncated]"):
-                return c
-    return ""
-
-
-def _tail_start_of(session_id: str, compressed: list[dict]) -> dict:
-    """定位压缩后保留 tail 的起点：首个仍带 id 且位于上次压缩水位之后的消息。
-
-    返回 epoch.snapshot 可用的 {tail_start_id, tail_start_seq}，供 history.load
-    做 tail 回放（摘要 + 原文轮次 + 新增消息）；无保留 tail 时返回 {}（旧行为）。
-    """
-    prev_seq = repository.latest_compaction_seq(session_id) or 0
-    for m in compressed:
-        mid = m.get("id")
-        if not mid:
-            continue
-        seq = repository.seq_of_message(session_id, mid)
-        if seq is not None and seq > prev_seq:
-            return {"tail_start_id": mid, "tail_start_seq": seq}
-    return {}
-
-
-def build_executor(app):
-    """构建 SessionService 的 executor 闭包。
-
-    在 FastAPI 事件循环中运行；agent 从 app.state 惰性读取（ensure_runtime_state 之后才就绪）。
-    """
-
-    async def executor(session_id: str) -> None:
-        item = repository.promote_next(session_id)
-        if not item:
-            return
-        prompt: dict[str, Any] = item["prompt"] or {}
-        request_id = prompt.get("request_id")
-        queue = _pending_queues.get(request_id)
-        first_message = repository.latest_seq(session_id) == 0
-
-        # 1. 构建模型视角历史（epoch 之后的会话消息，不含当前轮）
-        load = session_history.load(session_id)
-        raw_history = [_message_to_history(m, load.parts.get(m.id)) for m in load.messages]
-
-        # 2. 压缩/清洗（复用 chat.py 的截断 + 摘要逻辑）
-        from app.api.chat import MAX_HISTORY_TOKENS, _get_summarizer, _sanitize_history, _truncate_history
-
-        summarizer = _get_summarizer()
-        if summarizer:
-            compressed = await summarizer.apply(raw_history)
-        else:
-            compressed = _truncate_history(raw_history)
-        # 压缩后立即定位保留 tail 的起点（sanitize 会剥掉 id，需在清洗前取值）
-        tail_start = _tail_start_of(session_id, compressed)
-        compressed = _sanitize_history(compressed)
-
-        # 3-6 持每会话写锁（与 multi-agent 直写 / compact / revert / fork 共享），
-        #    保证同一会话的消息追加与撤销不会交错。
-        lock = app.state.session_service.write_lock(session_id)
-        async with lock:
-            # 3. 压缩发生 → 持久化压缩基线（compaction 消息 + epoch replace + time_compacted），
-            #    使恢复/重放时能定位截断水位（对齐设计 §6.3）
-            checkpoint = _checkpoint_of(compressed)
-            if checkpoint or (compressed and len(compressed) != len(raw_history)):
-                repository.append_message(session_id, "compaction", {
-                    "content": checkpoint or "[compacted]",
-                    "mode": "summarize" if checkpoint else "truncate",
-                })
-                session_history.replace_epoch_after_compaction(
-                    session_id, checkpoint or "[compacted]",
-                    tail_start,
-                )
-                repository.update_session(
-                    session_id, time_compacted=int(tmod.time() * 1000),
-                )
-
-            # 4. 先落库 user 消息（中断/失败时也已保留）
-            user_msg = repository.append_message(session_id, "user", {
-                "role": "user", "content": prompt.get("text", ""),
-            })
-            # 新会话首条消息 → 生成标题（在压缩消息落库后仍需判断"是否首条"）
-            if first_message:
-                from app.api.chat import _generate_title
-                repository.update_session(
-                    session_id, title=_generate_title([{"role": "user", "content": prompt.get("text", "")}])
-                )
-
-            try:
-                # 5. 先建 assistant 骨架消息（parts 落库需要其 id；对齐设计 §1：正文在 Part）
-                assistant_msg = repository.append_message(session_id, "assistant", {
-                    "role": "assistant",
-                    "parent_id": user_msg.id,
-                    "agent": "rag",
-                    "model": prompt.get("model"),
-                    "finish": "running",
-                    "tokens": {},
-                })
-
-                # 事件桥：graph 步骤/工具事件实时落库为 parts + 转发 SSE（带 part_id）
-                bridge = PartBridgeQueue(queue, session_id, assistant_msg.id)
-
-                # 6. 调用 Agent（事件桥接到请求队列）
-                #     [会话目录] 会话绑定的工作目录（opencode ctx.directory）传入 agent：
-                #     文件工具以其为相对路径基准 + 可写作用域
-                agent = app.state.agent
-                session_row = repository.get_session(session_id)
-                result = await agent.invoke(
-                    prompt.get("text", ""),
-                    model=prompt.get("model"),
-                    history=compressed,
-                    use_vector_db=prompt.get("use_vector_db", False),
-                    files=prompt.get("files") or [],
-                    event_queue=bridge,
-                    conversation_id=session_id,
-                    directory=(session_row.directory if session_row else "") or "",
-                )
-
-                # 7. 回填 assistant 结算字段 + 最终答案（text part 承载正文）
-                answer = result.get("answer", "")
-                final_data = dict(assistant_msg.data)
-                final_data.update({
-                    "content": answer,
-                    "finish": result.get("finish", "stop"),
-                    "model": result.get("model"),
-                    "tokens": result.get("tokens") or {},
-                    "steps": result.get("steps", []),
-                    "sources": result.get("sources", []),
-                })
-                repository.update_message(session_id, assistant_msg.id, final_data)
-                bridge.append_text(answer)
-
-                # 会话级 token/费用累加
-                tokens = result.get("tokens") or {}
-                repository.add_session_usage(
-                    session_id,
-                    input_tokens=tokens.get("input", 0),
-                    output_tokens=tokens.get("output", 0),
-                    cost=result.get("cost") or 0.0,
-                )
-
-                if queue is not None:
-                    queue.put_nowait({
-                        "type": "done",
-                        "answer": answer,
-                        "sources": result.get("sources", []),
-                        "conversation_id": session_id,
-                        "steps": result.get("steps", []),
-                        "parts": [p.model_dump() for p in repository.list_parts(assistant_msg.id)],
-                        "user_msg_id": user_msg.id,
-                        "assistant_msg_id": assistant_msg.id,
-                    })
-            except asyncio.CancelledError:
-                # 中断：assistant 骨架标记为错误，避免空消息残留
-                try:
-                    repository.update_message(session_id, assistant_msg.id, {
-                        **dict(assistant_msg.data),
-                        "content": "请求已中断", "finish": "error",
-                    })
-                except Exception:  # noqa: BLE001
-                    pass
-                if queue is not None:
-                    queue.put_nowait({"type": "error", "detail": "cancelled",
-                                      "retryable": False, "status_code": None, "error_type": "CancelledError"})
-                raise
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("executor: session %s agent call failed", session_id, exc_info=exc)
-                try:
-                    repository.update_message(session_id, assistant_msg.id, {
-                        **dict(assistant_msg.data),
-                        "content": str(exc) or "Agent 调用失败", "finish": "error",
-                    })
-                except Exception:  # noqa: BLE001
-                    pass
-                if queue is not None:
-                    queue.put_nowait({"type": "error", "detail": str(exc), **classify_error(exc)})
-
-    return executor

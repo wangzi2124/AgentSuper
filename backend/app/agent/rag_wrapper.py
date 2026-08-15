@@ -71,6 +71,8 @@ class RAGAgentWrapper(BaseAgent):
                     conversation_id=payload.get("conversation_id", ""),
                     on_activity=self._notify,
                     event_queue=tagged,
+                    directory=payload.get("directory", ""),
+                    task_depth=int(payload.get("_task_depth", 0) or 0),
                 )
                 emit(event_queue, {
                     "type": "agent_done",

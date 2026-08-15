@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
-import { SUPPORTED_MODELS } from '../stores/chat'
+import { SUPPORTED_MODELS } from '../config/models'
 import { usePermissionStore } from '../stores/permission'
 import MultiAgentResponse from '../components/MultiAgentResponse.vue'
 import ChatInput from '../components/ChatInput.vue'
@@ -150,6 +150,10 @@ function handleMessageDelete(messageId: string) {
   agent.deleteMessage(messageId)
 }
 
+function handleRetry(messageId: string) {
+  agent.manualRetry(messageId)
+}
+
 const copiedId = ref<string | null>(null)
 
 async function handleCopy(messageId: string, text: string) {
@@ -275,6 +279,12 @@ async function handleCopy(messageId: string, text: string) {
                   </div>
                   <button v-if="msg.role === 'user'" class="icon-btn" @click="handleUndo(idx)" title="撤销到此处">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+                  </button>
+                  <button v-if="msg.isError && msg.errorInfo?.retryable" class="icon-btn" @click="handleRetry(msg.id)" title="重试">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                  </button>
+                  <button v-if="msg.isError && agent.retryCountdown > 0" class="retry-countdown" title="自动重试中">
+                    ⟳ {{ agent.retryCountdown }}s
                   </button>
                   <button class="icon-btn delete-btn" @click="handleMessageDelete(msg.id)" title="删除消息">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -535,6 +545,7 @@ async function handleCopy(messageId: string, text: string) {
 .icon-btn { width: 28px; height: 28px; border-radius: 6px; border: none; background: transparent; color: inherit; opacity: 0.5; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
 .icon-btn:hover { opacity: 1; background: rgba(255,255,255,0.1); }
 .user .icon-btn:hover { background: rgba(255,255,255,0.2); }
+.retry-countdown { border: none; background: transparent; color: #f59e0b; font-size: 12px; font-variant-numeric: tabular-nums; cursor: default; padding: 0 4px; }
 .delete-btn:hover { color: #ef4444 !important; }
 .btn-danger { background: #ef4444; color: #fff; border: none; border-radius: var(--radius); padding: 6px 12px; font-size: 13px; cursor: pointer; }
 .btn-danger:hover { background: #dc2626; }

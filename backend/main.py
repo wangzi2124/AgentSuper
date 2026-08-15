@@ -8,7 +8,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config, weather, auth as auth_api, custom_tools as custom_tools_api
-from app.api.chat import MAX_CONCURRENT_AGENTS
 from app.api.responses import ApiError, error_response
 from app.auth import AuthMiddleware
 from app.config import settings
@@ -16,7 +15,6 @@ from app.monitor import RequestLogMiddleware, get_stats
 from app.runtime import ensure_runtime_state
 from app.session import SessionService, init_db
 from app.session import task_bridge
-from app.session.agent_executor import build_executor
 from app.session.router import router as sessions_router
 
 logging.basicConfig(
@@ -38,9 +36,9 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).info(
             "Auto-clear on startup: %s", result,
         )
-    # Session 管理（session.db）：建表 + 注入执行体（agent 惰性读取）
+    # Session 管理（session.db）：建表（多 Agent 直写落库，无单 Agent executor）
     init_db()
-    app.state.session_service = SessionService(executor=build_executor(app), global_limit=MAX_CONCURRENT_AGENTS)
+    app.state.session_service = SessionService()
     # 启动 Agent Bus 事件循环（需要在主事件循环中调用 asyncio.create_task）
     agent_bus = getattr(app.state, "agent_bus", None)
     if agent_bus:
