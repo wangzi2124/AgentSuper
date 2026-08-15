@@ -208,6 +208,7 @@ class AgentState(TypedDict):
     _task: object | None
     _cwd: str
     _task_depth: int
+    conversation_id: str = ""
 
 
 _ZERO_USAGE = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
@@ -243,12 +244,14 @@ class RAGAgent:
         plugin_loader: PluginLoader | None = None,
         reranker: Reranker | None = None,
         custom_tools: CustomToolStore | None = None,  # [token 优化 v6] 前端添加的自定义工具/固定工具
+        memory=None,  # [opencode memory] 共享记忆管理器（runtime.py 注入）
     ):
         self.retriever = retriever
         self.reranker = reranker
         self.skill_loader = skill_loader
         self.plugin_loader = plugin_loader
         self.custom_tools = custom_tools
+        self.memory = memory
         self.model = settings.llm_model
         self.api_key = settings.llm_api_key
         self.api_base = settings.llm_api_base
@@ -267,6 +270,53 @@ class RAGAgent:
             parameters=_TASK_TOOL_SCHEMA["function"]["parameters"],
             fn=self._task_tool_placeholder,
         ))
+        # [opencode memory] 主 Agent 记忆读写工具：模型可主动记忆/回忆关键信息。
+        # 仅在注入了共享记忆管理器时注册（fn 为占位，实际执行在 _execute_tool 特判）。
+        if memory is not None:
+            self.tools.append(ToolDef(
+                name="tool_memory_set",
+                description=(
+                    "记住一条关键信息，供后续对话回忆（会话内有效）。"
+                    "用于需要跨轮次记住的事实：用户偏好、项目关键决策、重要数值等。"
+                    "可指定标签便于后续按主题检索。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string", "description": "记忆键（如 'user_language_preference'）"},
+                        "value": {"type": "string", "description": "要记住的内容"},
+                        "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签，用于按主题检索"},
+                    },
+                    "required": ["key", "value"],
+                },
+                fn=self._memory_tool_placeholder,
+            ))
+            self.tools.append(ToolDef(
+                name="tool_memory_get",
+                description=(
+                    "按 key 读取一条已记住的信息。用于回忆之前 tool_memory_set 保存的内容。"
+                    "未找到或已过期时返回空。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {"key": {"type": "string", "description": "要读取的记忆键"}},
+                    "required": ["key"],
+                },
+                fn=self._memory_tool_placeholder,
+            ))
+            self.tools.append(ToolDef(
+                name="tool_memory_search",
+                description=(
+                    "按标签检索所有相关的已记住信息。用于在本会话内按主题查找记忆"
+                    "（如标签 'project'、'user_preference'）。返回匹配的键值对。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {"tag": {"type": "string", "description": "要检索的标签"}},
+                    "required": ["tag"],
+                },
+                fn=self._memory_tool_placeholder,
+            ))
 
         # 子 Agent 消息总线（runtime.py 注入）：供 tool_task 委派使用
         self.task_bus: object | None = None
@@ -275,6 +325,7 @@ class RAGAgent:
             skill_loader or SkillLoader(""),
             plugin_loader or PluginLoader(""),
             include_filesystem=True,
+            has_memory=memory is not None,
         )
 
         self._usage_accum: dict[str, int] = dict(_ZERO_USAGE)
@@ -292,6 +343,7 @@ class RAGAgent:
             self.skill_loader or SkillLoader(""),
             self.plugin_loader or PluginLoader(""),
             include_filesystem=True,
+            has_memory=getattr(self, "memory", None) is not None,
         )
 
     def _activity_text(self, event: dict) -> str:
@@ -502,6 +554,10 @@ class RAGAgent:
         """占位实现：_execute_tool 对 tool_task 特判，这里不会被真正调用。"""
         return ""
 
+    def _memory_tool_placeholder(self, **kwargs) -> str:
+        """占位实现：_execute_tool 对 tool_memory_* 特判，这里不会被真正调用。"""
+        return ""
+
     async def _tool_task(self, args: dict, depth: int = 0, event_queue=None, directory: str = "") -> str:
         """[opencode task tool] 把聚焦子任务委派给子 Agent 并取回最终结果。
 
@@ -556,6 +612,52 @@ class RAGAgent:
         err = reply.payload.get("error", "sub-agent failed")
         return f"Error: sub-agent '{subagent_type}' failed: {err}"
 
+    async def _tool_memory(self, name: str, args: dict, state: AgentState | None) -> str:
+        """[opencode memory] 主 Agent 记忆读写：set/get/search。
+
+        基于共享 MemoryManager（runtime 注入），会话内按 conversation_id 隔离。
+        与子 Agent 共用同一实例，因此主 Agent 记住的信息子 Agent 也可检索到
+        （对齐 opencode 的共享上下文语义）。
+        """
+        mm = getattr(self, "memory", None)
+        if mm is None:
+            return "Error: memory is unavailable."
+        namespace = str((state or {}).get("conversation_id") or "")
+
+        try:
+            if name == "tool_memory_set":
+                key = str(args.get("key") or "").strip()
+                value = args.get("value")
+                if not key:
+                    return "Error: 'key' is required."
+                tags = args.get("tags") or []
+                if not isinstance(tags, list):
+                    tags = [str(tags)] if tags else []
+                tags = [str(t) for t in tags if str(t).strip()]
+                await mm.set(key, value, ttl=300, tags=tags, namespace=namespace)
+                return f"记住成功: key='{key}' (会话内有效, 标签: {tags or '无'})"
+            if name == "tool_memory_get":
+                key = str(args.get("key") or "").strip()
+                if not key:
+                    return "Error: 'key' is required."
+                val = await mm.get(key, default=None, namespace=namespace)
+                if val is None:
+                    return f"未找到 key='{key}'（可能未记住或已过期）"
+                return f"{key}: {val}"
+            if name == "tool_memory_search":
+                tag = str(args.get("tag") or "").strip()
+                if not tag:
+                    return "Error: 'tag' is required."
+                found = await mm.get_by_tag(tag, namespace=namespace)
+                if not found:
+                    return f"未找到标签 '{tag}' 相关的记忆"
+                lines = [f"{k}: {v}" for k, v in found.items()]
+                return f"标签 '{tag}' 相关记忆:\n" + "\n".join(lines)
+            return f"Error: unknown memory tool '{name}'"
+        except Exception as e:
+            logger.warning("Memory tool %s failed: %s", name, e)
+            return f"Error executing {name}: {e}"
+
     async def _execute_tool(self, name: str, args: dict, state: dict | None = None) -> str:
         """执行指定的工具函数，处理权限检查和错误。"""
         for t in self.tools:
@@ -573,6 +675,8 @@ class RAGAgent:
                             eq = unwrap_tagged(eq)
                         return await self._tool_task(args, depth=depth, event_queue=eq,
                                                      directory=(state or {}).get("_cwd", ""))
+                    if name in ("tool_memory_set", "tool_memory_get", "tool_memory_search"):
+                        return await self._tool_memory(name, args, state)
                     eq = state.get("_event_queue") if state else None
                     if eq and name == "tool_execute":
                         try:
@@ -1322,6 +1426,7 @@ class RAGAgent:
                 _task=task,
                 _cwd=directory or "",
                 _task_depth=max(0, int(task_depth or 0)),
+                conversation_id=conversation_id,
             )
             try:
                 result = await self.graph.ainvoke(state)

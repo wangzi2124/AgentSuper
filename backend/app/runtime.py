@@ -145,11 +145,15 @@ def _do_init(app):
     )
     set_perm_manager(perm_mgr)
 
-    agent = RAGAgent(retriever, skill_loader, plugin_loader, reranker=reranker, custom_tools=custom_tools)
-
     # ── 初始化多 Agent 系统（bus 创建 + 注册，但 start_all 在异步上下文中调用）──
     agent_bus = AgentBus()
     shared_memory = MemoryManager(default_ttl=300)  # 共享记忆，5 分钟过期
+
+    agent = RAGAgent(
+        retriever, skill_loader, plugin_loader,
+        reranker=reranker, custom_tools=custom_tools,
+        memory=shared_memory,  # [opencode memory] 主 Agent 记忆读写工具
+    )
 
     # [opencode task tool] 主 Agent 注入总线引用，供其自主委派子 Agent
     agent.task_bus = agent_bus

@@ -229,12 +229,15 @@ def create_plugin_tools(plugin_loader: PluginLoader) -> List[ToolDef]:
 
 
 def build_system_prompt_no_kb(
-    skill_loader: SkillLoader, plugin_loader: PluginLoader, include_filesystem: bool = True, cwd: str = ""
+    skill_loader: SkillLoader, plugin_loader: PluginLoader, include_filesystem: bool = True, cwd: str = "",
+    has_memory: bool = False,
 ) -> str:
     """构建无知识库时的系统提示词，包含可用工具说明。
 
     cwd: 当前会话绑定的工作目录（opencode ctx.directory）。非空时写入提示词，
     告知 LLM 相对路径以该目录为基准解析。
+    has_memory: 是否启用共享记忆工具（tool_memory_set/get/search）。注入共享
+    记忆管理器时开启（opencode memory 语义）。
     """
     enabled_skills = skill_loader.get_enabled_skills()
     enabled_plugins = plugin_loader.get_enabled_plugins()
@@ -265,6 +268,17 @@ def build_system_prompt_no_kb(
             "to a sub-agent ('web_search' for realtime/news/network info, 'code' for coding/file work) and "
             "get its final result back. The sub-agent starts with fresh context — include all details. "
             "Use it for specialized or parallel work; do NOT delegate what you can do directly."
+        )
+
+    if has_memory:
+        tool_parts.append(
+            "Memory tools (session-scoped shared memory, aligned with opencode memory):\n"
+            "   - tool_memory_set(key, value, tags?) - Remember a fact for later recall (e.g. user "
+            "preference, project decision). Use for facts you will need in later turns of this session.\n"
+            "   - tool_memory_get(key) - Recall a previously remembered fact by key.\n"
+            "   - tool_memory_search(tag) - Find all remembered facts with a given tag (e.g. 'project', "
+            "'user_preference').\n"
+            "   Remember sparingly: only store durable, cross-turn facts worth keeping."
         )
 
     if enabled_skills:
