@@ -140,6 +140,7 @@ def create_filesystem_tools() -> List[ToolDef]:
     from app.tools.file_tools import (
         tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file,
         tool_glob, tool_grep, tool_execute, tool_delete_file, tool_rename_file,
+        tool_apply_patch,
     )
     tools: List[ToolDef] = []
 
@@ -150,14 +151,15 @@ def create_filesystem_tools() -> List[ToolDef]:
         "tool_write_file": {"path": "File path to create", "content": "Text content to write into the file", "overwrite": "If true, overwrite existing file (default: false)"},
         "tool_append_file": {"path": "File path to append to (created if missing)", "content": "Text content to append to the end of the file"},
         "tool_edit_file": {"path": "File path to edit", "old_string": "Text to search for and replace", "new_string": "Replacement text", "replace_all": "If true, replace ALL occurrences; if false, replace only the first. Multiple matches without replace_all cause an error (default: false)"},
-        "tool_glob": {"pattern": "Glob pattern to match files (e.g. **/*.py)", "root": "Directory to search in (default: workspace; absolute paths allowed, e.g. F:\\tetris)"},
-        "tool_grep": {"pattern": "Regex pattern to search for", "include": "File glob pattern to restrict search (e.g. *.py)", "context": "Number of context lines before/after each match", "count_only": "If true, return only match counts per file", "files_only": "If true, return only file paths", "root": "Directory to search in (default: workspace; absolute paths allowed, e.g. F:\\tetris)"},
-        "tool_execute": {"command": "Shell command to run (supports pipes/redirects/&&; every command segment is whitelist-checked)", "timeout": "Max execution time in seconds (default 300, max 600)", "work_dir": "Working directory for the command (default: current directory)"},
+        "tool_glob": {"pattern": "Glob pattern to match files (e.g. **/*.py)", "path": "Directory to search in (default: workspace; absolute paths allowed, e.g. F:\\tetris)"},
+        "tool_grep": {"pattern": "Regex pattern to search for", "include": "File glob pattern to restrict search (e.g. *.py)", "context": "Number of context lines before/after each match", "count_only": "If true, return only match counts per file", "files_only": "If true, return only file paths", "path": "Directory to search in (default: workspace; absolute paths allowed, e.g. F:\\tetris)"},
+        "tool_execute": {"command": "Shell command to run (supports pipes/redirects/&&; every command segment is whitelist-checked)", "timeout": "Max execution time in seconds (default 300, max 600)", "workdir": "Working directory for the command (default: current directory)"},
         "tool_delete_file": {"path": "File or empty directory path to delete"},
         "tool_rename_file": {"path": "Source path to rename/move", "new_path": "Destination path"},
+        "tool_apply_patch": {"patch_text": "Apply-patch format text: '*** Begin Patch' / '*** Add File: <path>' + '+' lines / '*** Update File: <path>' + '-/+/space lines / '*** Delete File: <path>' / '*** End Patch'"},
     }
 
-    for func in [tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file, tool_glob, tool_grep, tool_execute, tool_delete_file, tool_rename_file]:
+    for func in [tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file, tool_glob, tool_grep, tool_execute, tool_delete_file, tool_rename_file, tool_apply_patch]:
         name = func.__name__
         sig = inspect.signature(func)
         param_docs = _PARAM_DOCS.get(name, {})
@@ -176,15 +178,16 @@ def create_filesystem_tools() -> List[ToolDef]:
         # Use a concise description for the tool
         _DESC = {
             "tool_ls": "List files and directories",
-            "tool_read_file": "Read file content (text with line numbers; max 2000 lines / 50KB per call, paginate via offset; base64 for images/pdf/audio/video)",
+            "tool_read_file": "Read file content (text with line numbers; max 2000 lines / 50KB per call, paginate via offset; base64 for images/pdf/audio/video; also lists directories)",
             "tool_write_file": "Create a new file with text content (auto-creates parent directories)",
             "tool_append_file": "Append text content to a file (creates it if missing). Use for large files: write the first chunk then append in chunks.",
             "tool_edit_file": "Edit a file by replacing text (fuzzy matching; errors when multiple matches unless replace_all)",
-            "tool_glob": "Find files matching a glob pattern (mtime-sorted, max 100)",
-            "tool_grep": "Search file contents using regex (max 100 matches)",
+            "tool_glob": "Find files matching a glob pattern (absolute paths, mtime-sorted, max 100)",
+            "tool_grep": "Search file contents using regex (absolute paths, 'Found N matches', max 100 matches)",
             "tool_execute": "Run a shell command (build/install/test only, NOT for network/web operations)",
             "tool_delete_file": "Delete a file or empty directory (workspace only)",
             "tool_rename_file": "Rename or move a file/directory",
+            "tool_apply_patch": "Apply an apply_patch-format patch (Add File / Update File / Delete File). Best for creating or editing multiple files in one call.",
         }
         tools.append(ToolDef(
             name=name,
@@ -250,11 +253,12 @@ def build_system_prompt_no_kb(
             "   - tool_write_file(path, content, overwrite) - Create a new file\n"
             "   - tool_append_file(path, content) - Append content to a file (creates if missing)\n"
             "   - tool_edit_file(path, old_string, new_string, replace_all) - Edit a file\n"
-            "   - tool_glob(pattern, root) - Find files matching a pattern (root defaults to workspace)\n"
-            "   - tool_grep(pattern, include, context, count_only, files_only, root) - Search file contents\n"
-            "   - tool_execute(command, timeout, work_dir) - Run a shell command (build/install only)\n"
+            "   - tool_glob(pattern, path) - Find files matching a pattern (path defaults to workspace)\n"
+            "   - tool_grep(pattern, include, context, count_only, files_only, path) - Search file contents\n"
+            "   - tool_execute(command, timeout, workdir) - Run a shell command (build/install only)\n"
             "   - tool_delete_file(path) - Delete a file or empty directory\n"
-            "   - tool_rename_file(path, new_path) - Rename or move a file/directory"
+            "   - tool_rename_file(path, new_path) - Rename or move a file/directory\n"
+            "   - tool_apply_patch(patch_text) - Apply an apply-patch-format patch (Add/Update/Delete File)"
         )
         tool_parts.append(
             "   - tool_task(description, prompt, subagent_type) - Delegate a focused, independent subtask "
@@ -323,8 +327,8 @@ def build_system_prompt_no_kb(
         "  NOT in this list, you will get a Permission denied error telling you the reason — do NOT",
         "  blindly retry; instead report it, or ask the user to add the path to the workspace list in",
         "  the UI (workspace list updates take effect immediately).",
-        "  To search files in a configured workspace, pass root=<absolute path> to tool_glob / tool_grep.",
-        "  tool_grep / tool_glob return absolute paths when searching a custom root.",
+        "  To search files in a configured workspace, pass path=<absolute path> to tool_glob / tool_grep.",
+        "  tool_grep / tool_glob return absolute paths when searching a custom path.",
         "",
         "IMPORTANT - Multi-step tasks: start with plan block '## 实施计划'; end with '## 完成情况' "
         "(已完成 / 未完成 / 下一步). At step limit, give this report without calling more tools.",

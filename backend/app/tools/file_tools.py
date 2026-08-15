@@ -20,6 +20,22 @@ _WORKSPACE_FALLBACK = Path(__file__).resolve().parents[2]
 _matcher_cache: dict[str, GitignoreMatcher] = {}
 
 
+def _env(title: str, output: str, **metadata) -> dict:
+    """工具结果信封（对齐 opencode Tool.execute 返回的 {title, metadata, output}）。
+
+    调用方（graph._execute_tool / sub_tools.run_tool）用 unwrap() 提取 output 喂给 LLM；
+    信封中的 metadata 可承载 preview/display 等结构化信息供前端展示。
+    """
+    return {"title": title, "metadata": metadata, "output": output}
+
+
+def unwrap(result: object) -> str:
+    """从信封结构提取 output 字符串；非信封直接 str()（兼容旧返回）。"""
+    if isinstance(result, dict) and "output" in result:
+        return str(result["output"])
+    return str(result)
+
+
 def _gitignore_matcher() -> GitignoreMatcher | None:
     """按 worktree 惰性构建 .gitignore 匹配器(含 .gitignore 文件 mtime 缓存)。"""
     ws = _workspace()
@@ -146,7 +162,7 @@ def _is_read_allowed(path: Path) -> bool:
     return mgr.check(str(path), "read") == "allow"
 
 
-def tool_ls(path: str = ".") -> str:
+def tool_ls(path: str = ".") -> dict:
     """列出指定目录下的文件和子目录，显示类型、大小和修改时间。
 
     与 opencode list 语义对齐：被 .gitignore 忽略的项（如 node_modules/.venv）不列出；
@@ -155,7 +171,7 @@ def tool_ls(path: str = ".") -> str:
     target = _resolve(path)
     _ensure_safe(target, "read")
     if not target.is_dir():
-        return f"Error: '{path}' is not a directory"
+        return _env("ls", f"Error: '{path}' is not a directory", error=True)
     rows = []
     for node in _scan_cache.list_dir(target):
         if node.ignored:
@@ -169,7 +185,7 @@ def tool_ls(path: str = ".") -> str:
             rows.append(f"{kind} {size:>10}  {mtime}  {node.name}")
         except OSError:
             rows.append(f"? {'':>10}  {'':19}  {node.name}")
-    return "\n".join(rows) if rows else "(empty)"
+    return _env("ls", "\n".join(rows) if rows else "(empty)", entries=len(rows), path=str(target))
 
 
 def _is_binary(path: Path) -> bool:
@@ -210,12 +226,13 @@ def _file_not_found_suggestion(path_str: str, target: Path) -> str:
     return f"File not found: {path_str}"
 
 
-def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
+def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> dict:
     """读取文件内容，文本文件按行号格式返回并支持行偏移/限制，图片/PDF/音视频返回base64。
 
     与 opencode read.ts 对齐：limit 未传/<=0 时默认 DEFAULT_READ_LIMIT(2000) 行，
     输出受 MAX_BYTES(50KB) 字节硬上限约束（超出即截断并提示续读），
     offset 越界时报错。行级流式读取，不整文件载入内存。
+    目录也支持读取：列出条目（子目录带尾部 '/'）。
     """
     target = _resolve(path)
     _ensure_safe(target, "read")
@@ -223,19 +240,21 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
     limit = _coerce_int(limit, 0)
     if limit <= 0:
         limit = DEFAULT_READ_LIMIT
+    if target.is_dir():
+        return _list_directory(target, path, offset, limit)
     if not target.is_file():
-        return _file_not_found_suggestion(path, target)
+        return _file_not_found_envelope(path, target)
     ext = target.suffix.lower()
     if ext in _MULTIMODAL_EXTS:
         try:
             raw = target.read_bytes()
             b64 = base64.b64encode(raw).decode("utf-8")
             mime = _MIME_MAP.get(ext, "application/octet-stream")
-            return f"data:{mime};base64,{b64}"
+            return _env("read", f"data:{mime};base64,{b64}", mime=mime, truncated=False)
         except Exception as e:
-            return f"Error reading file: {e}"
+            return _env("read", f"Error reading file: {e}", error=True)
     if ext not in _TEXT_EXTS and _is_binary(target):
-        return f"Cannot read binary file: {path}"
+        return _env("read", f"Cannot read binary file: {path}", error=True)
     start = offset - 1
     selected: list[str] = []
     count = 0
@@ -261,13 +280,13 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
                 selected.append(line)
                 bytes_used += size
     except Exception as e:
-        return f"Error reading text file: {e}"
+        return _env("read", f"Error reading text file: {e}", error=True)
     if count < offset and not (count == 0 and offset == 1):
-        return f"Offset {offset} is out of range for this file ({count} lines)"
+        return _env("read", f"Offset {offset} is out of range for this file ({count} lines)", error=True)
     content_lines = []
     for i, line in enumerate(selected):
         line_no = offset + i
-        content_lines.append(f"{line_no:05d}| {line}")
+        content_lines.append(f"{line_no}: {line}")
     content = "\n".join(content_lines)
     last_read = offset + len(selected) - 1
     next_offset = last_read + 1
@@ -277,7 +296,57 @@ def tool_read_file(path: str, offset: int = 1, limit: int = 0) -> str:
         footer = f"\n\n(Showing lines {offset}-{last_read} of {count}. Use offset={next_offset} to continue.)"
     else:
         footer = f"\n\n(End of file - total {count} lines)"
-    return f"<file>\n{content}{footer}\n</file>"
+    truncated = bool(cut or more)
+    return _env(
+        "read",
+        f"<file>\n{content}{footer}\n</file>",
+        truncated=truncated,
+        line_start=offset,
+        line_end=last_read,
+        total_lines=count,
+        path=str(target),
+    )
+
+
+def _list_directory(target: Path, path_str: str, offset: int, limit: int) -> dict:
+    """读取目录：列出条目（opencode read 目录语义：子目录带尾部 '/'，排序 dir 在前）。"""
+    entries = _scan_cache.list_dir(target)
+    rows: list[dict] = []
+    for node in entries:
+        if node.ignored:
+            continue
+        display = node.name + ("/" if node.type == "dir" else "")
+        rows.append({"name": node.name, "type": node.type, "display": display})
+    rows.sort(key=lambda r: (0 if r["type"] == "dir" else 1, r["name"].lower()))
+    start = offset - 1
+    sliced = rows[start:start + limit]
+    truncated = start + len(sliced) < len(rows)
+    lines = [r["display"] for r in sliced]
+    note = (
+        f"\n(Showing {len(sliced)} of {len(rows)} entries. Use offset={offset + len(sliced)} to continue.)"
+        if truncated
+        else f"\n({len(rows)} entries)"
+    )
+    output = [
+        f"<path>{target}</path>",
+        "<type>directory</type>",
+        "<entries>",
+        "\n".join(lines),
+        note,
+        "</entries>",
+    ]
+    return _env(
+        "read",
+        "\n".join(output),
+        truncated=truncated,
+        entries=len(rows),
+        shown=len(sliced),
+        path=str(target),
+    )
+
+
+def _file_not_found_envelope(path_str: str, target: Path) -> dict:
+    return _env("read", _file_not_found_suggestion(path_str, target), error=True)
 
 
 def _detect_line_ending(text: str) -> str:
@@ -315,7 +384,7 @@ def _write_text_raw(path: Path, text: str, has_bom: bool = False) -> None:
         f.write(text)
 
 
-def tool_write_file(path: str, content: str, overwrite: bool = False) -> str:
+def tool_write_file(path: str, content: str, overwrite: bool = False) -> dict:
     """创建新文件并写入内容。overwrite=True 时允许覆盖已存在的文件。
 
     行尾按内容原样写入（newline=""），不做系统换行符转换。
@@ -324,19 +393,20 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> str:
     _ensure_safe(target, "write")
     overwrite = _coerce_bool(overwrite)
     if target.exists() and not overwrite:
-        return f"Error: file already exists: {path} (use overwrite=True to overwrite, or edit_file to modify)"
+        return _env("write", f"Error: file already exists: {path} (use overwrite=True to overwrite, or edit_file to modify)", error=True)
     target.parent.mkdir(parents=True, exist_ok=True)
     existed = target.exists()
     try:
         _write_text_raw(target, str(content))
         action = "Overwritten" if existed else "Created"
         _scan_cache.invalidate(target.parent)
-        return f"{action} {path} ({target.stat().st_size} bytes)"
+        size = target.stat().st_size
+        return _env("write", f"{action} {path} ({size} bytes)", path=str(target), size=size, action=action.lower())
     except Exception as e:
-        return f"Error writing file: {e}"
+        return _env("write", f"Error writing file: {e}", error=True)
 
 
-def tool_append_file(path: str, content: str) -> str:
+def tool_append_file(path: str, content: str) -> dict:
     """向文件追加内容（文件不存在则创建）。用于分段写入大文件：先 tool_write_file 写首段，再多次 append。"""
     target = _resolve(path)
     _ensure_safe(target, "write")
@@ -348,9 +418,9 @@ def tool_append_file(path: str, content: str) -> str:
         total = target.stat().st_size
         action = "Appended to" if existed else "Created"
         _scan_cache.invalidate(target.parent)
-        return f"{action} {path} ({total} bytes total)"
+        return _env("append", f"{action} {path} ({total} bytes total)", path=str(target), size=total)
     except Exception as e:
-        return f"Error appending to file: {e}"
+        return _env("append", f"Error appending to file: {e}", error=True)
 
 
 def _edit_levenshtein(a: str, b: str) -> int:
@@ -635,7 +705,7 @@ def _edit_replace(content: str, old_string: str, new_string: str, replace_all: b
     )
 
 
-def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict:
     """在文件中查找并替换指定字符串。支持模糊匹配；oldString 匹配到多处时报错（除非 replace_all=True）。
 
     与 opencode edit.ts 对齐：读取/写入均保留原文件行尾（LF 或 CRLF）与 UTF-8 BOM；
@@ -645,11 +715,11 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
     _ensure_safe(target, "write")
     replace_all = _coerce_bool(replace_all)
     if not target.is_file():
-        return f"File {path} not found"
+        return _env("edit", f"File {path} not found", error=True)
     try:
         text, has_bom = _read_text_raw(target)
     except Exception as e:
-        return f"Error reading file: {e}"
+        return _env("edit", f"Error reading file: {e}", error=True)
     ending = _detect_line_ending(text)
     try:
         if old_string == "":
@@ -659,90 +729,276 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
             replacement = _convert_line_ending(_normalize_line_endings(new_string), ending)
             content_new = _edit_replace(text, old, replacement, replace_all)
     except ValueError as e:
-        return f"Error: {e}"
+        return _env("edit", f"Error: {e}", error=True)
     try:
         _write_text_raw(target, content_new, has_bom)
         _scan_cache.invalidate(target.parent)
-        return f"Edited {path}"
+        return _env("edit", f"Edited {path}", path=str(target), replace_all=replace_all)
     except Exception as e:
-        return f"Error writing file: {e}"
+        return _env("edit", f"Error writing file: {e}", error=True)
 
 
-def tool_glob(pattern: str, root: str = ".") -> str:
-    """在指定目录中按glob模式搜索文件，返回匹配路径列表（默认工作区为相对路径，自定义 root 为绝对路径）。"""
-    root_path = _resolve(root)
+def tool_glob(pattern: str, path: str = ".") -> dict:
+    """在指定目录中按glob模式搜索文件，返回匹配路径列表（opencode glob 语义：绝对路径，No files found 表示无结果）。"""
+    root_path = _resolve(path)
     _ensure_safe(root_path, "read")
     if not root_path.is_dir():
-        return f"Error: '{root}' is not a directory"
+        return _env("glob", f"Error: '{root}' is not a directory", error=True)
     matcher = _gitignore_matcher()
     if matcher is not None:
         matches = [m for m in matcher.glob(pattern, top=root_path) if _is_read_allowed(m)]
     else:
         matches = [m for m in root_path.glob(pattern) if _is_read_allowed(m)]
     if not matches:
-        return f"No files found for: {pattern}"
+        return _env("glob", "No files found", matches=0)
     matches.sort(key=lambda m: os.path.getmtime(m), reverse=True)
-    if root_path == _workspace():
-        lines = [str(m.relative_to(_workspace())) for m in matches[:100]]
-    else:
-        lines = [str(m.resolve()) for m in matches[:100]]
-    if len(matches) > 100:
+    # 对齐 opencode glob.ts：输出绝对路径
+    lines = [str(m.resolve()) for m in matches[:100]]
+    truncated = len(matches) > 100
+    if truncated:
         lines.append("... and {} more".format(len(matches) - 100))
         lines.append("(Results are truncated. Consider using a more specific path or pattern.)")
-    return "\n".join(lines)
+    return _env(
+        "glob",
+        "\n".join(lines),
+        matches=min(len(matches), 100),
+        total_matches=len(matches),
+        truncated=truncated,
+    )
 
 
-def tool_delete_file(path: str) -> str:
+def tool_delete_file(path: str) -> dict:
     """删除指定文件或空目录（仅限工作区内）。"""
     target = _resolve(path)
     _ensure_safe(target, "write")
     if not target.exists():
-        return f"Error: not found: {path}"
+        return _env("delete", f"Error: not found: {path}", error=True)
     if target.is_dir():
         try:
             target.rmdir()
             _scan_cache.invalidate(target.parent)
-            return f"Deleted directory {path}"
+            return _env("delete", f"Deleted directory {path}", path=str(target), kind="dir")
         except OSError as e:
-            return f"Error deleting directory: {e}"
+            return _env("delete", f"Error deleting directory: {e}", error=True)
     try:
         target.unlink()
         _scan_cache.invalidate(target.parent)
-        return f"Deleted {path}"
+        return _env("delete", f"Deleted {path}", path=str(target), kind="file")
     except Exception as e:
-        return f"Error deleting file: {e}"
+        return _env("delete", f"Error deleting file: {e}", error=True)
 
 
-def tool_rename_file(path: str, new_path: str) -> str:
+def tool_rename_file(path: str, new_path: str) -> dict:
     """重命名或移动文件/目录到新路径。"""
     src = _resolve(path)
     dst = _resolve(new_path)
     _ensure_safe(src, "write")
     _ensure_safe(dst, "write")
     if not src.exists():
-        return f"Error: source not found: {path}"
+        return _env("rename", f"Error: source not found: {path}", error=True)
     if dst.exists():
-        return f"Error: destination already exists: {new_path}"
+        return _env("rename", f"Error: destination already exists: {new_path}", error=True)
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
         src.rename(dst)
         _scan_cache.invalidate(src.parent)
         _scan_cache.invalidate(dst.parent)
-        return f"Renamed {path} -> {new_path}"
+        return _env("rename", f"Renamed {path} -> {new_path}", src=str(src), dst=str(dst))
     except Exception as e:
-        return f"Error renaming: {e}"
+        return _env("rename", f"Error renaming: {e}", error=True)
 
 
-def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: bool = False, files_only: bool = False, root: str = ".") -> str:
-    """在指定目录的文本文件中按正则表达式搜索内容，支持文件过滤、上下文显示和目录范围。"""
+def _patch_split_sections(text: str) -> list[tuple[str, str, str]]:
+    """解析 apply_patch 补丁文本，返回 [(action, path, body)]。
+
+    action ∈ add/update/delete；body 为文件操作体的原始行（不含头部）。
+    对齐 apply_patch.txt 的 Begin/End Patch + Add/Delete/Update File 语义。
+    """
+    lines = text.splitlines()
+    sections: list[tuple[str, str, str]] = []
+    current: str | None = None
+    current_path = ""
+    body: list[str] = []
+
+    def flush() -> None:
+        nonlocal current, body
+        if current is not None:
+            sections.append((current, current_path, "\n".join(body).rstrip("\n")))
+            body = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "*** Begin Patch":
+            continue
+        if stripped == "*** End Patch":
+            break
+        if stripped.startswith("*** Add File:"):
+            flush()
+            current = "add"
+            current_path = stripped[len("*** Add File:"):].strip()
+            continue
+        if stripped.startswith("*** Delete File:"):
+            flush()
+            current = "delete"
+            current_path = stripped[len("*** Delete File:"):].strip()
+            continue
+        if stripped.startswith("*** Update File:"):
+            flush()
+            current = "update"
+            current_path = stripped[len("*** Update File:"):].strip()
+            continue
+        if stripped.startswith("*** Move to:"):
+            # 对齐 opencode：move 暂不支持 → 作为更新操作的一部分忽略
+            continue
+        if current is not None:
+            body.append(line)
+    flush()
+    return sections
+
+
+def _patch_add_body(body: str) -> str:
+    """add 文件体：每行必须 + 前缀，去除前缀并补结尾换行。"""
+    out_lines: list[str] = []
+    for raw in body.splitlines():
+        if raw.startswith("+"):
+            out_lines.append(raw[1:])
+        else:
+            out_lines.append(raw)
+    text = "\n".join(out_lines)
+    return text if text.endswith("\n") else text + "\n"
+
+
+def _patch_update_hunks(body: str) -> list[tuple[str, str]]:
+    """把 update 操作体解析为 (old_block, new_block) hunk 列表。
+
+    hunk 内：` ` 为上下文行（保留在两侧），`-` 为删除行（仅 old），
+    `+` 为新增行（仅 new）。@@ 头部行忽略。
+    """
+    hunks: list[tuple[str, str]] = []
+    old_lines: list[str] = []
+    new_lines: list[str] = []
+    for raw in body.splitlines():
+        if raw.startswith("@@"):
+            hunks.append(("\n".join(old_lines), "\n".join(new_lines)))
+            old_lines, new_lines = [], []
+            continue
+        if not raw:
+            continue
+        prefix, rest = raw[0], raw[1:]
+        if prefix in (" ",):
+            old_lines.append(rest)
+            new_lines.append(rest)
+        elif prefix == "-":
+            old_lines.append(rest)
+        elif prefix == "+":
+            new_lines.append(rest)
+    hunks.append(("\n".join(old_lines), "\n".join(new_lines)))
+    return hunks
+
+
+def _patch_apply_hunks(content: str, hunks: list[tuple[str, str]]) -> str:
+    """按 hunk 顺序把 old_block 替换为 new_block；找不到则模糊匹配（行内 trim 比较）。"""
+    lines = content.splitlines()
+    for old_block, new_block in hunks:
+        if not old_block.strip():
+            # 纯新增：定位到内容末尾（近似语义：追加）
+            lines = lines + new_block.splitlines()
+            continue
+        target = old_block.splitlines()
+        idx = -1
+        for i in range(len(lines) - len(target) + 1):
+            if lines[i:i + len(target)] == target:
+                idx = i
+                break
+        if idx == -1:
+            trimmed_target = [t.strip() for t in target]
+            for i in range(len(lines) - len(target) + 1):
+                if [l.strip() for l in lines[i:i + len(target)]] == trimmed_target:
+                    idx = i
+                    break
+        if idx == -1:
+            raise ValueError(f"Patch hunk not found in file:\n{old_block[:200]}")
+        lines = lines[:idx] + new_block.splitlines() + lines[idx + len(target):]
+    return "\n".join(lines)
+
+
+def tool_apply_patch(patch_text: str) -> dict:
+    """应用 apply_patch 格式的补丁：支持 Add File / Update File / Delete File 操作。
+
+    对齐 apply_patch.txt 语义：
+      *** Begin Patch
+      *** Add File: <path>
+      +<content line>
+      *** Update File: <path>
+      @@ <anchor>
+      -<old line>
+      +<new line>
+      *** Delete File: <path>
+      *** End Patch
+    补丁按顺序逐条应用；某个操作失败时已应用的部分保留并明确报告。
+    """
+    if not patch_text or not patch_text.strip():
+        return _env("apply_patch", "Error: patchText is required", error=True)
+    sections = _patch_split_sections(patch_text)
+    if not sections:
+        return _env("apply_patch", "Error: patch rejected: empty patch", error=True)
+    applied: list[str] = []
+    try:
+        for action, rel_path, body in sections:
+            target = _resolve(rel_path)
+            _ensure_safe(target, "write")
+            if action == "add":
+                if target.exists():
+                    raise ValueError(f"File already exists: {rel_path}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _write_text_raw(target, _patch_add_body(body))
+                applied.append(f"A {rel_path}")
+            elif action == "delete":
+                if not target.exists():
+                    raise ValueError(f"File not found: {rel_path}")
+                target.unlink()
+                applied.append(f"D {rel_path}")
+            else:  # update
+                if not target.is_file():
+                    raise ValueError(f"File not found: {rel_path}")
+                text, has_bom = _read_text_raw(target)
+                ending = _detect_line_ending(text)
+                hunks = _patch_update_hunks(body)
+                if not hunks:
+                    raise ValueError(f"Update hunk is empty: {rel_path}")
+                # 归一化换行后应用，再转换回原文件行尾（对齐 edit.ts 行尾保留）
+                normalized = _normalize_line_endings(text)
+                normalized = _patch_apply_hunks(normalized, hunks)
+                content_new = _convert_line_ending(normalized, ending)
+                _write_text_raw(target, content_new, has_bom)
+                applied.append(f"M {rel_path}")
+            _scan_cache.invalidate(target.parent)
+    except NeedsPermission:
+        raise
+    except Exception as e:
+        prefix = (
+            f"Error: Unable to apply patch at {rel_path}"
+            if not applied
+            else f"Error: Patch partially applied before failing at {rel_path}. Applied: {', '.join(applied)}"
+        )
+        return _env("apply_patch", f"{prefix}\n{e}", error=True, applied=applied)
+    return _env("apply_patch", "Applied patch sequentially:\n" + "\n".join(applied), applied=applied)
+
+
+def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: bool = False, files_only: bool = False, path: str = ".") -> dict:
+    """在指定目录的文本文件中按正则表达式搜索内容，支持文件过滤、上下文显示和目录范围。
+
+    与 opencode grep.ts 对齐：输出绝对路径；空结果 "No files found"；
+    有结果时头部 "Found N matches"（超限时 "(more matches available)"），按文件分组。
+    """
     import re
     context = _coerce_int(context, 0)
     count_only = _coerce_bool(count_only)
     files_only = _coerce_bool(files_only)
-    root_path = _resolve(root)
+    root_path = _resolve(path)
     _ensure_safe(root_path, "read")
     if not root_path.is_dir():
-        return f"Error: '{root}' is not a directory"
+        return _env("grep", f"Error: '{path}' is not a directory", error=True)
     use_re = re.compile(pattern, re.MULTILINE | re.DOTALL)
     file_pattern = include if include else "**/*"
     file_matches: list[tuple[Path, list[int]]] = []
@@ -781,16 +1037,13 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
         if found_positions:
             file_matches.append((f, found_positions))
     if not file_matches:
-        return f"No files found for: {pattern}"
+        return _env("grep", "No files found", matches=0, total_matches=0)
     file_matches.sort(key=lambda t: os.path.getmtime(t[0]), reverse=True)
     output: list[str] = []
     total_matches = 0
     truncated = False
     for f, found_positions in file_matches:
-        if root_path == _workspace():
-            rel = str(f.relative_to(_workspace()))
-        else:
-            rel = str(f.resolve())
+        rel = str(f.resolve())
         if files_only:
             if total_matches >= 100:
                 truncated = True
@@ -805,13 +1058,13 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
             output.append(f"{rel}: {len(found_positions)} match(es)")
             total_matches += 1
             continue
-        output.append(f"--- {rel} ---")
         seen_lines: set[int] = set()
         try:
             lines = f.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
         except Exception:
             lines = []
         emitted = 0
+        file_output: list[str] = []
         for lineno in found_positions:
             if lineno in seen_lines:
                 continue
@@ -827,15 +1080,26 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
                 line_text = lines[i].rstrip()
                 if len(line_text) > MAX_LINE_LENGTH:
                     line_text = line_text[:MAX_LINE_LENGTH] + "..."
-                output.append(f"{marker} {i+1:>6}: {line_text}")
-            output.append("")
-        total_matches += emitted
+                file_output.append(f"  {marker} Line {i+1}: {line_text}")
+            file_output.append("")
+        if emitted:
+            output.append(f"{rel}:")
+            output.extend(file_output)
+            total_matches += emitted
         if truncated:
             break
     if truncated:
         output.append(f"... and more. Showing first 100 matches.")
-        output.append("(Results are truncated. Consider using a more specific search pattern.)")
-    return "\n".join(output).rstrip()
+        output.append("(Results are truncated. Consider using a more specific path or pattern.)")
+    body = "\n".join(output).rstrip()
+    header = f"Found {total_matches} matches (more matches available)" if truncated else f"Found {total_matches} matches"
+    return _env(
+        "grep",
+        f"{header}\n{body}",
+        matches=total_matches,
+        truncated=truncated,
+        pattern=pattern,
+    )
 
 
 # Whitelist of allowed commands for tool_execute to mitigate command injection risk.
@@ -1142,7 +1406,7 @@ def _run_shell(command: str, resolved_cwd: str, timeout: int) -> tuple[int, str,
         raise subprocess.TimeoutExpired(command, timeout, stdout, stderr)
 
 
-def _format_execute_output(rc: int, stdout: str, stderr: str) -> str:
+def _format_execute_output(rc: int, stdout: str, stderr: str, command: str = "") -> dict:
     parts = []
     if stdout:
         parts.append(stdout.rstrip())
@@ -1150,40 +1414,62 @@ def _format_execute_output(rc: int, stdout: str, stderr: str) -> str:
         parts.append(f"[stderr]\n{stderr.rstrip()}")
     output = "\n".join(parts)
     header = f"Exit code: {rc}"
-    if len(output) > MAX_EXECUTE_OUTPUT_LENGTH:
-        output = output[:MAX_EXECUTE_OUTPUT_LENGTH]
-        output += "\n\n<bash_metadata>\nbash tool truncated output as it exceeded 30000 char limit\n</bash_metadata>"
-    if output:
-        return f"{header}\n{output}"
-    return header
+    truncated = len(output) > MAX_EXECUTE_OUTPUT_LENGTH
+    preview = output
+    output_path = None
+    if truncated:
+        # 对齐 opencode shell.ts：完整输出写入 truncation 文件，只回传预览 + 提示
+        try:
+            from app.context.tool_output import _write_truncated
+            output_path = _write_truncated(output)
+            preview = output[:MAX_EXECUTE_OUTPUT_LENGTH]
+            hint = f"\n\n<bash_metadata>\nOutput truncated; full output saved to: {output_path}\n</bash_metadata>"
+        except Exception:
+            hint = "\n\n<bash_metadata>\nbash tool truncated output as it exceeded 30000 char limit\n</bash_metadata>"
+        body = preview + hint
+    else:
+        body = output
+    if body:
+        text = f"{header}\n{body}"
+    else:
+        text = header
+    return _env(
+        "execute",
+        text,
+        exit_code=rc,
+        truncated=truncated,
+        output_path=output_path,
+        command=command[:200],
+    )
 
 
-def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
+def tool_execute(command: str, timeout: int = 300, workdir: str = ".") -> dict:
     """执行shell命令并返回标准输出、标准错误和退出码。
 
     支持管道/重定向/&& 等真实 shell 语义；安全校验（白名单/黑名单/SSRF）逐段生效，
     防止 `cat x | evil` 绕过首 token 白名单。无 shell 语义时保持原 exec 路径。
+    超长输出（>30KB）截断为预览，完整输出写入 data/truncation/tool_execute_*.txt 并提示路径。
     """
     timeout = _coerce_int(timeout, 300)
     if timeout > 600:
         timeout = 600
     if timeout < 1:
         timeout = 5
-    resolved_cwd = _resolve(work_dir)
+    resolved_cwd = _resolve(workdir)
     try:
         _validate_shell_command(command, cwd=resolved_cwd)
     except ValueError as e:
-        return f"Error: {e}"
+        return _env("execute", f"Error: {e}", error=True)
     mgr = get_perm_mgr()
     decision = mgr.check(str(resolved_cwd), "execute")
     if decision == "ask":
-        raise NeedsPermission(str(resolved_cwd), "execute", "tool_execute", {"command": command, "timeout": timeout, "work_dir": work_dir})
+        raise NeedsPermission(str(resolved_cwd), "execute", "tool_execute", {"command": command, "timeout": timeout, "workdir": workdir})
     if decision == "deny":
-        return f"Error: access denied to directory '{work_dir}'"
+        return _env("execute", f"Error: access denied to directory '{workdir}'", error=True)
     try:
         if _needs_shell(command):
             rc, stdout, stderr = _run_shell(command, str(resolved_cwd), timeout)
-            return _format_execute_output(rc, stdout, stderr)
+            return _format_execute_output(rc, stdout, stderr, command)
         # Parse command into argument list to avoid shell injection
         args = shlex.split(command)
         result = subprocess.run(
@@ -1194,10 +1480,10 @@ def tool_execute(command: str, timeout: int = 300, work_dir: str = ".") -> str:
             timeout=timeout,
             cwd=str(resolved_cwd),
         )
-        return _format_execute_output(result.returncode, result.stdout, result.stderr)
+        return _format_execute_output(result.returncode, result.stdout, result.stderr, command)
     except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s"
+        return _env("execute", f"Error: command timed out after {timeout}s", error=True, timed_out=True)
     except ValueError as e:
-        return f"Error: {e}"
+        return _env("execute", f"Error: {e}", error=True)
     except Exception as e:
-        return f"Error executing command: {e}"
+        return _env("execute", f"Error executing command: {e}", error=True)

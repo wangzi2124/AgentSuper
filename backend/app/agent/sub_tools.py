@@ -103,6 +103,7 @@ _AVAILABLE_TOOLS = (
     "tool_delete_file",
     "tool_rename_file",
     "tool_execute",
+    "tool_apply_patch",
 )
 
 _TOOL_SCHEMAS = [
@@ -142,7 +143,7 @@ _TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "glob 模式，如 '**/*.py'"},
-                    "root": {"type": "string", "description": "搜索根目录（相对工作区）"},
+                    "path": {"type": "string", "description": "搜索根目录（相对工作区）"},
                 },
                 "required": ["pattern"],
             },
@@ -160,7 +161,7 @@ _TOOL_SCHEMAS = [
                     "include": {"type": "string", "description": "文件过滤 glob，如 '*.py'"},
                     "context": {"type": "integer", "description": "匹配行前后显示行数"},
                     "files_only": {"type": "boolean", "description": "只输出文件名"},
-                    "root": {"type": "string", "description": "搜索根目录（相对工作区）"},
+                    "path": {"type": "string", "description": "搜索根目录（相对工作区）"},
                 },
                 "required": ["pattern"],
             },
@@ -245,9 +246,23 @@ _TOOL_SCHEMAS = [
                 "properties": {
                     "command": {"type": "string"},
                     "timeout": {"type": "integer", "description": "超时秒数（上限 600）"},
-                    "work_dir": {"type": "string", "description": "工作目录（相对工作区）"},
+                    "workdir": {"type": "string", "description": "工作目录（相对工作区）"},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_apply_patch",
+            "description": "应用 apply_patch 格式的补丁（对齐 opencode apply_patch 工具），支持 Add File / Update File / Delete File 三种操作。适合一次创建/修改/删除多个文件；单处替换用 tool_edit_file 更简单。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch_text": {"type": "string", "description": "补丁文本。格式：以 '*** Begin Patch' 开头，'*** End Patch' 结尾；'*** Add File: <path>' 后跟以 '+' 前缀的内容行；'*** Update File: <path>' 后跟以 '-'/'+'/' ' 前缀的行（@@ 头部可选）；'*** Delete File: <path>' 无需内容。"},
+                },
+                "required": ["patch_text"],
             },
         },
     },
@@ -275,7 +290,7 @@ async def run_tool(name: str, args: dict, event_queue=None) -> str:
     if fn is None:
         return f"Error: unknown tool '{name}'"
     try:
-        return str(await asyncio.to_thread(fn, **_coerce_args(fn, args)))
+        return fs.unwrap(await asyncio.to_thread(fn, **_coerce_args(fn, args)))
     except NeedsPermission as e:
         mgr = get_perm_mgr()
         req = mgr.create_request(e.path, e.operation, name, args)
@@ -294,7 +309,7 @@ async def run_tool(name: str, args: dict, event_queue=None) -> str:
         decision = await mgr.await_decision(req.id)
         if decision == "allowed":
             mgr.add_temp_approval(e.path)
-            return str(await asyncio.to_thread(fn, **_coerce_args(fn, args)))
+            return fs.unwrap(await asyncio.to_thread(fn, **_coerce_args(fn, args)))
         return _permission_denied_msg(e.operation, e.path)
     except Exception as e:
         return f"Error executing {name}: {e}"

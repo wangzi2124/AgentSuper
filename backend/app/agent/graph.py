@@ -382,7 +382,7 @@ class RAGAgent:
             "\n- If a source has 'chapter_title' in its metadata, use that exact title when referring to the chapter."
             "\n- If a source has 'chapter_summary', it is a chapter overview — use it to describe the chapter's content."
             "\n- If you don't have enough information, say so."
-            "\n\nYou have access to built-in filesystem tools (tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file, tool_glob, tool_grep, tool_execute) for reading/writing files and running shell commands."
+            "\n\nYou have access to built-in filesystem tools (tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file, tool_glob, tool_grep, tool_execute, tool_apply_patch) for reading/writing files, running shell commands and applying patches."
             "\nYou also have access to skill tools (load_skill_*) and plugin tools."
             "\nIf the user asks to create/edit/manipulate documents (Word, PDF, PPT, Excel), generate visual designs, build web pages, or use other specialized capabilities, call the relevant skill or plugin tool to get instructions first."
             "\n\nCharacter Analysis (for novels, scripts, or documents with dialogues):"
@@ -487,11 +487,16 @@ class RAGAgent:
             pass
         return set()
 
-    def _bound_plugin_result(self, name: str, result: str) -> str:
-        """[token 优化 v5] 大块结构化插件结果（天气/台风）截断，避免整块数据躺进历史每轮重发。"""
-        if name.startswith(self._WEATHER_TOOL_PREFIXES) and len(result) > self._WEATHER_RESULT_LIMIT:
-            return result[:self._WEATHER_RESULT_LIMIT] + "\n…[已截断：天气/台风数据过长，仅保留前 1500 字符]"
-        return result
+    def _bound_plugin_result(self, name: str, result) -> str:
+        """[token 优化 v5] 大块结构化插件结果（天气/台风）截断，避免整块数据躺进历史每轮重发。
+
+        兼容新版工具信封 {title, metadata, output}：先解包 output 再截断。
+        """
+        from app.tools.file_tools import unwrap
+        text = unwrap(result)
+        if name.startswith(self._WEATHER_TOOL_PREFIXES) and len(text) > self._WEATHER_RESULT_LIMIT:
+            return text[:self._WEATHER_RESULT_LIMIT] + "\n…[已截断：天气/台风数据过长，仅保留前 1500 字符]"
+        return text
 
     def _task_tool_placeholder(self, description: str = "", prompt: str = "", subagent_type: str = "web_search") -> str:
         """占位实现：_execute_tool 对 tool_task 特判，这里不会被真正调用。"""
@@ -576,14 +581,14 @@ class RAGAgent:
                             raise
                         except Exception as e:
                             logger.warning("tool_execute streaming failed, falling back to sync: %s", e)
-                            from app.tools.file_tools import tool_execute as _sync_execute
+                            from app.tools.file_tools import tool_execute as _sync_execute, unwrap
                             result = await asyncio.to_thread(_sync_execute, **args)
-                            return str(result)
+                            return unwrap(result)
                     if inspect.iscoroutinefunction(t.fn):
                         result = await t.fn(**args)
                     else:
                         result = await asyncio.to_thread(t.fn, **args)
-                    return self._bound_plugin_result(name, str(result))
+                    return self._bound_plugin_result(name, result)
                 except NeedsPermission as e:
                     mgr = get_perm_mgr()
                     req = mgr.create_request(e.path, e.operation, name, args)
@@ -616,7 +621,7 @@ class RAGAgent:
                             result = await t.fn(**args)
                         else:
                             result = await asyncio.to_thread(t.fn, **args)
-                        return self._bound_plugin_result(name, str(result))
+                        return self._bound_plugin_result(name, result)
                     return _permission_denied_msg(e.operation, e.path, name)
                 except Exception as e:
                     return f"Error executing {name}: {e}"
@@ -628,7 +633,7 @@ class RAGAgent:
         timeout = min(args.get("timeout", 300), 600)
         if timeout < 1:
             timeout = 5
-        work_dir = args.get("work_dir", ".")
+        work_dir = args.get("workdir") or args.get("work_dir") or "."
 
         from app.tools.file_tools import _resolve as _fs_resolve
         resolved_cwd = _fs_resolve(work_dir)
