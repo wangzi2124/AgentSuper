@@ -279,7 +279,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     """
     agent_bus: AgentBus = request.app.state.agent_bus
     user_id = _get_user_id(request)
-    service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id)
+    service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id, body.directory)
 
     history = _session_history_for(service, user_id, session_id)
 
@@ -375,7 +375,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     """
     agent_bus: AgentBus = request.app.state.agent_bus
     user_id = _get_user_id(request)
-    service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id)
+    service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id, body.directory)
 
     history = _session_history_for(service, user_id, session_id)
 
