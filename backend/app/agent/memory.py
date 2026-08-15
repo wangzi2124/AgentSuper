@@ -15,6 +15,7 @@
 import asyncio
 import json
 import time
+import time as tmod
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -25,6 +26,9 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TTL = 300  # 默认 5 分钟
+
+# 持久化去抖间隔（秒）：多个 set 在短时间内触发只落盘一次，减少同步全量写 IO
+_PERSIST_DEBOUNCE = 1.0
 
 
 @dataclass
@@ -61,6 +65,9 @@ class MemoryManager:
         self._lock = asyncio.Lock()
         # 持久化：默认使用 settings.memory_persist_path（空串/None 表示不落盘）
         self._persist_path = persist_path if persist_path is not None else settings.memory_persist_path
+        # 异步去抖落盘状态
+        self._persist_debounce_lock = asyncio.Lock()
+        self._last_persist_ts = 0.0
         self._load()
 
     def _ns_key(self, key: str, namespace: str = "") -> str:
@@ -97,31 +104,58 @@ class MemoryManager:
             logger.warning("MemoryManager failed to load persistence: %s", e)
 
     def _persist(self) -> None:
-        """把未过期记忆落盘（值不可序列化时降级为 str）。"""
+        """把未过期记忆落盘（值不可序列化时降级为 str）。
+
+        同步全量写（对齐原实现）：保证 set/delete 返回后数据已落盘，重启不丢。
+        调用方通常处于 async 锁内，且本文件很小（记忆条目级），开销可接受。
+        若要进一步降低写频可改用 _persist_async_debounced（见下）。
+        """
         if not self._persist_path:
             return
         try:
-            now = time.time()
-            entries = []
-            for e in self._store.values():
-                if e.expired:
-                    continue
-                entries.append({
-                    "key": e.key,
-                    "value": e.value,
-                    "ttl": e.ttl,
-                    "tags": e.tags,
-                    "namespace": e.namespace,
-                    "created_at": e.created_at,
-                })
-            p = Path(self._persist_path)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(
-                json.dumps({"version": 1, "entries": entries}, ensure_ascii=False, default=str),
-                encoding="utf-8",
-            )
+            self._persist_sync()
         except Exception as e:  # noqa: BLE001
             logger.warning("MemoryManager persist failed: %s", e)
+
+    def _persist_sync(self) -> None:
+        now = time.time()
+        entries = []
+        for e in self._store.values():
+            if e.expired:
+                continue
+            entries.append({
+                "key": e.key,
+                "value": e.value,
+                "ttl": e.ttl,
+                "tags": e.tags,
+                "namespace": e.namespace,
+                "created_at": e.created_at,
+            })
+        p = Path(self._persist_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps({"version": 1, "entries": entries}, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+
+    async def _persist_async_debounced(self) -> None:
+        """去抖异步落盘：短时间多次 set 只写一次磁盘。
+
+        对齐 opencode storage 的异步语义——避免在事件循环内做同步全量写 IO，
+        多 Agent 并发写共享记忆时不会阻塞各自的事件循环。
+        注意：调用后数据可能尚未写盘（去抖窗口内），进程异常退出会丢最近 1s 数据。
+        """
+        if not self._persist_path:
+            return
+        async with self._persist_debounce_lock:
+            now = tmod.monotonic()
+            if now - self._last_persist_ts < _PERSIST_DEBOUNCE:
+                return
+            self._last_persist_ts = now
+            try:
+                await asyncio.to_thread(self._persist_sync)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("MemoryManager async persist failed: %s", e)
 
     async def set(
         self,

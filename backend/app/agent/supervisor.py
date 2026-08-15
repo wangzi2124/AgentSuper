@@ -341,7 +341,7 @@ class SupervisorAgent(BaseAgent):
 
         start = tmod.time()
         attempts = []
-        for attempt in range(1):  # [token 优化] 分解失败重试 2→1,失败直接回退 rag
+        for attempt in range(2):  # [token 优化] 首次 + 1 次 few-shot 修复重试，仍失败才回退 rag
             try:
                 if attempt == 0:
                     messages = [
@@ -510,21 +510,6 @@ class SupervisorAgent(BaseAgent):
                 errors.append(note)
             else:
                 results.append(r)
-
-        # 存入记忆（按 conversation 隔离）
-        if self._memory:
-            conv_id = original_payload.get("conversation_id", "")
-            await self._memory.set(
-                f"decomposed_results",
-                {
-                    "subtasks": subtasks,
-                    "results": results,
-                    "errors": errors,
-                },
-                ttl=300,
-                tags=["supervisor", "decomposition"],
-                namespace=conv_id,  # 🔒 Session 隔离
-            )
 
         # 合成最终回答
         if len(results) == 1:
