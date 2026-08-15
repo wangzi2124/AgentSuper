@@ -2,7 +2,7 @@
   "name": "知识库系统 - AI 助手",
   "short_name": "AI 助手",
   "description": "基于RAG + AI Agent的知识库问答系统",
-  "start_url": "/m",
+  "start_url": "/multi-agent",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#f8fafc",

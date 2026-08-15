@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     vector_store_cleanup_interval_hours: int = 24
 
     # ── 并发控制 ──
-    # 全局同时执行的 Agent 任务上限（coordinator global_semaphore + chat.py 旧信号量共用）。
+    # 全局同时执行的 Agent 任务上限（chat.py `_agent_semaphore`，多 Agent 请求排队）。
     # 默认 4：RAG Agent 单次执行主要耗时在 LLM 调用（I/O 等待），提高并发不会打满 CPU，
     # 但 SQLite 连接与 ChromaDB 会有锁竞争，需配合 session.db 连接池（app/session/db.py）。
     max_concurrent_agents: int = 4

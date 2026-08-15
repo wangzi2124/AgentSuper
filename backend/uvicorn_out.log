@@ -1,19 +1,1 @@
 Downloading Model from https://www.modelscope.cn to directory: E:\AgentSuper\backend\data\models\BAAI\bge-small-zh-v1.5
-INFO:     127.0.0.1:10782 - "GET /health HTTP/1.1" 200 OK
-INFO:     127.0.0.1:11473 - "GET /api/auth/account/me HTTP/1.1" 401 Unauthorized
-INFO:     127.0.0.1:11552 - "POST /api/auth/account/login HTTP/1.1" 401 Unauthorized
-INFO:     127.0.0.1:11640 - "POST /api/auth/account/register HTTP/1.1" 200 OK
-INFO:     127.0.0.1:11754 - "GET /api/sessions?kind=multi-agent HTTP/1.1" 200 OK
-INFO:     127.0.0.1:11754 - "POST /api/sessions HTTP/1.1" 200 OK
-INFO:     127.0.0.1:11852 - "GET /api/sessions?kind=multi-agent HTTP/1.1" 200 OK
-INFO:     127.0.0.1:12003 - "POST /api/sessions HTTP/1.1" 200 OK
-INFO:     127.0.0.1:12003 - "GET /api/chat/stream/status HTTP/1.1" 404 Not Found
-INFO:     127.0.0.1:12247 - "POST /api/chat/multi-agent HTTP/1.1" 200 OK
-INFO:     127.0.0.1:12428 - "POST /api/chat/multi-agent/stream HTTP/1.1" 200 OK
-INFO:     127.0.0.1:13065 - "GET /api/sessions?kind=multi-agent HTTP/1.1" 200 OK
-INFO:     127.0.0.1:13165 - "GET /api/sessions/ses_20288tu70g3fd7688/messages HTTP/1.1" 200 OK
-INFO:     127.0.0.1:13350 - "DELETE /api/sessions/ses_20288rdcxz58745fc HTTP/1.1" 204 No Content
-INFO:     127.0.0.1:13350 - "DELETE /api/sessions/ses_20288sq016q8853ce HTTP/1.1" 204 No Content
-INFO:     127.0.0.1:13350 - "DELETE /api/sessions/ses_20288tu70g3fd7688 HTTP/1.1" 204 No Content
-INFO:     127.0.0.1:13350 - "DELETE /api/sessions/ses_20288umjocrd1645a HTTP/1.1" 204 No Content
-INFO:     127.0.0.1:13350 - "GET /api/sessions?kind=multi-agent HTTP/1.1" 200 OK

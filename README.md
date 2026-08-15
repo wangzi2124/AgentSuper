@@ -34,7 +34,7 @@
 | **对话持久化** | SQLite 存储对话历史，服务重启不丢失 |
 | **来源引用** | 回答时标注检索到的文档来源及相似度分数 |
 | **系统监控** | 请求级日志（方法/路径/状态/耗时）+ LLM 调用统计（模型/token/耗时/工具轮数），Web 页面可视化展示 |
-| **虚拟滚动** | 聊天消息列表使用 `@tanstack/vue-virtual`，只渲染可视区域节点，长对话 DOM 不臃肿 |
+| **消息滚动** | 聊天消息列表智能自动滚动（靠近底部才跟随），用户上翻浏览时不强制滚动 |
 | **权限系统** | AI Agent 写外部路径时前端弹窗审批，支持白名单持久化；可写工作目录由前端「工作目录」面板配置（运行时生效、持久化、免重启），`EXTERNAL_PATH_DEFAULT` 控制外部路径默认策略、审批超时（`PERMISSION_APPROVAL_TIMEOUT`）可配置，总线路径无可解释拒绝而非静默失败 |
 | **任务执行引擎** | 参考 OpenCode 双层循环架构，任务持续执行直到完成，支持上下文压缩和最大步数限制 |
 | **执行循环护栏** | `MAX_STEPS`（默认 40）最后轮注入收尾提示并禁用工具，强制"已完成/未完成/下一步"结构化总结；Doom-loop 检测（连续相同工具调用 ≥3 轮）注入策略变更提示，升级到上限后强制收尾 |
@@ -417,7 +417,7 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 默认（`AUTH_TOKEN_SECRET` 未设置）下，所有 API 请求通过 `X-User-Id` 请求头标识用户身份，未携带时后端默认使用 `"anonymous"`。
 
 ```javascript
-fetch("http://localhost:8000/api/chat/", {
+fetch("http://localhost:8000/api/chat/multi-agent", {
   method: "POST",
   headers: {
     "Content-Type": "application/json",
@@ -438,10 +438,9 @@ fetch("http://localhost:8000/api/chat/", {
 | 文件 | 作用 |
 |------|------|
 | `backend/app/auth.py` | HMAC 哈希、token 签名/校验（`create_signed_token` / `verify_signed_token`）+ `AuthMiddleware`（未配置密钥时跳过） |
-| `backend/app/api/auth.py` | `POST /api/auth/register` + `POST /api/auth/token` 路由 |
+| `backend/app/api/auth.py` | `POST /api/auth/register` + `POST /api/auth/token` 路由（账户登录见 `backend/app/api/auth.py` 的 `/api/auth/account/*`，PBKDF2 哈希 + JWT） |
 | `frontend/src/api/auth.ts` | `ensureAuth()` — 生成/读取 `user_id` + `device_secret`，自动注册并换取 token（`main.ts` 启动时调用） |
 | `frontend/src/api/fetch.ts` | `addAuthHeaders()` 自动注入 `X-User-Id` + `X-Auth-Token`；`fetchWithTimeout` 封装自动带认证头 |
-| `frontend/src/mobile/SettingsPanel.vue` | 手机端设置面板可查看/编辑用户身份 |
 
 后端通过 `_get_user_id(request)` 统一提取；启用签名校验后该函数同时验证 token，前端接口不变。
 
@@ -449,12 +448,14 @@ fetch("http://localhost:8000/api/chat/", {
 
 聊天对话按类型隔离存储，不同前端会话列表互不干扰：
 
-| 类型 | 前端页面 | conv_type 值 |
+| 类型 | 前端页面 | kind 值 |
 |------|----------|-------------|
-| **单 Agent 聊天** | ChatView、MobileView | `chat` |
-| **多 Agent 编排** | MultiAgentView | `multi-agent` |
+| **多 Agent 编排** | MultiAgentView | `multi-agent`（默认） |
+| **任务子会话** | 内部使用 | `task` |
 
-前端通过 `GET /api/sessions?kind=` 按会话类型过滤列表（`chat` / `multi-agent`），三个前端入口各自只加载自己类型的会话。
+> 单 Agent 聊天（`chat` 类型）及其前端入口（ChatView / MobileView）已随单 Agent 模式移除，`/chat`、`/m` 路由删除，`/` 重定向到 `/multi-agent`。
+
+前端通过 `GET /api/sessions?kind=multi-agent` 过滤多 Agent 会话列表。
 
 ---
 
@@ -464,16 +465,12 @@ fetch("http://localhost:8000/api/chat/", {
 |------|------|------|
 | GET | `/` | 服务信息 |
 | GET | `/health` | 健康检查 |
-| POST | `/api/chat/` | 发送聊天消息（单 Agent） |
-| POST | `/api/chat/stream` | 流式聊天 SSE（单 Agent），支持 queued/step_start/step_end/done 事件 |
 | POST | `/api/chat/multi-agent/` | 发送聊天消息（多 Agent Supervisor） |
-| POST | `/api/chat/multi-agent/stream` | 流式聊天 SSE（多 Agent），支持 routing/agent_start/agent_stream/agent_done/done 事件 |
-| GET | `/api/chat/stream/status` | 查询并发状态（active/queue_depth） |
+| POST | `/api/chat/multi-agent/stream` | 流式聊天 SSE（多 Agent），支持 queued/routing/agent_start/agent_stream/agent_done/agent_error/permission_request/done/error 事件 |
 | POST | `/api/sessions` | 创建会话 |
 | GET | `/api/sessions` | 会话列表（`project`/`roots`/`search`/`archived`/`kind`） |
 | GET / PATCH / DELETE | `/api/sessions/{id}` | 详情 / 更新 / 删除（级联子会话） |
 | POST | `/api/sessions/{id}/fork` | 在指定 `message_id` 处 fork 子会话 |
-| POST | `/api/sessions/{id}/prompt` | 投递输入（`delivery: steer\|queue`） |
 | GET | `/api/sessions/{id}/messages?after_seq=` | 分页消息（每条附 `parts`） |
 | DELETE | `/api/sessions/{id}/messages/{message_id}` | 删除单条消息 |
 | GET | `/api/sessions/{id}/context` | 模型视角上下文（epoch + 过滤后历史） |
@@ -517,15 +514,15 @@ fetch("http://localhost:8000/api/chat/", {
 
 每次对话请求通过 `conversation_id` 进行会话关联：
 
-1. **自动生成 ID**：首次对话不传 `conversation_id`，后端自动生成并返回
-2. **历史加载**：传 `conversation_id` 则从 SQLite 恢复完整历史
-3. **滑动窗口截断**：`_truncate_history()` 限制 4000 tokens，超出的最早消息被丢弃，插入 `[earlier history truncated]` 占位
+1. **自动生成 ID**：首次对话不传 `conversation_id`，后端创建 `kind='multi-agent'` 会话并返回
+2. **历史加载**：`_session_history_for()` 传 `conversation_id` 则从 SQLite 恢复完整历史（正文优先取 `message_parts` 的 text part）
+3. **滑动窗口截断**：`_truncate_history()` 限制 16000 tokens，超出的最早消息被丢弃，插入 `[earlier history truncated]` 占位
 4. **摘要压缩（可选，分层）**：配置 `SUMMARIZATION_MODEL` 后在截断前先尝试用 LLM 压缩早期消息。旧消息按 `CHUNK_PAIRS`（默认 10 对）分批，每批独立压缩为子摘要，若子摘要合并后仍超阈值则递归合并，直到适应预算。保留最近的 `SUMMARIZATION_KEEP_MESSAGES`（默认 20）条完整消息。摘要失败时自动回退为截断。
-5. **持久化**：每次回答后，user/assistant 消息对追加写入 `data/conversations.db`
+5. **持久化**：每次回答后，user/assistant 消息对追加写入 `data/session.db`（主会话 + `kind='task'` 子会话各一份，含 sources/steps/agents/tokens）
 
 > 截断在 LLM 调用前发生，仅影响 prompt 传入的历史，不影响数据库中的完整记录。
 
-实现路径：`backend/app/api/chat.py` — `_load_conversation` / `_truncate_history` / `_save_conversation`，`backend/app/middleware/summarization.py` — `HierarchicalSummarizationMiddleware`
+实现路径：`backend/app/api/chat.py` — `_session_history_for` / `_truncate_history` / `_persist_multi_agent`，`backend/app/middleware/summarization.py` — `HierarchicalSummarizationMiddleware`
 
 ### 共享记忆持久化（Memory）
 
@@ -535,7 +532,7 @@ fetch("http://localhost:8000/api/chat/", {
 
 ## 会话管理系统（Session Management）
 
-基于 SQLite（`backend/data/session.db`）的归一化会话体系，对齐 OpenCode 的 session 模型，为单 Agent / 多 Agent / 任务执行提供统一底座。旧 `conversations.db` 保持只读，首次访问时惰性迁移（`conversation_id == session.id`），前端无需改动。
+基于 SQLite（`backend/data/session.db`）的归一化会话体系，对齐 OpenCode 的 session 模型，为多 Agent 编排与任务执行提供统一底座。旧 `conversations.db` 保持只读，首次访问时惰性迁移（`conversation_id == session.id`），前端无需改动。
 
 ### 核心概念
 
@@ -545,14 +542,13 @@ fetch("http://localhost:8000/api/chat/", {
 | **消息日志** | `session_messages` append-only 事件日志，会话内自增 `seq` 水位 |
 | **上下文纪元（Context Epoch）** | 每个会话持久化系统上下文快照 + `baseline_seq`，恢复/压缩后精确定位历史水位 |
 | **压缩基线（Compaction Baseline）** | 压缩发生时落 `compaction` 消息 + 重建 epoch；checkpoint 作为 system 上下文带回，重启不丢摘要 |
-| **输入投递** | `session_inputs`，`delivery: steer`（打断）/ `queue`（排队），per-session 串行执行 |
 | **撤销（Revert）** | 删除指定消息之后的所有消息与部件，并回滚纪元水位 |
 
 ### 特性
 
-- **per-session 串行 + 全局并发上限**：`SessionCoordinator` 保证同一会话串行、不同会话并行，受 `MAX_CONCURRENT_AGENTS` 全局限流（替代旧的全局排队）
+- **per-session 串行 + 全局并发上限**：`service.write_lock(session_id)` 保证同一会话串行；`_agent_semaphore`（`app/api/chat.py`）受 `MAX_CONCURRENT_AGENTS` 全局限流（超出自动排队，SSE 发 `queued` 事件）
 - **fork**：在任意消息处克隆子会话，独立消息日志与上下文，与父会话互不污染
-- **级联删除 / 取消**：删除或打断会话时级联其子会话，并取消对应的 AgentBus 后台任务
+- **级联删除 / 取消**：删除或打断会话时级联其子会话，并取消对应的 AgentBus 后台任务（`task_bridge.cancel_children`）
 - **多 Agent 任务**：`/api/chat/multi-agent` 与 `/stream` 把每次任务登记为 `kind='task'` 子会话，父/子消息同步回写
 - **压缩基线持久化**：历史超阈值被摘要/截断时落 `compaction` 消息 + 置 `time_compacted`；`history.load` 始终带回最新 checkpoint
 
@@ -564,7 +560,6 @@ fetch("http://localhost:8000/api/chat/", {
 | GET | `/api/sessions` | 列表（`project`/`roots`/`search`/`archived`/`kind`） |
 | GET / PATCH / DELETE | `/api/sessions/{id}` | 详情 / 更新 / 删除（级联） |
 | POST | `/api/sessions/{id}/fork` | 在指定 `message_id` 处 fork 子会话 |
-| POST | `/api/sessions/{id}/prompt` | 投递输入（`delivery: steer\|queue`） |
 | GET | `/api/sessions/{id}/messages` | 分页消息（`after_seq`，每条附 `parts`） |
 | DELETE | `/api/sessions/{id}/messages/{message_id}` | 删除单条消息 |
 | GET | `/api/sessions/{id}/context` | 模型视角上下文（epoch + 过滤后历史） |
@@ -576,7 +571,7 @@ fetch("http://localhost:8000/api/chat/", {
 
 > 所有 `/api/sessions` 请求经 `X-User-Id` 头隔离（默认 `anonymous`），跨用户访问返回 403。
 
-实现路径：`backend/app/session/`（db / models / repository / history / coordinator / service / deps / router / agent_executor / task_bridge）；设计文档见 `docs/session-management-design.md`。
+实现路径：`backend/app/session/`（db / models / repository / history / service / deps / router / agent_executor / task_bridge；`coordinator.py` 已随单 Agent 移除）；设计文档见 `docs/session-management-design.md`。
 
 ---
 
@@ -650,8 +645,8 @@ const activeSessionId = ref<string | undefined>(undefined)
 
 实现路径：
 - 缓存层：`frontend/src/api/session-cache.ts` — IndexedDB CRUD + 合并逻辑
-- Store 集成：`frontend/src/stores/chat.ts` — `loadConversation()` / `persistSession()`
-- 后端持久化：`backend/app/api/chat.py` — `done` 事件时保存 `sources`/`steps` 到 SQLite
+- Store 集成：`frontend/src/stores/multiAgent.ts` — `loadConversation()` / `persistSession()`
+- 后端持久化：`backend/app/api/chat.py` — `_persist_multi_agent()` 在 `done`/`error` 事件时保存 `sources`/`steps`/`agents`/`tokens` 到 SQLite（主会话 + task 子会话）
 
 ### 工作流程
 
@@ -679,13 +674,12 @@ const activeSessionId = ref<string | undefined>(undefined)
          └─ 如果用户切回会话A，消息仍在（无需重新加载）
 ```
 
-实现路径：`frontend/src/stores/chat.ts` — `useChatStore`（按会话ID存储消息，`conv_type='chat'`）
-- 多 Agent 版本：`frontend/src/stores/multiAgent.ts` — `useMultiAgentStore`（支持 agents 面板和 routing 状态，`conv_type='multi-agent'`）
-- 手机版本：`frontend/src/stores/mobileChat.ts` — `useMobileChatStore`（移动端适配，`conv_type='chat'`）
+实现路径：`frontend/src/stores/multiAgent.ts` — `useMultiAgentStore`（按会话ID存储消息，支持 agents 面板、routing 状态与目录绑定，`kind='multi-agent'`）
+- 单 Agent 版本（`stores/chat.ts`）与移动端（`stores/mobileChat.ts`）已随单 Agent 模式移除
 
 ### 并发控制
 
-后端使用全局信号量（`settings.max_concurrent_agents`，默认 4）限制同时运行的 Agent 任务数，防止多会话同时 streaming 导致资源争抢。该信号量由 session 协调器（`app/session/coordinator.py` 的 `global_semaphore`）与旧版 `_get_agent_semaphore()`（`app/api/chat.py`）共享，同一会话内仍严格串行执行：
+后端使用全局信号量（`_agent_semaphore`，`settings.max_concurrent_agents` 默认 4）限制同时运行的 Agent 任务数，防止多会话同时 streaming 导致资源争抢。多 Agent 请求经 `/api/chat/multi-agent` 与 `/stream` 进入队列，同一会话内仍严格串行执行（`service.write_lock`）：
 
 ```
 Session A 发消息 → 获取 slot #1 → 开始执行
@@ -693,13 +687,13 @@ Session B 发消息 → 获取 slot #2 → 开始执行
 Session C 发消息 → slot 已满 → 排队等待
     │
     ├─ SSE 事件: {type: "queued", queue_position: 1}
-    ├─ 前 Sidebar 显示 "⏳ #1"
-    ├─ ChatView Header 显示 "排队中 #1"
+    ├─ Sidebar 显示 "⏳ #1"
+    ├─ MultiAgentView Header 显示 "排队中 #1"
     │
     ▼
 Session A 完成 → slot #1 释放 → Session C 获得 slot
     │
-    ├─ SSE 事件: {type: "step_start"} → 进入 running 阶段
+    ├─ SSE 事件: {type: "routing"} → 进入 running 阶段
     ├─ Sidebar 显示 "● streaming"
     └─ 开始流式输出
 ```
@@ -710,13 +704,13 @@ Session A 完成 → slot #1 释放 → Session C 获得 slot
 
 **session.db 连接池**：`app/session/db.py` 的 `_ConnectionPool` 维持固定连接（池大小 = `max(6, max_concurrent_agents + 2)`），`_get_db()` 借出、`close()` 归还；WAL 模式 + `busy_timeout=10000` 保证并发写安全。非默认路径的 DB 连接绕过池。
 
-状态 API：`GET /api/chat/stream/status` 返回 `{max_concurrent, active, queue_depth}`
+> 旧的状态 API `GET /api/chat/stream/status`（单 Agent 时期）已随单 Agent 模式移除；排队状态现在由 SSE `queued` 事件 + `queue_position` 承载，前端 `streamPhase` 跟踪。
 
 实现路径：
-- 后端：`backend/app/session/coordinator.py` — `global_semaphore`；`backend/app/api/chat.py` — `_get_agent_semaphore()` + `run_agent()` 的 `async with sem`
+- 后端：`backend/app/api/chat.py` — `_agent_semaphore` + `run_agent()` / `_run_multi_agent_stream()` 的 `async with sem`
 - 连接池：`backend/app/session/db.py` — `_ConnectionPool._get_db()` / `close()`
-- 前端状态：`frontend/src/stores/chat.ts` — `SessionState.streamPhase` / `queuePosition`
-- 前端显示：`frontend/src/components/ChatHistory.vue`（Sidebar 标签）、`frontend/src/views/ChatView.vue`（Header 标签）
+- 前端状态：`frontend/src/stores/multiAgent.ts` — `SessionState.streamPhase` / `queuePosition`
+- 前端显示：`frontend/src/components/MultiAgentChatHistory.vue`（Sidebar 排队/运行中 badge）、`frontend/src/views/MultiAgentView.vue`（Header 标签）
 
 ---
 
@@ -799,9 +793,9 @@ LLM API 报错 (429/500)
 - 后端重试：`backend/app/agent/graph.py` — `_llm_call()` num_retries
 - 后端自愈：`backend/app/agent/bus.py` — `run_agent()` 事件循环崩溃重启（递增延迟，最多 5 次）
 - 后端分类：`backend/app/api/chat.py` — SSE error 事件携带 retryable/statusCode
-- 前端分类：`frontend/src/api/chat.ts` — `classifyNetworkError()` + SSE 断连检测
-- 前端重试：`frontend/src/stores/chat.ts` — `retryLastMessage()` / `manualRetry()` / `cancelAutoRetry()`
-- 前端 UI：`frontend/src/components/ChatMessage.vue` — 错误样式 + 重试按钮
+- 前端分类：`frontend/src/api/multiAgent.ts` / `frontend/src/stores/multiAgent.ts` — `classifyNetworkError()` + SSE 断连检测
+- 前端重试：`frontend/src/stores/multiAgent.ts` — `retryLastMessage()` / `manualRetry()` / `cancelAutoRetry()`（5s 自动倒计时，最多 2 次）
+- 前端 UI：`frontend/src/views/MultiAgentView.vue` — 错误样式 + 重试按钮 + 倒计时徽标
 
 ---
 
@@ -1069,7 +1063,7 @@ backend/skills/
 
 **工作目录配置**：可写工作区由前端「工作目录」面板配置（持久化到 `backend/data/runtime_workspaces.json`，运行时生效、无需重启）。路径不落在任何工作区时按 `EXTERNAL_PATH_DEFAULT`（默认 `ask`）处理，审批等待超过 `PERMISSION_APPROVAL_TIMEOUT`（默认 60s）自动拒绝。
 
-**子 Agent 权限桥**：多 Agent 场景下 `code`/`web_search` 子 Agent 复用同一 `PermissionManager`；外部路径触发 `NeedsPermission` 时发出 `permission_request` 事件到事件队列并返回明确的拒绝信息给 LLM（多 Agent UI 无审批面板，外部路径实际拒绝、工作区内写入照常放行），不会阻塞等待。
+**子 Agent 权限桥**：多 Agent 场景下 `code`/`web_search` 子 Agent 复用同一 `PermissionManager`；外部路径触发 `NeedsPermission` 时发出 `permission_request` 事件（SSE 透传给前端共享 `PermissionDialog` 审批面板），随后异步等待用户审批结果：`allowed` 则临时放行并重试工具，`denied`/超时则把拒绝信息反馈 LLM；无事件队列（脱离请求流）时直接拒绝，不会永久阻塞。
 
 ### 交互流程
 
@@ -1083,9 +1077,10 @@ PermissionManager.check()
   └─ 外部路径 → 抛出 NeedsPermission
        │
        ▼
-graph.py 捕获 → 创建 PermissionRequest
+捕获者 ── 主 Agent: graph.py:_execute_tool / 子 Agent: sub_tools.py:run_tool
+  → 创建 PermissionRequest
   → SSE 推送 permission_request 事件
-  → 等待用户决策
+  → 等待用户决策（await_decision，默认 60s 超时）
        │
        ▼
 前端 PermissionDialog 弹窗 ───┬── [拒绝] → 返回 "Permission denied"
@@ -1095,6 +1090,8 @@ graph.py 捕获 → 创建 PermissionRequest
        ▼
 工具执行成功 → LLM 继续生成回答
 ```
+
+> 子 Agent 无事件队列（如脱离请求流的场景）时直接拒绝而不等待，防止永久阻塞。
 
 ### 白名单持久化
 
@@ -1116,9 +1113,10 @@ graph.py 捕获 → 创建 PermissionRequest
 |----|------|------|
 | 后端核心 | `backend/app/permission/manager.py` | 路径分类、请求管理、白名单持久化 |
 | 后端 API | `backend/app/api/permission.py` | `GET /api/permission/pending` + `POST /.../respond` |
-| 工具拦截 | `backend/plugins/filesystem.py` | `_ensure_safe` 集成权限检查 |
-| Agent 集成 | `backend/app/agent/graph.py` | `_execute_tool` 捕获 `NeedsPermission` 并等待决策 |
-| 前端组件 | `frontend/src/components/PermissionDialog.vue` | 审批弹窗 UI |
+| 工具拦截 | `backend/app/tools/file_tools.py` | 白名单/黑名单/SSRF 校验，`NeedsPermission` 抛出 |
+| Agent 集成 | `backend/app/agent/graph.py` | 主 Agent `_execute_tool` 捕获 `NeedsPermission` 并等待决策 |
+| 子 Agent 桥 | `backend/app/agent/sub_tools.py` | `code`/`web_search` `run_tool` 权限桥（事件上报 + 等待审批） |
+| 前端组件 | `frontend/src/components/PermissionDialog.vue` | 审批弹窗 UI（主/子 Agent 共享） |
 | 前端 Store | `frontend/src/stores/permission.ts` | 轮询 + SSE 事件处理 |
 | 前端 API | `frontend/src/api/permission.ts` | 请求/响应 API 客户端 |
 
@@ -1126,15 +1124,16 @@ graph.py 捕获 → 创建 PermissionRequest
 
 ## 性能优化
 
-### 虚拟滚动（Virtual Scrolling）
+### 消息列表滚动
 
-聊天消息列表使用 `@tanstack/vue-virtual` 实现虚拟滚动，只渲染可视区域 ±5 条的 DOM 节点：
+聊天消息列表（`frontend/src/views/MultiAgentView.vue`）支持自动滚动与"靠近底部才跟随"策略：
 
-- 长对话（数百条消息）DOM 节点数保持恒定，不再线性增长
-- 消息高度动态估算（基于内容长度 + sources + 附件），首次渲染后自动校正
-- 自动检测是否靠近底部，新消息到达时仅在靠近底部时自动滚动
+- 新消息/流式增量到达时，若当前视口靠近底部则平滑滚动到底部
+- 用户上翻浏览历史时不强制滚动（`onScroll` 检测 `scrollHeight - scrollTop - clientHeight < 100`）
 
-实现路径：`frontend/src/views/ChatView.vue` — `useVirtualizer({ estimateSize, overscan: 5 })`
+> 旧单 Agent `ChatView.vue` 使用的 `@tanstack/vue-virtual` 虚拟滚动已随单 Agent 模式移除。
+
+实现路径：`frontend/src/views/MultiAgentView.vue` — `onScroll` + `parentRef.scrollTo`（自动滚动跟随）
 
 ### BM25 增量索引
 
@@ -1302,7 +1301,7 @@ _select(conversation, preserve_recent_tokens)
 |------|------|
 | `agent/graph.py` | `_generate()` 工具循环集成 prune → should_compact → compact → sanitize → truncate（预算对齐）；删除旧 `_estimate_tokens`/`_truncate_messages` |
 | `config.py` | 新增 `max_context_tokens` / `context_reserve_tokens` / `compaction_threshold_tokens` / `context_tail_turns` / `context_preserve_recent_tokens` / `tool_output_protect_tokens` / `tool_output_prune_minimum_tokens` |
-| `api/chat.py` | `_truncate_history()` 改用 `estimate_tokens` |
+| `api/chat.py` | `_truncate_history()` 改用 `estimate_tokens`（`MAX_HISTORY_TOKENS`，默认 16000） |
 | `middleware/summarization.py` | 删除本地 token 估算，改用 `context.token_counter` |
 
 #### 上下文流转全景
@@ -1311,7 +1310,7 @@ _select(conversation, preserve_recent_tokens)
 [完整历史 SQLite]
     │
     ▼
-[API 层: Summarization(可选) / Truncation(4000 tokens)]
+[API 层: Summarization(可选) / Truncation(16000 tokens)]
     │  ← estimate_tokens() 精确计数
     ▼
 [Agent._generate(): 构建 messages]
@@ -1406,7 +1405,7 @@ backend/app/context/
 
 | 文件 | 改动 |
 |------|------|
-| `StepTaskList.vue` | `stepOrder` 加入 `compaction`，排在 `rerank` 和 `generate` 之间 |
+| `views/MultiAgentView.vue` | 步骤面板按 `agent_step` 事件 upsert（`step_id` 对齐） |
 | `types/index.ts` | `SSEEvent` 加 `task` 字段（task_id/status/step/total_tokens/tool_calls_count） |
 | compaction `step_end` 事件 | 包含 `detail`："X 条消息压缩为 Y 条" |
 
@@ -1480,39 +1479,39 @@ backend/plugins/example_plugin.py → 最简单的插件示例
 ### 7. 前端 — Vue 3 SPA
 
 ```
-frontend/src/stores/chat.ts        ← ⭐ 状态管理（会话、消息、SSE 流式接收、重试逻辑）
-frontend/src/stores/multiAgent.ts  → 多 Agent 状态管理（agents 面板、routing 状态）
-frontend/src/stores/mobileChat.ts  → 手机端状态管理
-frontend/src/views/ChatView.vue    → 聊天主界面
-frontend/src/views/MultiAgentView.vue → 多 Agent 聊天界面（并行 Agent 面板）
-frontend/src/views/MobileView.vue  → 手机端聊天界面
-frontend/src/api/chat.ts           → 聊天 SSE 流式调用（sendMessageStream）
-frontend/src/api/multiAgent.ts     → 多 Agent 流式调用（sendMultiAgentStream）
+frontend/src/stores/multiAgent.ts  ← ⭐ 状态管理（会话、消息、SSE 流式接收、重试逻辑、目录绑定）
+frontend/src/views/MultiAgentView.vue → ⭐ 唯一聊天界面（并行 Agent 面板、Vector DB 开关、工作目录、重试按钮）
+frontend/src/views/               → 其余：Documents / Skills / Plugins / Vectors / GeneratedFiles / Monitoring / Login / NotFound / CustomTools
+frontend/src/api/multiAgent.ts     → 多 Agent 流式调用（sendMultiAgentStream + classifyNetworkError）
 frontend/src/api/sessions.ts       → /api/sessions REST client（CRUD + 列表/详情/删除，含 kind 过滤）
 frontend/src/api/session-cache.ts  → IndexedDB 会话缓存（双重持久化）
 frontend/src/api/auth.ts           → 用户身份工具（ensureAuth/注册/换 token，可选签名校验）
-frontend/src/components/           → 各组件（Sidebar、ChatMessage、MultiAgentResponse 等）
-frontend/src/types/index.ts        → 类型定义（Message、ChatError、SSEEvent、MultiAgentSSEEvent）
+frontend/src/config/models.ts      → SUPPORTED_MODELS（模型列表，store + view 共享）
+frontend/src/components/           → 各组件（Sidebar、MultiAgentChatHistory、AgentPanel、PermissionDialog、ChatInput 等）
+frontend/src/types/index.ts        → 类型定义（MultiAgentMessage、ChatError、MultiAgentSSEEvent）
 ```
+
+> 单 Agent 相关前端文件（`stores/chat.ts`、`stores/mobileChat.ts`、`api/chat.ts`、`views/ChatView.vue`、`views/MobileView.vue`、`components/ChatHistory.vue`/`ChatMessage.vue`/`StepTaskList.vue`、`src/mobile/`）均已删除。
 
 ### 核心数据流
 
 ```
 用户输入
-  → 前端 chat.ts 发送 POST /api/chat/stream
-    → backend api/chat.py 接收
-      → agent/graph.py LangGraph 编排（retrieve → rerank → generate）
-        │
-        ├─ _retrieve()  → retriever.py 混合检索
-        ├─ _rerank()    → reranker.py 重排序
-        └─ _generate()  → litellm 调 LLM + 工具循环（最多 MAX_TOOL_ROUNDS 轮）
-              ├─ prune_tool_outputs: 回溯清理更旧工具输出
-              ├─ compaction: 超阈值（0.8 × usable）自动压缩旧消息
-              ├─ dedup: 相同工具调用复用缓存
-              ├─ bound_output: 大输出智能截断
-              └─ sanitize + truncate(usable) → 下一轮 LLM 调用
-      → SSE 事件流返回
-    → 前端 ChatView.vue 流式渲染
+  → 前端 multiAgent.ts 发送 POST /api/chat/multi-agent/stream
+    → backend api/chat.py 接收（_agent_semaphore 排队）
+      → supervisor 路由 → AgentBus 派发到 rag/web_search/code 子 Agent
+        → agent/graph.py LangGraph 编排（retrieve → rerank → generate）
+          │
+          ├─ _retrieve()  → retriever.py 混合检索
+          ├─ _rerank()    → reranker.py 重排序
+          └─ _generate()  → litellm 调 LLM + 工具循环（最多 MAX_TOOL_ROUNDS 轮）
+                ├─ prune_tool_outputs: 回溯清理更旧工具输出
+                ├─ compaction: 超阈值（0.8 × usable）自动压缩旧消息
+                ├─ dedup: 相同工具调用复用缓存
+                ├─ bound_output: 大输出智能截断
+                └─ sanitize + truncate(usable) → 下一轮 LLM 调用
+      → SSE 事件流返回（queued → routing → agent_start/agent_stream/agent_done/agent_error → done）
+    → 前端 MultiAgentView.vue 流式渲染（按 agent_id 分面板）
 ```
 
 ### 推荐学习顺序
@@ -1523,8 +1522,9 @@ frontend/src/types/index.ts        → 类型定义（Message、ChatError、SSEE
 | **2** | `context/budget.py` + `context/compaction.py` | 上下文预算与压缩策略，理解长工具循环如何不爆上下文 |
 | **3** | `rag/retriever.py` + `vector_store.py` | RAG 是项目的核心价值 |
 | **4** | `context/token_counter.py` | 精确 token 计数 + 工具消息净化 |
-| **5** | `api/chat.py` | 理解前后端如何通过 SSE 流式通信 |
-| **6** | `stores/chat.ts` | 前端状态管理 + 会话隔离 |
-| **7** | `plugins/loader.py` | 理解插件扩展机制 |
+| **5** | `api/chat.py` | 理解前后端如何通过 SSE 流式通信（multi-agent 唯一入口） |
+| **6** | `agent/supervisor.py` | 多 Agent 路由与分解逻辑 |
+| **7** | `stores/multiAgent.ts` | 前端状态管理 + 会话隔离 + 重试 |
+| **8** | `plugins/loader.py` | 理解插件扩展机制 |
 
-先跑通 `graph.py` 的工作流，再看上下文预算/压缩（`budget.py` + `compaction.py`），然后向外扩展到 RAG、API、前端，最后看插件系统。
+先跑通 `graph.py` 的工作流，再看上下文预算/压缩（`budget.py` + `compaction.py`），然后向外扩展到 RAG、Supervisor、API、前端，最后看插件系统。
