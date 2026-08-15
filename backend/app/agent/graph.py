@@ -722,7 +722,12 @@ class RAGAgent:
                     cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
                 )
         except Exception as e:
-            return f"Error starting command: {e}"
+            detail = str(e) or repr(e) or type(e).__name__
+            return (
+                f"Error starting command: {detail}\n"
+                f"Command: {command!r}\n"
+                f"Workdir: {str(resolved_cwd) if resolved_cwd.is_dir() else '.'}"
+            )
 
         stdout_task = asyncio.create_task(_read_stream(process.stdout, stdout_lines, "stdout"))
         stderr_task = asyncio.create_task(_read_stream(process.stderr, stderr_lines, "stderr"))

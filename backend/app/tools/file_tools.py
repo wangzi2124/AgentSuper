@@ -1486,4 +1486,5 @@ def tool_execute(command: str, timeout: int = 300, workdir: str = ".") -> dict:
     except ValueError as e:
         return _env("execute", f"Error: {e}", error=True)
     except Exception as e:
-        return _env("execute", f"Error executing command: {e}", error=True)
+        detail = str(e) or repr(e) or type(e).__name__
+        return _env("execute", f"Error executing command: {detail}", error=True)
