@@ -192,6 +192,18 @@ class PermissionManager:
             return "workspace"
         except ValueError:
             pass
+        # 会话绑定目录：当前上下文（本会话）的工作目录视为可写 workspace，
+        # 与全局 extra_workspaces 同权（opencode：文件工具在 ctx.directory 下操作）。
+        # ⚠️ 必须在 temp 判定之前：用户显式选择的工作目录即使恰好位于系统临时目录
+        #    （Windows temp 很常见），也应识别为 workspace 而非被 temp 分支"劫持"，
+        #    否则其下敏感文件（.env/数据库）会绕过 workspace 分支的保护检查。
+        sw = _session_workspace_var.get()
+        if sw:
+            try:
+                p.relative_to(Path(sw))
+                return "workspace"
+            except (ValueError, OSError):
+                pass
         system_dirs = [
             "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
             "/etc", "/usr", "/bin", "/sbin", "/var",
@@ -220,15 +232,6 @@ class PermissionManager:
         if self.project_worktree:
             try:
                 p.relative_to(Path(self.project_worktree))
-                return "workspace"
-            except (ValueError, OSError):
-                pass
-        # 会话绑定目录：当前上下文（本会话）的工作目录视为可写 workspace，
-        # 与全局 extra_workspaces 同权（opencode：文件工具在 ctx.directory 下操作）
-        sw = _session_workspace_var.get()
-        if sw:
-            try:
-                p.relative_to(Path(sw))
                 return "workspace"
             except (ValueError, OSError):
                 pass
