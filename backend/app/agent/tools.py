@@ -273,12 +273,15 @@ def build_system_prompt_no_kb(
     if has_memory:
         tool_parts.append(
             "Memory tools (session-scoped shared memory, aligned with opencode memory):\n"
-            "   - tool_memory_set(key, value, tags?) - Remember a fact for later recall (e.g. user "
-            "preference, project decision). Use for facts you will need in later turns of this session.\n"
+            "   - tool_memory_set(key, value, tags?) - Remember a durable fact for later recall (e.g. a "
+            "user preference, a project decision/conclusion, an important identifier).\n"
             "   - tool_memory_get(key) - Recall a previously remembered fact by key.\n"
             "   - tool_memory_search(tag) - Find all remembered facts with a given tag (e.g. 'project', "
             "'user_preference').\n"
-            "   Remember sparingly: only store durable, cross-turn facts worth keeping."
+            "   Remember SPARINGLY: ONLY store durable, cross-turn facts worth keeping. Do NOT store "
+            "trivial or transient details, and do NOT duplicate what the conversation history already "
+            "contains — history + compaction handles the process; memory is only for facts that must "
+            "survive reliably across turns."
         )
 
     if enabled_skills:

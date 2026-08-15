@@ -276,15 +276,17 @@ class RAGAgent:
             self.tools.append(ToolDef(
                 name="tool_memory_set",
                 description=(
-                    "记住一条关键信息，供后续对话回忆（会话内有效）。"
-                    "用于需要跨轮次记住的事实：用户偏好、项目关键决策、重要数值等。"
+                    "记住一条需要跨轮次可靠保留的稳定事实（会话内有效）。"
+                    "仅存值得长期保留的信息：用户明确表达的偏好、项目关键决策/结论、"
+                    "重要的标识符/数值。克制使用——临时信息（可当场说完的、很快过期不用的）"
+                    "不要存；对话历史本身已能覆盖的内容不要重复记忆。"
                     "可指定标签便于后续按主题检索。"
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "key": {"type": "string", "description": "记忆键（如 'user_language_preference'）"},
-                        "value": {"type": "string", "description": "要记住的内容"},
+                        "value": {"type": "string", "description": "要记住的内容（尽量简洁）"},
                         "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签，用于按主题检索"},
                     },
                     "required": ["key", "value"],
