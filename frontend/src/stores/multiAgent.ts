@@ -125,8 +125,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     try {
       const detail = await getConversation(id, 'multi-agent')
       session.conversationTitle = detail.title
-      // 同步会话绑定目录（服务器为准）
-      if (detail.directory) sessionDirectory.value = detail.directory
+      // 同步会话绑定目录（服务器为准；无论空与非空都覆盖，避免残留上一会话的目录）
+      sessionDirectory.value = detail.directory || ''
       const serverMessages: MultiAgentMessage[] = detail.messages.map(m => ({
         id: m.id,
         role: m.role as 'user' | 'assistant',
@@ -164,7 +164,11 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     } catch (e) { console.error('Failed to rename:', e) }
   }
 
-  function newChat() { routingStatus.value = ''; activeSessionId.value = undefined }
+  function newChat() {
+    routingStatus.value = ''
+    activeSessionId.value = undefined
+    sessionDirectory.value = ''
+  }
 
   // --- 错误分类 ---
 

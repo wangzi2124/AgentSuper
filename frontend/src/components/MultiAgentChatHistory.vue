@@ -41,9 +41,9 @@ const directoryGroups = computed(() => {
 
 // 新建对话（可选绑定工作目录，目录成为会话 cwd）
 function handleNewChat(dir?: string) {
-  if (dir !== undefined) agent.setSessionDirectory(dir)
   showDirMenu.value = false
   agent.newChat()
+  if (dir !== undefined) agent.setSessionDirectory(dir)
   router.push({ name: 'MultiAgent' })
 }
 
