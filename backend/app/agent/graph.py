@@ -115,7 +115,7 @@ from app.context.token_counter import truncate_messages as _truncate_messages
 from app.context.token_counter import sanitize_tool_messages
 from app.context.tool_output import bound_tool_output, prune_tool_outputs
 from app.context.tool_dedup import ToolResultDedup
-from app.context.budget import usable_context_tokens, compaction_threshold_tokens
+from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
 
 # 读取类工具：只读文件/目录状态，结果可被后续写操作改变，因此缓存仅在"未发生写操作"时有效
 _DEDUP_READONLY_TOOLS = {"tool_ls", "tool_read_file", "tool_glob", "tool_grep"}
@@ -1013,8 +1013,8 @@ class RAGAgent:
             trace_messages("graph.round_start", messages)  # [token trace v7]
             messages = prune_tool_outputs(
                 messages,
-                protect_tokens=settings.tool_output_protect_tokens,
-                minimum_tokens=settings.tool_output_prune_minimum_tokens,
+                protect_tokens=prune_protect_tokens(),
+                minimum_tokens=prune_minimum_tokens(),
                 tail_turns=settings.context_tail_turns,
             )
             trace_messages("graph.pre_compact", messages, threshold=compaction_threshold_tokens())  # [token trace v7]
@@ -1198,8 +1198,8 @@ class RAGAgent:
             trace_messages("graph.final_round_start", messages, tool_defs=None)  # [token trace v8]
             messages = prune_tool_outputs(
                 messages,
-                protect_tokens=settings.tool_output_protect_tokens,
-                minimum_tokens=settings.tool_output_prune_minimum_tokens,
+                protect_tokens=prune_protect_tokens(),
+                minimum_tokens=prune_minimum_tokens(),
                 tail_turns=settings.context_tail_turns,
             )
             if compactor.should_compact(messages):

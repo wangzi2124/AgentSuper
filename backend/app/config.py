@@ -69,9 +69,12 @@ class Settings(BaseSettings):
     context_tail_turns: int = 2
     # 尾部保留的 token 预算（对齐 opencode preserve_recent_tokens，默认 8_000）
     context_preserve_recent_tokens: int = 8_000
-    # 回溯式工具输出清理：最近 N 轮之内累计工具输出超过该值时，清理更旧输出（默认 40_000）
+    # 回溯式工具输出清理：最近 N 轮之内累计工具输出超过该值时，清理更旧输出。
+    # 注意：这里只是「原始配置值」，实际生效值由 budget.py 与压缩阈值联动钳制
+    # （protect = min(配置值, compaction_threshold_tokens()//2)，minimum = protect//2），
+    # 保证 prune 先于压缩回收旧输出（[token 优化 v12]）。
     tool_output_protect_tokens: int = 24_000
-    # 清理收益低于该值时不做（避免微小收益的频繁改写）
+    # 清理收益低于该值时不做（避免微小收益的频繁改写）；生效值同样经联动钳制。
     tool_output_prune_minimum_tokens: int = 12_000
     # 摘要中间件缓存大小（按历史分块缓存，避免每请求全量重算）
     summarization_cache_size: int = 200

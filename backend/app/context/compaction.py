@@ -40,6 +40,10 @@ DEFAULT_TAIL_TURNS = 2
 # Token budget for the preserved tail (aligned with opencode preserve_recent_tokens)
 DEFAULT_PRESERVE_RECENT_TOKENS = 8_000
 
+# 压缩摘要时，单条旧工具输出截断到该字符数（对齐 opencode compaction.ts
+# TOOL_OUTPUT_MAX_CHARS = 2_000）：避免大工具输出把摘要模型的输入撑大。
+TOOL_OUTPUT_MAX_CHARS = 2_000
+
 COMPACTION_MARKER = "[Task checkpoint"
 
 # Anchored summary template, aligned with opencode core/session/compaction.ts
@@ -86,6 +90,18 @@ COMPACTION_MESSAGE_TEMPLATE = (
 def is_checkpoint(msg: dict) -> bool:
     """判断消息是否为之前压缩产生的 checkpoint（system 角色 + 标记前缀）。"""
     return bool(msg) and msg.get("role") == "system" and str(msg.get("content", "")).startswith(COMPACTION_MARKER)
+
+
+def _truncate_tool_output(text: str, max_chars: int = TOOL_OUTPUT_MAX_CHARS) -> str:
+    """截断单条工具输出到指定字符数，保留开头并标注省略量。
+
+    对齐 opencode `session/message-v2.ts:truncateToolOutput`：
+    `[Tool output truncated for compaction: omitted N chars]`
+    """
+    if not max_chars or len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return f"{text[:max_chars]}\n[Tool output truncated for compaction: omitted {omitted} chars]"
 
 
 def _summary_of(msg: dict) -> Optional[str]:
@@ -309,6 +325,10 @@ class ContextCompactor:
                 text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
                 content = " ".join(text_parts)
             if content:
+                if role == "tool":
+                    # 对齐 opencode TOOL_OUTPUT_MAX_CHARS：压缩摘要时逐条截断旧工具输出，
+                    # 避免已入上下文但细节已不需要的大输出撑大摘要模型输入。
+                    content = _truncate_tool_output(content, TOOL_OUTPUT_MAX_CHARS)
                 lines.append(f"[{role}]: {content}")
 
         conversation_text = "\n".join(lines)

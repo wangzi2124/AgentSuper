@@ -45,6 +45,13 @@ async def lifespan(app: FastAPI):
         task_bridge.bind_bus(agent_bus)
         agent_bus.start_all()
     weather.load_weather_on_startup()
+    # 清理过期的工具输出截断文件（data/truncation，保留期 7 天，对齐 opencode truncate.ts）
+    try:
+        from app.context.tool_output import cleanup_truncated
+
+        cleanup_truncated()
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("Truncated output cleanup failed: %s", e)
     # 定时 TTL 清理：VECTOR_STORE_TTL_DAYS>0 时按间隔定期清理过期文档
     _ttl_task = None
     if settings.vector_store_ttl_days > 0:
