@@ -23,6 +23,7 @@ import litellm
 from app.agent.stream_events import emit, step_event
 from app.config import settings
 from app.context.token_counter import estimate_tokens
+from app.context.tool_output import bound_tool_output
 from app.monitor import record_model_call
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
 from app.permission import set_session_workspace, reset_session_workspace
@@ -33,9 +34,6 @@ logger = logging.getLogger(__name__)
 # 子 Agent 工具循环最大轮数（对齐主 Agent MAX_TOOL_ROUNDS 语义，config.max_tool_rounds）
 def _sub_agent_max_rounds() -> int:
     return max(2, int(settings.max_tool_rounds or 8))
-
-# 工具结果回传 LLM 时的截断长度，避免 context 膨胀
-_TOOL_RESULT_TRUNC = 1500
 
 # 子 Agent 可见的工具白名单（仅文件读写与搜索，不暴露插件/generator 等）
 # ── 子 Agent 上下文截断:控制 tool 循环 context 膨胀 ──
@@ -437,10 +435,13 @@ async def tool_loop_chat(
             for (tc_id, result), tc in zip(results, tool_calls):
                 if isinstance(result, Exception):
                     result = f"Error executing {tc.function.name}: {result}"
+                # 与主 Agent 一致：入口截断 + 超限写盘（data/truncation/）+ 续读提示，
+                # 避免大文件读取把子 Agent 上下文撑爆且截断后无法续读（对齐 opencode truncate.ts）
+                bounded = bound_tool_output(str(result), tc.function.name)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
-                    "content": str(result)[:_TOOL_RESULT_TRUNC],
+                    "content": bounded,
                 })
 
             # Doom-loop 检测：连续相同指纹 ≥3 轮 → 注入策略变更提示（对齐主 Agent）
