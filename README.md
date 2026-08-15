@@ -41,8 +41,8 @@
 | **任务完成判断** | 读取 `finish_reason` 归一化为 OpenCode 六值语义，仅 `tool-calls` 维持工具循环，`length` 追加截断提示、`content-filter` 转为可解释错误 |
 | **长任务不截断** | 输出上限 `LLM_MAX_TOKENS`（默认 16384）可配置；系统提示强制长内容（>500 字）写入文件、回复只留摘要，避免单轮输出触发截断（对齐 OpenCode 长任务机制） |
 | **子代理超时分级** | 工具密集型子 Agent（如 code）使用更长等待（`SUB_AGENT_TIMEOUT_EXTENDED` 默认 300s）；子 Agent 仍活跃时自动宽限续期；失败时结构化回传已完成步骤 + 失败原因 + 建议 |
-| **上下文压缩** | 消息超阈值（自动 = 可用预算的 80%）时将旧消息压缩为锚定式结构化 checkpoint，保留最近 N 轮工具上下文 |
-| **共享记忆持久化** | Agent 记忆（短期事实/偏好）持久化到 `data/agent_memory.json`，set/delete/clear 即时落盘，重启不丢失 |
+| **上下文压缩** | 消息超阈值（自动 = 可用预算的 60%，默认 ≈ 91K）时将旧消息压缩为锚定式结构化 checkpoint，保留最近 N 轮工具上下文 |
+| **共享记忆持久化** | Agent 记忆（短期事实/偏好）持久化到 `data/agent_memory.json`，set/delete/clear 即时落盘（可异步去抖），重启不丢失；主 Agent 可通过 `tool_memory_set/get/search` 主动记忆/回忆/检索 |
 | **SSRF 防护** | 所有出站 HTTP（`http_client` 插件、`tool_execute` 中的 curl/wget/ssh 等命令）经 `check_url`/`_ssrf_check_command` 校验，拦截内网/回环/链路本地/元数据地址及解析到它们的域名；`SSRF_ALLOW_INTERNAL=true` 可跳过（本地调试） |
 | **用户身份签名** | 可选 `AUTH_TOKEN_SECRET`：trust-on-first-use 注册 → 服务端仅存 HMAC 哈希 → 颁发签名 token（`base64(uid).base64(exp).hmac`）；中间件强制每个 `/api/*` 请求携带 `X-User-Id` + `X-Auth-Token`，未配置时全部关闭（默认本地行为） |
 | **多 Agent 工具链** | `code`/`web_search` 子 Agent 使用 LLM 工具调用循环（≤8 轮）+ 工作区文件系统工具（读写/编辑/搜索/执行），复用统一权限系统；外部路径经权限桥发事件并拒绝而非静默失败 |
@@ -365,11 +365,11 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 
 ```ini
 # ===== Context Budget & Compaction =====
-# 单次 LLM 调用的上下文上限（默认 64000）
-# MAX_CONTEXT_TOKENS=64000
+# 单次 LLM 调用的上下文上限（默认 160000）
+# MAX_CONTEXT_TOKENS=160000
 # 输出预留 token（默认 8192）——usable = MAX_CONTEXT_TOKENS - CONTEXT_RESERVE_TOKENS
 # CONTEXT_RESERVE_TOKENS=8192
-# 压缩触发阈值；0 = 自动（0.8 × usable）
+# 压缩触发阈值；0 = 自动（0.6 × usable ≈ 91084）
 # COMPACTION_THRESHOLD_TOKENS=0
 # 压缩保留的最近轮次（默认 2）
 # CONTEXT_TAIL_TURNS=2
@@ -526,7 +526,11 @@ fetch("http://localhost:8000/api/chat/multi-agent", {
 
 ### 共享记忆持久化（Memory）
 
-`MemoryManager`（`backend/app/agent/memory.py`）提供跨会话的短期记忆（Agent 主动记录的临时事实/偏好），未过期条目在 set/delete/clear 时即时写入 `settings.memory_persist_path`（默认 `data/agent_memory.json`），启动时重载，服务重启不丢失。`persist_path` 为构造函数注入，便于测试隔离。
+`MemoryManager`（`backend/app/agent/memory.py`）提供跨会话的短期记忆（Agent 主动记录的临时事实/偏好），未过期条目在 set/delete/clear 时写入 `settings.memory_persist_path`（默认 `data/agent_memory.json`），启动时重载，服务重启不丢失。`persist_path` 为构造函数注入，便于测试隔离。
+
+**主 Agent 记忆工具**：主 RAG Agent（`graph.py`）注入共享 `MemoryManager`（`runtime.py`），模型可自主调用 `tool_memory_set(key, value, tags?)` / `tool_memory_get(key)` / `tool_memory_search(tag)` 记忆、回忆、按标签检索关键信息（对齐 opencode memory 语义）。记忆按 `conversation_id` 命名空间隔离，跨会话不可见；未注入记忆管理器时不注册工具。子 Agent（`code`/`web_search`）复用同一实例，主 Agent 记住的信息子 Agent 也可检索到。
+
+**持久化优化**：`_persist_sync()` 保持"set 返回即落盘"的同步语义；另提供 `_persist_async_debounced()`（异步 `asyncio.to_thread` + 1 秒去抖窗口），用于高并发多 Agent 写共享记忆时避免阻塞各自事件循环（对齐 opencode 异步 storage 语义）。
 
 ---
 
@@ -1056,10 +1060,13 @@ backend/skills/
 | 级别 | 行为 | 示例 |
 |------|------|------|
 | **工作区内** | 静默允许 | `backend/` 下任意路径 |
+| **会话工作目录** | 静默允许（本会话内） | 新建会话时选择的工作目录 |
 | **系统临时目录** | 静默允许 | `%TEMP%` |
 | **系统敏感目录** | 永远拒绝，不弹窗 | `C:\Windows\`, `/etc` |
 | **白名单路径** | 静默允许 | `permissions.json` 中记录的路径 |
 | **其他外盘路径** | 弹窗询问 | `D:\projects\` |
+
+**会话工作目录**：新建会话时选择的工作目录（opencode `ctx.directory`）在 `classify_path` 中优先于临时目录判定（workspace → 会话目录 → system → temp → …）——即使该目录恰好位于系统临时目录下，也被识别为信任目录而非被 temp 分支"劫持"，其下敏感文件仍走 workspace 分支的保护检查。会话目录为会话级 contextvar 隔离，并发会话互不干扰，会话结束后目录自动失效回落外部路径 `ask`。
 
 **工作目录配置**：可写工作区由前端「工作目录」面板配置（持久化到 `backend/data/runtime_workspaces.json`，运行时生效、无需重启）。路径不落在任何工作区时按 `EXTERNAL_PATH_DEFAULT`（默认 `ask`）处理，审批等待超过 `PERMISSION_APPROVAL_TIMEOUT`（默认 60s）自动拒绝。
 
@@ -1207,8 +1214,8 @@ backend/app/context/
 
 | 计算 | 说明 |
 |------|------|
-| **可用预算 usable** | `max_context_tokens - context_reserve_tokens`（默认 64000 − 8192 = 55808） |
-| **压缩阈值** | 显式配置 `COMPACTION_THRESHOLD_TOKENS` > 0 时用配置值；否则自动取 usable 的 80% |
+| **可用预算 usable** | `max_context_tokens - context_reserve_tokens`（默认 160000 − 8192 = 151808） |
+| **压缩阈值** | 显式配置 `COMPACTION_THRESHOLD_TOKENS` > 0 时用配置值；否则自动取 usable 的 60%（默认 ≈ 91084，对齐 opencode） |
 
 预算先于截断兜底生效：长工具循环在触顶之前先触发压缩（总结而非丢弃）。
 
