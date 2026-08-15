@@ -1,9 +1,12 @@
 ---
 name: xlsx
-description: "Use this skill for ADVANCED spreadsheet tasks: editing existing .xlsx (formulas, charts, formatting), cleaning messy data, formula recalculation, complex financial modeling, CSV/TSV conversion. Do NOT trigger for simple .xlsx creation — use the excel-generator plugin instead."
+description: 'Use this skill for ADVANCED spreadsheet tasks: editing existing .xlsx
+  (formulas, charts, formatting), cleaning messy data, formula recalculation, complex
+  financial modeling, CSV/TSV conversion. Do NOT trigger for simple .xlsx creation
+  — use the excel-generator plugin instead.'
 license: Proprietary. LICENSE.txt has complete terms
+enabled: false
 ---
-
 # Requirements for Outputs
 
 ## All Excel files

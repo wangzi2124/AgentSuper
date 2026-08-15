@@ -1,9 +1,11 @@
 ---
 name: pdf
-description: "Use this skill for ADVANCED PDF tasks: merging/splitting, watermarking, encrypting/decrypting, filling forms, OCR, image extraction, XML-level editing. Do NOT trigger for simple .pdf creation — use the pdf-generator plugin instead."
+description: 'Use this skill for ADVANCED PDF tasks: merging/splitting, watermarking,
+  encrypting/decrypting, filling forms, OCR, image extraction, XML-level editing.
+  Do NOT trigger for simple .pdf creation — use the pdf-generator plugin instead.'
 license: Proprietary. LICENSE.txt has complete terms
+enabled: false
 ---
-
 # PDF Processing Guide
 
 ## Overview

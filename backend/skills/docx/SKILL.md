@@ -1,9 +1,13 @@
 ---
 name: docx
-description: "Use this skill for ADVANCED tasks: editing existing .docx (extract/reorganize content, insert images, tracked changes, comments, find-and-replace), conversion (.doc↔.docx, docx→PDF), XML-level manipulation, and complex formatting (TOC, footnotes, multi-column, headers/footers). Do NOT trigger for simple .docx creation — use the docx-generator plugin instead."
+description: 'Use this skill for ADVANCED tasks: editing existing .docx (extract/reorganize
+  content, insert images, tracked changes, comments, find-and-replace), conversion
+  (.doc↔.docx, docx→PDF), XML-level manipulation, and complex formatting (TOC, footnotes,
+  multi-column, headers/footers). Do NOT trigger for simple .docx creation — use the
+  docx-generator plugin instead.'
 license: Proprietary. LICENSE.txt has complete terms
+enabled: true
 ---
-
 # DOCX creation, editing, and analysis
 
 ## Overview
