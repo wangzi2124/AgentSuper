@@ -209,12 +209,14 @@ class MemoryManager:
             if self._store.pop(full_key, None) is not None:
                 self._persist()
 
-    async def get_by_tag(self, tag: str, namespace: str = "") -> dict[str, Any]:
+    async def get_by_tag(self, tag: str, namespace: Optional[str] = None) -> dict[str, Any]:
         """获取所有带指定标签的未过期记忆。
 
         Args:
             tag: 标签名
-            namespace: 如果提供，只返回该命名空间下的匹配条目
+            namespace: 如果为 None，返回所有命名空间下的匹配条目（全局）；
+                否则只返回 entry.namespace == namespace 的条目（空串 "" 同样精确匹配
+                空命名空间，不再视为"不过滤"，避免子 Agent 空命名空间搜索泄漏全局记忆）。
         """
         async with self._lock:
             now = time.time()
@@ -226,7 +228,7 @@ class MemoryManager:
                     continue
                 if tag not in entry.tags:
                     continue
-                if namespace and entry.namespace != namespace:
+                if namespace is not None and entry.namespace != namespace:
                     continue
                 result[entry.key] = entry.value
             for k in expired_keys:

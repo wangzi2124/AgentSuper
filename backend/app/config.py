@@ -141,6 +141,8 @@ class Settings(BaseSettings):
     # ── 共享记忆持久化 ──
     # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失
     memory_persist_path: str = "data/agent_memory.json"
+    # tool_memory_set 记忆的有效期（秒），默认 300（5 分钟）
+    memory_ttl_seconds: int = 300
 
     # ── 用户身份签名（可选，默认关闭）──
     # 设置 AUTH_TOKEN_SECRET 后启用：X-User-Id 必须携带对应的签名 token

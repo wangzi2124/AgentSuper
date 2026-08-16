@@ -600,7 +600,7 @@ class SupervisorAgent(BaseAgent):
         except Exception as e:
             logger.error("Synthesis LLM call failed: %s", e)
             # 回退：拼接结果
-            lines = [f"以下是多个来源的信息汇总:\n"]
+            lines = ["以下是多个来源的信息汇总:\n"]
             for r in results:
                 lines.append(f"--- {r['agent']} ---")
                 lines.append(r.get("answer", "（无结果）"))

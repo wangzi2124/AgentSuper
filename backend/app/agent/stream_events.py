@@ -127,7 +127,7 @@ class AgentEventCollector:
 class TaggedEventQueue:
     """RAG graph 事件队列适配器：把 graph 的原始步骤事件转为 agent_step。
 
-    graph.py 的 _push_event 只依赖 put_nowait 语义（graph.py:190-203），
+    graph.py 的 _push_event 只依赖 put_nowait 语义（graph.py 的 _push_event/_push_stream_event），
     传入本对象即可实现事件透传，无需改动 graph 本身。
 
     - step_start/step_end/tool_start/tool_end → agent_step

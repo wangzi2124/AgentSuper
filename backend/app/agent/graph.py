@@ -367,7 +367,10 @@ class RAGAgent:
         state["steps"].append(event)
         eq = state.get("_event_queue")
         if eq:
-            eq.put_nowait(event)
+            try:
+                eq.put_nowait(event)
+            except Exception:
+                logger.warning("push_event: failed to enqueue event %s", event.get("type"))
         cb = state.get("_on_activity")
         if cb:
             text = self._activity_text(event)
@@ -560,7 +563,7 @@ class RAGAgent:
         """占位实现：_execute_tool 对 tool_memory_* 特判，这里不会被真正调用。"""
         return ""
 
-    async def _tool_task(self, args: dict, depth: int = 0, event_queue=None, directory: str = "") -> str:
+    async def _tool_task(self, args: dict, depth: int = 0, event_queue=None, directory: str = "", conversation_id: str = "") -> str:
         """[opencode task tool] 把聚焦子任务委派给子 Agent 并取回最终结果。
 
         - subagent_type 白名单排除 rag（= 自身）与 supervisor（编排者非执行者），防自递归
@@ -568,6 +571,8 @@ class RAGAgent:
         - 子 Agent 以全新上下文执行（对齐 opencode task 工具 "fresh context" 语义），
           事件队列仅当来自 multi-agent 流时才透传（单 Agent 流不推子 Agent 面板事件）；
           会话工作目录（directory）透传给子 Agent，文件工具落在会话目录而非 git worktree
+        - conversation_id 透传外层会话 id，保证子 Agent 与主 Agent 落在同一记忆 namespace
+          （否则子 Agent 记忆读写落在全局 namespace，与主 Agent 会话隔离记忆互不可见）
         """
         prompt = str(args.get("prompt") or "").strip()
         subagent_type = str(args.get("subagent_type") or "").strip()
@@ -600,7 +605,7 @@ class RAGAgent:
                     "history": [],
                     "use_vector_db": False,
                     "files": [],
-                    "conversation_id": "",
+                    "conversation_id": conversation_id,
                     "directory": directory,
                     "_task_depth": depth + 1,
                     "_event_queue": event_queue,
@@ -636,7 +641,7 @@ class RAGAgent:
                 if not isinstance(tags, list):
                     tags = [str(tags)] if tags else []
                 tags = [str(t) for t in tags if str(t).strip()]
-                await mm.set(key, value, ttl=300, tags=tags, namespace=namespace)
+                await mm.set(key, value, ttl=settings.memory_ttl_seconds, tags=tags, namespace=namespace)
                 return f"记住成功: key='{key}' (会话内有效, 标签: {tags or '无'})"
             if name == "tool_memory_get":
                 key = str(args.get("key") or "").strip()
@@ -676,7 +681,8 @@ class RAGAgent:
                             from app.agent.stream_events import unwrap_tagged
                             eq = unwrap_tagged(eq)
                         return await self._tool_task(args, depth=depth, event_queue=eq,
-                                                     directory=(state or {}).get("_cwd", ""))
+                                                     directory=(state or {}).get("_cwd", ""),
+                                                     conversation_id=str((state or {}).get("conversation_id") or ""))
                     if name in ("tool_memory_set", "tool_memory_get", "tool_memory_search"):
                         return await self._tool_memory(name, args, state)
                     eq = state.get("_event_queue") if state else None
@@ -867,7 +873,10 @@ class RAGAgent:
         """流式文本增量事件：只进事件队列，不进 steps（避免污染步骤列表）。"""
         eq = state.get("_event_queue")
         if eq:
-            eq.put_nowait(event)
+            try:
+                eq.put_nowait(event)
+            except Exception:
+                pass
 
     def _assemble_response(self, model: str, response, start: float, state: AgentState | None, push_text: bool = False):
         """记录调用指标并累加 token 用量，可选把非流式全文转为 text_delta 推送。"""

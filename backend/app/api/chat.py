@@ -397,16 +397,20 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     async def run_multi_agent():
         """通过 Supervisor 运行多 Agent 系统，结果推送到 event_queue。"""
         global _queue_counter
+        # 仅当真正排队（进入前信号量已满）时才递增；进入后对称递减。
+        # 避免直接进入（未排队）的请求也递减，导致计数失真/提前清零。
+        queued_position: int | None = None
         if sem.locked():
             _queue_counter += 1
-            pos = _queue_counter
+            queued_position = _queue_counter
             await event_queue.put({
                 "type": "queued",
-                "queue_position": pos,
+                "queue_position": queued_position,
             })
 
         async with sem:
-            _queue_counter = max(0, _queue_counter - 1)
+            if queued_position is not None:
+                _queue_counter = max(0, _queue_counter - 1)
             try:
                 # 先推送路由事件
                 await event_queue.put({
