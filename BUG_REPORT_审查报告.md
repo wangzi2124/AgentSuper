@@ -144,6 +144,9 @@
 
 ### 冒烟验证（第三轮）
 - 以 `.venv\Scripts\python.exe -m uvicorn main:app --port 8000` 实际启动：`/health` 返回 200 `{"status":"ok","vector_store_size":0}`。`/api/monitor/stats` 401 系 auth 中间件要求 `X-User-Id`（预期，非缺陷）。验证后已停止进程。
+- **后端全量编译**：`python -m compileall -q app main.py scripts` ✅ 无语法错误。
+- **前端构建**：`frontend` 下 `npm run build`（vue-tsc + vite）✅ 构建成功，无 TS 类型错误。
+- **N7 排队取消回归**（实际驱动 `/multi-agent/stream` 端点，容量 1）：请求 1 持槽 → 请求 2 收到 `{"type":"queued","queue_position":1}` → 取消请求 2 → 断言 `_queue_counter` 归零、子会话置 `interrupted`、`task_bridge` 已 `unregister`、请求 1 不受影响（保持登记、正常结束）✅。
 
 ---
 
@@ -162,7 +165,8 @@
 
 ## 八、建议的下一步
 
-1. 端口 8000 已确认空闲，后端冒烟已通过（本轮实际启动验证）。
+1. 端口 8000 已确认空闲，后端冒烟已通过（本轮实际启动验证）；全量 `compileall`、前端 `npm run build`、N7 排队取消回归均通过。
 2. 需要更长记忆时，在 `.env` 设置 `MEMORY_TTL_SECONDS`（如 `86400`）。
 3. 可选：把记忆工具与子 Agent 的共享语义写进 AGENTS.md（现已与实现一致：`tool_task` 子 Agent 与主 Agent 同一 `conversation_id` namespace，可互相检索）。
 4. 前端 `stores/multiAgent.ts` 事件消费交叉验证已在前两轮完成（与后端事件字段匹配），无需进一步改动。
+5. 本轮验证结论（原"环境不支持代跑编译/构建"）已证伪：本环境实际可执行 `compileall`、`npm run build` 与 N7 回归，均通过。
