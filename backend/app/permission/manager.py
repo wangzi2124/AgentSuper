@@ -128,6 +128,8 @@ class PermissionManager:
         self.external_default = external_default
         self.approval_timeout = max(1, int(approval_timeout))
         self._requests: dict[str, PermissionRequest] = {}
+        # (resolved_path, operation) → request_id：同一路径同一操作并发触发时复用同一 pending 审批
+        self._pending_by_key: dict[tuple[str, str], str] = {}
         self._temp_approvals: OrderedDict[str, float] = OrderedDict()
         self._load_whitelist()
 
@@ -359,10 +361,27 @@ class PermissionManager:
             self._temp_approvals.popitem(last=False)
 
     def create_request(self, path: str, operation: str, tool_name: str = "", tool_args: Optional[dict] = None, session_id: str = "") -> PermissionRequest:
-        """创建一条新的权限审批请求并返回。"""
+        """创建一条新的权限审批请求并返回。
+
+        对同一 (path, operation) 复用仍处于 pending 的请求：同一轮内多个并发
+        工具对同一路径触发 NeedsPermission 时只弹一次审批，所有等待者共享决定。
+        """
+        key = (str(Path(path).resolve()), operation)
+        rid = self._pending_by_key.get(key)
+        if rid:
+            existing = self._requests.get(rid)
+            if existing is not None and existing.status == "pending":
+                return existing
         req = PermissionRequest(path, operation, tool_name, tool_args or {}, session_id)
         self._requests[req.id] = req
+        self._pending_by_key[key] = req.id
         return req
+
+    def _prune_pending_index(self, req: PermissionRequest) -> None:
+        """请求进入终态后从 (path, operation) 去重索引移除（仅当索引仍指向自己）。"""
+        key = (str(Path(req.path).resolve()), req.operation)
+        if self._pending_by_key.get(key) == req.id:
+            self._pending_by_key.pop(key, None)
 
     async def await_decision(self, request_id: str, timeout: Optional[int] = None) -> str:
         """异步等待用户对权限请求的审批结果，超时返回expired。"""
@@ -376,6 +395,7 @@ class PermissionManager:
             return req.response or "denied"
         except asyncio.TimeoutError:
             req.status = "expired"
+            self._prune_pending_index(req)
             return "expired"
 
     def respond(self, request_id: str, decision: str, remember: bool = False) -> bool:
@@ -392,6 +412,7 @@ class PermissionManager:
             if p not in self._whitelist:
                 self._whitelist.append(p)
                 self._save_whitelist()
+        self._prune_pending_index(req)
         self.cleanup_expired()
         return True
 
@@ -407,4 +428,6 @@ class PermissionManager:
         """清理所有已处理（允许/拒绝/过期）的权限请求记录。"""
         expired = [rid for rid, r in self._requests.items() if r.status in ("allowed", "denied", "expired")]
         for rid in expired:
-            self._requests.pop(rid, None)
+            req = self._requests.pop(rid, None)
+            if req is not None:
+                self._prune_pending_index(req)

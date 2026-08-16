@@ -106,8 +106,63 @@
 
 ---
 
-## 六、建议的下一步
+## 六、第三轮深度复核（graph / chat / repository / db / permission 全链路）
 
-1. 用 `.venv\Scripts\python.exe` 启动后端验证服务恢复（端口 8000 当前空闲）。
+### N1【已证伪 — 代码正确】步数上限与收尾时机
+- 证据：`effective_max_steps = min(max_tool_rounds, settings.max_steps)`，循环退出条件 `rounds < max_tool_rounds`（均 ≤ 轮数上限）。
+- 结论：收尾提示最晚于 `max_tool_rounds-1` 轮注入并禁用工具（`final_tool_defs=None`），不会"提示收尾了还继续跑工具"。**上一轮怀疑不成立，撤回。**
+
+### N4【已关闭】`_permission_denied_msg` 提示误导
+- 证据：`_permission_denied_msg`（graph.py:85-93）明确写明"**这不是可重试的临时错误**"；无事件队列时直接拒绝而非永久等待。
+- 结论：不会误导模型盲目重试。**关闭。**
+
+### N5【确认存在 → ✅ 已修复】`IN (...)` 无分批拼接
+- 位置：`repository.py` `list_parts_for_messages`、`revert_to_message` 的 `DELETE … IN (...)`。
+- 风险：SQLite 变量上限默认 999，长会话（大量工具消息）加载历史/撤销时可能 `too many SQL variables`。影响面：`router.py:120`、`history.py:92/95`。
+- 修复：新增 `_SQLITE_MAX_VARS = 500`，两处按批分片。已用 1000 条消息的临时 DB 实测通过（list=1000 → revert=999 → 残余 parts=1）。
+
+### N7【升级为高风险 → ✅ 已修复】排队期取消的僵尸 task 会话
+- 位置：`chat.py` `_begin_task_session`（`sem` 之前创建子会话并登记 task_bridge），`async with sem` 原在 `try` **之外**。
+- 风险：排队期间取消 → `CancelledError` 在 `sem.acquire()` 挂起点抛出，**不经过**取消处理分支 → 子会话残留 `idle` 僵尸、task_bridge 映射残留、`_queue_counter` 未递减（计数失真 +1）。
+- 修复：将整段（排队判断 + `async with sem` + 执行体）移入外层 `try`，新增外层 `except asyncio.CancelledError`：归还排队计数、子会话置 `interrupted`、`unregister`，再 `raise`。
+
+### N2【确认存在 — 低概率 → ✅ 已修复】权限请求重复审批
+- 位置：`permission/manager.py` `create_request` 无 `(path, operation)` 去重。
+- 风险：同一轮多个并发工具对同一路径触发 `NeedsPermission` 时弹出重复审批（触发需 LLM 同轮并行写同一新路径，概率低）。
+- 修复：新增 `_pending_by_key: {(path, operation) → request_id}`，pending 状态复用；`respond` / `await_decision` 超时 / `cleanup_expired` 三处进入终态后移除索引。已用内存实例单测验证复用/释放语义。
+
+### N3【降级为低 → ✅ 已修复】强制收尾残留 tool_calls
+- 位置：`graph.py` 强制收尾调用传 `tools=None`，返回只取 `msg.content`，残留 tool_calls 不进 answer，仅可能残留 step/tool_start 事件。
+- 修复：收尾后若 `msg.tool_calls` 非空，`logger.warning` 告警记录（便于排查模型违反禁用工具约束）。
+
+### N6【核实为低】`remove_session` 递归删除
+- 证据：db.py `PRAGMA foreign_keys=ON` + 表 `ON DELETE CASCADE`；`remove_session` 递归删除幂等无害。
+- 结论：无需修改，仅确认不重复遍历（当前 BFS 栈实现已避免）。
+
+### 既有修复复核（校验通过）
+- 排队计数对称增减（chat.py）、WAL + busy_timeout=10000 + 连接池（db.py:196-207）、`_push_event` try/except 兜底（graph.py）。均验证通过。
+
+### 冒烟验证（第三轮）
+- 以 `.venv\Scripts\python.exe -m uvicorn main:app --port 8000` 实际启动：`/health` 返回 200 `{"status":"ok","vector_store_size":0}`。`/api/monitor/stats` 401 系 auth 中间件要求 `X-User-Id`（预期，非缺陷）。验证后已停止进程。
+
+---
+
+## 七、修复记录（第三轮新增）
+
+| 文件 | 修复 |
+|---|---|
+| `backend/app/api/chat.py` | N7：排队期取消的清理（计数归还 + 子会话 interrupted + unregister + re-raise） |
+| `backend/app/session/repository.py` | N5：`IN (...)` 按 `_SQLITE_MAX_VARS=500` 分批（select / delete 各一处） |
+| `backend/app/permission/manager.py` | N2：`(path, operation)` pending 审批去重 + 终态索引清理 |
+| `backend/app/agent/graph.py` | N3：强制收尾残留 tool_calls 告警 |
+
+全部通过 `py_compile`；N2/N5 单测通过；后端启动冒烟通过。
+
+---
+
+## 八、建议的下一步
+
+1. 端口 8000 已确认空闲，后端冒烟已通过（本轮实际启动验证）。
 2. 需要更长记忆时，在 `.env` 设置 `MEMORY_TTL_SECONDS`（如 `86400`）。
 3. 可选：把记忆工具与子 Agent 的共享语义写进 AGENTS.md（现已与实现一致：`tool_task` 子 Agent 与主 Agent 同一 `conversation_id` namespace，可互相检索）。
+4. 前端 `stores/multiAgent.ts` 事件消费交叉验证已在前两轮完成（与后端事件字段匹配），无需进一步改动。

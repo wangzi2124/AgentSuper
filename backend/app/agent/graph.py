@@ -1342,6 +1342,13 @@ class RAGAgent:
             response = await self._llm_call(model, messages, None, state=state)
             msg = response.choices[0].message
             finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
+        if msg.tool_calls:
+            # 收尾调用已禁用工具（tools=None），理论上不应返回 tool_calls；
+            # 若模型仍输出，其 tool_calls 不会进入 answer，仅告警记录便于排查
+            logger.warning(
+                "Forced final LLM call returned %d tool_calls despite tools disabled (rounds=%d)",
+                len(msg.tool_calls), rounds,
+            )
         if not (msg.content or "").strip():
             # Last resort: LLM still returned empty, use a summary
             msg.content = "任务已完成，请查看结果。"

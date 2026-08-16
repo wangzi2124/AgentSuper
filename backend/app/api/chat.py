@@ -400,121 +400,134 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
         # 仅当真正排队（进入前信号量已满）时才递增；进入后对称递减。
         # 避免直接进入（未排队）的请求也递减，导致计数失真/提前清零。
         queued_position: int | None = None
-        if sem.locked():
-            _queue_counter += 1
-            queued_position = _queue_counter
-            await event_queue.put({
-                "type": "queued",
-                "queue_position": queued_position,
-            })
+        try:
+            if sem.locked():
+                _queue_counter += 1
+                queued_position = _queue_counter
+                await event_queue.put({
+                    "type": "queued",
+                    "queue_position": queued_position,
+                })
 
-        async with sem:
+            async with sem:
+                if queued_position is not None:
+                    _queue_counter = max(0, _queue_counter - 1)
+                try:
+                    # 先推送路由事件
+                    await event_queue.put({
+                        "type": "routing",
+                        "detail": "正在分析问题并选择最合适的 Agent...",
+                    })
+
+                    # 通过 Supervisor 发送请求（_event_queue 经 payload 透传到子 Agent）
+                    reply = await agent_bus.send_and_wait(
+                        AgentMessage(
+                            source="user",
+                            target="supervisor",
+                            type="request",
+                            action="chat",
+                            payload={
+                                "question": body.message,
+                                "model": body.model,
+                                "history": compressed,
+                                "use_vector_db": body.use_vector_db,
+                                "files": [f.model_dump() for f in body.files],
+                                "conversation_id": session_id,
+                                "user_id": user_id,
+                                "directory": session_dir,
+                                "_event_queue": collector,
+                            },
+                            thread_id=thread_id,
+                        ),
+                        timeout=settings.supervisor_timeout,
+                    )
+
+                    if reply.type == "error":
+                        collector.fail_running(reply.payload.get("error", "Agent error"))
+                        await event_queue.put({
+                            "type": "error",
+                            "error": reply.payload.get("error", "Agent error"),
+                            "detail": reply.payload.get("error", "Agent error"),
+                            "retryable": False,
+                            "status_code": None,
+                            "error_type": "AgentError",
+                        })
+                        return
+
+                    payload = reply.payload
+                    answer = payload.get("answer", "")
+                    sources = payload.get("sources", [])
+                    steps = payload.get("steps", [])
+                    routed_to = payload.get("routed_to")
+                    agents = collector.agents_snapshot()
+
+                    # 落库：主会话 + 子任务会话（先落库以拿到消息 id）
+                    user_msg_id, assistant_msg_id = await _persist_multi_agent(
+                        service, user_id, session_id, child_id, body.message, answer, sources, steps,
+                        agents=agents, model=body.model, tokens=payload.get("tokens"),
+                    )
+
+                    await event_queue.put({
+                        "type": "done",
+                        "answer": answer,
+                        "sources": [
+                            {"document_id": s["document_id"], "content": s["content"], "score": s["score"]}
+                            if isinstance(s, dict) else s
+                            for s in sources
+                        ],
+                        "conversation_id": session_id,
+                        "user_msg_id": user_msg_id,
+                        "assistant_msg_id": assistant_msg_id,
+                        "steps": steps,
+                        "routed_to": routed_to,
+                        "agents": agents,
+                        "tokens": payload.get("tokens") or {},
+                    })
+
+                except asyncio.TimeoutError:
+                    collector.fail_running("请求超时，请重试")
+                    await event_queue.put({
+                        "type": "error",
+                        "error": "请求超时，请重试",
+                        "detail": "请求超时，请重试",
+                        "retryable": True,
+                        "status_code": None,
+                        "error_type": "TimeoutError",
+                    })
+                except asyncio.CancelledError:
+                    service.update(user_id, child_id, status="interrupted")
+                    collector.fail_running("请求已取消")
+                    await event_queue.put({
+                        "type": "error",
+                        "detail": "cancelled",
+                        "retryable": False,
+                        "status_code": None,
+                        "error_type": "CancelledError",
+                    })
+                except Exception as e:
+                    logger.exception("multi-agent stream invocation failed")
+                    service.update(user_id, child_id, status="error")
+                    collector.fail_running(str(e))
+                    await event_queue.put({
+                        "type": "error",
+                        "error": str(e),
+                        "detail": str(e),
+                        **classify_error(e),
+                    })
+                finally:
+                    task_bridge.unregister(child_id)
+        except asyncio.CancelledError:
+            # 排队/获取信号量期间被取消：CancelledError 在 sem.acquire() 挂起点
+            # 抛出，不经过内部取消分支（try 在其之后）。在此统一清理，避免
+            # 残留 zombie 子会话 / task_bridge 映射，并归还排队计数。
             if queued_position is not None:
                 _queue_counter = max(0, _queue_counter - 1)
             try:
-                # 先推送路由事件
-                await event_queue.put({
-                    "type": "routing",
-                    "detail": "正在分析问题并选择最合适的 Agent...",
-                })
-
-                # 通过 Supervisor 发送请求（_event_queue 经 payload 透传到子 Agent）
-                reply = await agent_bus.send_and_wait(
-                    AgentMessage(
-                        source="user",
-                        target="supervisor",
-                        type="request",
-                        action="chat",
-                        payload={
-                            "question": body.message,
-                            "model": body.model,
-                            "history": compressed,
-                            "use_vector_db": body.use_vector_db,
-                            "files": [f.model_dump() for f in body.files],
-                            "conversation_id": session_id,
-                            "user_id": user_id,
-                            "directory": session_dir,
-                            "_event_queue": collector,
-                        },
-                        thread_id=thread_id,
-                    ),
-                    timeout=settings.supervisor_timeout,
-                )
-
-                if reply.type == "error":
-                    collector.fail_running(reply.payload.get("error", "Agent error"))
-                    await event_queue.put({
-                        "type": "error",
-                        "error": reply.payload.get("error", "Agent error"),
-                        "detail": reply.payload.get("error", "Agent error"),
-                        "retryable": False,
-                        "status_code": None,
-                        "error_type": "AgentError",
-                    })
-                    return
-
-                payload = reply.payload
-                answer = payload.get("answer", "")
-                sources = payload.get("sources", [])
-                steps = payload.get("steps", [])
-                routed_to = payload.get("routed_to")
-                agents = collector.agents_snapshot()
-
-                # 落库：主会话 + 子任务会话（先落库以拿到消息 id）
-                user_msg_id, assistant_msg_id = await _persist_multi_agent(
-                    service, user_id, session_id, child_id, body.message, answer, sources, steps,
-                    agents=agents, model=body.model, tokens=payload.get("tokens"),
-                )
-
-                await event_queue.put({
-                    "type": "done",
-                    "answer": answer,
-                    "sources": [
-                        {"document_id": s["document_id"], "content": s["content"], "score": s["score"]}
-                        if isinstance(s, dict) else s
-                        for s in sources
-                    ],
-                    "conversation_id": session_id,
-                    "user_msg_id": user_msg_id,
-                    "assistant_msg_id": assistant_msg_id,
-                    "steps": steps,
-                    "routed_to": routed_to,
-                    "agents": agents,
-                    "tokens": payload.get("tokens") or {},
-                })
-
-            except asyncio.TimeoutError:
-                collector.fail_running("请求超时，请重试")
-                await event_queue.put({
-                    "type": "error",
-                    "error": "请求超时，请重试",
-                    "detail": "请求超时，请重试",
-                    "retryable": True,
-                    "status_code": None,
-                    "error_type": "TimeoutError",
-                })
-            except asyncio.CancelledError:
                 service.update(user_id, child_id, status="interrupted")
-                collector.fail_running("请求已取消")
-                await event_queue.put({
-                    "type": "error",
-                    "detail": "cancelled",
-                    "retryable": False,
-                    "status_code": None,
-                    "error_type": "CancelledError",
-                })
-            except Exception as e:
-                logger.exception("multi-agent stream invocation failed")
-                service.update(user_id, child_id, status="error")
-                collector.fail_running(str(e))
-                await event_queue.put({
-                    "type": "error",
-                    "error": str(e),
-                    "detail": str(e),
-                    **classify_error(e),
-                })
-            finally:
-                task_bridge.unregister(child_id)
+            except Exception:
+                logger.warning("failed to mark child session interrupted on queue-cancel: %s", child_id)
+            task_bridge.unregister(child_id)
+            raise
 
     async def event_generator():
         """生成 SSE 事件流。"""

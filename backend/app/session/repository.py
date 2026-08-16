@@ -19,6 +19,10 @@ from .models import ContextEpoch, Message, Part, ProjectInfo, SessionInfo
 
 _DEFAULT_USER = "anonymous"
 
+# SQLite 变量上限默认 999；`IN (...)` 一次拼接超过会报 too many SQL variables。
+# 长会话（含大量工具消息）的 message_id 集合可能超限，统一按批分片。
+_SQLITE_MAX_VARS = 500
+
 
 def _row_to_session(row: sqlite3.Row) -> SessionInfo:
     data = dict(row)
@@ -372,22 +376,28 @@ def list_parts(message_id: str) -> list[Part]:
 
 
 def list_parts_for_messages(message_ids: list[str]) -> dict[str, list[Part]]:
-    """按消息批量加载 parts（保持每消息内 (time_created, id) 排序）。"""
+    """按消息批量加载 parts（保持每消息内 (time_created, id) 排序）。
+
+    分批查询：message_id 集合可能超过 SQLite 变量上限，按 _SQLITE_MAX_VARS 分片，
+    避免长会话加载历史时报 too many SQL variables。
+    """
     if not message_ids:
         return {}
     conn = _get_db()
     try:
-        placeholders = ",".join("?" * len(message_ids))
-        rows = conn.execute(
-            f"SELECT * FROM message_parts WHERE message_id IN ({placeholders})"
-            " ORDER BY message_id, time_created, id",
-            message_ids,
-        ).fetchall()
         out: dict[str, list[Part]] = {}
-        for r in rows:
-            p = Part(id=r["id"], session_id=r["session_id"], message_id=r["message_id"],
-                     type=r["type"], data=json.loads(r["data"]), time_created=r["time_created"])
-            out.setdefault(r["message_id"], []).append(p)
+        for i in range(0, len(message_ids), _SQLITE_MAX_VARS):
+            batch = message_ids[i:i + _SQLITE_MAX_VARS]
+            placeholders = ",".join("?" * len(batch))
+            rows = conn.execute(
+                f"SELECT * FROM message_parts WHERE message_id IN ({placeholders})"
+                " ORDER BY message_id, time_created, id",
+                batch,
+            ).fetchall()
+            for r in rows:
+                p = Part(id=r["id"], session_id=r["session_id"], message_id=r["message_id"],
+                         type=r["type"], data=json.loads(r["data"]), time_created=r["time_created"])
+                out.setdefault(r["message_id"], []).append(p)
         return out
     finally:
         conn.close()
@@ -479,11 +489,14 @@ def revert_to_message(session_id: str, message_id: str) -> int:
         ).fetchall()
         ids = [d["id"] for d in doomed]
         if ids:
-            placeholders = ",".join("?" * len(ids))
-            conn.execute(
-                f"DELETE FROM message_parts WHERE session_id = ? AND message_id IN ({placeholders})",
-                [session_id, *ids],
-            )
+            # 分批删除，避免 message_id 集合超过 SQLite 变量上限
+            for i in range(0, len(ids), _SQLITE_MAX_VARS):
+                batch = ids[i:i + _SQLITE_MAX_VARS]
+                placeholders = ",".join("?" * len(batch))
+                conn.execute(
+                    f"DELETE FROM message_parts WHERE session_id = ? AND message_id IN ({placeholders})",
+                    [session_id, *batch],
+                )
             conn.execute(
                 "DELETE FROM session_messages WHERE session_id = ? AND seq > ?",
                 (session_id, target_seq),
