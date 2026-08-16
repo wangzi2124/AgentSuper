@@ -184,7 +184,7 @@ def create_filesystem_tools() -> List[ToolDef]:
             "tool_edit_file": "Edit a file by replacing text (fuzzy matching; errors when multiple matches unless replace_all)",
             "tool_glob": "Find files matching a glob pattern (absolute paths, mtime-sorted, max 100)",
             "tool_grep": "Search file contents using regex (absolute paths, 'Found N matches', max 100 matches)",
-            "tool_execute": "Run a shell command (build/install/test only, NOT for network/web operations)",
+            "tool_execute": "Run a shell command (build/install/test/check/verify only, NOT for network/web operations)",
             "tool_delete_file": "Delete a file or empty directory (workspace only)",
             "tool_rename_file": "Rename or move a file/directory",
             "tool_apply_patch": "Apply an apply_patch-format patch (Add File / Update File / Delete File). Best for creating or editing multiple files in one call.",
@@ -258,7 +258,7 @@ def build_system_prompt_no_kb(
             "   - tool_edit_file(path, old_string, new_string, replace_all) - Edit a file\n"
             "   - tool_glob(pattern, path) - Find files matching a pattern (path defaults to workspace)\n"
             "   - tool_grep(pattern, include, context, count_only, files_only, path) - Search file contents\n"
-            "   - tool_execute(command, timeout, workdir) - Run a shell command (build/install only)\n"
+            "   - tool_execute(command, timeout, workdir) - Run a shell command (build/install/test/check, e.g. npm install, npm run build, python -m py_compile)\n"
             "   - tool_delete_file(path) - Delete a file or empty directory\n"
             "   - tool_rename_file(path, new_path) - Rename or move a file/directory\n"
             "   - tool_apply_patch(patch_text) - Apply an apply-patch-format patch (Add/Update/Delete File)"
@@ -318,18 +318,18 @@ def build_system_prompt_no_kb(
         "- Web search: plugin_internet-search_tool_internet_search (region='cn'|'global').",
         "- URL content: plugin_internet-search_tool_extract_urls.",
         "- HTTP: plugin_http-client_tool_http_get/_post/_request (headers as JSON string).",
-        "- CRITICAL: tool_execute ONLY for build/install (npm install, npm run build). NEVER for curl/wget/ping/network — use http-client plugin.",
+        "- CRITICAL: tool_execute is for build/install/test/check/verify (npm install, npm run build, python -m py_compile, pytest, npm test, node --check). NEVER use it for curl/wget/ping/network — use http-client plugin.",
         "- KB export: kb-export tools.",
         "- If no tool fits, answer directly without calling tools.",
         "",
         "IMPORTANT - Before code/design tasks: FIRST call the relevant load_skill_*() tool for best practices, "
-        "then write files with tool_write_file; tool_execute only for build/install if the skill says so.",
+        "then write files with tool_write_file; use tool_execute for build/install/test/check (e.g. python -m py_compile) as needed.",
         "",
         "IMPORTANT - Documents (.docx/.pdf/.xlsx/.pptx): use the matching generator plugin "
         "(docx/pdf/excel/pptx-generator); section/slide schemas are in each tool's description. Files saved per your directory rules.",
         "",
         "IMPORTANT - Projects: write ALL code files first via tool_write_file (auto-creates dirs); do NOT use "
-        "mkdir/Set-Content or 'npm create'/'create-react-app'/'create vite'; only then run tool_execute for install/build.",
+        "mkdir/Set-Content or 'npm create'/'create-react-app'/'create vite'; only then run tool_execute for install/build/test.",
         "",
         "IMPORTANT - Long content MUST be written to files, NOT pasted in replies (≈500 Chinese chars / 1000 tokens):",
         "  Write text/code with tool_write_file (first chunk, then tool_append_file for large files); generator plugins for .docx/.pdf/.xlsx/.pptx.",
