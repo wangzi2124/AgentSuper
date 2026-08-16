@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import stat
 import subprocess
@@ -1231,10 +1232,56 @@ def _validate_shell_command(command: str, cwd: str | None = None) -> None:
         _ssrf_check_command(seg_str)
 
 
-def _needs_shell(command: str) -> bool:
-    """命令是否包含引号外的 shell 语义（管道/重定向/&&/$VAR/反引号/通配符）？
+# Windows cmd 内建命令（无独立可执行文件，CreateProcess 无法直接启动，
+# 必须经 cmd.exe 解释）。与 POSIX 无关，仅 os.name == "nt" 时参与判定。
+_WIN_CMD_BUILTINS = frozenset({
+    "assoc", "attrib", "break", "call", "cd", "chdir", "cls", "color", "copy",
+    "date", "del", "dir", "echo", "endlocal", "erase", "exit", "for", "ftype",
+    "goto", "if", "md", "mkdir", "move", "path", "pause", "popd", "prompt",
+    "pushd", "rd", "rem", "ren", "rename", "rmdir", "set", "setlocal", "shift",
+    "start", "time", "title", "type", "ver", "verify", "vol",
+})
+_WIN_SHIM_EXTS = frozenset({".cmd", ".bat", ".ps1"})
 
-    是则必须走真实 shell 执行；否则保持安全的 shlex.split + exec 路径。
+# 命中 exec 路径却无法被 CreateProcess 直接启动的基命令（缓存 which 结果，避免每轮扫描）。
+_win_which_cache: dict[str, Optional[str]] = {}
+
+
+def _win_cmd_needs_shell(command: str) -> bool:
+    """Windows 下基命令是否需要真实 shell？
+
+    - cmd 内建命令（echo/dir/type…）：无独立 exe，必须 cmd.exe 解释
+    - npm/npx/yarn/pnpm 等 npm.cmd 垫片：which 解析为 .cmd/.bat/.ps1，CreateProcess 无法启动
+    - 其余解析到 .exe 的可执行文件：走安全 exec 路径（零回归）
+    """
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    base = parts[0]
+    if base.lower() in _WIN_CMD_BUILTINS:
+        return True
+    if "/" in base or "\\" in base:
+        # 显式路径命令：按扩展名判定（.cmd/.bat/.ps1 需 shell，其余交给 exec + 解析）
+        return Path(base).suffix.lower() in _WIN_SHIM_EXTS
+    resolved = _win_which_cache.get(base)
+    if resolved is None:
+        resolved = shutil.which(base)
+        _win_which_cache[base] = resolved
+    if resolved is None:
+        return False
+    return Path(resolved).suffix.lower() in _WIN_SHIM_EXTS
+
+
+def _needs_shell(command: str) -> bool:
+    """命令是否需要真实 shell 执行？
+
+    判定依据：
+    - 引号外的 shell 语义（管道/重定向/&&/$VAR/反引号/通配符）→ 是
+    - Windows 下基命令为 cmd 内建或 .cmd/.bat/.ps1 垫片（npm 等）→ 是
+    - 其余保持安全的 shlex.split + exec 路径
     """
     single = False
     double = False
@@ -1255,6 +1302,8 @@ def _needs_shell(command: str) -> bool:
                 # Windows cmd 环境变量展开（%USERPROFILE%）
                 return True
         i += 1
+    if os.name == "nt":
+        return _win_cmd_needs_shell(command)
     return False
 
 
