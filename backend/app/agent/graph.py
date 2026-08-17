@@ -1,6 +1,5 @@
 import asyncio
 import inspect
-import json
 import logging
 import os
 import shlex
@@ -116,6 +115,7 @@ from app.context.token_counter import sanitize_tool_messages
 from app.context.tool_output import bound_tool_output, prune_tool_outputs
 from app.context.tool_dedup import ToolResultDedup
 from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+from app.utils.json_repair import parse_tool_args
 
 # 读取类工具：只读文件/目录状态，结果可被后续写操作改变，因此缓存仅在"未发生写操作"时有效
 _DEDUP_READONLY_TOOLS = {"tool_ls", "tool_read_file", "tool_glob", "tool_grep"}
@@ -1172,10 +1172,9 @@ class RAGAgent:
                 tool_name = tc.function.name
                 # [token 优化 v5] 记录已使用工具 → 下轮重挂载时保留
                 used_tools.add(tool_name)
-                try:
-                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                except json.JSONDecodeError as e:
-                    early_results[tc.id] = f"Error parsing arguments for '{tool_name}': {e}"
+                args = parse_tool_args(tc.function.arguments)
+                if args is None:
+                    early_results[tc.id] = f"Error parsing arguments for '{tool_name}': 参数不是合法 JSON 且自动修复失败（已按空参数处理，请重新提交完整参数）"
                     continue
 
                 # Dedup: 仅对只读且幂等的工具复用结果。
@@ -1300,9 +1299,8 @@ class RAGAgent:
             tool_tasks = []
             tool_metas = []
             for tc in msg.tool_calls:
-                try:
-                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                except json.JSONDecodeError:
+                args = parse_tool_args(tc.function.arguments)
+                if args is None:
                     args = {}
                 self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tc.function.name}", "name": f"调用工具: {tc.function.name}", "status": "running", "tool_name": tc.function.name, "tool_args": args})
                 tool_tasks.append(self._execute_tool(tc.function.name, args, state))

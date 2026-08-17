@@ -12,8 +12,8 @@
 """
 
 import asyncio
-import json
 import logging
+import re
 import time as tmod
 import uuid
 from typing import AsyncIterator, Optional
@@ -25,6 +25,7 @@ from app.agent.bus import AgentBus
 from app.agent.memory import MemoryManager
 from app.config import settings
 from app.monitor import record_model_call
+from app.utils.json_repair import parse_json_value
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +381,7 @@ class SupervisorAgent(BaseAgent):
                     )
                 text = text.strip()
                 text = text.replace("```json", "").replace("```", "").strip()
-                subtasks = json.loads(text)
+                subtasks = parse_json_value(text)
                 validated = self._validate_subtasks(subtasks, routable)
                 if validated:
                     return validated

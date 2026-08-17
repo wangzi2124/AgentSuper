@@ -13,7 +13,6 @@
 
 import asyncio
 import inspect
-import json
 import logging
 import time as tmod
 from typing import Optional
@@ -28,6 +27,7 @@ from app.monitor import record_model_call
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
 from app.permission import set_session_workspace, reset_session_workspace
 from app.tools import file_tools as fs
+from app.utils.json_repair import parse_tool_args
 
 logger = logging.getLogger(__name__)
 
@@ -371,11 +371,8 @@ async def tool_loop_chat(
     async def _exec_one(tc) -> tuple[str, str]:
         """执行单个工具调用（权限桥 + 事件上报），返回 (tool_call_id, result)。"""
         name = tc.function.name
-        try:
-            args = json.loads(tc.function.arguments or "{}")
-            if not isinstance(args, dict):
-                args = {}
-        except Exception:
+        args = parse_tool_args(tc.function.arguments)
+        if args is None:
             args = {}
             logger.warning("Sub-agent malformed tool args for %s", name)
 
