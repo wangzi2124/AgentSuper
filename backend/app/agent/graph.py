@@ -4,6 +4,7 @@ import logging
 import os
 import shlex
 import subprocess
+import threading
 import time as tmod
 import uuid
 from collections.abc import Sequence
@@ -53,32 +54,6 @@ def _normalize_finish_reason(finish_reason: str | None) -> str:
     if not finish_reason:
         return "stop"
     return _FINISH_REASON_MAP.get(str(finish_reason).strip().lower(), "unknown")
-
-
-async def _async_kill_process_tree(process: asyncio.subprocess.Process) -> None:
-    """杀掉进程及其整个后代进程树（Windows 用 taskkill /T /F，POSIX 用 killpg）。"""
-    if os.name == "nt":
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "taskkill", "/pid", str(process.pid), "/T", "/F",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        except Exception:
-            try:
-                process.kill()
-            except Exception:
-                pass
-    else:
-        try:
-            import signal as _signal
-            os.killpg(os.getpgid(process.pid), _signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                process.kill()
-            except Exception:
-                pass
 
 
 def _permission_denied_msg(operation: str, path: str, tool_name: str = "") -> str:
@@ -450,7 +425,16 @@ class RAGAgent:
             "Use it to delegate independent or specialized subtasks (realtime web search via 'web_search', "
             "or a separate coding/file task via 'code') to a sub-agent and get its final result back — "
             "it runs with fresh context, so include all needed details. Do NOT delegate work you can do directly."
-            "\n\n" + LONG_CONTENT_FILE_RULE
+            "\n\n"
+            + (
+                "IMPORTANT - Shell dialect: commands run via cmd.exe on Windows, NOT bash. Use backslash paths "
+                "for executables (.venv\\Scripts\\python.exe — forward slashes fail), %ERRORLEVEL% instead of $?, "
+                "and & / && instead of ; as command separator."
+                "\n\n"
+                if os.name == "nt"
+                else ""
+            )
+            + LONG_CONTENT_FILE_RULE
         )
 
     # [token 优化 v5] 按需挂载工具 schema：核心文件工具常驻，技能/插件按意图关键词 + 已使用保留
@@ -740,14 +724,20 @@ class RAGAgent:
         return f"Tool '{name}' not found"
 
     async def _execute_tool_streaming(self, args: dict, event_queue: asyncio.Queue, on_activity: Callable[[str], None] | None = None) -> str:
-        """流式执行shell命令，实时推送输出到事件队列。使用异步子进程避免PIPE死锁。"""
+        """流式执行shell命令，实时推送输出到事件队列。
+
+        对齐 opencode shell.ts 的单路径语义：Popen 启动子进程 + 后台线程读流，
+        经 loop.call_soon_threadsafe 把行推回事件队列——不依赖事件循环自身的
+        子进程能力（Windows + uvicorn --reload 下事件循环为 SelectorEventLoop，
+        asyncio.create_subprocess_* 会抛 NotImplementedError）。
+        """
         command = args.get("command", "")
         timeout = min(args.get("timeout", 300), 600)
         if timeout < 1:
             timeout = 5
         work_dir = args.get("workdir") or args.get("work_dir") or "."
 
-        from app.tools.file_tools import _resolve as _fs_resolve
+        from app.tools.file_tools import _resolve as _fs_resolve, _kill_process_tree as _kill_tree
         resolved_cwd = _fs_resolve(work_dir)
 
         from app.permission import get_manager as _get_perm_mgr, NeedsPermission as _NeedsPermission
@@ -768,76 +758,79 @@ class RAGAgent:
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         start_time = tmod.time()
-        last_heartbeat = tmod.time()
+        hb_state = {"last": start_time}
+        loop = asyncio.get_running_loop()
 
-        async def _read_stream(stream, storage: list[str], source: str):
-            nonlocal last_heartbeat
-            while True:
-                raw_line = await stream.readline()
-                if not raw_line:
-                    break
-                now = tmod.time()
-                if now - last_heartbeat >= 5:
-                    last_heartbeat = now
-                    try:
-                        event_queue.put_nowait({
+        def _push(ev: dict) -> None:
+            """仅在事件循环线程内执行（经 call_soon_threadsafe 调度），对象非线程安全也安全。"""
+            try:
+                event_queue.put_nowait(ev)
+            except Exception:
+                pass
+
+        def _emit_threadsafe(ev: dict) -> None:
+            try:
+                loop.call_soon_threadsafe(_push, ev)
+            except RuntimeError:
+                pass  # 循环已关闭（请求已结束/取消），静默丢弃
+
+        def _pump(pipe, storage: list[str], source: str) -> None:
+            """工作线程：逐行读管道，落 storage 并推送 tool_output/心跳事件（与旧异步版同语义）。"""
+            from app.tools.file_tools import decode_process_output
+            try:
+                for raw in iter(pipe.readline, b""):
+                    decoded = decode_process_output(raw).rstrip()
+                    storage.append(decoded)
+                    now = tmod.time()
+                    if now - hb_state["last"] >= 5:
+                        hb_state["last"] = now
+                        _emit_threadsafe({
                             "type": "tool_heartbeat",
                             "tool_name": "tool_execute",
                             "elapsed_seconds": int(now - start_time),
                             "command": command[:200],
                         })
-                    except Exception:
-                        pass
-                    if on_activity:
-                        try:
-                            on_activity(f"tool_execute 运行中 ({int(now - start_time)}s)")
-                        except Exception:
-                            pass
-                decoded = raw_line.decode("utf-8", errors="replace").rstrip()
-                storage.append(decoded)
-                try:
-                    event_queue.put_nowait({
+                        if on_activity:
+                            try:
+                                on_activity(f"tool_execute 运行中 ({int(now - start_time)}s)")
+                            except Exception:
+                                pass
+                    _emit_threadsafe({
                         "type": "tool_output",
                         "tool_name": "tool_execute",
                         "source": source,
                         "line": decoded,
                         "elapsed_seconds": int(tmod.time() - start_time),
                     })
+            finally:
+                try:
+                    pipe.close()
                 except Exception:
                     pass
 
+        # 无 shell 语义 → exec 防注入；否则走真实 shell（与 tool_execute 对齐）
+        popen_kwargs: dict = {}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         try:
-            # 无 shell 语义 → exec 防注入；否则走真实 shell（与 tool_execute 对齐）
             if _needs_shell(command):
-                if os.name == "nt":
-                    process = await asyncio.create_subprocess_shell(
-                        command,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
-                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-                    )
-                else:
-                    process = await asyncio.create_subprocess_shell(
-                        command,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
-                        start_new_session=True,
-                    )
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
+                    **popen_kwargs,
+                )
             else:
-                cmd_args = shlex.split(command)
-                process = await asyncio.create_subprocess_exec(
-                    *cmd_args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                process = subprocess.Popen(
+                    shlex.split(command),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
                 )
-        except NotImplementedError:
-            # Windows + uvicorn --reload 时事件循环为 SelectorEventLoop，
-            # 不支持 asyncio 子进程；向上抛出让调用方回退到线程池里的
-            # 同步 tool_execute（subprocess.run 不依赖事件循环）
-            raise
         except Exception as e:
             detail = str(e) or repr(e) or type(e).__name__
             return (
@@ -846,21 +839,37 @@ class RAGAgent:
                 f"Workdir: {str(resolved_cwd) if resolved_cwd.is_dir() else '.'}"
             )
 
-        stdout_task = asyncio.create_task(_read_stream(process.stdout, stdout_lines, "stdout"))
-        stderr_task = asyncio.create_task(_read_stream(process.stderr, stderr_lines, "stderr"))
+        readers = [
+            threading.Thread(target=_pump, args=(process.stdout, stdout_lines, "stdout"), daemon=True),
+            threading.Thread(target=_pump, args=(process.stderr, stderr_lines, "stderr"), daemon=True),
+        ]
+        for th in readers:
+            th.start()
 
+        # 轮询等待退出：poll() 不依赖事件循环的 wait 协程，任何循环类型都可用
         timed_out = False
-        try:
-            await asyncio.wait_for(process.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            await _async_kill_process_tree(process)
-            await process.wait()
-            timed_out = True
-
-        await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task, return_exceptions=True), timeout=5)
+        while process.poll() is None:
+            if tmod.time() - start_time >= timeout:
+                timed_out = True
+                break
+            await asyncio.sleep(0.2)
 
         if timed_out:
+            # 同步杀整树（taskkill /T /F）：不用 _async_kill_process_tree——
+            # 其内部同样走 create_subprocess_exec，selector 循环下会静默失败
+            await asyncio.to_thread(_kill_tree, process)
+            await asyncio.to_thread(process.wait)
             return f"Error: command timed out after {timeout}s"
+
+        def _join_all() -> None:
+            for th in readers:
+                th.join(5)
+
+        # 命令已执行完毕，此处绝不能再抛异常（否则调用方会回退同步路径造成二次执行）
+        try:
+            await asyncio.wait_for(asyncio.to_thread(_join_all), timeout=12)
+        except Exception:
+            pass
 
         parts = []
         if stdout_lines:
@@ -871,8 +880,11 @@ class RAGAgent:
         rc = process.returncode or 0
         header = f"Exit code: {rc}"
         if output:
-            return f"{header}\n{output}"
-        return header
+            result = f"{header}\n{output}"
+        else:
+            result = header
+        from app.tools.file_tools import append_cmd_dialect_hint
+        return append_cmd_dialect_hint(result)
 
     def _push_stream_event(self, state: AgentState, event: dict):
         """流式文本增量事件：只进事件队列，不进 steps（避免污染步骤列表）。"""

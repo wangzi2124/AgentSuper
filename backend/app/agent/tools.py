@@ -1,4 +1,5 @@
 import inspect
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -319,6 +320,11 @@ def build_system_prompt_no_kb(
         "- URL content: plugin_internet-search_tool_extract_urls.",
         "- HTTP: plugin_http-client_tool_http_get/_post/_request (headers as JSON string).",
         "- CRITICAL: tool_execute is for build/install/test/check/verify (npm install, npm run build, python -m py_compile, pytest, npm test, node --check). NEVER use it for curl/wget/ping/network — use http-client plugin.",
+        *([
+            "- IMPORTANT - Shell dialect: commands run via cmd.exe on Windows, NOT bash. Use backslash paths "
+            "for executables (.venv\\Scripts\\python.exe — forward slashes fail), %ERRORLEVEL% instead of $?, "
+            "and & / && instead of ; as command separator."
+        ] if sys.platform.startswith("win") else []),
         "- KB export: kb-export tools.",
         "- If no tool fits, answer directly without calling tools.",
         "",

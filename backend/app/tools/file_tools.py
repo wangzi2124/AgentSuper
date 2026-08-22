@@ -1429,30 +1429,77 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
             pass
 
 
+def decode_process_output(data: bytes) -> str:
+    """子进程输出三级解码：utf-8 严格 → GBK → utf-8 replace。
+
+    Windows 控制台程序（cmd.exe 内建报错、git 中文提示等）输出本地代码页
+    （中文系统 GBK），而 node/npm 等现代工具链输出 UTF-8 —— 单一编码必然
+    弄错一边。utf-8 严格解码失败再试 GBK，都失败才降级替换符。
+    """
+    if not data:
+        return ""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return data.decode("gbk")
+    except UnicodeDecodeError:
+        pass
+    return data.decode("utf-8", errors="replace")
+
+
 def _run_shell(command: str, resolved_cwd: str, timeout: int) -> tuple[int, str, str]:
     """通过真实 shell 执行命令（Windows: cmd.exe；POSIX: /bin/sh）。
 
     进程放入新会话/进程组，超时时杀掉整个进程树（opencode killTree 语义）。
+    管道按字节读取 + 三级解码（见 decode_process_output），不依赖 -X utf8/locale。
     """
+    popen_kwargs: dict = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
     if os.name == "nt":
-        proc = subprocess.Popen(
-            command, shell=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            cwd=resolved_cwd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-        )
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
-        proc = subprocess.Popen(
-            command, shell=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            cwd=resolved_cwd, start_new_session=True,
-        )
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(
+        command, shell=True,
+        cwd=resolved_cwd, **popen_kwargs,
+    )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
-        return proc.returncode, stdout, stderr
+        return proc.returncode, decode_process_output(stdout or b""), decode_process_output(stderr or b"")
     except subprocess.TimeoutExpired:
         _kill_process_tree(proc)
         stdout, stderr = proc.communicate()
-        raise subprocess.TimeoutExpired(command, timeout, stdout, stderr)
+        raise subprocess.TimeoutExpired(
+            command, timeout,
+            decode_process_output(stdout or b""), decode_process_output(stderr or b""),
+        )
+
+
+_CMD_DIALECT_HINT = (
+    "[cmd.exe hint] Commands here run via cmd.exe on Windows, not bash: use backslash paths "
+    "(.venv\\Scripts\\python.exe — forward slashes fail), %ERRORLEVEL% instead of $?, "
+    "and & / && instead of ; as command separator."
+)
+
+
+def append_cmd_dialect_hint(text: str) -> str:
+    """检测 POSIX 方言在 cmd.exe 下的典型失败签名，附一行修正指引给 LLM 自纠。
+
+    opencode 无此问题（Bun 跨平台 shell 天然吃 POSIX 语法）；本实现用真 cmd.exe，
+    而 LLM 训练语料偏 bash —— 以前失败反馈是哑弹（NotImplementedError），模型永远
+    学不到语法错了；现在把真实方言错误 + 修正指引一起回传，下一轮即可自纠。
+    """
+    if os.name != "nt" or not text:
+        return text
+    posix_signature = (
+        "不是内部或外部命令" in text
+        or "is not recognized as an internal or external command" in text
+        or "$?" in text
+    )
+    if not posix_signature:
+        return text
+    return f"{text}\n{_CMD_DIALECT_HINT}"
 
 
 def _format_execute_output(rc: int, stdout: str, stderr: str, command: str = "") -> dict:
@@ -1482,6 +1529,7 @@ def _format_execute_output(rc: int, stdout: str, stderr: str, command: str = "")
         text = f"{header}\n{body}"
     else:
         text = header
+    text = append_cmd_dialect_hint(text)
     return _env(
         "execute",
         text,
