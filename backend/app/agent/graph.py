@@ -846,15 +846,14 @@ class RAGAgent:
         for th in readers:
             th.start()
 
-        # 轮询等待退出：poll() 不依赖事件循环的 wait 协程，任何循环类型都可用
+        # 事件驱动等待：process.wait() 在线程里阻塞（不依赖事件循环的子进程协程），
+        # wait_for 提供超时。相比旧版 poll()+sleep 轮询无 0.2s 延迟地板，
+        # 恢复旧实现的即时返回；超时取消后杀树，等待线程随进程退出自然回收。
         timed_out = False
-        while process.poll() is None:
-            if tmod.time() - start_time >= timeout:
-                timed_out = True
-                break
-            await asyncio.sleep(0.2)
-
-        if timed_out:
+        try:
+            await asyncio.wait_for(asyncio.to_thread(process.wait), timeout=timeout)
+        except asyncio.TimeoutError:
+            timed_out = True
             # 同步杀整树（taskkill /T /F）：不用 _async_kill_process_tree——
             # 其内部同样走 create_subprocess_exec，selector 循环下会静默失败
             await asyncio.to_thread(_kill_tree, process)
