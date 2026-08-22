@@ -833,6 +833,11 @@ class RAGAgent:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(resolved_cwd) if resolved_cwd.is_dir() else None,
                 )
+        except NotImplementedError:
+            # Windows + uvicorn --reload 时事件循环为 SelectorEventLoop，
+            # 不支持 asyncio 子进程；向上抛出让调用方回退到线程池里的
+            # 同步 tool_execute（subprocess.run 不依赖事件循环）
+            raise
         except Exception as e:
             detail = str(e) or repr(e) or type(e).__name__
             return (
