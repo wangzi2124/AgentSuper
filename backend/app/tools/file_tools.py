@@ -1137,6 +1137,8 @@ _ALLOWED_COMMANDS = frozenset({
 _SHELL_SEP = {"|", "||", "&&", "&", ";", "(", ")"}
 # 重定向符：其后一个 token 是重定向目标（文件名/文件描述符），不属于新命令
 _REDIRECT_OPS = {">", ">>", "<", "<<", "<&", ">&", "2>", "2>>", "&>", "|&"}
+# 写重定向符：其后 token 是文件写入目标（需做权限检查）
+_WRITE_REDIRECT_OPS = {">", ">>", "2>", "2>>", "&>"}
 
 
 def _first_command(seg: list[str]) -> Optional[str]:
@@ -1148,6 +1150,57 @@ def _first_command(seg: list[str]) -> Optional[str]:
             continue
         return tok
     return None
+
+
+def _extract_redirect_targets(command: str) -> list[str]:
+    """从 shell 命令中提取写重定向的目标文件路径。
+
+    解析 >、>>、2>、2>>、&> 重定向操作符后的 token 作为文件写入目标。
+    输入重定向（<、<<）和管道（|）不产生文件写入，忽略。
+    """
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return []
+    targets: list[str] = []
+    skip_next = False
+    for tok in tokens:
+        if skip_next:
+            skip_next = False
+            # 跳过文件描述符数字（如 2>/dev/null 中的 /dev/null 也需要检查）
+            targets.append(tok)
+            continue
+        if tok in _WRITE_REDIRECT_OPS:
+            skip_next = True
+            continue
+    return targets
+
+
+def _check_redirect_targets_permission(command: str, resolved_cwd: Path) -> None:
+    """检查 shell 命令中写重定向目标文件的权限。
+
+    对每个重定向目标路径解析并校验写权限；外部路径抛出 NeedsPermission。
+    """
+    targets = _extract_redirect_targets(command)
+    if not targets:
+        return
+    mgr = get_perm_mgr()
+    for target in targets:
+        # 跳过 /dev/null 等特殊设备文件
+        if target.startswith("/dev/"):
+            continue
+        # 解析为绝对路径
+        t = Path(target)
+        if not t.is_absolute():
+            t = resolved_cwd / t
+        resolved = t.resolve()
+        decision = mgr.check(str(resolved), "write")
+        if decision == "ask":
+            raise NeedsPermission(str(resolved), "write", "tool_execute", {"command": command, "redirect_target": target})
+        if decision == "deny":
+            raise PermissionError(f"Access denied: redirect target '{target}' is outside workspace or protected")
 
 
 def _split_shell_segments(command: str) -> list[list[str]]:
@@ -1563,6 +1616,13 @@ def tool_execute(command: str, timeout: int = 300, workdir: str = ".") -> dict:
         raise NeedsPermission(str(resolved_cwd), "execute", "tool_execute", {"command": command, "timeout": timeout, "workdir": workdir})
     if decision == "deny":
         return _env("execute", f"Error: access denied to directory '{workdir}'", error=True)
+    # 检查写重定向目标文件权限（>、>> 等），防止 shell 命令绕过文件工具的权限检查
+    try:
+        _check_redirect_targets_permission(command, resolved_cwd)
+    except (NeedsPermission, PermissionError):
+        raise
+    except Exception:
+        pass  # 解析失败不阻塞执行（如复杂的动态重定向）
     try:
         if _needs_shell(command):
             rc, stdout, stderr = _run_shell(command, str(resolved_cwd), timeout)

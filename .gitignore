@@ -14,3 +14,4 @@ backend/.env
 backend/data.zip
 *.bak_*
 backend/logs/
+data/logs/

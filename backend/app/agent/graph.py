@@ -755,6 +755,15 @@ class RAGAgent:
         except ValueError as e:
             return f"Error: {e}"
 
+        # 检查写重定向目标文件权限（>、>> 等），防止 shell 命令绕过文件工具的权限检查
+        from app.tools.file_tools import _check_redirect_targets_permission
+        try:
+            _check_redirect_targets_permission(command, resolved_cwd)
+        except (_NeedsPermission, PermissionError):
+            raise
+        except Exception:
+            pass
+
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         start_time = tmod.time()

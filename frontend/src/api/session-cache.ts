@@ -70,9 +70,10 @@ export async function saveSessionToCache<M extends CacheMessage>(
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite')
       const store = tx.objectStore(STORE_NAME)
-      const data: CachedSession<M> = {
+      // JSON round-trip: strip non-cloneable values (functions, circular refs, undefined, Map/Set, etc.)
+      // that would cause DataCloneError in IndexedDB structured clone
+      const raw: CachedSession<M> = {
         sessionId,
-        // 序列化时将 Date 转为 ISO 字符串，反序列化时恢复
         messages: messages.map(m => ({
           ...m,
           timestamp: m.timestamp instanceof Date ? m.timestamp : new Date(m.timestamp),
@@ -82,6 +83,7 @@ export async function saveSessionToCache<M extends CacheMessage>(
         deletedIds,
         updatedAt: Date.now(),
       }
+      const data: CachedSession<M> = JSON.parse(JSON.stringify(raw))
       const req = store.put(data)
       req.onsuccess = () => resolve()
       req.onerror = () => reject(req.error)
