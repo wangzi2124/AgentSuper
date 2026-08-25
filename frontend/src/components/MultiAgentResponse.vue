@@ -67,6 +67,12 @@ function stepKey(a: string, s: AgentStep): string {
 
 <template>
   <div class="response" :class="{ loading: isLast && !!routingStatus, error: message.isError }">
+    <!-- waiting for response -->
+    <div v-if="isLast && !routingStatus && !message.agents.length && !message.content && !message.isError" class="routing">
+      <span class="spinner"></span>
+      正在思考...
+    </div>
+
     <!-- routing -->
     <div v-if="isLast && routingStatus" class="routing">
       <span class="spinner"></span>
