@@ -1,9 +1,19 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useCustomToolsStore } from '../stores/customTools'
 import type { CustomToolItem } from '../types/customTools'
 
 const store = useCustomToolsStore()
+
+// ── 搜索 ──
+const searchText = ref('')
+const filteredItems = computed(() => {
+  const q = searchText.value.toLowerCase().trim()
+  if (!q) return store.items
+  return store.items.filter(
+    (item) => item.name.toLowerCase().includes(q) || (item.description && item.description.toLowerCase().includes(q))
+  )
+})
 
 // ── 列表 ──
 onMounted(async () => {
@@ -85,7 +95,19 @@ async function handleDelete(item: CustomToolItem) {
 
 // 已固定（pin）的工具：从目录中移除，避免重复固定
 const pinnedNames = () => new Set(store.items.filter((i) => i.type === 'pin').map((i) => i.name))
-const pinCandidates = () => store.catalog.filter((t) => !pinnedNames().has(t.name))
+const pinCandidates = () => {
+  const q = searchText.value.toLowerCase().trim()
+  const candidates = store.catalog.filter((t) => !pinnedNames().has(t.name))
+  if (!q) return candidates
+  return candidates.filter(
+    (t) => t.name.toLowerCase().includes(q) || (t.description && t.description.toLowerCase().includes(q))
+  )
+}
+
+const catalogDesc = (name: string) => {
+  const t = store.catalog.find((c) => c.name === name)
+  return t?.description || ''
+}
 </script>
 
 <template>
@@ -95,25 +117,41 @@ const pinCandidates = () => store.catalog.filter((t) => !pinnedNames().has(t.nam
   </div>
   <div class="page-content" style="display:flex;flex-direction:column;gap:16px;">
     <!-- 创建入口 -->
-    <div class="card" style="display:flex;gap:12px;flex-wrap:wrap;">
-      <button class="btn btn-primary" style="font-size:13px;" @click="showScriptForm = !showScriptForm">
-        {{ showScriptForm ? '收起' : '+' }} 创建脚本工具
-      </button>
-      <select
-        v-model="pinForm.tool_name"
-        style="flex:1;min-width:200px;max-width:320px;padding:8px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);"
+    <div class="card" style="display:flex;flex-direction:column;gap:10px;">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+        <button class="btn btn-primary" style="font-size:13px;" @click="showScriptForm = !showScriptForm">
+          {{ showScriptForm ? '收起' : '+' }} 创建脚本工具
+        </button>
+        <input
+          v-model="searchText"
+          placeholder="搜索工具名称或描述..."
+          style="flex:1;min-width:160px;max-width:260px;padding:8px 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);font-size:13px;"
+        />
+        <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:200px;">
+          <select
+            v-model="pinForm.tool_name"
+            :title="catalogDesc(pinForm.tool_name)"
+            style="flex:1;max-width:300px;padding:8px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);font-size:13px;min-width:0;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+          >
+            <option value="" disabled>选择已有工具固定</option>
+            <option v-for="t in pinCandidates()" :key="t.name" :value="t.name">
+              {{ t.name }}
+            </option>
+          </select>
+          <input
+            v-model="pinForm.description"
+            placeholder="固定备注（可选）"
+            style="flex:1;min-width:120px;max-width:200px;padding:8px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);font-size:13px;"
+          />
+          <button class="btn btn-primary" style="font-size:13px;white-space:nowrap;" @click="handlePin">固定</button>
+        </div>
+      </div>
+      <div
+        v-if="pinForm.tool_name && catalogDesc(pinForm.tool_name)"
+        style="font-size:12px;color:var(--text-secondary);padding:4px 8px;background:var(--bg);border-radius:var(--radius);line-height:1.5;"
       >
-        <option value="" disabled>选择已有工具固定（始终挂载 schema）</option>
-        <option v-for="t in pinCandidates()" :key="t.name" :value="t.name">
-          {{ t.name }} — {{ t.description || '无描述' }}
-        </option>
-      </select>
-      <input
-        v-model="pinForm.description"
-        placeholder="固定备注（可选）"
-        style="flex:1;min-width:160px;max-width:240px;padding:8px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);"
-      />
-      <button class="btn btn-primary" style="font-size:13px;" @click="handlePin">固定</button>
+        {{ catalogDesc(pinForm.tool_name) }}
+      </div>
     </div>
 
     <!-- 脚本型创建表单 -->
@@ -163,9 +201,9 @@ const pinCandidates = () => store.catalog.filter((t) => !pinnedNames().has(t.nam
 
     <div v-else style="display:flex;flex-direction:column;gap:8px;">
       <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px;">
-        {{ store.items.length }} 个自定义工具
+        {{ filteredItems.length }} 个自定义工具
       </div>
-      <div v-for="item in store.items" :key="item.type + ':' + item.name" class="card" style="display:flex;align-items:center;gap:14px;">
+      <div v-for="item in filteredItems" :key="item.type + ':' + item.name" class="card" style="display:flex;align-items:center;gap:14px;">
         <div style="font-size:24px;">{{ item.type === 'script' ? '🧩' : '📌' }}</div>
         <div style="flex:1;min-width:0;">
           <div style="font-weight:600;font-size:14px;">

@@ -1157,9 +1157,11 @@ def _extract_redirect_targets(command: str) -> list[str]:
 
     解析 >、>>、2>、2>>、&> 重定向操作符后的 token 作为文件写入目标。
     输入重定向（<、<<）和管道（|）不产生文件写入，忽略。
+    Windows 下先还原 cmd.exe ^ 转义序列。
     """
     try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        normalized = _preprocess_cmd_escapes(command)
+        lex = shlex.shlex(normalized, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
         tokens = list(lex)
     except ValueError:
@@ -1208,8 +1210,10 @@ def _split_shell_segments(command: str) -> list[list[str]]:
 
     在 ; | || && & ( ) 处断开；重定向符及其目标附加到当前命令段；
     $(...) 中的子命令因 '(' 断开而自然成为独立段，从而被独立校验。
+    Windows 下先还原 cmd.exe ^ 转义序列，避免 shlex 误拆。
     """
-    lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+    normalized = _preprocess_cmd_escapes(command)
+    lex = shlex.shlex(normalized, posix=True, punctuation_chars=True)
     lex.whitespace_split = True
     tokens = list(lex)
     segments: list[list[str]] = []
@@ -1308,7 +1312,7 @@ def _win_cmd_needs_shell(command: str) -> bool:
     - 其余解析到 .exe 的可执行文件：走安全 exec 路径（零回归）
     """
     try:
-        parts = shlex.split(command)
+        parts = _split_args_win(command)
     except ValueError:
         return False
     if not parts:
@@ -1328,12 +1332,27 @@ def _win_cmd_needs_shell(command: str) -> bool:
     return Path(resolved).suffix.lower() in _WIN_SHIM_EXTS
 
 
+_CMD_EXC_RE = re.compile(r"\^[|&<>^]") if os.name == "nt" else None
+
+
+def _preprocess_cmd_escapes(command: str) -> str:
+    """将 cmd.exe 转义序列 (^| ^& ^^ 等) 还原为字面字符。
+
+    shlex 不认识 ^ 转义，会把 ^| 拆成 ^ 和 | 两个 token，导致分段校验误判。
+    在 shlex 分词前先还原，使 shlex 看到的是 cmd.exe 解释后的等价命令。
+    """
+    if os.name != "nt" or not _CMD_EXC_RE:
+        return command
+    return _CMD_EXC_RE.sub(lambda m: m.group(0)[1], command)
+
+
 def _needs_shell(command: str) -> bool:
     """命令是否需要真实 shell 执行？
 
     判定依据：
     - 引号外的 shell 语义（管道/重定向/&&/$VAR/反引号/通配符）→ 是
-    - Windows 下基命令为 cmd 内建或 .cmd/.bat/.ps1 垫片（npm 等）→ 是
+    - 引号内的 %VAR%（cmd.exe 在双引号内也展开环境变量）→ 是
+    - Windows 下基命令为 cmd 内建或 .cmd/.bat/.ps1 垢片（npm 等）→ 是
     - 其余保持安全的 shlex.split + exec 路径
     """
     single = False
@@ -1353,7 +1372,23 @@ def _needs_shell(command: str) -> bool:
                 return True
             if c == "%" and os.name == "nt":
                 # Windows cmd 环境变量展开（%USERPROFILE%）
+                # %% 是 cmd.exe 输出字面 % 的转义，不算变量展开
+                if i + 1 < n and command[i + 1] == "%":
+                    i += 2
+                    continue
                 return True
+        elif double and os.name == "nt":
+            # cmd.exe 在双引号内也会展开 %VAR%，检测 %X% 模式
+            # %X% 需要 X 至少包含 1 个有效变量名字符（字母/数字/_），
+            # %% 是 cmd.exe 输出字面 % 的转义，不算变量展开。
+            if c == "%" and i + 2 < n:
+                j = i + 1
+                has_name = False
+                while j < n and command[j] not in ('"', "'", "%"):
+                    has_name = True
+                    j += 1
+                if j < n and command[j] == "%" and has_name and j > i + 1:
+                    return True
         i += 1
     if os.name == "nt":
         return _win_cmd_needs_shell(command)
@@ -1377,6 +1412,8 @@ _DANGEROUS_PATTERNS = (
     "subprocess", "pty.spawn", "pty.openpty",
     "eval(", "exec(", "compile(", "globals()", "locals()",
     "__import__", "importlib", "runpy", "pickle", "marshal", "codecs.decode",
+    # Node.js 危险模块
+    "child_process",
     # 网络访问 (绕过 SSRF 检查的通道)
     "socket.", "urllib", "requests.", "http.client", "aiohttp", "httpx",
     "ftplib", "telnetlib", "smtplib", "poplib", "imaplib", "xmlrpc",
@@ -1399,7 +1436,7 @@ def _check_command_blacklist(command: str) -> None:
     白名单只能校验首个 token，`python -c "import os; os.system(...)"` 可完全绕过，
     因此对 python/node/powershell/cmd 等解释器的内联代码参数额外做黑名单过滤。
     """
-    parts = shlex.split(command)
+    parts = _split_args_win(command)
     if not parts:
         return
     interp = Path(parts[0]).name.lower() or parts[0].lower()
@@ -1440,7 +1477,7 @@ def _ssrf_check_command(command: str) -> None:
     """对出站网络命令做 SSRF 校验：URL 目标为内网地址时拦截。"""
     from app.utils.ssrf import check_url, _host_is_internal
 
-    parts = shlex.split(command)
+    parts = _split_args_win(command)
     if not parts or parts[0].lower() not in _NET_COMMANDS:
         return
     for tok in parts[1:]:
@@ -1463,6 +1500,29 @@ def _ssrf_check_command(command: str) -> None:
 
 
 MAX_EXECUTE_OUTPUT_LENGTH = 30_000
+
+
+def _split_args_win(command: str) -> list[str]:
+    """Windows 安全的命令行拆分：保留反斜杠路径，同时剥离外层引号。
+
+    shlex.split(posix=True) 将 \\ 视为转义字符，导致 .venv\\Scripts\\python.exe 等
+    Windows 路径被错误解析。 posix=False 保留反斜杠但不剥离引号（"script.py" 会原样
+    传递给 CreateProcess，引号被当作参数内容）。
+
+    本函数用 posix=False 分词后，对每个 token 剥离外层配对引号，使参数语义与
+    cmd.exe 一致：带空格的路径会自动被 list2cmdline 重新引用。
+    """
+    if os.name != "nt":
+        return shlex.split(command)
+    tokens = shlex.split(command, posix=False)
+    result: list[str] = []
+    for tok in tokens:
+        if len(tok) >= 2 and tok[0] == '"' and tok[-1] == '"':
+            tok = tok[1:-1]
+        elif len(tok) >= 2 and tok[0] == "'" and tok[-1] == "'":
+            tok = tok[1:-1]
+        result.append(tok)
+    return result
 
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:
@@ -1628,7 +1688,7 @@ def tool_execute(command: str, timeout: int = 300, workdir: str = ".") -> dict:
             rc, stdout, stderr = _run_shell(command, str(resolved_cwd), timeout)
             return _format_execute_output(rc, stdout, stderr, command)
         # Parse command into argument list to avoid shell injection
-        args = shlex.split(command)
+        args = _split_args_win(command)
         result = subprocess.run(
             args,
             shell=False,
