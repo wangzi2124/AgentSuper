@@ -310,7 +310,7 @@ async function handleCopy(messageId: string, text: string) {
 
 <style scoped>
 .multi-agent-view { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
-.chat-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.chat-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; gap: 8px; }
 .chat-header h2 { margin: 0 0 2px; font-size: 20px; }
 .chat-header p { margin: 0; font-size: 13px; color: var(--text-secondary); }
 .chat-header p.session-dir {
@@ -323,7 +323,12 @@ async function handleCopy(messageId: string, text: string) {
   white-space: nowrap;
   max-width: 420px;
 }
-.header-controls { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+@media (max-width: 768px) {
+  .chat-header { padding: 16px; }
+  .chat-header p.session-dir { max-width: 200px; }
+  .message-list { padding: 16px; }
+}
+.header-controls { display: flex; align-items: center; gap: 12px; flex-shrink: 0; flex-wrap: wrap; }
 .stream-badge { font-size: 12px; padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
 .stream-badge.queued { background: rgba(251,191,36,0.12); color: #f59e0b; }
 .stream-badge.running { background: rgba(34,197,94,0.12); color: #22c55e; animation: pulse-stream 1.5s ease-in-out infinite; }
@@ -373,7 +378,8 @@ async function handleCopy(messageId: string, text: string) {
   color: var(--text);
   outline: none;
   cursor: pointer;
-  min-width: 200px;
+  min-width: 140px;
+  max-width: 200px;
 }
 .model-selector select:focus { border-color: var(--primary); }
 .ws-manager {

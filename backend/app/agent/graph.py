@@ -705,7 +705,10 @@ class RAGAgent:
                         return _permission_denied_msg(e.operation, e.path, name)
                     decision = await mgr.await_decision(req.id)
                     if decision == "allowed":
-                        mgr.add_temp_approval(e.path)
+                        if e.operation == "command":
+                            mgr.add_temp_command_approval(e.path)
+                        else:
+                            mgr.add_temp_approval(e.path)
                         if eq and name == "tool_execute":
                             try:
                                 return await self._execute_tool_streaming(args, eq, state.get("_on_activity"))
@@ -751,7 +754,7 @@ class RAGAgent:
         # Apply whitelist check (same as filesystem.tool_execute)
         from app.tools.file_tools import _validate_shell_command, _needs_shell
         try:
-            _validate_shell_command(command, cwd=str(resolved_cwd))
+            _validate_shell_command(command, cwd=str(resolved_cwd), ask=True)
         except ValueError as e:
             return f"Error: {e}"
 

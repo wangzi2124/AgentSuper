@@ -103,11 +103,6 @@ const pinCandidates = () => {
     (t) => t.name.toLowerCase().includes(q) || (t.description && t.description.toLowerCase().includes(q))
   )
 }
-
-const catalogDesc = (name: string) => {
-  const t = store.catalog.find((c) => c.name === name)
-  return t?.description || ''
-}
 </script>
 
 <template>
@@ -117,41 +112,32 @@ const catalogDesc = (name: string) => {
   </div>
   <div class="page-content" style="display:flex;flex-direction:column;gap:16px;">
     <!-- 创建入口 -->
-    <div class="card" style="display:flex;flex-direction:column;gap:10px;">
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
-        <button class="btn btn-primary" style="font-size:13px;" @click="showScriptForm = !showScriptForm">
-          {{ showScriptForm ? '收起' : '+' }} 创建脚本工具
-        </button>
+    <div class="card" style="display:flex;gap:12px;flex-wrap:wrap;">
+      <button class="btn btn-primary" style="font-size:13px;" @click="showScriptForm = !showScriptForm">
+        {{ showScriptForm ? '收起' : '+' }} 创建脚本工具
+      </button>
+      <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:200px;max-width:400px;">
         <input
           v-model="searchText"
           placeholder="搜索工具名称或描述..."
-          style="flex:1;min-width:160px;max-width:260px;padding:8px 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);font-size:13px;"
+          style="width:140px;padding:8px 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);font-size:13px;flex-shrink:0;"
         />
-        <div style="display:flex;align-items:center;gap:6px;flex:1;min-width:200px;">
-          <select
-            v-model="pinForm.tool_name"
-            :title="catalogDesc(pinForm.tool_name)"
-            style="flex:1;max-width:300px;padding:8px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);font-size:13px;min-width:0;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
-          >
-            <option value="" disabled>选择已有工具固定</option>
-            <option v-for="t in pinCandidates()" :key="t.name" :value="t.name">
-              {{ t.name }}
-            </option>
-          </select>
-          <input
-            v-model="pinForm.description"
-            placeholder="固定备注（可选）"
-            style="flex:1;min-width:120px;max-width:200px;padding:8px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);font-size:13px;"
-          />
-          <button class="btn btn-primary" style="font-size:13px;white-space:nowrap;" @click="handlePin">固定</button>
-        </div>
+        <select
+          v-model="pinForm.tool_name"
+          style="flex:1;min-width:0;padding:8px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);overflow:hidden;text-overflow:ellipsis;"
+        >
+          <option value="" disabled>选择已有工具固定</option>
+          <option v-for="t in pinCandidates()" :key="t.name" :value="t.name" :title="t.name + ' — ' + (t.description || '无描述')">
+            {{ t.name.length > 12 ? t.name.slice(0, 12) + '…' : t.name }}{{ t.description ? ' — ' + (t.description.length > 16 ? t.description.slice(0, 16) + '…' : t.description) : '' }}
+          </option>
+        </select>
       </div>
-      <div
-        v-if="pinForm.tool_name && catalogDesc(pinForm.tool_name)"
-        style="font-size:12px;color:var(--text-secondary);padding:4px 8px;background:var(--bg);border-radius:var(--radius);line-height:1.5;"
-      >
-        {{ catalogDesc(pinForm.tool_name) }}
-      </div>
+      <input
+        v-model="pinForm.description"
+        placeholder="固定备注（可选）"
+        style="flex:1;min-width:160px;max-width:240px;padding:8px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);"
+      />
+      <button class="btn btn-primary" style="font-size:13px;" @click="handlePin">固定</button>
     </div>
 
     <!-- 脚本型创建表单 -->
@@ -203,7 +189,7 @@ const catalogDesc = (name: string) => {
       <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px;">
         {{ filteredItems.length }} 个自定义工具
       </div>
-      <div v-for="item in filteredItems" :key="item.type + ':' + item.name" class="card" style="display:flex;align-items:center;gap:14px;">
+      <div v-for="item in filteredItems" :key="item.type + ':' + item.name" class="card tool-card">
         <div style="font-size:24px;">{{ item.type === 'script' ? '🧩' : '📌' }}</div>
         <div style="flex:1;min-width:0;">
           <div style="font-weight:600;font-size:14px;">
@@ -230,3 +216,17 @@ const catalogDesc = (name: string) => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.tool-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+@media (max-width: 600px) {
+  .tool-card {
+    gap: 8px;
+  }
+}
+</style>

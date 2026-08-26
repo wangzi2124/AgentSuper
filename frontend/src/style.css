@@ -250,3 +250,38 @@ input, textarea {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: none;
+  }
+  .sidebar.open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0,0,0,0.15);
+  }
+  .sidebar-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.3);
+    z-index: 99;
+  }
+  .page-header { padding: 16px; }
+  .page-header h2 { font-size: 18px; }
+  .page-content { padding: 16px; }
+  .card { padding: 12px; }
+}
+
+@media (max-width: 480px) {
+  .page-header { padding: 12px; }
+  .page-content { padding: 12px; }
+  .card { padding: 10px; }
+  .btn { padding: 6px 12px; font-size: 13px; }
+}

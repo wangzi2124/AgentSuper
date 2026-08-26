@@ -131,7 +131,13 @@ class PermissionManager:
         # (resolved_path, operation) → request_id：同一路径同一操作并发触发时复用同一 pending 审批
         self._pending_by_key: dict[tuple[str, str], str] = {}
         self._temp_approvals: OrderedDict[str, float] = OrderedDict()
+        # 命令级持久化白名单（独立于路径白名单，便于审计）
+        self.command_whitelist_path = self.whitelist_path.parent / "command_permissions.json"
+        self._command_whitelist: set[str] = set()
+        # 命令临时授权（独立命名空间，不与路径临时授权混用）
+        self._temp_command_approvals: OrderedDict[str, float] = OrderedDict()
         self._load_whitelist()
+        self._load_command_whitelist()
 
     def _load_runtime_workspaces(self):
         """从 runtime_workspaces.json 加载前端运行时添加的工作目录。
@@ -185,6 +191,56 @@ class PermissionManager:
             )
         except Exception as e:
             logger.warning("Failed to save whitelist: %s", e)
+
+    def _load_command_whitelist(self):
+        """从JSON文件加载已授权的命令白名单。"""
+        try:
+            if self.command_whitelist_path.exists():
+                data = json.loads(self.command_whitelist_path.read_text("utf-8"))
+                self._command_whitelist = {c.lower() for c in data.get("allowed_commands", [])}
+                logger.info("Loaded %d command whitelist entries", len(self._command_whitelist))
+        except Exception as e:
+            logger.warning("Failed to load command whitelist: %s", e)
+
+    def _save_command_whitelist(self):
+        """将当前命令白名单持久化保存到JSON文件。"""
+        try:
+            self.command_whitelist_path.parent.mkdir(parents=True, exist_ok=True)
+            self.command_whitelist_path.write_text(
+                json.dumps({"allowed_commands": sorted(self._command_whitelist)}, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("Failed to save command whitelist: %s", e)
+
+    def check_command(self, base_cmd: str) -> str:
+        """命令级权限检查，返回 "allow" / "ask" / "deny"。
+
+        1. 命中持久化 command_whitelist -> "allow"；
+        2. 命中临时命令授权（TTL 内）-> "allow"；
+        3. 否则返回 self.external_default。
+        """
+        key = base_cmd.lower()
+        # 持久化白名单
+        if key in self._command_whitelist:
+            return "allow"
+        # 临时授权（含过期清理）
+        now = time.time()
+        expired = [k for k, t in self._temp_command_approvals.items() if now - t > _TEMP_APPROVAL_TTL]
+        for k in expired:
+            del self._temp_command_approvals[k]
+        if key in self._temp_command_approvals:
+            self._temp_command_approvals.move_to_end(key)
+            return "allow"
+        return self.external_default
+
+    def add_temp_command_approval(self, base_cmd: str):
+        """命令级临时授权，TTL过期后自动失效。"""
+        key = base_cmd.lower()
+        self._temp_command_approvals[key] = time.time()
+        # LRU 淘汰
+        while len(self._temp_command_approvals) > _MAX_TEMP_APPROVALS:
+            self._temp_command_approvals.popitem(last=False)
 
     def classify_path(self, path_str: str) -> str:
         """将路径分类为workspace/system/temp/external之一。"""
@@ -408,10 +464,17 @@ class PermissionManager:
         req.responded_at = datetime.now()
         req._event.set()
         if remember and decision == "allowed":
-            p = str(Path(req.path).resolve())
-            if p not in self._whitelist:
-                self._whitelist.append(p)
-                self._save_whitelist()
+            if req.operation == "command":
+                # 命令维度：记住 base 命令（不记参数）
+                key = req.path.lower().strip()
+                if key and key not in self._command_whitelist:
+                    self._command_whitelist.add(key)
+                    self._save_command_whitelist()
+            else:
+                p = str(Path(req.path).resolve())
+                if p not in self._whitelist:
+                    self._whitelist.append(p)
+                    self._save_whitelist()
         self._prune_pending_index(req)
         self.cleanup_expired()
         return True

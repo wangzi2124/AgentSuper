@@ -223,6 +223,8 @@ function closeOutput() {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .file-info {
@@ -249,6 +251,10 @@ function closeOutput() {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 360px;
+}
+@media (max-width: 600px) {
+  .file-name { max-width: 200px; }
+  .file-row { padding: 10px 12px; }
 }
 
 .file-meta {

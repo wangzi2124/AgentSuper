@@ -28,9 +28,17 @@ function deny() {
     <div class="perm-detail">
       <div class="perm-row">
         <span class="perm-label">操作</span>
-        <span class="perm-op">{{ currentRequest.operation === 'write' ? '写入文件' : currentRequest.operation }}</span>
+        <span class="perm-op">{{
+          currentRequest.operation === 'command' ? '执行命令' :
+          currentRequest.operation === 'write' ? '写入文件' :
+          currentRequest.operation
+        }}</span>
       </div>
-      <div class="perm-row">
+      <div v-if="currentRequest.operation === 'command'" class="perm-row">
+        <span class="perm-label">命令</span>
+        <code class="perm-cmd">{{ currentRequest.tool_args?.command || currentRequest.path }}</code>
+      </div>
+      <div v-else class="perm-row">
         <span class="perm-label">路径</span>
         <code class="perm-path">{{ currentRequest.path }}</code>
       </div>
@@ -124,11 +132,21 @@ function deny() {
   border-radius: 4px;
 }
 .perm-path,
-.perm-tool {
+.perm-tool,
+.perm-cmd {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
   font-size: 11px;
   color: var(--text);
   word-break: break-all;
+}
+.perm-cmd {
+  display: block;
+  background: rgba(0,0,0,0.06);
+  padding: 4px 6px;
+  border-radius: 3px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  max-width: 100%;
 }
 .perm-path {
   background: rgba(0,0,0,0.04);

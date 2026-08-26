@@ -40,7 +40,7 @@ async function handleToggle(name: string, enabled: boolean) {
       <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px;">
         {{ skills.skills.length }} 个技能可用
       </div>
-      <div v-for="skill in skills.skills" :key="skill.name" class="card" style="display:flex;align-items:center;gap:14px;">
+      <div v-for="skill in skills.skills" :key="skill.name" class="card" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
         <div style="font-size:24px;">🧠</div>
         <div style="flex:1;min-width:0;">
           <div style="font-weight:600;font-size:14px;">{{ skill.name }}</div>

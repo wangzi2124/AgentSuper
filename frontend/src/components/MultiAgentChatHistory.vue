@@ -123,7 +123,7 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
 </template>
 
 <style scoped>
-.chat-history { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.chat-history { display: flex; flex-direction: column; height: 100%; overflow: visible; }
 .history-header { padding: 8px; }
 .new-chat-btn { width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 12px; border: 1px dashed var(--border); border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; font-size: 13px; transition: all 0.15s; }
 .new-chat-btn:hover { border-color: var(--primary); color: var(--primary); background: rgba(79,70,229,0.05); }
@@ -158,7 +158,7 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
   top: calc(100% + 6px);
   left: 0;
   right: 0;
-  z-index: 100;
+  z-index: 200;
   background: var(--surface, #ffffff);
   border: 1px solid var(--border);
   border-radius: 8px;

@@ -60,8 +60,9 @@ function cancel() {
 </script>
 
 <template>
-  <div v-if="show" class="dir-modal-overlay" @click.self="cancel">
-    <div class="dir-modal">
+  <Teleport to="body">
+    <div v-if="show" class="dir-modal-overlay" @click.self="cancel">
+      <div class="dir-modal">
       <div class="dir-modal-header">
         <span class="dir-modal-title">选择目录</span>
         <button class="dir-modal-close" @click="cancel" title="关闭">
@@ -92,8 +93,9 @@ function cancel() {
         <button class="dir-btn dir-btn-secondary" @click="cancel">取消</button>
         <button class="dir-btn dir-btn-primary" :disabled="!currentPath" @click="confirm">选择此目录</button>
       </div>
+      </div>
     </div>
-  </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -104,7 +106,7 @@ function cancel() {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  z-index: 200;
 }
 .dir-modal {
   width: 460px;

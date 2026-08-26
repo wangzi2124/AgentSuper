@@ -40,7 +40,7 @@ async function handleToggle(name: string, enabled: boolean) {
       <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px;">
         {{ plugins.plugins.length }} 个插件已安装
       </div>
-      <div v-for="plugin in plugins.plugins" :key="plugin.name" class="card" style="display:flex;align-items:center;gap:14px;">
+      <div v-for="plugin in plugins.plugins" :key="plugin.name" class="card" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
         <div style="font-size:24px;">🔌</div>
         <div style="flex:1;min-width:0;">
           <div style="font-weight:600;font-size:14px;">{{ plugin.name }}</div>

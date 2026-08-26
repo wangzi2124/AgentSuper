@@ -125,7 +125,7 @@ async function handleClearExpired() {
     </div>
 
     <div v-else>
-      <div style="border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;">
+      <div style="border:1px solid var(--border);border-radius:var(--radius);overflow:auto;">
         <table style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead>
             <tr style="background:var(--bg);text-align:left;">

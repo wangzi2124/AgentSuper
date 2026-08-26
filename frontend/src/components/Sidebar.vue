@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import MultiAgentChatHistory from './MultiAgentChatHistory.vue'
 import PermissionDialog from './PermissionDialog.vue'
@@ -7,6 +8,8 @@ import { useAuthStore } from '../stores/auth'
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+
+const sidebarOpen = ref(false)
 
 const navItems = [
   { path: '/multi-agent', label: '多智能体', icon: '🤖' },
@@ -19,6 +22,8 @@ const navItems = [
   { path: '/monitoring', label: '系统监控', icon: '📊' },
 ]
 
+watch(() => route.path, () => { sidebarOpen.value = false })
+
 function handleLogout() {
   auth.logout()
   router.push({ name: 'Login' })
@@ -26,7 +31,11 @@ function handleLogout() {
 </script>
 
 <template>
-  <aside class="sidebar">
+  <button class="sidebar-toggle" @click="sidebarOpen = !sidebarOpen">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+  </button>
+  <div v-if="sidebarOpen" class="sidebar-overlay" @click="sidebarOpen = false"></div>
+  <aside class="sidebar" :class="{ open: sidebarOpen }">
     <div class="sidebar-header">
       <h1>知识库</h1>
       <p>Agent + RAG 系统</p>
@@ -64,6 +73,26 @@ function handleLogout() {
 </template>
 
 <style scoped>
+.sidebar-toggle {
+  display: none;
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 101;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow);
+}
+@media (max-width: 768px) {
+  .sidebar-toggle { display: flex; }
+}
 .sidebar-bottom {
   flex-shrink: 0;
 }
