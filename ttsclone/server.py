@@ -121,6 +121,19 @@ async def tts_clone(
     return _audio_response(audio, status, "clone")
 
 
+@app.post("/api/tts/transcribe")
+async def tts_transcribe(audio: UploadFile = File(...)):
+    """Whisper 自动转写:上传参考音频 → 返回识别文本(供 Voice Clone 自动填充 ref_text,免手动输入)"""
+    wav, sr = _read_upload_audio(audio)  # _read_upload_audio 返回 (wav, sr)
+    if wav is None:
+        return JSONResponse({"ok": False, "error": "无法解析音频"}, status_code=400)
+    try:
+        text = tts.transcribe_audio((sr, wav))  # transcribe_audio 期望 (sr, wav)
+        return {"ok": True, "text": text}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"}, status_code=500)
+
+
 if __name__ == "__main__":
     import uvicorn
 
