@@ -19,6 +19,12 @@ const text = ref('')
 // [F8] 待发送附件列表
 const files = ref<PendingFile[]>([])
 
+// [F9] 已发送历史导航：sentHistory 最新在前（索引 0 = 最近一条）
+// historyIndex -1 = 当前输入，0..len-1 = 回溯历史；draft 保存离开时的草稿
+const sentHistory = ref<string[]>([])
+const historyIndex = ref(-1)
+const draft = ref('')
+
 // 消息长度上限（与后端 ChatRequest.max_length=50_000 对齐，双层约束）
 const MAX_LENGTH = 50_000
 
@@ -100,6 +106,12 @@ function handleSend() {
   // [F8] 文本与附件皆空则不发送
   if (!msg.trim() && files.value.length === 0) return
   emit('send', msg, files.value.map(({ id: _id, preview: _pv, ...fc }) => fc))
+  // [F9] 记录已发送历史（最新在前），重置导航指针
+  if (msg.trim()) {
+    sentHistory.value = [msg, ...sentHistory.value.filter(m => m !== msg)].slice(0, 50)
+  }
+  historyIndex.value = -1
+  draft.value = ''
   text.value = ''
   files.value = []
   // F3: 发送后重置高度
@@ -157,7 +169,37 @@ function onFileInput(e: Event) {
 const dragging = ref(false)
 const canSend = computed(() => !!(text.value.trim() || files.value.length))
 
-// 键盘事件处理：回车发送，Shift+回车换行
+// [F9] 历史导航提示：是否处于历史回看状态，及当前位置「N / 总数」
+const historyActive = computed(() => historyIndex.value !== -1)
+const historyPosition = computed(() =>
+  historyActive.value ? `${historyIndex.value + 1} / ${sentHistory.value.length}` : ''
+)
+// 退出历史回看，回到草稿
+function exitHistory() {
+  historyIndex.value = -1
+  text.value = draft.value
+  nextTick(() => autoResize())
+  nextTick(() => textareaRef.value?.focus())
+}
+
+// [F9] 历史消息导航：↑ 回溯上一条、↓ 前进（最新在前，索引 0 = 最近一条）
+function navigateHistory(step: number) {
+  const len = sentHistory.value.length
+  if (!len) return
+  // 从当前输入开始时，先保存草稿
+  if (historyIndex.value === -1) draft.value = text.value
+  let next = historyIndex.value + step
+  next = Math.min(Math.max(next, -1), len - 1)
+  historyIndex.value = next
+  text.value = next === -1 ? draft.value : (sentHistory.value[next] || '')
+  nextTick(() => autoResize())
+  nextTick(() => {
+    const el = textareaRef.value
+    if (el) el.setSelectionRange(el.value.length, el.value.length)
+  })
+}
+
+// 键盘事件处理：回车发送，Shift+回车换行；↑/↓ 历史导航
 // F1 修复：IME 合成期间（isComposing / keyCode 229）的 Enter 直接忽略，
 // 避免中文输入法选词/组句时误触发发送。
 function onKeydown(e: KeyboardEvent) {
@@ -165,6 +207,16 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     handleSend()
+    return
+  }
+  const el = textareaRef.value
+  // F9：仅当光标位于首行（↑）或末行末尾（↓）时才拦截，避免影响多行文本内光标移动
+  if (e.key === 'ArrowUp' && el && el.selectionStart === 0 && el.selectionEnd === 0) {
+    e.preventDefault()
+    navigateHistory(-1)
+  } else if (e.key === 'ArrowDown' && el && el.selectionStart === el.value.length) {
+    e.preventDefault()
+    navigateHistory(1)
   }
 }
 
@@ -183,6 +235,16 @@ const textareaRef = ref<HTMLTextAreaElement>()
 
 <template>
   <div class="chat-input" :class="{ dragging }" @dragover.prevent="onDragOver" @dragleave="onDragLeave" @drop.prevent="onDrop">
+    <!-- [F9] 历史导航提示条：有历史时提示 ↑/↓ 浏览；回看中显示位置可退出 -->
+    <div v-if="sentHistory.length" class="history-hint" :class="{ 'history-hint--active': historyActive }">
+      <template v-if="historyActive">
+        <span class="history-hint__pos">历史 {{ historyPosition }}</span>
+        <button class="history-hint__exit" @click="exitHistory">退出历史</button>
+      </template>
+      <template v-else>
+        <span>↑ / ↓ 可浏览历史消息</span>
+      </template>
+    </div>
     <!-- [F8] 附件预览列表 -->
     <div v-if="files.length" class="file-list">
       <div v-for="f in files" :key="f.id" class="file-chip">
@@ -251,6 +313,39 @@ const textareaRef = ref<HTMLTextAreaElement>()
   padding: 16px 24px;
   background: var(--surface);
   border-top: 1px solid var(--border);
+}
+/* [F9] 历史导航提示条 */
+.history-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted, #9ca3af);
+  background: color-mix(in srgb, var(--primary, #4f46e5) 6%, var(--bg, #fff));
+  border: 1px solid color-mix(in srgb, var(--primary, #4f46e5) 20%, var(--border));
+  border-radius: var(--radius);
+}
+.history-hint--active {
+  color: var(--primary, #4f46e5);
+  font-weight: 500;
+}
+.history-hint__pos {
+  flex: 1;
+}
+.history-hint__exit {
+  border: none;
+  background: transparent;
+  color: var(--primary, #4f46e5);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+.history-hint__exit:hover {
+  text-decoration: underline;
 }
 .textarea-wrapper {
   position: relative;
