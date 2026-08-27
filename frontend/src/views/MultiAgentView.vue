@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { SUPPORTED_MODELS } from '../config/models'
+import type { FileContent } from '../types'
 import { usePermissionStore } from '../stores/permission'
 import MultiAgentResponse from '../components/MultiAgentResponse.vue'
 import ChatInput from '../components/ChatInput.vue'
@@ -125,8 +126,8 @@ function onScroll() {
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 100
 }
 
-function handleSend(text: string) {
-  agent.send(text).then((completed) => {
+function handleSend(text: string, files?: FileContent[]) {
+  agent.send(text, undefined, files || []).then((completed) => {
     // 仅在真正完成（收到 done）时跳转会话路由并触发 loadConversation，
     // 避免「SSE 断连→重连失败」时导航到服务器 id 新建空会话、把已显示内容顶掉
     if (completed && agent.conversationId && route.name !== 'MultiAgentConversation') {
@@ -264,6 +265,18 @@ async function handleCopy(messageId: string, text: string) {
             <div class="bubble">
               <template v-if="msg.role === 'user'">
                 <div class="content">{{ msg.content }}</div>
+                <!-- [F8] 用户消息带附件时回显（图片显示缩略图，其余显示文件 chip） -->
+                <div v-if="msg.files && msg.files.length" class="msg-files">
+                  <div v-for="(f, fi) in msg.files" :key="fi" class="msg-file">
+                    <img
+                      v-if="f.mime_type?.startsWith('image/')"
+                      :src="`data:${f.mime_type};base64,${f.data}`"
+                      class="msg-file-image"
+                      alt=""
+                    />
+                    <span v-else class="msg-file-name">📄 {{ f.filename }}</span>
+                  </div>
+                </div>
               </template>
 
               <template v-else>
@@ -527,6 +540,10 @@ async function handleCopy(messageId: string, text: string) {
 .bubble { flex: 1; width: 100%; max-width: 100%; padding: 12px 16px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); line-height: 1.7; font-size: 15px; box-sizing: border-box; }
 .user .bubble { flex: none; width: auto; max-width: 80%; background: var(--primary); color: white; border-color: var(--primary); }
 .content { white-space: pre-wrap; word-break: break-word; }
+/* [F8] 用户消息附件回显 */
+.msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.msg-file-image { max-width: 200px; max-height: 200px; border-radius: 8px; object-fit: cover; display: block; }
+.msg-file-name { font-size: 12px; padding: 3px 8px; border-radius: 6px; background: rgba(255,255,255,0.18); display: inline-block; }
 .is-error .bubble { background: rgba(239,68,68,0.06); border-color: rgba(239,68,68,0.3); }
 .message-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 11px; }
 .user .message-footer { border-top-color: rgba(255,255,255,0.2); }

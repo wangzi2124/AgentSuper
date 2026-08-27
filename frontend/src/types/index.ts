@@ -282,6 +282,8 @@ export interface MultiAgentChatRequest {
   directory?: string
   /** [S2/B4] 客户端消息幂等 id：自动/手动重试复用同一 id，服务端据此去重 */
   client_msg_id?: string
+  /** [F8] 多模态附件（拖拽/粘贴/选择），data 为 base64 编码内容 */
+  files?: FileContent[]
 }
 
 export interface MultiAgentMessage {
@@ -296,4 +298,6 @@ export interface MultiAgentMessage {
   live?: boolean
   /** [S2/B4] 幂等 id：user 消息首次发送时生成，重试时复用，保证服务端去重 */
   clientMsgId?: string
+  /** [F8] 随消息发送的附件（用于回显/重试时按原样重发） */
+  files?: FileContent[]
 }

@@ -1,13 +1,23 @@
 <script setup lang="ts">
 import { ref, computed, nextTick } from 'vue'
+import type { FileContent } from '../types'
 
-// 定义组件事件：发送消息、取消请求
-const emit = defineEmits<{ send: [text: string]; cancel: [] }>()
+// 定义组件事件：发送消息（含可选附件）、取消请求
+const emit = defineEmits<{ send: [text: string, files: FileContent[]]; cancel: [] }>()
 // 定义组件属性：加载状态
 const props = defineProps<{ loading: boolean }>()
 
+// [F8] 待发送附件：data 为 base64 编码内容（对齐后端 FileContent），
+// 图片额外保留 data URL 预览用
+interface PendingFile extends FileContent {
+  id: string
+  preview?: string
+}
+
 // 输入框文本内容
 const text = ref('')
+// [F8] 待发送附件列表
+const files = ref<PendingFile[]>([])
 
 // 消息长度上限（与后端 ChatRequest.max_length=50_000 对齐，双层约束）
 const MAX_LENGTH = 50_000
@@ -32,14 +42,66 @@ function autoResize() {
   el.style.height = clamped + 'px'
 }
 
+// [F8] 读取 File → base64（对齐后端 FileContent.data），图片额外生成 data URL 预览
+function readFile(file: File): Promise<PendingFile> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const base64 = String(reader.result || '').split(',')[1] || ''
+      const pending: PendingFile = {
+        id: genId(), filename: file.name, mime_type: file.type || 'application/octet-stream',
+        data: base64,
+      }
+      if (file.type.startsWith('image/')) {
+        pending.preview = reader.result as string
+      }
+      resolve(pending)
+    }
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+}
+
+function genId(): string {
+  try { return crypto.randomUUID() }
+  catch { return 'xxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16) }) }
+}
+
+// [F8] 加入文件（去重同名同大小 + 上限保护）
+async function addFiles(list: FileList | File[] | null) {
+  if (!list || props.loading) return
+  const incoming = Array.from(list)
+  for (const f of incoming) {
+    // 简单跳空目录占位（File 无 .size===0 但 type 为空且 name 为空视为目录）
+    if (!f.name) continue
+    // 去重：同名文件不重复添加
+    if (files.value.some(p => p.filename === f.name)) continue
+    // 后端/链路尽力而为，这里对单个文件大小做硬上限保护（50MB）
+    if (f.size > 50 * 1024 * 1024) continue
+    try {
+      const pending = await readFile(f)
+      files.value = [...files.value, pending]
+    } catch {
+      // 读取失败静默跳过
+    }
+  }
+}
+
+// [F8] 移除附件
+function removeFile(id: string) {
+  files.value = files.value.filter(f => f.id !== id)
+}
+
 // 发送消息
 function handleSend() {
   if (props.loading) return
   // F5: 仅用 trim() 判空，发送原文（保留首尾空白/换行）
   const msg = text.value
-  if (!msg.trim()) return
-  emit('send', msg)
+  // [F8] 文本与附件皆空则不发送
+  if (!msg.trim() && files.value.length === 0) return
+  emit('send', msg, files.value.map(({ id: _id, preview: _pv, ...fc }) => fc))
   text.value = ''
+  files.value = []
   // F3: 发送后重置高度
   nextTick(() => autoResize())
   // F6: 发送后焦点恢复
@@ -50,6 +112,50 @@ function handleSend() {
 function handleCancel() {
   emit('cancel')
 }
+
+// [F8] 拖拽上传
+function onDrop(e: DragEvent) {
+  dragging.value = false
+  if (props.loading) return
+  addFiles(e.dataTransfer?.files || null)
+}
+function onDragOver(e: DragEvent) {
+  if (props.loading) return
+  e.preventDefault()
+  dragging.value = true
+}
+function onDragLeave() { dragging.value = false }
+
+// [F8] 粘贴上传（图片/文件）
+function onPaste(e: ClipboardEvent) {
+  if (props.loading) return
+  const items = e.clipboardData?.items
+  if (!items || items.length === 0) return
+  const dropped: File[] = []
+  for (const item of Array.from(items)) {
+    const f = item.getAsFile?.()
+    if (f) dropped.push(f)
+  }
+  if (dropped.length) {
+    e.preventDefault()
+    addFiles(dropped)
+  }
+}
+
+// [F8] 文件选择器
+const fileInputRef = ref<HTMLInputElement>()
+function triggerFilePicker() {
+  if (props.loading) return
+  fileInputRef.value?.click()
+}
+function onFileInput(e: Event) {
+  const input = e.target as HTMLInputElement
+  addFiles(input.files || null)
+  input.value = ''
+}
+
+const dragging = ref(false)
+const canSend = computed(() => !!(text.value.trim() || files.value.length))
 
 // 键盘事件处理：回车发送，Shift+回车换行
 // F1 修复：IME 合成期间（isComposing / keyCode 229）的 Enter 直接忽略，
@@ -76,7 +182,18 @@ const textareaRef = ref<HTMLTextAreaElement>()
 </script>
 
 <template>
-  <div class="chat-input">
+  <div class="chat-input" :class="{ dragging }" @dragover.prevent="onDragOver" @dragleave="onDragLeave" @drop.prevent="onDrop">
+    <!-- [F8] 附件预览列表 -->
+    <div v-if="files.length" class="file-list">
+      <div v-for="f in files" :key="f.id" class="file-chip">
+        <img v-if="f.preview" :src="f.preview" class="file-thumb" alt="" />
+        <span v-else class="file-icon">📄</span>
+        <span class="file-name" :title="f.filename">{{ f.filename }}</span>
+        <button class="file-remove" title="移除附件" @click="removeFile(f.id)">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
     <div class="textarea-wrapper">
       <textarea
         ref="textareaRef"
@@ -86,16 +203,27 @@ const textareaRef = ref<HTMLTextAreaElement>()
         rows="3"
         @keydown="onKeydown"
         @input="autoResize"
+        @paste="onPaste"
       ></textarea>
       <span
         v-if="showCounter"
         class="char-counter"
         :class="{ 'char-counter--danger': counterDanger }"
       >{{ remaining }}</span>
+      <button class="attach-btn" :disabled="loading" title="添加附件" @click="triggerFilePicker">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+      </button>
+      <input
+        ref="fileInputRef"
+        type="file"
+        multiple
+        style="display: none"
+        @change="onFileInput"
+      />
       <button
         v-if="!loading"
         class="send-btn"
-        :disabled="!text.trim()"
+        :disabled="!canSend"
         @click="handleSend"
         title="发送"
       >
@@ -195,4 +323,46 @@ const textareaRef = ref<HTMLTextAreaElement>()
   background: var(--danger-hover, #dc2626);
   transform: scale(1.05);
 }
+
+/* [F8] 附件相关样式 */
+.chat-input { position: relative; }
+.chat-input.dragging .textarea-wrapper textarea {
+  border-color: var(--primary, #4f46e5);
+  background: color-mix(in srgb, var(--primary, #4f46e5) 6%, var(--bg, #fff));
+}
+.file-list {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;
+}
+.file-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 6px 4px 4px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); max-width: 220px;
+}
+.file-thumb {
+  width: 32px; height: 32px; object-fit: cover;
+  border-radius: 6px; flex-shrink: 0;
+}
+.file-icon { font-size: 20px; line-height: 1; flex-shrink: 0; }
+.file-name {
+  font-size: 12px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px;
+}
+.file-remove {
+  display: flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border: none; border-radius: 50%;
+  background: transparent; color: var(--text-muted, #9ca3af);
+  cursor: pointer; flex-shrink: 0; padding: 0;
+}
+.file-remove:hover { background: var(--danger, #dc2626); color: #fff; }
+.attach-btn {
+  position: absolute; left: 8px; bottom: 8px;
+  width: 32px; height: 32px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  border: none; background: transparent; color: var(--text-secondary);
+  cursor: pointer; transition: all 0.15s;
+}
+.attach-btn:hover:not(:disabled) { color: var(--primary); background: color-mix(in srgb, var(--primary, #4f46e5) 10%, transparent); }
+.attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.textarea-wrapper textarea { padding-left: 44px; }
 </style>
