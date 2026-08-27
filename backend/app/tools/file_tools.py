@@ -1192,8 +1192,15 @@ def _cmd_lex(command: str) -> list[tuple[str, str]]:
             i += 1
             continue
         if c == "%":
-            j = command.find("%", i + 1)
-            if j != -1:
+            # cmd 变量展开 %VAR%：扫描到下一个 %；但区间内出现元字符 / 空白 /
+            # 换行时不当作变量名（cmd 变量名不含这些字符），例如 `%a&evil%`
+            # 中的 `&` 必须被切分，否则构成分段绕过（校验不切、执行却切）
+            j = i + 1
+            while j < n and command[j] != "%":
+                if command[j] in _CMD_CMDSEP_CHARS or command[j] in _CMD_REDIRECT_CHARS or command[j] in " \t\r\n":
+                    break
+                j += 1
+            if j < n and command[j] == "%":
                 word.append(command[i:j + 1])
                 i = j + 1
             else:
@@ -1207,6 +1214,13 @@ def _cmd_lex(command: str) -> list[tuple[str, str]]:
         if c in ";,":
             # cmd 的单词分隔符（不产生新命令边界）
             flush()
+            i += 1
+            continue
+        if c in "\r\n":
+            # cmd 把换行/回车当作命令分隔符（等价于 &）→ 切段，
+            # 防止 `dir\n evil` 白名单分段绕过（校验不切、执行却切）
+            flush()
+            tokens.append((c, "cmd_sep"))
             i += 1
             continue
         two = command[i:i + 2]
@@ -1517,10 +1531,26 @@ def _needs_shell(command: str) -> bool:
     """命令是否需要真实 shell 执行？
 
     判定依据：
-    - 引号外的 shell 语义（管道/重定向/&&/$VAR/反引号/通配符）→ 是
+    - Windows (cmd.exe)：复用 _cmd_lex 判定 cmd_sep / 重定向 / %VAR% / 通配符 → 是
+      （与真实执行语义一致：cmd 引号内同样展开 %VAR%，单引号是普通字符而非引号）
+    - POSIX：引号外的 shell 语义（管道/重定向/&&/$VAR/反引号/通配符）→ 是
     - Windows 下基命令为 cmd 内建或 .cmd/.bat/.ps1 垫片（npm 等）→ 是
     - 其余保持安全的 shlex.split + exec 路径
     """
+    if os.name == "nt":
+        for tok, kind in _cmd_lex(command):
+            if kind in ("cmd_sep", "redirect"):
+                return True
+            if kind == "word":
+                # %VAR% 展开：cmd 在引号内同样展开 → 一律需要 shell
+                if "%" in tok:
+                    return True
+                # cmd 对引号外的 *? 交给命令自身展开；引号内是字面量。
+                # 保守起见引号外的 *? 一律走 shell（与历史行为一致，多走无害）
+                if not tok.startswith('"') and any(ch in tok for ch in "*?"):
+                    return True
+        return _win_cmd_needs_shell(command)
+
     single = False
     double = False
     i = 0
@@ -1536,12 +1566,7 @@ def _needs_shell(command: str) -> bool:
                 return True
             if c in "$`*?[~":
                 return True
-            if c == "%" and os.name == "nt":
-                # Windows cmd 环境变量展开（%USERPROFILE%）
-                return True
         i += 1
-    if os.name == "nt":
-        return _win_cmd_needs_shell(command)
     return False
 
 
