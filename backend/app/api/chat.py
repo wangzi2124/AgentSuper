@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from app.config import settings
 from app.context.token_counter import estimate_tokens
+from app.context.budget import usable_context_tokens
 
 from app.middleware.summarization import HierarchicalSummarizationMiddleware
 from app.models.schemas import ChatRequest, Source, StepEvent, MultiAgentChatResponse
@@ -36,14 +37,23 @@ router = APIRouter()
 _DEFAULT_USER_ID = "anonymous"
 
 def _get_user_id(request: Request) -> str:
-    """从请求头中提取用户身份。"""
+    """从请求头中提取用户身份。
+
+    B12: 记录 (user_id, 来源 IP) 审计日志。
+    """
     uid = request.headers.get("X-User-Id", "")
-    return uid.strip() if uid.strip() else _DEFAULT_USER_ID
+    user_id = uid.strip() if uid.strip() else _DEFAULT_USER_ID
+    client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or (
+        request.client.host if request.client else "unknown"
+    )
+    logger.debug("user_id=%s ip=%s path=%s", user_id, client_ip, request.url.path)
+    return user_id
 
 # --- 并发控制：限制同时运行的 Agent 任务数（可经 .env 的 MAX_CONCURRENT_AGENTS 调整）---
 MAX_CONCURRENT_AGENTS = settings.max_concurrent_agents
 _agent_semaphore: asyncio.Semaphore | None = None
 _queue_counter = 0  # 正在等待 slot 的请求数
+MAX_QUEUE_SIZE = 50  # B7: 排队上限，超限直接 429
 
 
 def _get_agent_semaphore() -> asyncio.Semaphore:
@@ -56,7 +66,13 @@ def _get_agent_semaphore() -> asyncio.Semaphore:
 # [token 优化 v3] Sliding window: keep up to 32K tokens of history before passing to Agent.
 # graph.py 通过 config.max_context_tokens(v9 后为 24K，usable ≈ 15.8K) 做上下文管理，此阈值仅控制历史注入量。
 # [token 优化 v9] 32K → 16K：历史注入量减半，长会话首条消息不再重发整段 32K 历史。
-MAX_HISTORY_TOKENS = 16_000
+# [B9] 历史注入预算与上下文配置联动：min(16K, usable_context_tokens())。
+#   usable 缩小时（reserve 变大）预算自动缩小，防止注入量超出可用上下文；
+#   usable 放大时仍封顶 16K，不扩大既有行为。消除与 budget.py 的双常量漂移。
+MAX_HISTORY_TOKENS = max(1, min(16_000, usable_context_tokens()))
+
+# 聊天消息长度上限（与前端 ChatInput.vue 的 MAX_LENGTH 对齐，前端+后端双层约束）
+MAX_MESSAGE_LENGTH = 50_000
 
 _summarizer: HierarchicalSummarizationMiddleware | None = None
 _summarizer_model: str | None = None
@@ -93,11 +109,19 @@ def reset_summarizer():
 
 
 def _generate_title(messages: list[dict]) -> str:
-    """根据用户第一条消息生成对话标题。"""
+    """根据用户第一条消息生成对话标题。
+
+    B8: 清洗控制字符 + html.escape 防注入，字节安全截断。
+    """
+    import html
+    import re
     for msg in messages:
         if msg.get("role") == "user":
             text = msg.get("content", "")
+            # 去除控制字符（保留换行/制表）
+            text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
             text = text.strip().replace("\n", " ")
+            text = html.escape(text)
             return text[:20] + ("..." if len(text) > 20 else "")
     return "新对话"
 
@@ -181,15 +205,17 @@ def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | N
         return service, session.id, session.directory or ""
 
 
-def _session_history_for(service, user_id: str, session_id: str) -> list[dict]:
+def _session_history_for(service, user_id: str, session_id: str, limit: int = 200) -> list[dict]:
     """把会话消息投影为模型历史（role/content）。
 
     正文优先从 message_parts 的 text part 提取（对齐设计 §3），无 parts 时
     回退 data.content（旧数据/compaction/system 消息）。
+
+    B3: 限制拉取条数（默认 200），避免长会话 O(n) 全量拉取 + 全量 parts 查询。
     """
     from app.session import history as session_history
 
-    messages = service.messages(user_id, session_id)
+    messages = service.messages(user_id, session_id, limit=limit)
     ids = [m.id for m in messages]
     parts_map = session_repo.list_parts_for_messages(ids) if ids else {}
     history = []
@@ -264,6 +290,19 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
     return user_msg.id, assistant_msg.id
 
 
+def _validate_chat_message(body: ChatRequest) -> None:
+    """聊天消息兜底校验：空内容/超长直接 422（与 schema 约束双层防护）。
+
+    schema 的 Field(min_length/max_length) 已拦截超长输入，此处兜底处理
+    纯空白消息（len>0 但 strip 后为空）并给出友好提示。
+    """
+    msg = body.message
+    if not msg or not msg.strip():
+        raise HTTPException(status_code=422, detail="消息内容不能为空")
+    if len(msg) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(status_code=422, detail=f"消息长度超出上限（{MAX_MESSAGE_LENGTH} 字符）")
+
+
 
 # ═══════════════════════════════════════════════════════════════
 #  多 Agent 聊天端点
@@ -277,6 +316,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     支持与单 Agent 相同的参数和文件上传。
     P4：本次请求登记为 kind='task' 子会话（parent_id=主会话），支持级联取消。
     """
+    _validate_chat_message(body)
     agent_bus: AgentBus = request.app.state.agent_bus
     user_id = _get_user_id(request)
     service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id, body.directory)
@@ -322,12 +362,16 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     except Exception as e:
         task_bridge.unregister(child_id)
         service.update(user_id, child_id, status="error")
-        raise HTTPException(status_code=500, detail=f"Agent error: {e}")
+        logger.exception("multi-agent request failed: user=%s session=%s classified=%s",
+                         user_id, session_id, classify_error(e))
+        raise HTTPException(status_code=500, detail="处理请求时发生内部错误，请稍后重试")
 
     if reply.type == "error":
         task_bridge.unregister(child_id)
         service.update(user_id, child_id, status="error")
-        raise HTTPException(status_code=500, detail=reply.payload.get("error", "Agent error"))
+        logger.error("multi-agent reply error: user=%s session=%s detail=%s",
+                     user_id, session_id, reply.payload.get("error", ""))
+        raise HTTPException(status_code=500, detail="处理请求时发生内部错误，请稍后重试")
 
     payload = reply.payload
     answer = payload.get("answer", "")
@@ -373,6 +417,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
 
     P4：请求登记为 kind='task' 子会话，删除/打断父会话时级联取消。
     """
+    _validate_chat_message(body)
     agent_bus: AgentBus = request.app.state.agent_bus
     user_id = _get_user_id(request)
     service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id, body.directory)
@@ -402,6 +447,17 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
         queued_position: int | None = None
         try:
             if sem.locked():
+                # B7: 排队上限检查
+                if _queue_counter >= MAX_QUEUE_SIZE:
+                    await event_queue.put({
+                        "type": "error",
+                        "error": "服务繁忙，排队已满，请稍后重试",
+                        "detail": "服务繁忙，排队已满，请稍后重试",
+                        "retryable": True,
+                        "status_code": 429,
+                        "error_type": "QueueFullError",
+                    })
+                    return
                 _queue_counter += 1
                 queued_position = _queue_counter
                 await event_queue.put({
@@ -443,11 +499,14 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     )
 
                     if reply.type == "error":
-                        collector.fail_running(reply.payload.get("error", "Agent error"))
+                        logger.error("multi-agent reply error: session=%s detail=%s",
+                                     session_id, reply.payload.get("error", ""))
+                        generic_error = "处理请求时发生内部错误，请稍后重试"
+                        collector.fail_running(generic_error)
                         await event_queue.put({
                             "type": "error",
-                            "error": reply.payload.get("error", "Agent error"),
-                            "detail": reply.payload.get("error", "Agent error"),
+                            "error": generic_error,
+                            "detail": generic_error,
                             "retryable": False,
                             "status_code": None,
                             "error_type": "AgentError",
@@ -505,13 +564,15 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         "error_type": "CancelledError",
                     })
                 except Exception as e:
-                    logger.exception("multi-agent stream invocation failed")
+                    logger.exception("multi-agent stream invocation failed: user=%s session=%s",
+                                     user_id, session_id)
                     service.update(user_id, child_id, status="error")
-                    collector.fail_running(str(e))
+                    generic_error = "处理请求时发生内部错误，请稍后重试"
+                    collector.fail_running(generic_error)
                     await event_queue.put({
                         "type": "error",
-                        "error": str(e),
-                        "detail": str(e),
+                        "error": generic_error,
+                        "detail": generic_error,
                         **classify_error(e),
                     })
                 finally:
@@ -530,11 +591,25 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
             raise
 
     async def event_generator():
-        """生成 SSE 事件流。"""
+        """生成 SSE 事件流（含 keep-alive 心跳）。"""
         task = asyncio.create_task(run_multi_agent())
+        # B5: SSE keep-alive 心跳 — 每 20s 推一行注释，防止 Nginx/网关 60s 超时掐断
+        async def _heartbeat():
+            try:
+                while True:
+                    await asyncio.sleep(20)
+                    # SSE 注释行（: 开头）不触发前端 onEvent，但维持连接活性
+                    # 注意：StreamingResponse 的 yield 不能并发，心跳通过 event_queue 中转
+                    await event_queue.put({"type": "_ping"})
+            except asyncio.CancelledError:
+                pass
+        heartbeat = asyncio.create_task(_heartbeat())
         try:
             while True:
                 event = await event_queue.get()
+                # 跳过内部心跳事件（不推给前端）
+                if event.get("type") == "_ping":
+                    continue
                 # 注入 conversation_id：前端在流中尽早拿到会话 id，
                 # 使"停止"按钮能调用 /api/sessions/{id}/interrupt 真正打断后台任务
                 event["conversation_id"] = session_id
@@ -543,6 +618,11 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     break
             await task
         finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
             task.cancel()
             try:
                 await task

@@ -1141,12 +1141,168 @@ _REDIRECT_OPS = {">", ">>", "<", "<<", "<&", ">&", "2>", "2>>", "&>", "|&"}
 _WRITE_REDIRECT_OPS = {">", ">>", "2>", "2>>", "&>"}
 
 
+# ── Windows cmd.exe 语义词法（对齐真实执行语义，而非 POSIX shlex）───────────
+# 关键差异（决定校验与执行是否一致，否则出现白名单绕过或误拦）：
+#   - `^X`（引号外）转义下一个字符 X → X 是字面量，不作为分隔符
+#   - 反斜杠 `\` 不是转义符 → `\&` 在 cmd 是真正的命令分隔符（POSIX shlex 却当成
+#     转义字面量合并成一个命令 → 校验漏掉第二命令的基命令，构成绕过）
+#   - 引号内：`^` 与 `&|<>()` 都是字面量
+#   - `%VAR%` 变量名：`%...%` 内整体为一个 token，不产生分隔符
+#   - `!var!` 延迟展开：cmd /c 默认不开启 EnableDelayedExpansion → `!` 按普通字符
+#     处理、绝不分词（避免把其中的分隔符漏判成字面量）
+_CMD_CMDSEP_CHARS = set("&|()")
+_CMD_REDIRECT_CHARS = set("<>")
+
+
+def _cmd_lex(command: str) -> list[tuple[str, str]]:
+    """cmd.exe 语义词法器 → [(token, kind)]，kind ∈ word|cmd_sep|redirect。
+
+    仅用于【安全校验的切分】（白名单分段 / 重定向目标提取），不直接执行；
+    语义与 `_run_shell` 的 cmd.exe 解释保持一致，杜绝「校验一套、执行另一套」。
+    """
+    i = 0
+    n = len(command)
+    in_quotes = False
+    tokens: list[tuple[str, str]] = []
+    word: list[str] = []
+
+    def flush() -> None:
+        nonlocal word
+        if word:
+            tokens.append(("".join(word), "word"))
+            word = []
+
+    while i < n:
+        c = command[i]
+        if in_quotes:
+            # 引号内：^ 是字面量，&|<>() 也是字面量
+            if c == '"':
+                in_quotes = False
+            word.append(c)
+            i += 1
+            continue
+        # 引号外：^ 转义下一个字符（即使它是引号或元字符）
+        if c == "^" and i + 1 < n:
+            word.append(command[i + 1])
+            i += 2
+            continue
+        if c == '"':
+            in_quotes = True
+            word.append(c)
+            i += 1
+            continue
+        if c == "%":
+            j = command.find("%", i + 1)
+            if j != -1:
+                word.append(command[i:j + 1])
+                i = j + 1
+            else:
+                word.append(c)
+                i += 1
+            continue
+        if c in " \t":
+            flush()
+            i += 1
+            continue
+        if c in ";,":
+            # cmd 的单词分隔符（不产生新命令边界）
+            flush()
+            i += 1
+            continue
+        two = command[i:i + 2]
+        if two in ("&&", "||", "|&", ">>", "<<", "<&", ">&", "&>"):
+            flush()
+            tokens.append((two, "cmd_sep" if two in ("&&", "||", "|&") else "redirect"))
+            i += 2
+            continue
+        if c in _CMD_CMDSEP_CHARS:
+            flush()
+            tokens.append((c, "cmd_sep"))
+            i += 1
+            continue
+        if c in _CMD_REDIRECT_CHARS:
+            # 可能的 fd 重定向：word 为纯数字则并入（2> / 2>> / 2>&1）
+            if word and all(ch.isdigit() for ch in word):
+                fd = "".join(word)
+                word = []
+                if command[i:i + 2] == ">>":
+                    op = fd + ">>"
+                    i += 2
+                else:
+                    op = fd + ">"
+                    i += 1
+                # 处理 2>&1 / 2>&2 等形式（fd 重复，非命令分隔）
+                if i < n and command[i] == "&" and i + 1 < n and command[i + 1].isdigit():
+                    j = i + 1
+                    while j < n and command[j].isdigit():
+                        j += 1
+                    tokens.append((op + command[i:j], "redirect"))
+                    i = j
+                else:
+                    tokens.append((op, "redirect"))
+            else:
+                flush()
+                op = command[i:i + 2] if command[i:i + 2] == ">>" else c
+                tokens.append((op, "redirect"))
+                i += len(op)
+            continue
+        word.append(c)
+        i += 1
+    flush()
+    return tokens
+
+
+def _cmd_split_shell_segments(command: str) -> list[list[str]]:
+    """Windows：按 cmd.exe 语义切分简单命令段（cmd_sep 处断开，重定向留在本段）。"""
+    tokens = _cmd_lex(command)
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for tok, kind in tokens:
+        if kind == "cmd_sep":
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(tok)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _win_flag_split(command: str) -> list[str]:
+    """Windows：把命令按 cmd 语义拆成「实参 token」列表（仅 word，剔除重定向/分隔符）。
+
+    供黑名单 / SSRF 等基于 POSIX shlex.split 的下游复用——POSIX shlex 无法解析
+    cmd 特有的尾随反斜杠、单引号字面量等，会在 split 时抛 ValueError 误拦。
+    """
+    if os.name != "nt":
+        try:
+            return shlex.split(command)
+        except ValueError:
+            return []
+    return [tok for tok, kind in _cmd_lex(command) if kind == "word"]
+
+
+_CMD_REDIRECT_OP_TOKENS = frozenset({">", ">>", "<", "<<", "<&", ">&", "2>", "2>>", "&>", "|&"})
+
+
+def _is_redirect_token(tok: str) -> bool:
+    """判断 token 是否为 cmd 重定向符（含 fd 形式 2> / 2>> / 2>&1）。"""
+    if tok in _CMD_REDIRECT_OP_TOKENS:
+        return True
+    if re.fullmatch(r"\d+>(>?)(&\d+)?", tok):
+        return True
+    return bool(re.fullmatch(r"\d+<&?\d*", tok))
+
+
 def _first_command(seg: list[str]) -> Optional[str]:
-    """取简单命令段的基命令名：跳过环境变量赋值前缀（FOO=bar ...）与命令替换 `$`。"""
+    """取简单命令段的基命令名：跳过环境变量赋值前缀（FOO=bar ...）、命令替换 `$` 与重定向符。"""
     for tok in seg:
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tok):
             continue
         if tok == "$":
+            continue
+        if _is_redirect_token(tok):
             continue
         return tok
     return None
@@ -1158,6 +1314,20 @@ def _extract_redirect_targets(command: str) -> list[str]:
     解析 >、>>、2>、2>>、&> 重定向操作符后的 token 作为文件写入目标。
     输入重定向（<、<<）和管道（|）不产生文件写入，忽略。
     """
+    if os.name == "nt":
+        # Windows：用 cmd 语义词法提取，避免 POSIX shlex 把 `\>` 当成转义字面量
+        tokens = _cmd_lex(command)
+        targets: list[str] = []
+        for idx, (tok, kind) in enumerate(tokens):
+            if kind != "redirect":
+                continue
+            for nxt, nkind in tokens[idx + 1:]:
+                if nkind in ("word",):
+                    targets.append(nxt)
+                    break
+                if nkind in ("cmd_sep",):
+                    break
+        return targets
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
@@ -1208,7 +1378,12 @@ def _split_shell_segments(command: str) -> list[list[str]]:
 
     在 ; | || && & ( ) 处断开；重定向符及其目标附加到当前命令段；
     $(...) 中的子命令因 '(' 断开而自然成为独立段，从而被独立校验。
+
+    Windows 下改用 cmd.exe 语义词法（_cmd_split_shell_segments）：正确处理
+    `^` 转义、`\\` 非转义、`%VAR%`、引号内字面量等，使切分与真实执行一致。
     """
+    if os.name == "nt":
+        return _cmd_split_shell_segments(command)
     lex = shlex.shlex(command, posix=True, punctuation_chars=True)
     lex.whitespace_split = True
     tokens = list(lex)
@@ -1409,7 +1584,7 @@ def _check_command_blacklist(command: str) -> None:
     白名单只能校验首个 token，`python -c "import os; os.system(...)"` 可完全绕过，
     因此对 python/node/powershell/cmd 等解释器的内联代码参数额外做黑名单过滤。
     """
-    parts = shlex.split(command)
+    parts = _win_flag_split(command)
     if not parts:
         return
     interp = Path(parts[0]).name.lower() or parts[0].lower()
@@ -1450,7 +1625,7 @@ def _ssrf_check_command(command: str) -> None:
     """对出站网络命令做 SSRF 校验：URL 目标为内网地址时拦截。"""
     from app.utils.ssrf import check_url, _host_is_internal
 
-    parts = shlex.split(command)
+    parts = _win_flag_split(command)
     if not parts or parts[0].lower() not in _NET_COMMANDS:
         return
     for tok in parts[1:]:

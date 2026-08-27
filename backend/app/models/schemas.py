@@ -1,6 +1,6 @@
-from pydantic import BaseModel
-from typing import Optional
+from typing import Annotated, Optional
 from datetime import datetime
+from pydantic import BaseModel, Field, StringConstraints
 
 
 class FileContent(BaseModel):
@@ -47,7 +47,7 @@ class StepEvent(BaseModel):
 
 class ChatRequest(BaseModel):
     """聊天请求模型，包含用户消息和相关参数。"""
-    message: str
+    message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50_000)] = Field(..., description="用户消息内容（1~50000 字符，不能为空，首尾空白自动去除）")
     conversation_id: Optional[str] = None
     model: Optional[str] = None
     use_vector_db: bool = False

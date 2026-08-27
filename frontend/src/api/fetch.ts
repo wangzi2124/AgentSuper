@@ -25,7 +25,7 @@ export async function fetchWithTimeout(
 
   if (timeoutMs > 0) {
     controller = new AbortController()
-    timer = setTimeout(() => controller!.abort(), timeoutMs)
+    timer = setTimeout(() => controller!.abort(new DOMException(`timeout after ${timeoutMs}ms`, 'TimeoutError')), timeoutMs)
   }
 
   // 合并调用方的 signal 与内部超时 signal

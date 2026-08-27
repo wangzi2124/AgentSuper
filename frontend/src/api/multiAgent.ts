@@ -6,11 +6,17 @@ const BASE = '/api/chat'
 function classifyNetworkError(err: unknown): ChatError {
   const msg = err instanceof Error ? err.message : String(err)
   const lower = msg.toLowerCase()
-  if (lower.includes('abort') || lower.includes('aborted')) return { type: 'unknown', message: msg, retryable: false }
-  if (lower.includes('timeout') || lower.includes('timed out')) return { type: 'timeout', message: msg, retryable: true }
-  if (lower.includes('rate limit') || lower.includes('429')) return { type: 'rate_limit', message: msg, retryable: true }
-  if (lower.includes('failed to fetch') || lower.includes('networkerror')) return { type: 'network', message: msg, retryable: true }
-  if (lower.includes('500') || lower.includes('502') || lower.includes('503')) return { type: 'server_error', message: msg, retryable: true }
+  // 超时/stall 相关 abort 优先判为可重试（放在通用 abort 检查之前）
+  if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('stall'))
+    return { type: 'timeout', message: msg, retryable: true }
+  if (lower.includes('abort') || lower.includes('aborted'))
+    return { type: 'unknown', message: msg, retryable: false }
+  if (lower.includes('rate limit') || lower.includes('429'))
+    return { type: 'rate_limit', message: msg, retryable: true }
+  if (lower.includes('failed to fetch') || lower.includes('networkerror'))
+    return { type: 'network', message: msg, retryable: true }
+  if (lower.includes('500') || lower.includes('502') || lower.includes('503'))
+    return { type: 'server_error', message: msg, retryable: true }
   return { type: 'unknown', message: msg, retryable: false }
 }
 
@@ -22,12 +28,13 @@ export async function sendMultiAgentStream(
 ): Promise<void> {
   let res: Response
   try {
-    res = await fetch(BASE + '/multi-agent/stream', {
+    // S1: 连接阶段使用 fetchWithTimeout（30s），防止服务端挂起不响应
+    res = await fetchWithTimeout(BASE + '/multi-agent/stream', {
       method: 'POST',
       headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(data),
       signal,
-    })
+    }, 30_000)
   } catch (err) {
     throw classifyNetworkError(err)
   }
@@ -52,6 +59,23 @@ export async function sendMultiAgentStream(
   const decoder = new TextDecoder()
   let buffer = ''
   let receivedTerminalEvent = false
+  // S1: stall 检测 — 记录最近事件时间戳，>60s 无事件 → abort + 按可重试错误处理
+  const STALL_TIMEOUT_MS = 60_000
+  let lastEventTime = Date.now()
+  let stallTimer: ReturnType<typeof setTimeout> | null = null
+  let stallTriggered = false
+  const stallCheck = () => {
+    const elapsed = Date.now() - lastEventTime
+    if (elapsed > STALL_TIMEOUT_MS && !stallTriggered) {
+      stallTriggered = true
+      reader.cancel(new DOMException('stall timeout', 'TimeoutError')).catch(() => {})
+      return
+    }
+    if (!stallTriggered) {
+      stallTimer = setTimeout(stallCheck, Math.min(10_000, STALL_TIMEOUT_MS - elapsed))
+    }
+  }
+  stallTimer = setTimeout(stallCheck, 10_000)
   try {
     while (true) {
       const { done, value } = await reader.read()
@@ -59,6 +83,7 @@ export async function sendMultiAgentStream(
         if (!receivedTerminalEvent) throw { type: 'network', message: 'Connection interrupted', retryable: true } as ChatError
         break
       }
+      lastEventTime = Date.now()
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop() || ''
@@ -77,8 +102,13 @@ export async function sendMultiAgentStream(
   } catch (err) {
     if (err && typeof err === 'object' && 'retryable' in (err as any)) throw err
     if (signal?.aborted) throw { type: 'unknown', message: 'Cancelled', retryable: false } as ChatError
+    // S1: stall 超时归类为可重试的 timeout 错误
+    if (stallTriggered) {
+      throw { type: 'timeout', message: '连接超时，正在重试', retryable: true } as ChatError
+    }
     throw classifyNetworkError(err)
   } finally {
+    if (stallTimer) clearTimeout(stallTimer)
     reader.releaseLock()
   }
 }
