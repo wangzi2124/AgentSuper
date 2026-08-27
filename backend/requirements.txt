@@ -3,6 +3,8 @@ uvicorn[standard]
 pydantic
 pydantic-settings
 langchain-core
+langchain-community
+pypdf
 langgraph
 litellm
 pyyaml

@@ -209,6 +209,35 @@ def _extract_cache_usage(usage, pt: int = 0):
     return hit, miss
 
 
+def _find_attachment(files: list[dict], filename: str) -> dict:
+    for f in files:
+        if f.get("filename") == filename:
+            return f
+    raise KeyError(filename)
+
+
+def _attachment_parts(files: list[dict], budget: int = 6000):
+    """把附件拆分为 (图片文件名列表, 文本上下文)。
+
+    图片交给多模态 image_url；文档附件经 LangChain loaders
+    （attachment_loader.attachment_context_text）解析为文本上下文。
+    """
+    from . import attachment_loader
+
+    image_names: list[str] = []
+    others: list[dict] = []
+    for f in files:
+        mime = (f.get("mime_type") or "").lower()
+        ext = Path((f.get("filename") or "")).suffix.lower()
+        if mime.startswith("image/") or ext in {".jpg", ".jpeg", ".png", ".gif",
+                                                ".webp", ".bmp", ".svg", ".ico"}:
+            image_names.append(f.get("filename") or "file")
+        else:
+            others.append(f)
+    text_ctx = attachment_loader.attachment_context_text(others, budget=budget) if others else ""
+    return image_names, text_ctx
+
+
 class RAGAgent:
     """RAG（检索增强生成）代理，负责协调检索、重排序和生成回答的流程。"""
 
@@ -1106,12 +1135,19 @@ class RAGAgent:
         user_files = state.get("files", [])
         if user_files:
             user_content: list[dict] = [{"type": "text", "text": user_question}]
-            for f in user_files:
-                if f.get("mime_type", "").startswith("image/"):
-                    user_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{f['mime_type']};base64,{f['data']}"},
-                    })
+            # [F8 后端] 附件处理：
+            #   - image/* → 多模态 image_url 数据块（LLM 原生看图）
+            #   - 其余（pdf/docx/xlsx/txt/md/csv/json 等）→ 经 LangChain document
+            #     loaders 解析为文本上下文（attachment_loader），让模型能读到文档正文。
+            image_names, text_ctx = _attachment_parts(user_files)
+            for name in image_names:
+                f = _find_attachment(user_files, name)
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{f['mime_type']};base64,{f['data']}"},
+                })
+            if text_ctx:
+                user_content.append({"type": "text", "text": text_ctx})
             messages.append({"role": "user", "content": user_content})
         else:
             messages.append({"role": "user", "content": user_question})

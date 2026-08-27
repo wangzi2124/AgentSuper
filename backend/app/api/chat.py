@@ -273,7 +273,8 @@ def _persist_multi_agent_parts(session_id: str, message_id: str, answer: str,
 async def _persist_multi_agent(service, user_id: str, session_id: str, child_id: str,
                                question: str, answer: str, sources: list, steps: list,
                                agents: list | None = None, model: str | None = None,
-                               tokens: dict | None = None, client_msg_id: str | None = None) -> tuple[str, str]:
+                               tokens: dict | None = None, client_msg_id: str | None = None,
+                               files: list | None = None) -> tuple[str, str]:
     """主会话 + 子任务会话各追加 user/assistant 消息；新会话生成标题。
 
     主会话写经 write_lock 串行化（与 /stream 协调器执行体、compact/revert 互斥），
@@ -293,6 +294,7 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
             if user_msg_id is None:
                 user_msg = service.append_message(user_id, session_id, "user", {
                     "role": "user", "content": question, "client_msg_id": client_msg_id,
+                    "files": files or [],
                 })
                 user_msg_id = user_msg.id
                 if session_repo.latest_seq(session_id) == 1:
@@ -490,6 +492,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     user_msg_id, assistant_msg_id = await _persist_multi_agent(
         service, user_id, session_id, child_id, body.message, answer, sources, steps,
         model=body.model, tokens=payload.get("tokens"), client_msg_id=body.client_msg_id,
+        files=[f.model_dump() for f in body.files],
     )
     task_bridge.unregister(child_id)
 
@@ -625,6 +628,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         service, user_id, session_id, child_id, body.message, answer, sources, steps,
                         agents=agents, model=body.model, tokens=payload.get("tokens"),
                         client_msg_id=body.client_msg_id,
+                        files=[f.model_dump() for f in body.files],
                     )
 
                     await event_queue.put({

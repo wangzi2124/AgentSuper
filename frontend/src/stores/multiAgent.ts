@@ -183,6 +183,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         role: m.role as 'user' | 'assistant',
         content: m.content || '',
         agents: (m as any).agents || [],
+        files: (m as any).files || [],
         timestamp: new Date(),
       }))
       // 从 IndexedDB 加载本地缓存（SSE 中断时可能有未同步消息）
