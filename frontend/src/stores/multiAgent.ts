@@ -295,7 +295,32 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     await send(userMsg.content)
   }
 
-  async function send(text: string) {
+  // 把内存会话的 key 从客户端 genId 迁移到服务器 conversation_id。
+  // 只能成功完成（done）或失败（error/断连）后调用：一旦知道服务器 id，
+  // 就将内存里的完整消息（含流式中断的部分内容）挂到服务器 id 下，
+  // 避免之后 loadConversation(serverId) 因找不到内存会话而新建空会话，
+  // 导致「断连后重连内容丢失、要重新访问后台」。
+  function migrateToServerId(sessionId: string) {
+    const session = sessions.value[sessionId]
+    if (!session) return
+    const serverId = session.conversationId
+    if (!serverId || serverId === sessionId) return
+    if (!sessions.value[serverId]) {
+      sessions.value[serverId] = session
+    } else if (sessions.value[serverId] !== session) {
+      // 已存在不同对象：把当前消息合并进已存在会话（保留内容最多的）
+      const target = sessions.value[serverId]
+      if (session.messages.length > target.messages.length) {
+        target.messages = session.messages
+        target.conversationTitle = session.conversationTitle
+      }
+    }
+    delete sessions.value[sessionId]
+    if (activeSessionId.value === sessionId) activeSessionId.value = serverId
+    if (autoRetrySessionId.value === sessionId) autoRetrySessionId.value = serverId
+  }
+
+  async function send(text: string): Promise<boolean> {
     let sessionId = activeSessionId.value
     if (!sessionId) {
       sessionId = genId()
@@ -304,11 +329,12 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
 
     const session = sessions.value[sessionId]
-    if (!session) return
+    if (!session) return false
     // 防止同一会话并发发送导致消息/步骤竞态
-    if (session.loading) return
-    // 用户主动发送新消息时，取消待执行的自动重试
+    if (session.loading) return false
     cancelAutoRetry()
+
+    let completed = false
 
     const userMsg: MultiAgentMessage = {
       id: genId(), role: 'user', content: text, agents: [], timestamp: new Date(),
@@ -410,6 +436,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             startAutoRetry(sessionId, text)
           }
         } else if (event.type === 'done') {
+          completed = true
           session.streamPhase = 'idle'
           routingStatus.value = ''
           session.conversationId = event.conversation_id
@@ -435,13 +462,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           }
           // 完成后持久化 + 内存 key 迁移（客户端 genId → 服务器 id）
           persistSession(sessionId)
-          const serverId = session.conversationId
-          if (serverId && serverId !== sessionId) {
-            sessions.value[serverId] = session
-            delete sessions.value[sessionId]
-            if (activeSessionId.value === sessionId) activeSessionId.value = serverId
-            if (autoRetrySessionId.value === sessionId) autoRetrySessionId.value = serverId
-          }
+          migrateToServerId(sessionId)
           cancelAutoRetry()
         }
       }, signal, (sid) => {
@@ -460,6 +481,9 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         assistantMsg.isError = true; assistantMsg.errorInfo = errorInfo; assistantMsg.content = formatErrorMessage(errorInfo)
         assistantMsg.agents = Object.values(agentsMap)
         persistSession(sessionId)
+        // 失败/断连后也已拿到服务器 id：立刻迁移内存 key，避免后续
+        // loadConversation(serverId) 新建空会话把内容顶掉
+        migrateToServerId(sessionId)
         // 自动重试：仅对可重试错误且未超过最大次数
         if (errorInfo.retryable && autoRetrySessionId.value === sessionId) {
           startAutoRetry(sessionId, text)
@@ -472,6 +496,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       session.queuePosition = null
       if (session.abortController === controller) session.abortController = null
     }
+    return completed
   }
 
   function cancel() {

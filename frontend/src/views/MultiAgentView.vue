@@ -126,8 +126,10 @@ function onScroll() {
 }
 
 function handleSend(text: string) {
-  agent.send(text).then(() => {
-    if (agent.conversationId && route.name !== 'MultiAgentConversation') {
+  agent.send(text).then((completed) => {
+    // 仅在真正完成（收到 done）时跳转会话路由并触发 loadConversation，
+    // 避免「SSE 断连→重连失败」时导航到服务器 id 新建空会话、把已显示内容顶掉
+    if (completed && agent.conversationId && route.name !== 'MultiAgentConversation') {
       router.push({ name: 'MultiAgentConversation', params: { id: agent.conversationId } })
     }
   })
