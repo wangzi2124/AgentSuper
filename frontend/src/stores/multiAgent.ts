@@ -54,6 +54,12 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const AUTO_RETRY_DELAY = 5 // 秒
   const MAX_AUTO_RETRIES = 2
   let autoRetryTimer: ReturnType<typeof setTimeout> | null = null
+  // [S8] 独立自动重试计数：startAutoRetry 自增，用户主动新发 / 成功 done 清零。
+  // 替代旧的「数尾部连续 error 消息」方式——手动重试成功后计数不再残留。
+  let retryCount = 0
+  // 自动重试重发时置位：send 开头跳过 cancelAutoRetry() 的计数清零，
+  // 让 S8 独立计数在连发重试之间持续累加（否则每次重发都被清零、永远达不到上限）。
+  let suppressRetryReset = false
   const retryCountdown = ref(0)
   const autoRetrySessionId = ref<string | undefined>(undefined)
   const retryMessageText = ref('')
@@ -210,18 +216,18 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     const session = sessions.value[sessionId]
     if (!session) return
 
-    // 检查自动重试次数（通过计算连续 error 消息数）
-    let consecutiveErrors = 0
-    for (let i = session.messages.length - 1; i >= 0; i--) {
-      if (session.messages[i].isError) consecutiveErrors++
-      else break
-    }
-    if (consecutiveErrors >= MAX_AUTO_RETRIES) {
+    // [S8] 独立重试计数：达到上限则放弃（cancelAutoRetry 会清计数，属终止路径）
+    if (retryCount >= MAX_AUTO_RETRIES) {
       cancelAutoRetry()
       return
     }
 
-    cancelAutoRetry()
+    // 清掉上个 timer（只清 timer，不清计数——不能走 cancelAutoRetry）
+    if (autoRetryTimer) {
+      clearInterval(autoRetryTimer)
+      autoRetryTimer = null
+    }
+    retryCount++
     retryCountdown.value = AUTO_RETRY_DELAY
     autoRetrySessionId.value = sessionId
     retryMessageText.value = text
@@ -229,7 +235,10 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     autoRetryTimer = setInterval(() => {
       retryCountdown.value--
       if (retryCountdown.value <= 0) {
-        cancelAutoRetry()
+        if (autoRetryTimer) {
+          clearInterval(autoRetryTimer)
+          autoRetryTimer = null
+        }
         retryLastMessage()
       }
     }, 1000)
@@ -243,6 +252,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     retryCountdown.value = 0
     autoRetrySessionId.value = undefined
     retryMessageText.value = ''
+    // [S8] 取消/成功/主动新发一律清零独立重试计数
+    retryCount = 0
   }
 
   // 重试最后一条用户消息
@@ -267,7 +278,10 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       session.messages = session.messages.slice(0, lastUserMsgIdx)
     }
 
-    await send(lastUserMsg.content)
+    // [S2] 重试复用原 user 消息的 client_msg_id，服务端按幂等键去重，不产生重复轮次
+    // [S8] 置位抑制 send 开头的计数清零，让独立重试计数在连发间持续累加
+    suppressRetryReset = true
+    await send(lastUserMsg.content, lastUserMsg.clientMsgId)
   }
 
   // 手动重试（从 error 消息的 UI 触发）
@@ -292,7 +306,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
     const userMsg = session.messages[userIdx]
     session.messages = session.messages.slice(0, userIdx)
-    await send(userMsg.content)
+    // [S2] 手动重试同样复用原 user 消息的 client_msg_id，服务端幂等去重
+    await send(userMsg.content, userMsg.clientMsgId)
   }
 
   // 把内存会话的 key 从客户端 genId 迁移到服务器 conversation_id。
@@ -320,7 +335,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (autoRetrySessionId.value === sessionId) autoRetrySessionId.value = serverId
   }
 
-  async function send(text: string): Promise<boolean> {
+  async function send(text: string, clientMsgId?: string): Promise<boolean> {
     let sessionId = activeSessionId.value
     if (!sessionId) {
       sessionId = genId()
@@ -332,12 +347,26 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (!session) return false
     // 防止同一会话并发发送导致消息/步骤竞态
     if (session.loading) return false
-    cancelAutoRetry()
+    if (suppressRetryReset) {
+      // [S8] 自动重试重发：只清 timer，保留独立重试计数（在连发间持续累加）
+      if (autoRetryTimer) {
+        clearInterval(autoRetryTimer)
+        autoRetryTimer = null
+      }
+      retryCountdown.value = 0
+      suppressRetryReset = false
+    } else {
+      // 新的/手动发送：完整取消自动重试（含清零独立重试计数）
+      cancelAutoRetry()
+    }
 
     let completed = false
 
+    // [S2] 幂等 id：重试时复用原 user 消息的 clientMsgId，首次发送则新生成
+    const messageClientId = clientMsgId ?? genId()
     const userMsg: MultiAgentMessage = {
       id: genId(), role: 'user', content: text, agents: [], timestamp: new Date(),
+      clientMsgId: messageClientId,
     }
     session.messages = [...session.messages, userMsg]
     session.loading = true
@@ -357,7 +386,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     // 发送后立即持久化（SSE 中断也不丢失 user 消息）
     persistSession(sessionId)
 
-    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, directory: sessionDirectory.value || undefined }
+    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, directory: sessionDirectory.value || undefined, client_msg_id: messageClientId }
     const controller = new AbortController()
     session.abortController = controller
     const signal = controller.signal

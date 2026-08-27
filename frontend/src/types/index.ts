@@ -280,6 +280,8 @@ export interface MultiAgentChatRequest {
   use_vector_db?: boolean
   /** 会话绑定的工作目录（opencode ctx.directory），首条消息创建会话时生效 */
   directory?: string
+  /** [S2/B4] 客户端消息幂等 id：自动/手动重试复用同一 id，服务端据此去重 */
+  client_msg_id?: string
 }
 
 export interface MultiAgentMessage {
@@ -292,4 +294,6 @@ export interface MultiAgentMessage {
   errorInfo?: ChatError
   /** 流式中的占位消息（未完成），持久化/合并时过滤 */
   live?: boolean
+  /** [S2/B4] 幂等 id：user 消息首次发送时生成，重试时复用，保证服务端去重 */
+  clientMsgId?: string
 }

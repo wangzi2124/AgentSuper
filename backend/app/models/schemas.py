@@ -53,6 +53,9 @@ class ChatRequest(BaseModel):
     use_vector_db: bool = False
     files: list[FileContent] = []
     directory: str = ""  # 会话绑定的工作目录（opencode ctx.directory），首条消息时创建会话用
+    # [B4] 客户端消息幂等 id：前端自动/手动重试复用同一 id，
+    # 服务端按 (user_id, session_id, client_msg_id) 去重，避免断网重试产生重复轮次。
+    client_msg_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):

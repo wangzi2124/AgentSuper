@@ -254,6 +254,18 @@ class SupervisorAgent(BaseAgent):
     #  任务分解
     # ═══════════════════════════════════════════════════════════════
 
+    # [B6] 寒暄/闲聊关键词：简短寒暄不消耗 LLM 分解，直接走 rag 通用问答
+    _GREETING_KEYWORDS = (
+        "你好", "您好", "嗨", "哈喽", "在吗", "在不在", "hello", "hi", "hey",
+        "早上好", "中午好", "下午好", "晚上好", "早安", "晚安", "早上", "晚上",
+        "谢谢", "感谢", "辛苦了", "再见", "拜拜", "麻烦你", "请问", "你好呀",
+        "hola", "yo", "hi there", "good morning", "good afternoon", "good evening",
+    )
+
+    def _is_greeting(self, q: str) -> bool:
+        """[B6] 判断是否为简短的寒暄/闲聊（用于 ≤24 字符快速路径）。"""
+        return any(k in q for k in self._GREETING_KEYWORDS)
+
     async def _decompose(self, question: str) -> list[dict]:
         """将复杂问题拆解成多个子任务。
 
@@ -304,9 +316,13 @@ class SupervisorAgent(BaseAgent):
         if needs_kb:
             return [{"agent": "rag", "question": question}]
 
-        # ── [token 优化] 简短问题(≤24字符)直接走 rag,免 LLM 分解 ──
-        if len(question.strip()) <= 24:
-            return [{"agent": "rag", "question": question}]
+        # ── [B6] 简短问题(≤24字符)：寒暄直接走 rag 免 LLM；
+        #        非寒暄且零关键词命中则强制 LLM 分解，避免简单但明确的
+        #        请求(如"帮我写个爬虫")被盲目路由到 rag。──
+        if len(q) <= 24:
+            if self._is_greeting(q):
+                return [{"agent": "rag", "question": question}]
+            return await self._llm_decompose(question, available_agents)
 
         # ── 默认: 尝试 LLM 分解 ──
         return await self._llm_decompose(question, available_agents)
@@ -326,7 +342,7 @@ class SupervisorAgent(BaseAgent):
                 api_key=self._api_key,
                 api_base=self._api_base,
                 messages=messages,
-                max_tokens=512,
+                max_tokens=1024,
                 temperature=0.1,
             )
             usage = getattr(response, "usage", None)

@@ -227,6 +227,21 @@ def _session_history_for(service, user_id: str, session_id: str, limit: int = 20
     return history
 
 
+async def _build_compressed_history(service, user_id: str, session_id: str) -> list[dict]:
+    """[B10] 抽取历史加载 + 压缩 + 清洗的公共逻辑，避免两个多 Agent 端点重复。
+
+    启用 SummarizationMiddleware 时用 LLM 分层压缩，否则按 token 截断；
+    最终统一 _sanitize_history 清洗。
+    """
+    history = _session_history_for(service, user_id, session_id)
+    summarizer = _get_summarizer()
+    if summarizer:
+        compressed = await summarizer.apply(history)
+    else:
+        compressed = _truncate_history(history)
+    return _sanitize_history(compressed)
+
+
 def _begin_task_session(service, user_id: str, parent_id: str, question: str) -> tuple[str, str]:
     """创建 kind='task' 子会话并登记 thread（返回 child_id + thread_id）。"""
     thread_id = f"{parent_id}:task:{uuid.uuid4().hex[:8]}"
@@ -258,7 +273,7 @@ def _persist_multi_agent_parts(session_id: str, message_id: str, answer: str,
 async def _persist_multi_agent(service, user_id: str, session_id: str, child_id: str,
                                question: str, answer: str, sources: list, steps: list,
                                agents: list | None = None, model: str | None = None,
-                               tokens: dict | None = None) -> tuple[str, str]:
+                               tokens: dict | None = None, client_msg_id: str | None = None) -> tuple[str, str]:
     """主会话 + 子任务会话各追加 user/assistant 消息；新会话生成标题。
 
     主会话写经 write_lock 串行化（与 /stream 协调器执行体、compact/revert 互斥），
@@ -266,28 +281,121 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
 
     [token 优化 v9] tokens 参数：supervisor 汇总的本次请求真实 LLM 用量
     （分解 + 子 Agent + 汇总），与单 Agent executor 落库口径对齐，供前端/DB 展示。
+
+    [B4] client_msg_id 幂等：前端自动/手动重试复用同一 client_msg_id，
+    主/子会话均按 (user_id, session_id, client_msg_id) 去重——命中已落库的完整
+    轮次直接复用 id、跳过写入；命中 user 但缺 assistant 时补齐缺失对，避免断网
+    重试/重复请求产生重复轮次。
     """
     async with service.write_lock(session_id):
-        user_msg = service.append_message(user_id, session_id, "user", {"role": "user", "content": question})
-        if session_repo.latest_seq(session_id) == 1:
-            service.update(user_id, session_id, title=_generate_title([{"role": "user", "content": question}]))
-        assistant_msg = service.append_message(user_id, session_id, "assistant", {
-            "role": "assistant", "content": answer, "sources": sources, "steps": steps,
-            "agents": agents or [], "parent_id": user_msg.id, "agent": "supervisor", "model": model,
-            "tokens": tokens or {},
-        })
-        _persist_multi_agent_parts(session_id, assistant_msg.id, answer, agents)
-    # 子任务会话独立日志（隔离上下文）
+        user_msg_id, existing_assistant_id = _existing_pair(service, user_id, session_id, client_msg_id)
+        if not existing_assistant_id:
+            if user_msg_id is None:
+                user_msg = service.append_message(user_id, session_id, "user", {
+                    "role": "user", "content": question, "client_msg_id": client_msg_id,
+                })
+                user_msg_id = user_msg.id
+                if session_repo.latest_seq(session_id) == 1:
+                    service.update(user_id, session_id, title=_generate_title([{"role": "user", "content": question}]))
+            # 新写入或 user 命中但缺 assistant：追加 assistant 轮次
+            assistant_msg = service.append_message(user_id, session_id, "assistant", {
+                "role": "assistant", "content": answer, "sources": sources, "steps": steps,
+                "agents": agents or [], "parent_id": user_msg_id, "agent": "supervisor", "model": model,
+                "tokens": tokens or {},
+            })
+            _persist_multi_agent_parts(session_id, assistant_msg.id, answer, agents)
+            assistant_msg_id = assistant_msg.id
+        else:
+            # [B4] 完整轮次已落库 → 直接复用 id，不重复写入主会话
+            assistant_msg_id = existing_assistant_id
+    # 子任务会话独立日志（隔离上下文，幂等去重）
     async with service.write_lock(child_id):
-        service.append_message(user_id, child_id, "user", {"role": "user", "content": question})
-        child_assist = service.append_message(user_id, child_id, "assistant", {
-            "role": "assistant", "content": answer, "sources": sources, "steps": steps,
-            "agents": agents or [], "parent_id": user_msg.id, "agent": "supervisor", "model": model,
-            "tokens": tokens or {},
+        _ensure_child_pair(service, user_id, child_id, question, answer, sources,
+                           steps, agents, model, tokens, client_msg_id)
+    return user_msg_id, assistant_msg_id
+
+
+def _existing_pair(service, user_id: str, session_id: str,
+                   client_msg_id: str | None) -> tuple[str | None, str | None]:
+    """[B4] 按 client_msg_id 查找已落库的 user/assistant 对。
+
+    返回 (user_msg_id, assistant_msg_id)；assistant 缺失时第二个元素为 None，
+    供调用方决定补齐；client_msg_id 为空或未命中时返回 (None, None)。
+    """
+    if not client_msg_id:
+        return None, None
+    msgs = service.messages(user_id, session_id)
+    for i, m in enumerate(msgs):
+        if m.type == "user" and m.data.get("client_msg_id") == client_msg_id:
+            for a in msgs[i + 1:]:
+                if a.type == "assistant":
+                    # [B11] 中断的部分 assistant 不算完整轮次：
+                    # 返回 (user_id, None) 让重试继续补齐，而不是复用残缺答案
+                    if a.data.get("interrupted"):
+                        return m.id, None
+                    return m.id, a.id
+            return m.id, None
+    return None, None
+
+
+def _ensure_child_pair(service, user_id: str, session_id: str, question: str, answer: str,
+                       sources: list, steps: list, agents: list | None, model: str | None,
+                       tokens: dict | None, client_msg_id: str | None) -> None:
+    """[B4] 确保子任务会话存在与主会话一致的 user/assistant 对（幂等）。"""
+    user_msg_id, existing_assistant_id = _existing_pair(service, user_id, session_id, client_msg_id)
+    if existing_assistant_id:
+        return
+    if user_msg_id is None:
+        user_msg = service.append_message(user_id, session_id, "user", {
+            "role": "user", "content": question, "client_msg_id": client_msg_id,
         })
-        _persist_multi_agent_parts(child_id, child_assist.id, answer, agents)
-        service.update(user_id, child_id, status="idle")
-    return user_msg.id, assistant_msg.id
+        user_msg_id = user_msg.id
+    child_assist = service.append_message(user_id, session_id, "assistant", {
+        "role": "assistant", "content": answer, "sources": sources, "steps": steps,
+        "agents": agents or [], "parent_id": user_msg_id, "agent": "supervisor", "model": model,
+        "tokens": tokens or {},
+    })
+    _persist_multi_agent_parts(session_id, child_assist.id, answer, agents)
+    service.update(user_id, session_id, status="idle")
+
+
+async def _persist_interrupted_partial(service, user_id: str, session_id: str, child_id: str,
+                                       question: str, answer: str, agents: list | None,
+                                       client_msg_id: str | None) -> None:
+    """[B11] 会话中断时把已生成的部分内容落库（status=interrupted）。
+
+    客户端断开/取消导致流未走到 done 时，主/子会话并没有完整 user/assistant 轮次
+    （_persist_multi_agent 只在 done 时落库）。这里在 event_generator 的 finally 兜底
+    记录「用户问题 + 部分回答 + 子 Agent 快照」，使用户重开历史能恢复已产出的内容。
+
+    assistant 标记 interrupted=True：B4 的 _existing_pair 会将其视为「未完整」，
+    因此前端以同一 client_msg_id 自动重试时仍会补齐完整轮次，不会复用残缺答案。
+    """
+    try:
+        def _append_partial(target_session: str) -> str:
+            user_msg_id, existing_assistant_id = _existing_pair(service, user_id, target_session, client_msg_id)
+            if existing_assistant_id:
+                return existing_assistant_id
+            if user_msg_id is None:
+                user_msg = service.append_message(user_id, target_session, "user", {
+                    "role": "user", "content": question, "client_msg_id": client_msg_id,
+                })
+                user_msg_id = user_msg.id
+            partial = service.append_message(user_id, target_session, "assistant", {
+                "role": "assistant", "content": answer, "sources": [], "steps": [],
+                "agents": agents or [], "parent_id": user_msg_id, "agent": "supervisor",
+                "model": None, "tokens": {}, "interrupted": True,
+            })
+            _persist_multi_agent_parts(target_session, partial.id, answer, agents)
+            return partial.id
+
+        async with service.write_lock(session_id):
+            _append_partial(session_id)
+        async with service.write_lock(child_id):
+            _append_partial(child_id)
+            service.update(user_id, child_id, status="interrupted")
+    except Exception:
+        logger.exception("persist interrupted partial failed: user=%s session=%s", user_id, session_id)
 
 
 def _validate_chat_message(body: ChatRequest) -> None:
@@ -321,14 +429,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     user_id = _get_user_id(request)
     service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id, body.directory)
 
-    history = _session_history_for(service, user_id, session_id)
-
-    summarizer = _get_summarizer()
-    if summarizer:
-        compressed = await summarizer.apply(history)
-    else:
-        compressed = _truncate_history(history)
-    compressed = _sanitize_history(compressed)
+    compressed = await _build_compressed_history(service, user_id, session_id)
 
     # 登记子任务会话（kind='task'）+ AgentBus thread
     child_id, thread_id = _begin_task_session(service, user_id, session_id, body.message)
@@ -382,7 +483,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     # 落库：主会话 + 子任务会话
     user_msg_id, assistant_msg_id = await _persist_multi_agent(
         service, user_id, session_id, child_id, body.message, answer, sources, steps,
-        model=body.model, tokens=payload.get("tokens"),
+        model=body.model, tokens=payload.get("tokens"), client_msg_id=body.client_msg_id,
     )
     task_bridge.unregister(child_id)
 
@@ -422,14 +523,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     user_id = _get_user_id(request)
     service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id, body.directory)
 
-    history = _session_history_for(service, user_id, session_id)
-
-    summarizer = _get_summarizer()
-    if summarizer:
-        compressed = await summarizer.apply(history)
-    else:
-        compressed = _truncate_history(history)
-    compressed = _sanitize_history(compressed)
+    compressed = await _build_compressed_history(service, user_id, session_id)
 
     event_queue: asyncio.Queue = asyncio.Queue()
     sem = _get_agent_semaphore()
@@ -524,6 +618,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     user_msg_id, assistant_msg_id = await _persist_multi_agent(
                         service, user_id, session_id, child_id, body.message, answer, sources, steps,
                         agents=agents, model=body.model, tokens=payload.get("tokens"),
+                        client_msg_id=body.client_msg_id,
                     )
 
                     await event_queue.put({
@@ -604,6 +699,8 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
             except asyncio.CancelledError:
                 pass
         heartbeat = asyncio.create_task(_heartbeat())
+        # [B11] 是否已正常走到 done/error（此时 _persist_multi_agent 已在 run_multi_agent 完成落库）
+        reached_terminal: dict | None = None
         try:
             while True:
                 event = await event_queue.get()
@@ -615,6 +712,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                 event["conversation_id"] = session_id
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if event["type"] in ("done", "error"):
+                    reached_terminal = event
                     break
             await task
         finally:
@@ -628,6 +726,24 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+            # [B11] 客户端断开/取消，未走到 done/error → 兜底落库部分结果。
+            # 用后台 task 而非 await：finally 可能在 GeneratorExit 上下文中执行，
+            # await 会抛 "async generator ignored GeneratorExit" 破坏流关闭。
+            if reached_terminal is None:
+                agents = collector.agents_snapshot()
+                partial_answer = "\n\n".join(
+                    a.get("content", "") for a in agents if a.get("content")
+                )
+                if partial_answer or agents:
+                    try:
+                        asyncio.get_running_loop().create_task(
+                            _persist_interrupted_partial(
+                                service, user_id, session_id, child_id, body.message,
+                                partial_answer, agents, body.client_msg_id,
+                            )
+                        )
+                    except Exception:
+                        logger.exception("failed to schedule interrupted-partial persist")
 
     return StreamingResponse(
         event_generator(),

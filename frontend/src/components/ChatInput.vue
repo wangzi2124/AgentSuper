@@ -18,6 +18,11 @@ const remaining = computed(() => MAX_LENGTH - text.value.length)
 const showCounter = computed(() => remaining.value < 5000)
 const counterDanger = computed(() => remaining.value < 1000)
 
+// F10: 输入框占位文案（loading 时为动态处理文案），修复模板引用未定义 computed
+const placeholder = computed(() =>
+  props.loading ? '正在处理，请稍候…' : '输入消息，Enter 发送，Shift+Enter 换行'
+)
+
 // F3: textarea 自动增高（min 80px / max 200px）
 function autoResize() {
   const el = textareaRef.value
@@ -76,9 +81,8 @@ const textareaRef = ref<HTMLTextAreaElement>()
       <textarea
         ref="textareaRef"
         v-model="text"
-        :disabled="loading"
         :maxlength="MAX_LENGTH"
-        placeholder="请输入关于知识库的问题..."
+        :placeholder="placeholder"
         rows="3"
         @keydown="onKeydown"
         @input="autoResize"
