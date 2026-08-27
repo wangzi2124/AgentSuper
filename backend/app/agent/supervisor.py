@@ -93,6 +93,29 @@ class SupervisorAgent(BaseAgent):
     def agent_id(self) -> str:
         return self._id
 
+    def _start_heartbeat(self, interval: float = 5.0):
+        """[A2] 启动 supervisor 自身的心跳任务：处理期间周期 touch，避免上层超时误判。
+
+        supervisor 的 LLM 分解 / 等待子 Agent / 汇总都可能持续数秒到数分钟，
+        期间其事件循环阻塞在 handle_message 内、bus 无法自动 touch——因此这里
+        主动周期 touch，让 endpoint 侧 send_and_wait 的 grace 续期逻辑能看到
+        "supervisor 仍在处理"，而非把它当死任务提前超时。
+        Returns:
+            心跳 task（调用方需在收尾时 cancel）；失败返回 None。
+        """
+        try:
+            async def _beat():
+                try:
+                    while True:
+                        self._bus.touch(self._id)
+                        await asyncio.sleep(interval)
+                except asyncio.CancelledError:
+                    pass
+            return asyncio.create_task(_beat())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Supervisor heartbeat failed to start: %s", e)
+            return None
+
     # ═══════════════════════════════════════════════════════════════
     #  Handle Message （入口）
     # ═══════════════════════════════════════════════════════════════
@@ -112,31 +135,39 @@ class SupervisorAgent(BaseAgent):
             # 注：bus 事件循环对每个 agent 串行处理消息，无并发写冲突。
             self._usage = {"input": 0, "output": 0}
 
-            # ── 尝试任务分解 ──
-            subtasks = await self._decompose(question)
+            # [A2] Supervisor 自身心跳：整个处理（LLM 分解 / 等待子 Agent / 汇总）
+            # 期间持续 touch，让上层（endpoint send_and_wait 的 grace 续期）能看见
+            # supervisor 仍存活，避免其被误判超时；收尾时取消。
+            beat = self._start_heartbeat()
+            try:
+                # ── 尝试任务分解 ──
+                subtasks = await self._decompose(question)
 
-            # 安全护栏：只路由到白名单 Agent，防止 LLM 返回 "supervisor" 造成自我递归超时
-            subtasks = [st for st in subtasks if st.get("agent") in self.ROUTABLE_AGENTS]
-            if not subtasks:
-                subtasks = [{"agent": "rag", "question": question}]
+                # 安全护栏：只路由到白名单 Agent，防止 LLM 返回 "supervisor" 造成自我递归超时
+                subtasks = [st for st in subtasks if st.get("agent") in self.ROUTABLE_AGENTS]
+                if not subtasks:
+                    subtasks = [{"agent": "rag", "question": question}]
 
-            if len(subtasks) > 1:
-                logger.info(
-                    "Supervisor decomposed into %d subtasks (thread=%s)",
-                    len(subtasks), msg.thread_id,
-                )
-                # 并行执行分解后的子任务
-                result = await self._execute_parallel(subtasks, payload, msg.thread_id)
-                yield result
-            else:
-                # 只有一个子任务 → 走简单路由
-                target_agent = subtasks[0]["agent"] if subtasks else "rag"
-                logger.info(
-                    "Supervisor routing to '%s' (thread=%s)",
-                    target_agent, msg.thread_id,
-                )
-                async for reply in self._route_to(target_agent, payload, msg.thread_id):
-                    yield reply
+                if len(subtasks) > 1:
+                    logger.info(
+                        "Supervisor decomposed into %d subtasks (thread=%s)",
+                        len(subtasks), msg.thread_id,
+                    )
+                    # 并行执行分解后的子任务
+                    result = await self._execute_parallel(subtasks, payload, msg.thread_id)
+                    yield result
+                else:
+                    # 只有一个子任务 → 走简单路由
+                    target_agent = subtasks[0]["agent"] if subtasks else "rag"
+                    logger.info(
+                        "Supervisor routing to '%s' (thread=%s)",
+                        target_agent, msg.thread_id,
+                    )
+                    async for reply in self._route_to(target_agent, payload, msg.thread_id):
+                        yield reply
+            finally:
+                if beat is not None:
+                    beat.cancel()
 
         else:
             yield AgentMessage(

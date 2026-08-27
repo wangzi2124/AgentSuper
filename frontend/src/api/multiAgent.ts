@@ -1,24 +1,8 @@
 import type { MultiAgentChatRequest, MultiAgentSSEEvent, ChatError } from '../types'
+import { classifyNetworkError } from './errors'
 import { fetchWithTimeout, addAuthHeaders } from './fetch'
 
 const BASE = '/api/chat'
-
-function classifyNetworkError(err: unknown): ChatError {
-  const msg = err instanceof Error ? err.message : String(err)
-  const lower = msg.toLowerCase()
-  // 超时/stall 相关 abort 优先判为可重试（放在通用 abort 检查之前）
-  if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('stall'))
-    return { type: 'timeout', message: msg, retryable: true }
-  if (lower.includes('abort') || lower.includes('aborted'))
-    return { type: 'unknown', message: msg, retryable: false }
-  if (lower.includes('rate limit') || lower.includes('429'))
-    return { type: 'rate_limit', message: msg, retryable: true }
-  if (lower.includes('failed to fetch') || lower.includes('networkerror'))
-    return { type: 'network', message: msg, retryable: true }
-  if (lower.includes('500') || lower.includes('502') || lower.includes('503'))
-    return { type: 'server_error', message: msg, retryable: true }
-  return { type: 'unknown', message: msg, retryable: false }
-}
 
 export async function sendMultiAgentStream(
   data: MultiAgentChatRequest,

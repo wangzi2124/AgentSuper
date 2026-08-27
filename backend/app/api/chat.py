@@ -309,9 +309,15 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
             # [B4] 完整轮次已落库 → 直接复用 id，不重复写入主会话
             assistant_msg_id = existing_assistant_id
     # 子任务会话独立日志（隔离上下文，幂等去重）
-    async with service.write_lock(child_id):
-        _ensure_child_pair(service, user_id, child_id, question, answer, sources,
-                           steps, agents, model, tokens, client_msg_id)
+    # [B13] 主会话已先行提交（独立 write_lock + append_message 各自事务），
+    # 子会话写入用 try/except 兜底：即使子会话落库失败也只记日志，不回滚、
+    # 不中断主会话已落库的完整轮次，保证「主会话内容不因子会话故障而丢失」。
+    try:
+        async with service.write_lock(child_id):
+            _ensure_child_pair(service, user_id, child_id, question, answer, sources,
+                               steps, agents, model, tokens, client_msg_id)
+    except Exception:
+        logger.exception("Failed to persist child session %s (main %s), main already committed", child_id, session_id)
     return user_msg_id, assistant_msg_id
 
 

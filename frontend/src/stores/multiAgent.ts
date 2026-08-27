@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, onScopeDispose } from 'vue'
 import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep } from '../types'
 import {
   sendMultiAgentStream,
@@ -19,6 +19,7 @@ import {
   mergeServerAndCache,
 } from '../api/session-cache'
 import { interruptSession, revertSession, deleteSessionMessage } from '../api/sessions'
+import { classifyNetworkError } from '../api/errors'
 import { usePermissionStore } from './permission'
 
 function genId(): string {
@@ -34,8 +35,6 @@ interface SessionState {
   abortController: AbortController | null
   streamPhase: 'idle' | 'queued' | 'running'
   queuePosition: number | null
-  liveMsgId: string | null
-  liveContent: string
   deletedIds: string[]
 }
 
@@ -63,6 +62,14 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const retryCountdown = ref(0)
   const autoRetrySessionId = ref<string | undefined>(undefined)
   const retryMessageText = ref('')
+  // [S6/S7] 发送前校验 / 排队提示的轻量 notice，视图上短暂展示
+  const notice = ref('')
+  let _noticeTimer: ReturnType<typeof setTimeout> | null = null
+  function setNotice(msg: string) {
+    notice.value = msg
+    if (_noticeTimer) { clearTimeout(_noticeTimer); _noticeTimer = null }
+    _noticeTimer = setTimeout(() => { notice.value = '' }, 4000)
+  }
 
   function setSessionDirectory(dir: string) {
     sessionDirectory.value = dir || ''
@@ -78,16 +85,25 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         abortController: null,
         streamPhase: 'idle',
         queuePosition: null,
-        liveMsgId: null,
-        liveContent: '',
         deletedIds: [],
       }
     }
     return sessions.value[sessionId]
   }
 
+  // [S5] 持久化防抖计时器：按会话管理，避免高频写入 IndexedDB。
+  // 只有 `schedulePersist` 走防抖；`persistSession`（直接调用）与 `flushPersist`
+  // 都会先清掉待执行计时器，保证终态/用户主动操作即时落库、不被过期快照覆盖。
+  const _persistTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+
+  function _clearPersistTimer(sessionId: string) {
+    const t = _persistTimers[sessionId]
+    if (t) { clearTimeout(t); delete _persistTimers[sessionId] }
+  }
+
   // 将会话消息持久化到 IndexedDB（过滤 live 占位 + 墓碑）
   async function persistSession(sessionId: string) {
+    _clearPersistTimer(sessionId)
     const session = sessions.value[sessionId]
     if (!session) return
     const messages = session.messages.filter(m => !m.live)
@@ -102,6 +118,35 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (cacheKey !== sessionId) {
       await deleteSessionFromCache(sessionId)
     }
+  }
+
+  // [S5] 防抖持久化：1.2s 尾随合并。适用于频率较高但非终态的写入
+  // （如发送时的初始 user 消息——随后 done/error 会有终态写入覆盖兜底）。
+  function schedulePersist(sessionId: string) {
+    _clearPersistTimer(sessionId)
+    _persistTimers[sessionId] = setTimeout(() => {
+      delete _persistTimers[sessionId]
+      persistSession(sessionId)
+    }, 1200)
+  }
+
+  // [S5] 立即冲刷某会话的防抖写入（页面卸载/删除/撤销等终态操作）。
+  async function flushPersist(sessionId: string) {
+    _clearPersistTimer(sessionId)
+    await persistSession(sessionId)
+  }
+
+  function flushAllPendingPersists() {
+    for (const sessionId of Object.keys(_persistTimers)) {
+      _clearPersistTimer(sessionId)
+      persistSession(sessionId)
+    }
+  }
+
+  // [S5] 卸载/关页前冲刷所有待写入会话，防抖不丢数据
+  onScopeDispose(() => flushAllPendingPersists())
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', flushAllPendingPersists)
   }
 
   const currentSession = computed(() => {
@@ -187,17 +232,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       return { type: 'network', message: detail, retryable: true }
     }
     return { type: 'unknown', message: detail, retryable: false }
-  }
-
-  function classifyNetworkError(err: unknown): ChatError {
-    const msg = err instanceof Error ? err.message : String(err)
-    const lower = msg.toLowerCase()
-    if (lower.includes('abort') || lower.includes('aborted')) return { type: 'unknown', message: msg, retryable: false }
-    if (lower.includes('timeout') || lower.includes('timed out')) return { type: 'timeout', message: msg, retryable: true }
-    if (lower.includes('rate limit') || lower.includes('429') || lower.includes('too many requests')) return { type: 'rate_limit', message: msg, retryable: true }
-    if (lower.includes('failed to fetch') || lower.includes('networkerror')) return { type: 'network', message: msg, retryable: true }
-    if (lower.includes('500') || lower.includes('502') || lower.includes('503') || lower.includes('504')) return { type: 'server_error', message: msg, retryable: true }
-    return { type: 'unknown', message: msg, retryable: false }
   }
 
   function formatErrorMessage(info: ChatError): string {
@@ -345,8 +379,16 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
     const session = sessions.value[sessionId]
     if (!session) return false
-    // 防止同一会话并发发送导致消息/步骤竞态
-    if (session.loading) return false
+    // [S7] 防止同一会话并发发送导致消息/步骤竞态；loading 时给出可选排队提示
+    if (session.loading) {
+      setNotice('上一条消息仍在处理中，请稍候再发送')
+      return false
+    }
+    // [S6] 发送前校验模型/目录有效性，避免带无效 model 触发后端 404
+    if (!SUPPORTED_MODELS.some(m => m.value === selectedModel.value)) {
+      setNotice(`当前模型不可用：${selectedModel.value}，请重新选择`)
+      return false
+    }
     if (suppressRetryReset) {
       // [S8] 自动重试重发：只清 timer，保留独立重试计数（在连发间持续累加）
       if (autoRetryTimer) {
@@ -610,7 +652,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     sessions, activeSessionId, conversations, routingStatus, selectedModel, useVectorDb,
     sessionDirectory, setSessionDirectory,
     messages, conversationId, conversationTitle, loading, streamPhase, queuePosition,
-    retryCountdown,
+    retryCountdown, notice, setNotice,
     send, cancel, clear, undoMessage, deleteMessage, deleteConversation,
     loadConversations, loadConversation, newChat, renameConversation,
     retryLastMessage, manualRetry, cancelAutoRetry,

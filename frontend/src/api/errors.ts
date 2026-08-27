@@ -1,4 +1,5 @@
 import { addAuthHeaders } from './fetch'
+import type { ChatError } from '../types'
 
 // 统一 API 错误对象：携带业务错误码、HTTP 状态码与人类可读提示。
 export class ApiError extends Error {
@@ -13,6 +14,25 @@ export class ApiError extends Error {
     this.status = status
     this.retryable = retryable
   }
+}
+
+// [S3] 单一聊天错误分类实现：收敛自 store 与 api/multiAgent.ts 的两份重复。
+// 所有聊天链路的网络异常都归一到这里，避免三处逻辑漂移。
+export function classifyNetworkError(err: unknown): ChatError {
+  const msg = err instanceof Error ? err.message : String(err)
+  const lower = msg.toLowerCase()
+  // 超时/stall 相关 abort 优先判为可重试（放在通用 abort 检查之前）
+  if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('stall'))
+    return { type: 'timeout', message: msg, retryable: true }
+  if (lower.includes('abort') || lower.includes('aborted'))
+    return { type: 'unknown', message: msg, retryable: false }
+  if (lower.includes('rate limit') || lower.includes('429') || lower.includes('too many requests'))
+    return { type: 'rate_limit', message: msg, retryable: true }
+  if (lower.includes('failed to fetch') || lower.includes('networkerror'))
+    return { type: 'network', message: msg, retryable: true }
+  if (lower.includes('500') || lower.includes('502') || lower.includes('503') || lower.includes('504'))
+    return { type: 'server_error', message: msg, retryable: true }
+  return { type: 'unknown', message: msg, retryable: false }
 }
 
 function classifyStatus(status: number): boolean {

@@ -299,6 +299,8 @@ async function handleCopy(messageId: string, text: string) {
       </div>
     </div>
 
+    <div v-if="agent.notice" class="chat-notice">{{ agent.notice }}</div>
+
     <div class="chat-footer">
       <button v-if="messages.length > 0" class="btn btn-danger" @click="agent.deleteConversation()" style="margin: 0 24px 8px;" :disabled="agent.loading">
         Clear conversation
@@ -312,6 +314,11 @@ async function handleCopy(messageId: string, text: string) {
 
 <style scoped>
 .multi-agent-view { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+.chat-notice {
+  margin: 0 24px 8px; padding: 8px 12px; border-radius: 8px;
+  background: var(--accent-soft, rgba(59, 130, 246, 0.12));
+  color: var(--text-primary, inherit); font-size: 13px; flex-shrink: 0;
+}
 .chat-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; gap: 8px; }
 .chat-header h2 { margin: 0 0 2px; font-size: 20px; }
 .chat-header p { margin: 0; font-size: 13px; color: var(--text-secondary); }

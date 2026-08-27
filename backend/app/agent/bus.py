@@ -144,8 +144,13 @@ class AgentBus:
         if grace_window is None:
             grace_window = max(10.0, timeout / 2)
         loop = asyncio.get_running_loop()
+        # [A3] 下次使用前先清理已完成的遗留 Future（防止异常路径残留导致内存泄漏）
+        self.prune_done_pending()
         fut = loop.create_future()
         self._pending[msg.thread_id] = fut
+        # [A3] Future 完成后兜底移除 _pending 项：无论走 send() 直投 / 超时 / 取消 / GC，
+        # 都保证 thread_id → Future 不会残留在 _pending 中（若 send() 已弹出则为空操作）。
+        fut.add_done_callback(lambda _f, tid=msg.thread_id: self._pending.pop(tid, None))
         await self.send(msg)
         try:
             deadline = loop.time() + timeout
@@ -178,6 +183,21 @@ class AgentBus:
         except BaseException:
             self._pending.pop(msg.thread_id, None)
             raise
+
+    def prune_done_pending(self) -> int:
+        """[A3] 移除 _pending 中已完成/已取消的 Future（防御性清理，防止内存泄漏）。
+
+        正常路径由 send() 直投 / 超时 / done-callback 清理，此方法兜底扫描。
+        Returns:
+            清理掉的条目数。
+        """
+        removed = 0
+        for tid in list(self._pending.keys()):
+            fut = self._pending[tid]
+            if fut.done():
+                self._pending.pop(tid, None)
+                removed += 1
+        return removed
 
     def cancel_pending(self, thread_id: str) -> bool:
         """取消指定 thread 的等待（级联取消用，对齐 opencode abort）。
