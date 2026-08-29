@@ -1,11 +1,54 @@
 <script setup lang="ts">
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
 import type { FileContent } from '../types'
+import { useMultiAgentStore } from '../stores/multiAgent'
+import { SUPPORTED_MODELS } from '../config/models'
 
 // 定义组件事件：发送消息（含可选附件）、取消请求
 const emit = defineEmits<{ send: [text: string, files: FileContent[]]; cancel: [] }>()
 // 定义组件属性：加载状态
 const props = defineProps<{ loading: boolean }>()
+
+// Gemini 式输入卡底部操作：模型选择下沉到输入框内
+const agent = useMultiAgentStore()
+
+// [录音] Web Speech API 语音输入（浏览器原生，Chrome/Edge 桌面可用，无需后端）
+const listening = ref(false)
+const recognition = ref<{ start(): void; stop(): void } | null>(null)
+function initRecognition() {
+  const w = window as any
+  const SR = w.SpeechRecognition || w.webkitSpeechRecognition
+  if (!SR) return
+  const r = new SR()
+  r.lang = 'zh-CN'
+  r.interimResults = false
+  r.maxAlternatives = 1
+  r.onresult = (e: any) => {
+    const t = e.results[0]?.[0]?.transcript || ''
+    if (t) text.value = (text.value ? text.value + ' ' : '') + t
+    listening.value = false
+  }
+  r.onerror = () => { listening.value = false }
+  r.onend = () => { listening.value = false }
+  recognition.value = r
+}
+function toggleMic() {
+  if (props.loading) return
+  if (!recognition.value) initRecognition()
+  if (!recognition.value) return
+  if (listening.value) {
+    recognition.value.stop()
+    listening.value = false
+  } else {
+    try {
+      recognition.value.start()
+      listening.value = true
+    } catch {
+      listening.value = false
+    }
+  }
+}
+onBeforeUnmount(() => { try { recognition.value?.stop() } catch { /* noop */ } })
 
 // [F8] 待发送附件：data 为 base64 编码内容（对齐后端 FileContent），
 // 图片额外保留 data URL 预览用
@@ -353,12 +396,31 @@ const textareaRef = ref<HTMLTextAreaElement>()
         <button class="attach-btn" :disabled="loading" title="添加附件" @click="triggerFilePicker">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
+        <!-- Gemini 式模型选择胶囊（输入卡底部） -->
+        <span class="model-pill" title="选择模型">
+          <svg class="model-icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"/></svg>
+          <select class="model-select" v-model="agent.selectedModel" :disabled="loading">
+            <option v-for="m in SUPPORTED_MODELS" :key="m.value" :value="m.value">{{ m.label }}</option>
+          </select>
+          <svg class="model-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </span>
         <span class="actions-spacer"></span>
         <span
           v-if="showCounter"
           class="char-counter"
           :class="{ 'char-counter--danger': counterDanger }"
         >{{ remaining }}</span>
+        <!-- 录音按钮 -->
+        <button
+          class="mic-btn"
+          :class="{ listening }"
+          :disabled="loading"
+          @click="toggleMic"
+          :title="listening ? '停止录音' : '语音输入'"
+          :aria-label="listening ? '停止录音' : '语音输入'"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        </button>
         <button
           v-if="!loading"
           class="send-btn"
@@ -473,6 +535,36 @@ const textareaRef = ref<HTMLTextAreaElement>()
   gap: 6px;
 }
 .actions-spacer { flex: 1; }
+.model-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 28px;
+  padding: 0 6px 0 9px;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  max-width: 190px;
+}
+.model-pill .model-icon { color: var(--primary, #4f46e5); flex-shrink: 0; }
+.model-pill select {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0 2px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.model-pill select:disabled { opacity: 0.6; cursor: not-allowed; }
+.model-pill .model-chevron { flex-shrink: 0; }
 .attach-btn {
   width: 34px;
   height: 34px;
@@ -501,6 +593,33 @@ const textareaRef = ref<HTMLTextAreaElement>()
 .char-counter--danger {
   color: var(--danger, #dc2626);
   font-weight: 600;
+}
+.mic-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.mic-btn:hover:not(:disabled) {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary, #4f46e5) 10%, transparent);
+}
+.mic-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.mic-btn.listening {
+  color: #fff;
+  background: var(--danger, #ef4444);
+  animation: mic-pulse 1.3s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.45); }
+  50% { box-shadow: 0 0 0 7px rgba(239, 68, 68, 0); }
 }
 .send-btn {
   width: 36px;
@@ -648,6 +767,8 @@ const textareaRef = ref<HTMLTextAreaElement>()
   .history-hint { margin-bottom: 6px; font-size: 11px; padding: 3px 8px; }
   .input-card { padding: 12px 12px 8px; border-radius: 20px; }
   .input-card textarea { font-size: 16px; min-height: 26px; }
+  .model-pill { max-width: 150px; }
+  .model-pill select { max-width: 84px; }
   .file-chip { max-width: 100%; }
   .preview-overlay { padding: 12px; }
   .preview-panel { max-width: 100%; max-height: 86vh; }

@@ -171,6 +171,11 @@ function handleMessageDelete(messageId: string) {
   agent.deleteMessage(messageId)
 }
 
+function handleClearConversation() {
+  if (!confirm('确定清空当前对话？此操作不可撤销。')) return
+  agent.deleteConversation()
+}
+
 function handleRetry(messageId: string) {
   agent.manualRetry(messageId)
 }
@@ -271,14 +276,14 @@ async function handleCopy(messageId: string, text: string) {
           <span class="toggle-slider"></span>
           <span class="toggle-label">向量库检索</span>
         </label>
-        <div class="model-selector">
-          <label for="model-select">模型：</label>
-          <select id="model-select" v-model="agent.selectedModel" :disabled="agent.loading">
-            <option v-for="m in SUPPORTED_MODELS" :key="m.value" :value="m.value">
-              {{ m.label }}
-            </option>
-          </select>
-        </div>
+        <button
+          class="icon-btn clear-chat-btn"
+          :disabled="agent.loading || messages.length === 0"
+          title="清空当前对话"
+          @click="handleClearConversation"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        </button>
       </div>
     </div>
   <!-- @@CHAT_TABLIST@@ -->
@@ -378,9 +383,6 @@ async function handleCopy(messageId: string, text: string) {
     <div v-if="agent.notice" class="chat-notice">{{ agent.notice }}</div>
 
     <div class="chat-footer">
-      <button v-if="messages.length > 0" class="btn btn-danger" @click="agent.deleteConversation()" style="margin: 8px auto 2px; max-width: 860px; width: calc(100% - 48px);" :disabled="agent.loading">
-        Clear conversation
-      </button>
       <ChatInput ref="chatInputRef" :loading="agent.loading" @send="handleSend" @cancel="handleCancel" />
     </div>
 
@@ -453,26 +455,9 @@ async function handleCopy(messageId: string, text: string) {
 .toggle input:checked + .toggle-slider { background: var(--primary, #4f46e5); }
 .toggle input:checked + .toggle-slider::after { transform: translateX(16px); }
 .toggle input:disabled + .toggle-slider { opacity: 0.5; }
-.model-selector {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-.model-selector select {
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-size: 13px;
-  background: var(--surface);
-  color: var(--text);
-  outline: none;
-  cursor: pointer;
-  min-width: 140px;
-  max-width: 200px;
-}
-.model-selector select:focus { border-color: var(--primary); }
+.clear-chat-btn { flex-shrink: 0; }
+.clear-chat-btn:hover:not(:disabled) { color: var(--danger, #ef4444); background: color-mix(in srgb, var(--danger, #ef4444) 12%, transparent); opacity: 1; }
+.clear-chat-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .ws-manager {
   position: relative;
   flex-shrink: 0;
