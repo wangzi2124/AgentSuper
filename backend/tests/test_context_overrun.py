@@ -357,12 +357,12 @@ def test_parse_files_from_answer():
 
 @pytest.mark.asyncio
 async def test_code_agent_wires_coordinator_when_enabled(monkeypatch):
-    """LONG_TASK_STEP_MODE=true 时 code 子 Agent chat 走接力。"""
-    import app.agent.code_agent as ca_mod
+    """LONG_TASK_STEP_MODE=true 且问题够长时 code 子 Agent chat 走接力。"""
     from app.agent.code_agent import CodeAgent
     from app.agent.base import AgentMessage
     from _graphmod_support import build_agent
     monkeypatch.setattr(settings, "long_task_step_mode", True)
+    monkeypatch.setattr(settings, "long_task_min_question_chars", 5)
 
     inner = build_agent()
     coordinator_calls = []
@@ -374,10 +374,35 @@ async def test_code_agent_wires_coordinator_when_enabled(monkeypatch):
 
     agent = CodeAgent(inner=inner)
     msg = AgentMessage(source="user", target="code", type="request", action="chat",
-                       payload={"question": "写一个多文件项目", "conversation_id": "cid", "directory": "/w"})
+                       payload={"question": "写一个多文件项目并运行测试", "conversation_id": "cid", "directory": "/w"})
     replies = [r async for r in agent.handle_message(msg)]
     assert replies[0].payload["answer"] == "RELAY"
-    assert coordinator_calls == [("写一个多文件项目", "/w", "cid")]
+    assert coordinator_calls == [("写一个多文件项目并运行测试", "/w", "cid")]
+
+
+@pytest.mark.asyncio
+async def test_code_agent_short_question_skips_planning(monkeypatch):
+    """门控：问题过短即使 step_mode 开启也不走接力（零规划开销）。"""
+    from app.agent.code_agent import CodeAgent
+    from app.agent.base import AgentMessage
+    monkeypatch.setattr(settings, "long_task_step_mode", True)
+    monkeypatch.setattr(settings, "long_task_min_question_chars", 30)
+    called = []
+    coordinator_calls = []
+
+    class Inner:
+        async def invoke(self, **kw):
+            called.append(kw.get("question"))
+            return {"answer": "NORMAL", "sources": [], "steps": [], "tokens": {}}
+    monkeypatch.setattr("app.agent.long_task.LongTaskCoordinator.run",
+                        lambda self, question, directory="", conversation_id="": coordinator_calls.append(question) or {})
+    agent = CodeAgent(inner=Inner())
+    msg = AgentMessage(source="user", target="code", type="request", action="chat",
+                       payload={"question": "你好"})  # 2 字符 < 30
+    replies = [r async for r in agent.handle_message(msg)]
+    assert replies[0].payload["answer"] == "NORMAL"
+    assert called == ["你好"]
+    assert coordinator_calls == []  # 未触发规划
 
 
 @pytest.mark.asyncio
@@ -397,6 +422,50 @@ async def test_code_agent_normal_when_disabled(monkeypatch):
     replies = [r async for r in agent.handle_message(msg)]
     assert replies[0].payload["answer"] == "NORMAL"
     assert called == ["简单问题"]
+
+
+@pytest.mark.asyncio
+async def test_generate_freezes_tool_defs_for_cache(monkeypatch, tmp_path):
+    """[C5 · G] 请求内 tool_defs 冻结：每轮传给 LLM 的 tools 参数字节一致（前缀缓存）。"""
+    from _graphmod_support import FakeLLM, build_agent, make_state
+    import app.agent.graphmod.generate as gen_mod
+    monkeypatch.setattr(settings, "step_summary_enabled", False)
+    for n in ("record_model_call", "trace", "trace_messages"):
+        monkeypatch.setattr(gen_mod, n, lambda *a, **k: None)
+
+    agent = build_agent()
+    # 用真实 _build_tool_defs 包一层计数：每轮返回的必须是同一对象（冻结）
+    orig = agent._build_tool_defs
+    seen = []
+
+    def frozen_build(question="", used=None):
+        d = orig(question, used)
+        seen.append(d)
+        return d
+    monkeypatch.setattr(agent, "_build_tool_defs", frozen_build)
+
+    llm = FakeLLM()
+    llm.responses = [
+        FakeLLM().response(tool_calls=[("tool_probe", '{"a":"1"}')]),
+        FakeLLM().response(tool_calls=[("tool_probe", '{"a":"1"}')]),
+        FakeLLM().response(content="done"),
+    ]
+
+    async def spy(name, args, state=None):
+        return "R"
+    agent._execute_tool = spy
+
+    td_by_call = []
+
+    async def snap_llm(model, messages, tool_defs, state=None):
+        td_by_call.append(tool_defs)
+        return await llm(model, messages, tool_defs, state=state)
+    agent._llm_call = snap_llm
+
+    await agent._generate(make_state(_cwd=str(tmp_path)))
+    # 冻结：只有入口构建一次，循环不再重挂载 → 每轮 tools 参数为同一对象
+    assert len(seen) == 1, f"tool_defs 应只构建一次，实际 {len(seen)} 次"
+    assert all(td is td_by_call[0] for td in td_by_call[1:])
 
 
 @pytest.mark.asyncio

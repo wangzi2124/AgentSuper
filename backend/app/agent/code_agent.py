@@ -114,9 +114,10 @@ class CodeAgent(BaseAgent):
                     "agent_id": self._id,
                     "step": step_event("generate", "生成回答", "running"),
                 })
-                if settings.long_task_step_mode:
+                if settings.long_task_step_mode and len(question) >= settings.long_task_min_question_chars:
                     # [C5 · 方案 E/F] 长任务小步快走：多步骤任务拆计划、每步独立
                     # fresh-context 请求执行，步间只传落盘 STEP_STATE（上下文不膨胀）。
+                    # 门控：短问题直接走普通路径，不浪费一次规划 LLM 调用。
                     from app.agent.long_task import LongTaskCoordinator
                     result = await LongTaskCoordinator(
                         self._inner, max_steps=settings.long_task_max_steps,

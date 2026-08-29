@@ -419,10 +419,10 @@ class RAGAgentGenerate(RAGAgentTools):
                 steps_prompt_injected = True
                 messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
 
-            # [token 优化 v5] 每轮按需重挂载（核心常驻 + 意图命中 + 已使用保留），schema 固定开销大降
-            # [token 优化 P9] 先构建本轮 schema 再截断，预算需扣除 tools 序列化开销（tool_defs 移到此处理）
-            tool_defs = self._build_tool_defs(state.get("question", ""), used_tools)
-            # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）
+            # [C5 · G 前缀缓存] 冻结 tool_defs：请求内不再按 used_tools 每轮重挂载，
+            # 使「system + tools」前缀跨轮次字节稳定 → DeepSeek 前缀缓存命中（0.1x 计费）。
+            # 核心 tool_* 工具本就常驻 schema；模型若调用未挂载的插件/技能工具，_execute_tool
+            # 仍会执行（self.tools 全量），仅本轮 schema 未列出该工具（下轮仍可被调用）。
             final_tool_defs = None if steps_prompt_injected else tool_defs
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(), reserve_tokens=0, tool_defs=final_tool_defs))
             trace_messages("graph.round_ready", messages, tool_defs=final_tool_defs)  # [token trace v7]

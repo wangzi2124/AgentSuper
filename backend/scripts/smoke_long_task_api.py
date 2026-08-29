@@ -51,7 +51,23 @@ def _spy_record(model, prompt_tokens=0, completion_tokens=0, duration_ms=0, tool
     })
 
 
+# 缓存命中/未命中从 trace("llm.usage", ...) 事件捕获（G 前缀缓存验证）
+CACHE_LOG: list[dict] = []
+
+
+def _spy_trace(event, **payload):
+    if event == "llm.usage":
+        CACHE_LOG.append({
+            "hit": payload.get("cache_hit", 0),
+            "miss": payload.get("cache_miss", 0),
+            "where": payload.get("where", ""),
+        })
+    return None
+
+
 core_mod.record_model_call = _spy_record
+core_mod.trace = _spy_trace
+core_mod.trace_messages = lambda *a, **k: None
 
 
 def main() -> int:
@@ -83,11 +99,17 @@ def main() -> int:
     for i, s in enumerate(plan, 1):
         print(f"  step{i}: {s[:50]}")
 
-    print(f"\n== 每步每次 LLM 调用 pt 曲线 ==")
+    print(f"\n== 每步每次 LLM 调用 pt 曲线（hit=缓存命中 token） ==")
     peak = 0
     for i, rec in enumerate(PT_LOG, 1):
         peak = max(peak, rec["pt"])
-        print(f"  call{i:2d}: pt={rec['pt']:6d}  ct={rec['ct']:4d}  rounds={rec['rounds']}  {rec['dur_ms']:7.1f}ms")
+        ch = CACHE_LOG[i - 1].get("hit", 0) if i <= len(CACHE_LOG) else 0
+        print(f"  call{i:2d}: pt={rec['pt']:6d}  ct={rec['ct']:4d}  cache_hit={ch:6d}  "
+              f"hit_ratio={ch / rec['pt'] * 100:.0f}%  rounds={rec['rounds']}")
+
+    total_hit = sum(c.get("hit", 0) for c in CACHE_LOG)
+    total_miss = sum(c.get("miss", 0) for c in CACHE_LOG) or 1
+    print(f"  前缀缓存: 命中 {total_hit} / 未命中 {total_miss} token（命中率 {total_hit / (total_hit + total_miss) * 100:.0f}%）")
 
     limit = int(settings.max_context_tokens)
     over = [r for r in PT_LOG if r["pt"] > limit]
@@ -107,7 +129,6 @@ def main() -> int:
 
     ok = not over and peak <= limit and answer.strip()
     print("\n结论:", "PASS - 全程 pt ≤ MAX_CONTEXT_TOKENS，接力完成" if ok else "FAIL")
-    # 报告落盘（UTF-8，便于审计）
     try:
         from pathlib import Path
         (Path(WORK) / "smoke_report.md").write_text(
