@@ -18,3 +18,4 @@ backend/data.zip
 backend/logs/
 data/logs/
 scripts/upgrade_chat_panel.py
+backend/.agents/steps/*.md
