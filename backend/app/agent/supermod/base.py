@@ -59,6 +59,7 @@ class SupervisorAgentBase(BaseAgent):
         if agent_id in self._extended_timeout_agents:
             return settings.sub_agent_timeout_extended
         return settings.sub_agent_timeout
+    @property
     def agent_id(self) -> str:
         return self._id
     def _start_heartbeat(self, interval: float = 5.0):

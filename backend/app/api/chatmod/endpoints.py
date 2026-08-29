@@ -117,6 +117,7 @@ def _get_agent_semaphore() -> asyncio.Semaphore:
 # ═══════════════════════════════════════════════════════════════
 
 
+@router.post("/multi-agent", response_model=MultiAgentChatResponse)
 async def chat_multi_agent(request: Request, body: ChatRequest):
     """使用多 Agent 系统处理聊天请求。
 
@@ -203,6 +204,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
 # ═══════════════════════════════════════════════════════════════
 
 
+@router.post("/multi-agent/stream")
 async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     """使用多 Agent 系统的流式聊天端点。
 

@@ -189,6 +189,7 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
             len(attempts), attempts[-1] if attempts else "unknown",
         )
         return [{"agent": "rag", "question": question}]
+    @staticmethod
     def _validate_subtasks(data, routable: list[str]) -> list[dict]:
         """校验并规范化 LLM 分解输出，返回合法子任务列表（白名单过滤 + 最多 3 个）。"""
         if not isinstance(data, list):
