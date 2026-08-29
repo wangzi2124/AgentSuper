@@ -12,6 +12,20 @@ const props = defineProps<{ loading: boolean }>()
 // Gemini 式输入卡底部操作：模型选择下沉到输入框内
 const agent = useMultiAgentStore()
 
+// [模型选择] 向上弹出的自绘下拉（原生 select 只能向下且无法自定义样式）
+const modelMenuOpen = ref(false)
+const currentModelLabel = computed(
+  () => SUPPORTED_MODELS.find(m => m.value === agent.selectedModel)?.label || agent.selectedModel
+)
+function toggleModelMenu() {
+  if (props.loading) return
+  modelMenuOpen.value = !modelMenuOpen.value
+}
+function pickModel(value: string) {
+  agent.selectedModel = value
+  modelMenuOpen.value = false
+}
+
 // [录音] Web Speech API 语音输入（浏览器原生，Chrome/Edge 桌面可用，无需后端）
 const listening = ref(false)
 const recognition = ref<{ start(): void; stop(): void } | null>(null)
@@ -396,13 +410,33 @@ const textareaRef = ref<HTMLTextAreaElement>()
         <button class="attach-btn" :disabled="loading" title="添加附件" @click="triggerFilePicker">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
-        <!-- Gemini 式模型选择胶囊（输入卡底部） -->
-        <span class="model-pill" title="选择模型">
-          <svg class="model-icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"/></svg>
-          <select class="model-select" v-model="agent.selectedModel" :disabled="loading">
-            <option v-for="m in SUPPORTED_MODELS" :key="m.value" :value="m.value">{{ m.label }}</option>
-          </select>
-          <svg class="model-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        <!-- Gemini 式模型选择胶囊（输入卡底部，向上弹出） -->
+        <span class="model-wrap">
+          <button
+            type="button"
+            class="model-pill"
+            :disabled="loading"
+            @click.stop="toggleModelMenu"
+            title="选择模型"
+          >
+            <svg class="model-icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"/></svg>
+            <span class="model-current">{{ currentModelLabel }}</span>
+            <svg class="model-chevron" :class="{ open: modelMenuOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div v-if="modelMenuOpen" class="model-menu-mask" @click="modelMenuOpen = false"></div>
+          <div v-if="modelMenuOpen" class="model-menu">
+            <button
+              v-for="m in SUPPORTED_MODELS"
+              :key="m.value"
+              type="button"
+              class="model-menu-item"
+              :class="{ active: agent.selectedModel === m.value }"
+              @click="pickModel(m.value)"
+            >
+              <span class="model-menu-name">{{ m.label }}</span>
+              <svg v-if="agent.selectedModel === m.value" class="check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </button>
+          </div>
         </span>
         <span class="actions-spacer"></span>
         <span
@@ -535,6 +569,7 @@ const textareaRef = ref<HTMLTextAreaElement>()
   gap: 6px;
 }
 .actions-spacer { flex: 1; }
+.model-wrap { position: relative; display: inline-flex; }
 .model-pill {
   display: inline-flex;
   align-items: center;
@@ -546,31 +581,63 @@ const textareaRef = ref<HTMLTextAreaElement>()
   border: 1px solid color-mix(in srgb, var(--text-secondary, #64748b) 16%, var(--border));
   color: var(--text-secondary);
   cursor: pointer;
+  font-family: inherit;
   max-width: 190px;
   transition: border-color 0.15s, background 0.15s;
 }
-.model-pill:hover {
+.model-pill:hover:not(:disabled) {
   border-color: var(--primary, #4f46e5);
   background: color-mix(in srgb, var(--primary, #4f46e5) 6%, var(--surface));
 }
+.model-pill:disabled { opacity: 0.6; cursor: not-allowed; }
 .model-pill .model-icon { color: var(--primary, #4f46e5); flex-shrink: 0; }
-.model-pill select {
-  border: none;
-  background: transparent;
-  color: var(--text);
+.model-current {
   font-size: 12px;
   font-weight: 600;
-  outline: none;
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-  padding: 0 2px;
+  color: var(--text);
   max-width: 116px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.model-pill select:disabled { opacity: 0.6; cursor: not-allowed; }
-.model-pill .model-chevron { flex-shrink: 0; }
+.model-chevron { flex-shrink: 0; transition: transform 0.2s; }
+.model-chevron.open { transform: rotate(180deg); }
+.model-menu-mask { position: fixed; inset: 0; z-index: 90; }
+.model-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 91;
+  min-width: 200px;
+  max-width: 240px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 16px 44px rgba(15, 23, 42, 0.18);
+}
+.model-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s;
+}
+.model-menu-item:hover { background: var(--bg); }
+.model-menu-item.active { color: var(--primary, #4f46e5); font-weight: 600; }
+.model-menu-item .check { flex-shrink: 0; }
 .attach-btn {
   width: 34px;
   height: 34px;
@@ -774,7 +841,7 @@ const textareaRef = ref<HTMLTextAreaElement>()
   .input-card { padding: 12px 12px 8px; border-radius: 20px; }
   .input-card textarea { font-size: 16px; min-height: 26px; }
   .model-pill { max-width: 150px; }
-  .model-pill select { max-width: 84px; }
+  .model-current { max-width: 84px; }
   .file-chip { max-width: 100%; }
   .preview-overlay { padding: 12px; }
   .preview-panel { max-width: 100%; max-height: 86vh; }
