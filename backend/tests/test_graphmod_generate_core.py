@@ -521,6 +521,8 @@ def gen_env(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENTSUPER_LOG_DIR", str(tmp_path / "logs"))
     for name in ("record_model_call", "trace", "trace_messages"):
         monkeypatch.setattr(gen_mod, name, lambda *a, **k: None)
+    # [C5 · 方案 D] 旧用例不 mock 摘要组件 → 关闭小步快走，保持既有行为
+    monkeypatch.setattr(settings, "step_summary_enabled", False)
     return monkeypatch
 
 

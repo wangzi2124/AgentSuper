@@ -36,6 +36,7 @@ from app.context.tool_dedup import ToolResultDedup
 
 from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
 from app.context.budget import llm_call_budget
+from app.context.token_counter import estimate_tokens_messages
 
 from app.utils.json_repair import parse_tool_args
 
@@ -88,6 +89,37 @@ from .state import _find_attachment
 logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgentGenerate(RAGAgentTools):
+    async def _step_summarize(self, messages: list[dict], budget: int) -> list[dict]:
+        """[C5 · 方案 D] 小步快走摘要替换：用 HierarchicalSummarizationMiddleware
+        把旧轮次压成摘要，上下文只装 [摘要 checkpoint + 最近一轮 + 当前步]。
+
+        与既有 compaction（阈值触发、anchored Task checkpoint）互补：本方法是
+        **结构性**的——长任务周期性执行，无论上下文是否触顶都把旧轮次换成摘要，
+        从根源上避免上下文随轮次线性膨胀（而非等它涨到阈值再清理）。
+
+        保留最近 keep 条消息（覆盖刚完成一轮的 assistant+tool 结果），
+        旧轮次进入摘要；摘要失败回退原列表（不阻断执行）。
+        """
+        try:
+            from app.middleware.summarization import HierarchicalSummarizationMiddleware
+            summarizer = HierarchicalSummarizationMiddleware(
+                model=settings.summarization_model or self.model,
+                api_key=settings.summarization_api_key or settings.llm_api_key,
+                api_base=settings.summarization_api_base or settings.llm_api_base,
+                trigger=("tokens", 1),  # 始终压缩（结构性小步，而非阈值触发）
+                keep=("messages", max(2, settings.step_summary_keep_messages)),
+            )
+            compacted = await summarizer.apply(messages)
+            compacted = sanitize_tool_messages(compacted)
+            if estimate_tokens_messages(compacted) > budget:
+                compacted = sanitize_tool_messages(
+                    _truncate_messages(compacted, max_tokens=budget, reserve_tokens=0)
+                )
+            return compacted
+        except Exception as e:  # noqa: BLE001 —— 摘要失败不阻断执行
+            logger.warning("step summarize failed, keep raw context: %s", e)
+            return messages
+
     async def _generate(self, state: AgentState) -> dict:
         """调用LLM生成回答，支持多轮工具调用。"""
         _gen_start = tmod.time()
@@ -321,6 +353,15 @@ class RAGAgentGenerate(RAGAgentTools):
                         "files": [],
                     },
                 )
+
+            # [C5 · 方案 D 小步快走] 长任务周期性地把旧轮次压成摘要：
+            # 上下文只装 [摘要 + 最近一轮 + 当前步]，不随轮次线性膨胀。
+            if (
+                settings.step_summary_enabled
+                and rounds >= max(1, settings.step_summary_min_rounds)
+                and rounds % max(1, settings.step_summary_interval) == 0
+            ):
+                messages = await self._step_summarize(messages, llm_call_budget())
 
             # Doom-loop 检测：同一组工具调用指纹连续重复 ≥ threshold 轮 → 注入策略变更提示；
             # 首次提示后仍连续重复（升级到 doom_loop_max_strikes）→ 强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具）

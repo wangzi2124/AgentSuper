@@ -212,3 +212,106 @@ def test_step_state_write_read(tmp_path):
 
 def test_step_state_no_dir(tmp_path):
     assert step_state.load_latest_step_state(str(tmp_path / "nonexistent")) == (None, None)
+
+
+# ── 方案 D · 小步快走摘要替换 ──────────────────────────────────────────────
+
+class FakeSummarizer:
+    def __init__(self, **kw):
+        self.kw = kw
+
+    async def apply(self, history):
+        keep = self.kw["keep"][1]
+        return [{"role": "system", "content": "[step summary] 已完成旧轮次"}] + history[-keep:]
+
+
+def _round_msgs():
+    msgs = [{"role": "system", "content": "SYS"}]
+    for i in range(3):  # 3 个旧轮次
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}", "function": {"name": "t", "arguments": "{}"}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": f"old{i}"})
+    # 最近一轮
+    msgs.append({"role": "assistant", "content": "", "tool_calls": [{"id": "c9", "function": {"name": "t", "arguments": "{}"}}]})
+    msgs.append({"role": "tool", "tool_call_id": "c9", "content": "recent"})
+    return msgs
+
+
+@pytest.mark.asyncio
+async def test_step_summarize_replaces_old_rounds(monkeypatch):
+    from _graphmod_support import build_agent
+    import app.agent.graphmod.generate as gen_mod
+    monkeypatch.setattr("app.middleware.summarization.HierarchicalSummarizationMiddleware", FakeSummarizer)
+    monkeypatch.setattr(settings, "step_summary_keep_messages", 2)
+    agent = build_agent()
+    msgs = _round_msgs()
+    out = await agent._step_summarize(msgs, budget=10_000)
+    # 旧轮次被摘要替换，仅保留最近 keep 条 + 摘要
+    contents = [m.get("content", "") for m in out]
+    assert any("step summary" in str(c) for c in contents)
+    assert any(str(c) == "recent" for c in contents)
+    assert not any(str(c) == "old0" for c in contents)
+
+
+@pytest.mark.asyncio
+async def test_step_summarize_failure_keeps_raw(monkeypatch):
+    from _graphmod_support import build_agent
+    class Boom:
+        def __init__(self, **kw):
+            pass
+
+        async def apply(self, history):
+            raise RuntimeError("summarizer down")
+    monkeypatch.setattr("app.middleware.summarization.HierarchicalSummarizationMiddleware", Boom)
+    agent = build_agent()
+    msgs = _round_msgs()
+    assert await agent._step_summarize(msgs, 10_000) is msgs  # 回退原列表
+
+
+@pytest.mark.asyncio
+async def test_generate_long_task_small_step_wiring(monkeypatch, tmp_path):
+    """长任务（≥min_rounds）周期性调用 _step_summarize，发送上下文保持有界。"""
+    from _graphmod_support import FakeLLM, build_agent, make_state
+    import app.agent.graphmod.generate as gen_mod
+    monkeypatch.setattr(settings, "step_summary_enabled", True)
+    monkeypatch.setattr(settings, "step_summary_min_rounds", 3)
+    monkeypatch.setattr(settings, "step_summary_interval", 2)
+    monkeypatch.setattr(settings, "step_summary_keep_messages", 4)
+    monkeypatch.setattr(settings, "max_context_tokens", 10_000)
+    monkeypatch.setattr(settings, "context_reserve_tokens", 1_000)
+    monkeypatch.setattr(settings, "context_safety_ratio", 0.5)
+    for n in ("record_model_call", "trace", "trace_messages"):
+        monkeypatch.setattr(gen_mod, n, lambda *a, **k: None)
+
+    agent = build_agent()
+    monkeypatch.setattr(agent, "_build_tool_defs", lambda *a, **k: [])
+    calls = []
+
+    async def fake_sum(messages, budget):
+        calls.append(len(messages))
+        return [{"role": "system", "content": "SYS"},
+                {"role": "system", "content": "[step summary] 已压缩"},
+                messages[-1]]  # 只留摘要 + 最近一条
+    monkeypatch.setattr(agent, "_step_summarize", fake_sum)
+
+    llm = FakeLLM()
+    llm.responses = ([FakeLLM().response(tool_calls=[("tool_probe", '{"a":"1"}')]) for _ in range(6)]
+                     + [FakeLLM().response(content="done")])
+    sent = []
+
+    async def snap_llm(model, messages, tool_defs, state=None):
+        sent.append([dict(m) for m in messages])
+        return await llm(model, messages, tool_defs, state=state)
+    agent._llm_call = snap_llm
+
+    async def spy(name, args, state=None):
+        return "小步数据" * 800  # 中文大输出
+    agent._execute_tool = spy
+
+    await agent._generate(make_state(_cwd=str(tmp_path)))
+    # 第 4、6 轮触发摘要（>=3 且 %2==0）；第 7 轮收尾
+    assert calls, "长任务应触发小步快走摘要"
+    assert len(calls) >= 2
+    # 摘要后所有发送快照估算 ≤ budget（4500）+ 摘要/系统余量
+    for msgs in sent:
+        est = tc.estimate_tokens_messages(msgs)
+        assert est <= 4500 + 300, est

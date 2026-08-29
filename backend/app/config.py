@@ -93,6 +93,15 @@ class Settings(BaseSettings):
     # 32KB 字符 ≈ 48K token 单条过大，bound_tool_output 在字符/行限之外再按 token
     # 封顶，超限写盘 + 续读提示。0 = 不启用 token 封顶。
     tool_output_max_tokens: int = 8_000
+    # [C5 · 方案 D 小步快走] 长任务周期性地把旧轮次压成摘要（HierarchicalSummarization
+    # Middleware），上下文只装 [摘要 checkpoint + 最近一轮 + 当前步]，不随轮次线性膨胀。
+    step_summary_enabled: bool = True
+    # 从第几步起进入小步快走（短任务保持 in-loop 快路径，不做多余摘要调用）
+    step_summary_min_rounds: int = 3
+    # 每隔几步做一次摘要替换（间隔 1 = 每轮都压，成本高；间隔 2 = 折中）
+    step_summary_interval: int = 2
+    # 摘要后原样保留的最近消息条数（覆盖最近一轮 assistant+tool 结果）
+    step_summary_keep_messages: int = 4
     # 摘要中间件缓存大小（按历史分块缓存，避免每请求全量重算）
     summarization_cache_size: int = 200
 
