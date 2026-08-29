@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 def classify_error(exc: Exception) -> dict[str, Any]:
     """错误分类（对齐 chat.py run_agent 的 retryable/status_code 判定）。"""
     error_str = str(exc).lower()
-    error_type = type(exc).__name__
+    # 统一小写：错误类别名比较（ratelimit/internalserverserror）与消息一样需大小写无关
+    error_type = type(exc).__name__.lower()
     retryable = False
     status_code = None
 
@@ -26,7 +27,7 @@ def classify_error(exc: Exception) -> dict[str, Any]:
         retryable, status_code = True, 429
     elif any(x in error_str for x in ("500", "502", "503", "504")):
         retryable, status_code = True, 500
-    elif "internalserverserror" in error_type or "internal server error" in error_str:
+    elif "internalservererror" in error_type or "internal server error" in error_str:
         retryable, status_code = True, 500
     elif "timeout" in error_str or "timed out" in error_str:
         retryable = True
