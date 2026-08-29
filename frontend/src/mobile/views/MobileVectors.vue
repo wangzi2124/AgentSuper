@@ -8,21 +8,15 @@ const vs = useVectorStore()
 const ds = useDocumentStore()
 
 const searchText = ref('')
-const filterSheet = ref(false)
 const selectedDocId = ref('')
 
 const totalPages = computed(() => Math.ceil(vs.total / vs.limit))
 const hasMore = computed(() => vs.chunks.length < vs.total)
 
 const docOptions = computed(() => [
-  { name: '全部文档', subname: `${ds.documents.reduce((n, d) => n + d.chunk_count, 0)} chunks`, value: '' },
-  ...ds.documents.map(d => ({ name: d.filename, subname: `${d.chunk_count} chunks`, value: d.id })),
+  { name: '全部文档', value: '' },
+  ...ds.documents.map(d => ({ name: d.filename, value: d.id })),
 ])
-
-function selectedDocLabel() {
-  const hit = docOptions.value.find(o => o.value === selectedDocId.value)
-  return hit ? hit.name : '全部文档'
-}
 
 function chunkSource(chunk: { metadata: Record<string, unknown> }): string {
   const f = chunk.metadata.filename
@@ -107,12 +101,13 @@ async function handleRepair() {
         @clear="onSearch"
       />
       <div class="m-query-row">
-        <span class="m-query-chip" @click="filterSheet = true">
-          <van-icon name="filter-o" />
-          <span class="m-query-chip-label">{{ selectedDocLabel() }}</span>
-          <van-icon name="arrow-down" />
-        </span>
-        <span v-if="vs.searchQuery" class="m-query-hint">匹配 {{ vs.chunks.length }} 条</span>
+        <span
+          v-for="opt in docOptions"
+          :key="opt.value || '__all__'"
+          class="m-filter-chip"
+          :class="{ active: selectedDocId === opt.value }"
+          @click="onPickDoc(opt)"
+        >{{ opt.name }}</span>
       </div>
     </div>
 
@@ -171,17 +166,8 @@ async function handleRepair() {
         </button>
       </div>
     </div>
-
-    <van-action-sheet
-      v-model:show="filterSheet"
-      :actions="docOptions"
-      title="按文档筛选"
-      cancel-text="取消"
-      @select="onPickDoc"
-    />
   </div>
 </template>
-
 
 <style scoped>
 .m-vectors { padding: 8px 12px 24px; }
@@ -248,26 +234,35 @@ async function handleRepair() {
 .m-query-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 0 14px 10px;
+  gap: 8px;
+  padding: 4px 14px 10px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
-.m-query-chip {
+.m-query-row::-webkit-scrollbar { display: none; }
+.m-filter-chip {
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 11px;
+  height: 24px;
+  padding: 0 10px;
   border-radius: 999px;
-  background: var(--m-vector-soft, rgba(16, 185, 129, 0.12));
-  color: var(--m-vector, #10b981);
-  font-size: 12px;
-  font-weight: 600;
-  max-width: 60%;
+  background: var(--m-vector-soft, rgba(16, 185, 129, 0.10));
+  color: var(--text-secondary, #64748b);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.15s, color 0.15s;
 }
-.m-query-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.m-query-chip .van-icon { font-size: 13px; flex-shrink: 0; }
-.m-query-hint { font-size: 11px; color: var(--text-tertiary, #94a3b8); flex-shrink: 0; }
+.m-filter-chip.active {
+  background: var(--m-vector, #10b981);
+  color: #fff;
+  font-weight: 600;
+}
 
 /* 分块卡片 */
 .chunk-list { display: flex; flex-direction: column; gap: 10px; }
