@@ -153,13 +153,25 @@ def _peek_dimensions(raw: bytes) -> tuple[int, int]:
 def ocr_image(data_b64: str, filename: str = "") -> str:
     """图片 OCR 提取文本（截图/文档图，信息保真优先）。
 
-    IMAGE_USE_OCR=false 或 OCR 库缺失时返回 ""（不启用）。接入示例：
-    PaddleOCR / pytesseract；此处为 hook，落地具体引擎时在分支内实现。
+    IMAGE_USE_OCR=false 或 OCR 引擎不可用（未装 pytesseract + tesseract 二进制）
+    时返回 ""（不启用，降级链继续）。启用时用 pytesseract（chi_sim+eng）。
     """
     from app.config import settings
     if not settings.image_use_ocr:
         return ""
-    return ""  # TODO: 接入 OCR 引擎后实现
+    try:
+        import io as _io
+        from PIL import Image
+        import pytesseract
+        raw = base64.b64decode(data_b64 or "", validate=False)
+        img = Image.open(_io.BytesIO(raw))
+        text = pytesseract.image_to_string(img, lang="chi_sim+eng")
+        text = (text or "").strip()
+        logger.info("image ocr ok (%s): %d chars", filename, len(text))
+        return text
+    except Exception as e:  # noqa: BLE001 —— OCR 引擎缺失/失败不阻断
+        logger.warning("image ocr unavailable (%s): %s", filename, e)
+        return ""
 
 
 def _caption_kwargs() -> tuple[str, Optional[str], Optional[str], str, int]:

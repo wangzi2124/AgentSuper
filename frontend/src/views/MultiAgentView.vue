@@ -323,6 +323,7 @@ async function handleCopy(messageId: string, text: string) {
                       alt=""
                       @click="previewImage = `data:${f.mime_type};base64,${f.data}`"
                     />
+                    <span v-if="f._caption" class="msg-file-caption">{{ f._caption }}</span>
                     <span v-else class="msg-file-name">📄 {{ f.filename }}</span>
                   </div>
                 </div>
@@ -611,6 +612,7 @@ async function handleCopy(messageId: string, text: string) {
 /* [F8] 用户消息附件回显 */
 .msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .msg-file-image { max-width: 200px; max-height: 200px; border-radius: 8px; object-fit: cover; display: block; cursor: zoom-in; }
+.msg-file-caption { display: block; font-size: 12px; color: var(--text-secondary, #64748b); margin-top: 4px; max-width: 200px; }
 .msg-file-name { font-size: 12px; padding: 3px 8px; border-radius: 6px; background: rgba(255,255,255,0.18); display: inline-block; }
 .is-error .bubble { background: rgba(239,68,68,0.06); border-color: rgba(239,68,68,0.3); }
 .message-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 11px; }

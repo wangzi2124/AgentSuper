@@ -185,9 +185,11 @@ def _attachment_parts(files: list[dict], budget: int = 6000):
         else:
             others.append(f)
 
-    # [F8] 图片 token 预算：超 IMAGE_TOKEN_CAP → 进一步降采样一次（仍超则保留，由 C5 截断兜底）
+    # [F8] 图片 token 预算：超 IMAGE_TOKEN_CAP → 先降采样一次；仍超则超出部分
+    # 转「仅描述占位」（不携带 image_url），彻底遵守预算（调用方仍可经 caption 看内容）。
     cap = max(1, int(settings.image_token_cap))
     total = sum(estimate_image_tokens(im.get("_width", 0), im.get("_height", 0)) for im in images)
+    dropped_hint: list[str] = []
     if images and total > cap:
         smaller = max(1, int(settings.image_max_dimension) // 2)
         re_normed = []
@@ -199,8 +201,22 @@ def _attachment_parts(files: list[dict], budget: int = 6000):
             re_normed.append({**im, "data": n["data"], "mime_type": n["mime_type"],
                               "_width": n["width"], "_height": n["height"]})
         images = re_normed
+        new_total = sum(estimate_image_tokens(im.get("_width", 0), im.get("_height", 0)) for im in images)
+        if new_total > cap:
+            keep: list[dict] = []
+            acc = 0
+            for im in images:
+                tk = estimate_image_tokens(im.get("_width", 0), im.get("_height", 0))
+                if acc + tk <= cap:
+                    keep.append(im)
+                    acc += tk
+                else:
+                    dropped_hint.append(f"[图片 {im.get('filename', '')}: 体积过大已省略，已按需生成描述]")
+            images = keep
 
     text_ctx = attachment_loader.attachment_context_text(others, budget=budget) if others else ""
+    if dropped_hint:
+        text_ctx = (text_ctx + "\n\n" + "\n".join(dropped_hint)).strip()
     return images, text_ctx
 
 
