@@ -324,7 +324,7 @@ async function handleRepair() {
   justify-content: space-between;
   gap: 10px;
   margin: 12px 0 4px;
-  padding: 10px;
+  padding: 8px;
   background: color-mix(in srgb, var(--surface, #fff) 88%, transparent);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -342,18 +342,19 @@ async function handleRepair() {
 .m-manage-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 38px;
-  padding: 0 14px;
+  gap: 4px;
+  height: 30px;
+  padding: 0 11px;
   border: none;
   border-radius: 999px;
   background: var(--m-vector-soft, rgba(16, 185, 129, 0.12));
   color: var(--m-vector, #10b981);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: opacity 0.15s, transform 0.1s;
 }
+.m-manage-btn .van-icon { font-size: 13px; }
 .m-manage-btn:active { transform: scale(0.96); opacity: 0.8; }
 .m-manage-btn.repair {
   background: rgba(217, 119, 6, 0.12);
