@@ -102,6 +102,7 @@ async function handleDelete(item: CustomToolItem) {
       <div class="count">{{ filteredItems.length }} 个自定义工具</div>
       <van-swipe-cell v-for="item in filteredItems" :key="item.type + ':' + item.name">
         <van-cell
+          :class="'t-' + item.type"
           :title="item.name"
           :label="`${item.type === 'script' ? '🧩' : '📌'} ${item.description || ''} · ${item.tools.join(', ')}`"
           center
@@ -178,3 +179,66 @@ async function handleDelete(item: CustomToolItem) {
 .pin-options { flex: 1; overflow-y: auto; }
 .pin-options :deep(.van-cell.active) { background: var(--primary-soft); }
 </style>
+
+<style scoped>
+/* ===== @@M_TOOL_CARD@@ 自定义工具卡片化（upgrade_mobile_ui.py tools job） ===== */
+.m-tools { padding: 0 12px 24px; }
+
+/* CTA：品牌渐变胶囊按钮（覆盖 Vant plain primary 轮廓） */
+.cta { padding: 4px 2px 14px; }
+.m-tools :deep(.cta .van-button--plain.van-button--primary) {
+  color: #fff;
+  background: linear-gradient(135deg, #6d5ef1, #8b5cf6);
+  border: none;
+  border-radius: 999px;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(109, 94, 241, 0.30);
+}
+.tool-list { gap: 8px; padding: 0 2px; }
+.count {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--m-tools, #8b5cf6);
+  background: var(--m-tools-soft, rgba(139, 92, 246, 0.10));
+  align-self: flex-start;
+  border-radius: 999px;
+  padding: 4px 12px;
+  margin: 4px 2px 8px;
+}
+.m-tools :deep(.van-swipe-cell .van-cell) {
+  border-radius: var(--m-card-radius, 16px);
+  background: var(--surface, #fff) !important;
+  border: 1px solid var(--border, #eef1f6);
+  box-shadow: var(--m-card-shadow, 0 2px 12px rgba(31, 41, 55, 0.06));
+  margin-bottom: 8px;
+}
+.m-tools :deep(.van-cell__title) { font-size: 14px; font-weight: 600; color: var(--text, #1e293b); }
+.m-tools :deep(.van-cell__label) { font-size: 12px; color: var(--text-secondary, #64748b); }
+
+/* 工具类型语义色：script 粉 / pin 青 */
+.m-tools :deep(.t-script .van-cell__value .van-switch) { --van-switch-on-background: #ec4899; }
+.m-tools :deep(.t-pin .van-cell__value .van-switch)    { --van-switch-on-background: #06b6d4; }
+.m-tools :deep(.t-script .van-cell__title) { border-left: 3px solid var(--sw-pink, #ec4899); padding-left: 8px; line-height: 1.4; }
+.m-tools :deep(.t-pin .van-cell__title)    { border-left: 3px solid var(--sw-cyan, #06b6d4); padding-left: 8px; line-height: 1.4; }
+.swipe-del { background: linear-gradient(135deg, #ee0a24, #f87171); font-weight: 600; }
+
+/* 表单面板：渐变标题头 + 选中项描边 */
+.form-panel :deep(.form-title) {
+  font-size: 16px;
+  font-weight: 700;
+  display: inline-block;
+  padding: 2px 0 4px;
+  background: linear-gradient(90deg, #6d5ef1, #8b5cf6);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.form-panel { background: var(--surface, #fff); }
+.pin-options :deep(.van-cell.active) {
+  background: var(--primary-soft, rgba(109, 94, 241, 0.10));
+  border: 1px solid var(--primary, #4f46e5);
+  border-radius: 12px;
+}
+.pin-options :deep(.van-cell) { border: 1px solid var(--border, #eef1f6); border-radius: 12px; margin-bottom: 6px; }
+</style>
+

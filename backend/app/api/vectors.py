@@ -30,12 +30,19 @@ async def list_chunks(
 
 @router.get("/config")
 async def vector_store_config(request: Request):
-    """返回向量库清理相关配置（启动清空 / TTL 天数 / 清理间隔）。"""
+    """返回向量库清理相关配置 + 索引一致性统计（修复按钮数据来源）。"""
+    fs = request.app.state.file_store
+    states: dict[str, int] = {}
+    for doc in fs.list_all():
+        st = doc.get("index_state", "pending")  # 旧数据无该字段视作待修复
+        states[st] = states.get(st, 0) + 1
     return {
         "auto_clear": settings.vector_store_auto_clear,
         "ttl_days": settings.vector_store_ttl_days,
         "cleanup_interval_hours": settings.vector_store_cleanup_interval_hours,
         "count": request.app.state.vector_store.count,
+        "index_states": states,
+        "pending_repair": states.get("pending", 0) + states.get("processing", 0) + states.get("failed", 0),
     }
 
 
@@ -61,4 +68,25 @@ async def clear_expired_vectors(request: Request):
         "message": f"已清理 {removed} 个过期文档",
         "removed": removed,
         "ttl_days": settings.vector_store_ttl_days,
+    }
+
+
+@router.post("/repair")
+async def repair_vectors(request: Request):
+    """自愈重建：对 index_state != ready 的文档重放建索引（向量/BM25/章节）。
+
+    上传/重建崩溃遗留的孤儿数据在此补齐：主库（已保存文件+元数据）为权威，
+    派生索引按 document_id 幂等重建，多次调用安全。"""
+    require_admin(request)
+    from app.services.kb_repair import repair_incomplete_documents
+
+    result = await repair_incomplete_documents(request.app.state)
+    repaired = len(result["repaired"])
+    failed = len(result["failed"])
+    message = "索引已全部一致，无需修复" if not repaired and not failed else (
+        f"已重建 {repaired} 个文档的索引" + (f"，{failed} 个失败" if failed else "")
+    )
+    return {
+        "message": message,
+        **result,
     }

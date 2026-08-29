@@ -102,7 +102,7 @@ function closeOutput() {
       <div class="count">{{ store.filteredFiles.length }} 个文件</div>
       <van-cell-group inset>
         <van-swipe-cell v-for="f in store.filteredFiles" :key="f.filename">
-          <van-cell :title="f.filename" :label="store.formatSize(f.size)" :icon="isJsFile(f.filename) ? 'lightning' : 'description'" is-link @click="isJsFile(f.filename) ? handleRun(f.filename) : handleDownload(f.filename)" />
+          <van-cell :title="f.filename" :label="store.formatSize(f.size)" :icon="isJsFile(f.filename) ? 'lightning' : 'description'" class="m-file-cell" :class="isJsFile(f.filename) ? 'ftype-js' : 'ftype-doc'" is-link @click="isJsFile(f.filename) ? handleRun(f.filename) : handleDownload(f.filename)" />
           <template #right>
             <div class="swipe-btn swipe-run" v-if="isJsFile(f.filename)" @click="handleRun(f.filename)">运行</div>
             <div class="swipe-btn swipe-dl" @click="handleDownload(f.filename)">下载</div>
@@ -144,3 +144,81 @@ function closeOutput() {
 .run-body { flex: 1; overflow: auto; margin: 0; font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 12px; }
 .run-body.error { color: #f87171; }
 </style>
+
+<style scoped>
+/* ===== @@M_FILE_CARD@@ 生成文件卡片化（upgrade_mobile_ui.py generated job） ===== */
+.file-list { gap: 10px; padding: 0 12px; }
+.count {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--m-generated, #6d5ef1);
+  background: var(--m-generated-soft, rgba(109, 94, 241, 0.10));
+  align-self: flex-start;
+  border-radius: 999px;
+  padding: 4px 12px;
+  margin: 4px 2px 8px;
+}
+.m-file-cell.van-cell--clickable {
+  border-radius: var(--m-card-radius, 16px);
+  background: var(--surface, #fff) !important;
+  box-shadow: var(--m-card-shadow, 0 2px 12px rgba(31, 41, 55, 0.06));
+  margin-bottom: 6px;
+  border: 1px solid var(--border, #eef1f6);
+  padding: 10px 12px;
+}
+.m-file-cell :deep(.van-cell__left-icon) {
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  color: #fff;
+  flex-shrink: 0;
+}
+.m-file-cell.ftype-js :deep(.van-cell__left-icon) {
+  background: linear-gradient(135deg, #8b5cf6, #ec4899);
+}
+.m-file-cell.ftype-doc :deep(.van-cell__left-icon) {
+  background: linear-gradient(135deg, #06b6d4, #3b82f6);
+}
+.m-file-cell :deep(.van-cell__title) {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #1e293b);
+}
+.m-file-cell :deep(.van-cell__label) {
+  font-size: 12px;
+  color: var(--text-tertiary, #94a3b8);
+  margin-top: 2px;
+}
+
+/* swipe 右侧操作区：圆角色块 */
+.m-generated :deep(.van-swipe-cell__right) {
+  border-radius: 12px;
+  overflow: hidden;
+  margin-left: 8px;
+}
+.swipe-btn {
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+.swipe-run { background: linear-gradient(135deg, #6d5ef1, #8b5cf6); }
+.swipe-dl  { background: linear-gradient(135deg, #1989fa, #38bdf8); }
+.swipe-del { background: linear-gradient(135deg, #ee0a24, #f87171); }
+
+/* 运行面板：渐变头部 + 卡片化输出区 */
+.run-panel { padding: 14px 16px; }
+.run-head {
+  background: linear-gradient(135deg, #6d5ef1, #8b5cf6);
+  border-radius: 14px;
+  padding: 10px 14px;
+  color: #fff;
+  margin-bottom: 10px;
+}
+.run-head .run-title { font-size: 14px; font-weight: 700; }
+.run-head :deep(.van-button) { border-radius: 999px; }
+.run-body { border-radius: 14px; box-shadow: inset 0 1px 6px rgba(0, 0, 0, 0.25); }
+</style>
+

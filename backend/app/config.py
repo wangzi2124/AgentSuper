@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     enable_reranker: bool = True
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+    # ── 模型下载容错（C3）──
+    # 单次 snapshot_download 调用超时（秒）；0 = 不设整体超时（依赖底层库自身重试/续传）
+    model_download_timeout: int = 600
+    # 单个下载源（ModelScope / HuggingFace）内的重试次数（不含首次尝试）
+    model_download_retries: int = 2
+
     skills_dir: str = "skills"
     plugins_dir: str = "plugins"
 

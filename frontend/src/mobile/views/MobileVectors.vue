@@ -79,6 +79,24 @@ async function handleClearExpired() {
     if (err?.message && !String(err.message).includes('cancel')) showToast(err.message || '清理失败')
   }
 }
+
+async function handleRepair() {
+  const pending = vs.config?.pending_repair ?? 0
+  try {
+    await showConfirmDialog({
+      title: '自愈重建',
+      message: `${pending} 个文档索引未就绪，重新构建其向量/BM25/章节数据？`,
+    })
+    const res = await vs.repair()
+    ds.fetchAll()
+    showDialog({
+      title: '自愈重建',
+      message: res.message + (res.failed?.length ? `\n${res.failed.length} 个失败` : ''),
+    })
+  } catch (err: any) {
+    if (err?.message && !String(err.message).includes('cancel')) showToast(err.message || '修复失败')
+  }
+}
 </script>
 
 <template>
@@ -140,6 +158,13 @@ async function handleClearExpired() {
       <van-button size="small" v-if="vs.config && vs.config.ttl_days > 0" @click="handleClearExpired">
         清理过期（TTL {{ vs.config.ttl_days }} 天）
       </van-button>
+      <van-button
+        size="small"
+        v-if="vs.config && (vs.config.pending_repair ?? 0) > 0"
+        plain
+        style="color:#d97706;border-color:#d97706;"
+        @click="handleRepair"
+      >自愈重建 ({{ vs.config!.pending_repair }})</van-button>
       <van-button size="small" type="danger" plain @click="handleClearAll">清空向量库</van-button>
     </div>
 

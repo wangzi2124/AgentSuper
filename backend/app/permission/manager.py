@@ -262,21 +262,9 @@ class PermissionManager:
                 return "workspace"
             except (ValueError, OSError):
                 pass
-        system_dirs = [
-            "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
-            "/etc", "/usr", "/bin", "/sbin", "/var",
-        ]
-        for sd in system_dirs:
-            try:
-                p.relative_to(Path(sd))
-                return "system"
-            except (ValueError, OSError):
-                pass
-        try:
-            p.relative_to(Path(tempfile.gettempdir()).resolve())
-            return "temp"
-        except (ValueError, OSError):
-            pass
+        # 额外工作区 / 项目 worktree：均须在 temp 判定之前。
+        # 同 session-dir 理由：若某额外工作区或仓库根恰好位于系统临时目录，
+        # 被 temp→allow 劫持会让其下 .git/.env 绕过 Git 与敏感文件保护。
         for extra in self.extra_workspaces:
             try:
                 p.relative_to(extra)
@@ -293,6 +281,21 @@ class PermissionManager:
                 return "workspace"
             except (ValueError, OSError):
                 pass
+        system_dirs = [
+            "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
+            "/etc", "/usr", "/bin", "/sbin", "/var",
+        ]
+        for sd in system_dirs:
+            try:
+                p.relative_to(Path(sd))
+                return "system"
+            except (ValueError, OSError):
+                pass
+        try:
+            p.relative_to(Path(tempfile.gettempdir()).resolve())
+            return "temp"
+        except (ValueError, OSError):
+            pass
         return "external"
 
     def _is_git_path(self, p: Path) -> bool:
@@ -337,7 +340,9 @@ class PermissionManager:
             return True
         if first in ("plugins", "skills", "config"):
             return True
-        if len(parts) == 1 and parts[0] in ("main.py", "requirements.txt", "pyproject.toml"):
+        if len(parts) == 1 and parts[0] in (
+            "main.py", "config.py", "requirements.txt", "pyproject.toml",
+        ):
             return True
         return False
 

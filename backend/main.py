@@ -52,32 +52,61 @@ async def lifespan(app: FastAPI):
         cleanup_truncated()
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning("Truncated output cleanup failed: %s", e)
-    # 定时 TTL 清理：VECTOR_STORE_TTL_DAYS>0 时按间隔定期清理过期文档
-    _ttl_task = None
-    if settings.vector_store_ttl_days > 0:
+    # 定时 TTL 清理：VECTOR_STORE_TTL_DAYS>0 时按间隔定期清理过期文档；
+    # 后台维护循环同时执行知识库自愈（D2：index_state!=ready 的文档重放建索引）。
+    _maintenance_task = None
 
-        async def _ttl_loop():
-            interval = max(settings.vector_store_cleanup_interval_hours, 1) * 3600
-            logger = logging.getLogger(__name__)
-            while True:
-                await asyncio.sleep(interval)
-                try:
+    async def _maintenance_loop():
+        interval = max(settings.vector_store_cleanup_interval_hours, 1) * 3600
+        logger = logging.getLogger(__name__)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                if settings.vector_store_ttl_days > 0:
                     from app.services.kb_cleanup import clear_expired
 
                     removed = await clear_expired(app)
                     if removed:
                         logger.info("Scheduled TTL cleanup removed %d expired documents", removed)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("Scheduled TTL cleanup failed: %s", e)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Scheduled TTL cleanup failed: %s", e)
+            try:
+                from app.services.kb_repair import repair_incomplete_documents
 
-        _ttl_task = asyncio.create_task(_ttl_loop())
+                result = await repair_incomplete_documents(app)
+                if result["repaired"]:
+                    logger.info("Scheduled KB repair: %s", result)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Scheduled KB repair failed: %s", e)
+
+    _maintenance_task = asyncio.create_task(_maintenance_loop())
+
+    # 启动一次性自愈：上次进程崩溃/索引中断留下的半成品文档在启动时补齐，
+    # 以背景任务运行（不阻塞服务就绪），重放建索引与上传共用串行锁。
+    _repair_task = None
+
+    async def _startup_repair():
+        from app.services.kb_repair import repair_incomplete_documents
+
+        try:
+            result = await repair_incomplete_documents(app)
+            if result["repaired"]:
+                logging.getLogger(__name__).info("Startup KB repair completed: %s", result)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning("Startup KB repair failed: %s", e)
+
+    # 无待修复文档时 repair 内部立即返回，成本忽略不计
+    _repair_task = asyncio.create_task(_startup_repair())
+
     try:
         yield
     except asyncio.CancelledError:
         pass
     finally:
-        if _ttl_task:
-            _ttl_task.cancel()
+        if _maintenance_task:
+            _maintenance_task.cancel()
+        if _repair_task:
+            _repair_task.cancel()
 
 
 app = FastAPI(

@@ -21,6 +21,16 @@ export interface VectorStoreConfig {
   ttl_days: number
   cleanup_interval_hours: number
   count: number
+  // [D2] 主库索引一致性统计：各 index_state 数量 + 待修复总数
+  index_states?: Record<string, number>
+  pending_repair?: number
+}
+
+export interface RepairResult {
+  message: string
+  repaired: string[]
+  failed: { id: string; error: string }[]
+  skipped: number
 }
 
 export interface ClearResult {
@@ -48,5 +58,12 @@ export async function clearVectors(): Promise<ClearResult> {
 export async function clearExpiredVectors(): Promise<{ message: string; removed: number; ttl_days: number }> {
   const res = await fetchWithTimeout(BASE + '/clear-expired', { method: 'POST' })
   if (!res.ok) throw new Error(`Failed to clear expired: ${res.statusText}`)
+  return res.json()
+}
+
+// 自愈重建：对 index_state != ready 的文档重放建索引（幂等，可多次调用）
+export async function repairVectors(): Promise<RepairResult> {
+  const res = await fetchWithTimeout(BASE + '/repair', { method: 'POST' })
+  if (!res.ok) throw new Error(`Failed to repair vector store: ${res.statusText}`)
   return res.json()
 }

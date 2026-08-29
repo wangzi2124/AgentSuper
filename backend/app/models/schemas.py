@@ -17,6 +17,8 @@ class DocumentResponse(BaseModel):
     size: int
     chunk_count: int
     created_at: datetime
+    index_state: Optional[str] = "ready"   # [D2] pending/processing/ready/failed
+    index_error: Optional[str] = None      # [D2] 最近一次索引失败原因
 
 
 class DocumentListResponse(BaseModel):

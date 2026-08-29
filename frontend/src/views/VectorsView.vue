@@ -70,6 +70,22 @@ async function handleClearExpired() {
     alert(`清理失败：${e.message || e}`)
   }
 }
+
+// 自愈重建：补齐 index_state != ready 文档的构建索引
+async function handleRepair() {
+  const pending = vs.config?.pending_repair ?? 0
+  if (!confirm(`检测到 ${pending} 个文档的索引未就绪，将重新构建其向量/BM25/章节数据？\n（幂等操作，可重复执行）`)) return
+  try {
+    const res = await vs.repair()
+    ds.fetchAll()
+    const failed = res.failed?.length ?? 0
+    alert(failed > 0
+      ? `${res.message}\n${failed} 个索引重建失败：${res.failed!.map((f) => f.error).join('；')}`
+      : res.message)
+  } catch (e: any) {
+    alert(`修复失败：${e.message || e}`)
+  }
+}
 </script>
 
 <template>
@@ -85,6 +101,12 @@ async function handleClearExpired() {
           <template v-if="vs.config.ttl_days > 0">· 每 {{ vs.config.cleanup_interval_hours }}h 检查</template>
         </span>
         <button v-if="vs.config.ttl_days > 0" class="btn" @click="handleClearExpired">清理过期</button>
+        <button
+          v-if="(vs.config.pending_repair ?? 0) > 0"
+          class="btn"
+          style="border-color:#d97706;color:#d97706;"
+          @click="handleRepair"
+        >自愈重建 ({{ vs.config!.pending_repair }})</button>
       </template>
       <button class="btn btn-danger" @click="handleClearAll">清空向量库</button>
     </div>

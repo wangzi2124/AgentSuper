@@ -16,11 +16,15 @@ STEP_EVENT_TYPES = {"step_start", "step_end", "tool_start", "tool_end"}
 
 # [A5] TaggedEventQueue 的 显式放行 (allowlist) / 透传 / 丢弃 (drop) 清单：
 #   - ALLOW（放行并转发给前端面板）：graph 的步骤类事件 → 统一改标为 agent_step
+#   - TEXT_DELTA（直通但打上 agent_id 标签）：graph 生成的增量文本 → SSE 实时渲染主回答
+#     [F2] message.part.delta 真增量：rag 子 Agent 逐 token 输出时前端主回答实时增量更新，
+#     不再等 done 才一次性回填；事件带 agent_id，前端可辨识来源。
 #   - PASSTHROUGH（原样透传）：permission_request（前端 multi-agent 复用共享审批面板，不能丢）
 #   - DROP（明确丢弃）：tool_output / tool_heartbeat —— 高频瞬时噪音（工具输出/心跳），
 #     会随每次工具调用涌入、前端只按 step upsert 展示最终态，中转无意义；且高强度
 #     循环下直接透传会与 [A4] 背压冲突。保持显式丢弃，避免意外累积。
 ALLOW_STEP_EVENTS = STEP_EVENT_TYPES
+TEXT_DELTA_EVENTS = {"text_delta"}
 PASSTHROUGH_EVENTS = {"permission_request"}
 DROP_HIGH_FREQ_EVENTS = {"tool_output", "tool_heartbeat"}
 
@@ -84,6 +88,11 @@ class AgentEventCollector:
 
     def put_nowait(self, event: dict) -> None:
         et = event.get("type")
+        # [F2] 增量文本：直通 SSE 用于主回答实时渲染；不进入 events 快照，
+        # 避免超长生成把快照/内存撑爆（answer 终态仍由 done/落库提供）。
+        if et == "text_delta":
+            self._push_queue(event)
+            return
         # [A4] 超限后：agent_step 属高频且可重建的中间态，允许丢弃并记账；
         #       其余事件（agent_start/agent_done/agent_error）仍保留。
         if len(self.events) >= self._MAX_EVENTS and et == "agent_step":
@@ -171,6 +180,7 @@ class TaggedEventQueue:
 
     [A5] 分派策略见顶部常量：
       - ALLOW_STEP_EVENTS (step_start/step_end/tool_start/tool_end) → 改标 agent_step 转发
+      - TEXT_DELTA_EVENTS (text_delta) → [F2] 打上 agent_id 后直通（前端增量渲染主回答）
       - PASSTHROUGH_EVENTS (permission_request) → 原样透传
       - DROP_HIGH_FREQ_EVENTS (tool_output/tool_heartbeat) → 明确丢弃（高频噪音）
       - 其余未知事件类型 → 丢弃（保守：不转发未显式允许的类型，防止意外泄漏/膨胀）
@@ -187,6 +197,12 @@ class TaggedEventQueue:
                 "type": "agent_step",
                 "agent_id": self._agent_id,
                 "step": event,
+            })
+        elif et in TEXT_DELTA_EVENTS:
+            # [F2] 直通增量文本：保留原始 delta，补上 agent_id 供前端辨识来源
+            self._collector.put_nowait({
+                **event,
+                "agent_id": self._agent_id,
             })
         elif et in PASSTHROUGH_EVENTS:
             self._collector.put_nowait(event)

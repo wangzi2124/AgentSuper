@@ -117,6 +117,8 @@ async def get_task_progress(request: Request, task_id: str):
             size=r["size"],
             chunk_count=r["chunk_count"],
             created_at=created_at,
+            index_state=r.get("index_state", "ready"),
+            index_error=r.get("index_error"),
         )
 
     return TaskProgressResponse(
@@ -151,6 +153,8 @@ async def list_documents(request: Request):
                 size=d["size"],
                 chunk_count=d.get("chunk_count", 0),
                 created_at=safe_dt(d),
+                index_state=d.get("index_state", "ready"),
+                index_error=d.get("index_error"),
             )
             for d in docs
         ],

@@ -96,6 +96,7 @@ class TaskManager:
             task.progress = 5
 
             doc_id, file_path = fs.save(filename, content)
+            fs.mark_index_state(doc_id, "processing")
 
             task.stage = "Reading and chunking document"
             task.progress = 15
@@ -142,7 +143,8 @@ class TaskManager:
             await loop.run_in_executor(None, vs.add, texts, metadatas, all_embeddings)
             if bm25:
                 await loop.run_in_executor(None, bm25.add, texts, metadatas)
-            fs.update_meta(doc_id, {"chunk_count": len(chunks)})
+            # 先写主库再补索引：此处发动机/BM25/章节已全部写入 → 标记 ready
+            fs.mark_index_state(doc_id, "ready", chunk_count=len(chunks))
 
             meta = fs.get(doc_id)
             task.progress = 100
@@ -161,5 +163,29 @@ class TaskManager:
             task.progress = 0
             task.stage = "Error"
             task.error = str(e)
+            # [D2] 主库已保存文件与元数据（index_state!=ready），不删除：
+            # 交由 kb_repair 自愈流程从文件重放建索引。此处尽力清除本次
+            # 可能写入的部分向量/章节/BM25，避免当前进程内残留半成品。
+            if chapter_store:
+                try:
+                    chapter_store.delete_by_document(doc_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                vs.delete_by_metadata("document_id", doc_id)
+            except Exception:  # noqa: BLE001
+                pass
+            if bm25:
+                try:
+                    bm25.remove_by_metadata("document_id", doc_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                fs.mark_index_state(
+                    doc_id, "failed",
+                    error=(str(e) or e.__class__.__name__)[:400],
+                )
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             task.finished_at = datetime.now()

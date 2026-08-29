@@ -431,7 +431,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     retryMessageText.value = text
 
     // 发送后立即持久化（SSE 中断也不丢失 user 消息）
-    persistSession(sessionId)
+    // [S5] 走防抖（非终态写，done/error 的终态 persistSession 会清 timer 兜底覆盖）
+    schedulePersist(sessionId)
 
     const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, directory: sessionDirectory.value || undefined, client_msg_id: messageClientId, files: files && files.length ? files : undefined }
     const controller = new AbortController()
@@ -483,6 +484,12 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         } else if (event.type === 'agent_stream') {
           const agent = agentsMap[event.agent_id]
           if (agent && event.content) { agent.content += event.content; assistantMsg.agents = Object.values(agentsMap) }
+        } else if (event.type === 'text_delta') {
+          // [F2] message.part.delta 真增量：主回答逐增量实时渲染，不再等 done 一次性回填。
+          // done 事件仍携带权威完整 answer 兜底（漏帧/重连自动覆盖）。
+          if (event.delta) {
+            assistantMsg.content += event.delta
+          }
         } else if (event.type === 'agent_done') {
           const agent = agentsMap[event.agent_id]
           if (agent) { agent.status = 'completed'; if (event.content) agent.content = event.content; assistantMsg.agents = Object.values(agentsMap) }

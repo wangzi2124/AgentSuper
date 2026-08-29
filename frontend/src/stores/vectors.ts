@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { Chunk } from '../types'
-import { listChunks, getVectorConfig, clearVectors, clearExpiredVectors, type VectorStoreConfig } from '../api/vectors'
+import { listChunks, getVectorConfig, clearVectors, clearExpiredVectors, repairVectors, type VectorStoreConfig } from '../api/vectors'
 
 // 向量存储管理 Store
 export const useVectorStore = defineStore('vectors', () => {
@@ -75,5 +75,13 @@ export const useVectorStore = defineStore('vectors', () => {
     return res
   }
 
-  return { chunks, total, offset, limit, loading, filterDocId, searchQuery, config, fetch, reset, loadConfig, clearAll, clearExpired }
+  // [D2] 自愈重建：补齐 index_state != ready 文档的派生索引（向量/BM25/章节）
+  async function repair() {
+    const res = await repairVectors()
+    await loadConfig()
+    await fetch()
+    return res
+  }
+
+  return { chunks, total, offset, limit, loading, filterDocId, searchQuery, config, fetch, reset, loadConfig, clearAll, clearExpired, repair }
 })

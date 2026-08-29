@@ -45,7 +45,12 @@ class FileStore:
             logger.error("Failed to save metadata to %s: %s", self.meta_path, e)
 
     def save(self, filename: str, content: bytes) -> tuple[str, str]:
-        """保存文件并更新元数据，返回文档ID和文件路径。"""
+        """保存文件并更新元数据，返回文档ID和文件路径。
+
+        index_state 记录派生索引（向量/BM25/章节）的构建进度，作为跨库一致性
+        的主库状态：pending → processing → ready / failed。任一索引阶段崩溃后，
+        自愈流程（kb_repair）根据该状态从已保存的文件重放建索引。
+        """
         doc_id = str(uuid.uuid4())
         safe_name = f"{doc_id}_{_safe_filename(filename)}"
         file_path = self.upload_dir / safe_name
@@ -56,6 +61,9 @@ class FileStore:
             "path": str(file_path),
             "created_at": datetime.now().isoformat(),
             "size": len(content),
+            "chunk_count": 0,
+            "index_state": "pending",
+            "index_error": None,
         }
         self._save_metadata()
         return doc_id, str(file_path)
@@ -75,6 +83,23 @@ class FileStore:
         if doc_id in self.metadata:
             self.metadata[doc_id].update(updates)
             self._save_metadata()
+
+    def mark_index_state(self, doc_id: str, state: str, error: Optional[str] = None,
+                         chunk_count: Optional[int] = None):
+        """更新派生索引状态（pending/processing/ready/failed）。
+
+        state='ready' 时表示向量库+BM25+章节库均已写入；其余状态提示自愈流程
+        需要从主库（本文件 + 元数据）重放建索引。
+        """
+        if doc_id not in self.metadata:
+            return
+        meta = self.metadata[doc_id]
+        meta["index_state"] = state
+        meta["index_error"] = error
+        if chunk_count is not None:
+            meta["chunk_count"] = chunk_count
+        self.metadata[doc_id] = meta
+        self._save_metadata()
 
     def get(self, doc_id: str) -> Optional[dict]:
         """获取指定文档的元数据。"""
