@@ -12,6 +12,7 @@ const props = defineProps<{ loading: boolean }>()
 interface PendingFile extends FileContent {
   id: string
   preview?: string
+  size?: number
 }
 
 // 输入框文本内容
@@ -56,7 +57,7 @@ function readFile(file: File): Promise<PendingFile> {
       const base64 = String(reader.result || '').split(',')[1] || ''
       const pending: PendingFile = {
         id: genId(), filename: file.name, mime_type: file.type || 'application/octet-stream',
-        data: base64,
+        data: base64, size: file.size,
       }
       if (file.type.startsWith('image/')) {
         pending.preview = reader.result as string
@@ -66,6 +67,61 @@ function readFile(file: File): Promise<PendingFile> {
     reader.onerror = () => reject(reader.error)
     reader.readAsDataURL(file)
   })
+}
+
+// [预览] base64 → Uint8Array
+function base64ToBytes(base64: string): Uint8Array {
+  const bin = atob(base64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return bytes
+}
+
+// [预览] base64 → UTF-8 文本
+function decodeText(base64: string): string {
+  try {
+    return new TextDecoder('utf-8').decode(base64ToBytes(base64))
+  } catch {
+    return ''
+  }
+}
+
+const TEXT_EXTS = ['txt', 'md', 'markdown', 'json', 'csv', 'log', 'js', 'ts', 'py', 'xml', 'html', 'yml', 'yaml', 'ini', 'conf', 'sql', 'sh', 'css', 'toml']
+
+function isTextLike(f: PendingFile): boolean {
+  if (f.mime_type.startsWith('text/')) return true
+  const ext = (f.filename.split('.').pop() || '').toLowerCase()
+  return TEXT_EXTS.includes(ext)
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+// [预览] 附件预览浮层
+const previewFile = ref<PendingFile | null>(null)
+const previewText = computed(() => {
+  const f = previewFile.value
+  if (!f || !isTextLike(f)) return ''
+  const txt = decodeText(f.data)
+  return txt.length > 20000 ? `${txt.slice(0, 20000)}\n\n…（内容过长，仅预览前 20000 字符）` : txt
+})
+function openPreview(f: PendingFile) { previewFile.value = f }
+function closePreview() { previewFile.value = null }
+function downloadPending(f: PendingFile) {
+  try {
+    const blob = new Blob([base64ToBytes(f.data) as BlobPart], { type: f.mime_type })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = f.filename
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch {
+    // 下载失败静默
+  }
 }
 
 function genId(): string {
@@ -105,7 +161,7 @@ function handleSend() {
   const msg = text.value
   // [F8] 文本与附件皆空则不发送
   if (!msg.trim() && files.value.length === 0) return
-  emit('send', msg, files.value.map(({ id: _id, preview: _pv, ...fc }) => fc))
+  emit('send', msg, files.value.map(({ id: _id, preview: _pv, size: _sz, ...fc }) => fc))
   // [F9] 记录已发送历史（最新在前），重置导航指针
   if (msg.trim()) {
     sentHistory.value = [msg, ...sentHistory.value.filter(m => m !== msg)].slice(0, 50)
@@ -245,15 +301,40 @@ const textareaRef = ref<HTMLTextAreaElement>()
         <span>↑ / ↓ 可浏览历史消息</span>
       </template>
     </div>
-    <!-- [F8] 附件预览列表 -->
+    <!-- [F8] 附件预览列表（点击查看大图/内容） -->
     <div v-if="files.length" class="file-list">
-      <div v-for="f in files" :key="f.id" class="file-chip">
+      <div v-for="f in files" :key="f.id" class="file-chip" @click="openPreview(f)">
         <img v-if="f.preview" :src="f.preview" class="file-thumb" alt="" />
         <span v-else class="file-icon">📄</span>
         <span class="file-name" :title="f.filename">{{ f.filename }}</span>
-        <button class="file-remove" title="移除附件" @click="removeFile(f.id)">
+        <button class="file-remove" title="移除附件" @click.stop="removeFile(f.id)">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
+      </div>
+    </div>
+
+    <!-- [预览] 附件预览浮层：图片大图 / 文本内容 / 不支持提示 + 下载 -->
+    <div v-if="previewFile" class="preview-overlay" @click.self="closePreview">
+      <div class="preview-panel" @click.stop>
+        <div class="preview-head">
+          <span class="preview-title" :title="previewFile.filename">{{ previewFile.filename }}</span>
+          <button class="preview-close" title="关闭" @click="closePreview">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="preview-body">
+          <img v-if="previewFile.preview" :src="previewFile.preview" class="preview-img" alt="" />
+          <pre v-else-if="previewText" class="preview-text">{{ previewText }}</pre>
+          <div v-else class="preview-nosupport">
+            <div class="preview-nosupport-icon">📄</div>
+            <p>该格式暂不支持直接预览</p>
+            <p class="preview-nosupport-sub">可直接发送给模型分析，或点击下方下载查看</p>
+          </div>
+        </div>
+        <div class="preview-foot">
+          <span class="preview-meta">{{ previewFile.mime_type }}{{ previewFile.size ? ` · ${formatSize(previewFile.size)}` : '' }}</span>
+          <button class="preview-dl" @click="downloadPending(previewFile)">下载</button>
+        </div>
       </div>
     </div>
     <div class="textarea-wrapper">
@@ -433,7 +514,10 @@ const textareaRef = ref<HTMLTextAreaElement>()
   padding: 4px 6px 4px 4px;
   border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg); max-width: 220px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
+.file-chip:hover { border-color: var(--primary, #4f46e5); box-shadow: 0 0 0 1px var(--primary, #4f46e5); }
 .file-thumb {
   width: 32px; height: 32px; object-fit: cover;
   border-radius: 6px; flex-shrink: 0;
@@ -461,6 +545,81 @@ const textareaRef = ref<HTMLTextAreaElement>()
 .attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .textarea-wrapper textarea { padding-left: 44px; }
 
+/* [预览] 附件预览浮层 */
+.preview-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+.preview-panel {
+  display: flex; flex-direction: column;
+  width: 100%; max-width: 560px;
+  max-height: 80vh;
+  background: var(--surface, #fff);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+}
+.preview-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border, #eef1f6);
+}
+.preview-title {
+  font-size: 14px; font-weight: 600; color: var(--text, #1e293b);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.preview-close {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border: none; border-radius: 50%;
+  background: var(--bg, #f8fafc); color: var(--text-secondary, #64748b);
+  cursor: pointer; flex-shrink: 0;
+}
+.preview-close:hover { background: var(--danger, #dc2626); color: #fff; }
+.preview-body {
+  flex: 1; min-height: 0; overflow: auto;
+  display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--bg, #f8fafc) 60%, #fff);
+  padding: 12px;
+}
+.preview-img {
+  max-width: 100%; max-height: 56vh;
+  object-fit: contain; border-radius: 8px;
+}
+.preview-text {
+  width: 100%; margin: 0; padding: 12px;
+  font-family: 'Cascadia Code', Consolas, Menlo, monospace;
+  font-size: 12px; line-height: 1.6;
+  color: var(--text, #1e293b);
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #eef1f6);
+  border-radius: 8px;
+  white-space: pre-wrap; word-break: break-all;
+  align-self: stretch;
+}
+.preview-nosupport { text-align: center; padding: 24px 16px; color: var(--text-secondary, #64748b); }
+.preview-nosupport-icon { font-size: 40px; margin-bottom: 8px; }
+.preview-nosupport p { margin: 4px 0; font-size: 13px; }
+.preview-nosupport-sub { font-size: 12px; opacity: 0.8; }
+.preview-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border, #eef1f6);
+}
+.preview-meta {
+  font-size: 12px; color: var(--text-muted, #9ca3af);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.preview-dl {
+  height: 28px; padding: 0 16px; border: none; border-radius: 8px;
+  background: var(--primary, #4f46e5); color: #fff;
+  font-size: 12px; font-weight: 600; cursor: pointer; flex-shrink: 0;
+}
+.preview-dl:hover { background: var(--primary-hover, #4338ca); }
+
 /* 移动端适配（与 MultiAgentView 768px 断点对齐） */
 @media (max-width: 768px) {
   .chat-input { padding: 10px 12px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
@@ -469,5 +628,8 @@ const textareaRef = ref<HTMLTextAreaElement>()
   .char-counter { right: 46px; bottom: 8px; }
   .send-btn, .cancel-btn, .attach-btn { bottom: 6px; }
   .file-chip { max-width: 100%; }
+  .preview-overlay { padding: 12px; }
+  .preview-panel { max-width: 100%; max-height: 86vh; }
+  .preview-img { max-height: 60vh; }
 }
 </style>
