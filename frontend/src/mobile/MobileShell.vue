@@ -191,7 +191,7 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
           </div>
                     <!-- @@CHAT_SETTINGS_ENTRY@@ -->
           <!-- ── 设置：与「功能导航」同款 drawer-item，点开弹出参数表单 ── -->
-          <div class="drawer-group-label" style="margin-top: 16px">设置</div>
+          <!-- <div class="drawer-group-label" style="margin-top: 16px">设置</div> -->
 
           <div class="drawer-item settings-item" @click="openSettings">
             <div class="drawer-item-ico" style="background: rgba(109,94,241,.12); color: #6d5ef1;">
