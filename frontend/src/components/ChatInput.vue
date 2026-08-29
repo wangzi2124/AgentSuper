@@ -427,7 +427,10 @@ const textareaRef = ref<HTMLTextAreaElement>()
           </button>
           <!-- hover 悬浮说明框（当前模型描述，展开菜单时隐藏） -->
           <div class="model-tip">
-            <span class="model-tip-name">{{ currentModelLabel }}</span>
+            <div class="model-tip-head">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"/></svg>
+              <span class="model-tip-name">{{ currentModelLabel }}</span>
+            </div>
             <span class="model-tip-desc">{{ currentModelDesc }}</span>
           </div>
           <div v-if="modelMenuOpen" class="model-menu-mask" @click="modelMenuOpen = false"></div>
@@ -614,33 +617,47 @@ const textareaRef = ref<HTMLTextAreaElement>()
 .model-chevron.open { transform: rotate(180deg); }
 .model-tip {
   position: absolute;
-  bottom: calc(100% + 10px);
+  bottom: calc(100% + 12px);
   left: 0;
   z-index: 92;
-  width: 240px;
-  padding: 10px 12px;
+  width: 250px;
+  padding: 11px 13px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.24);
   opacity: 0;
   pointer-events: none;
-  transform: translateY(4px);
-  transition: opacity 0.18s, transform 0.18s;
+  transform: translateY(6px);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.model-tip::after {
+  content: '';
+  position: absolute;
+  top: calc(100% - 5px);
+  left: 24px;
+  width: 10px;
+  height: 10px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  transform: rotate(45deg);
 }
 .model-wrap:hover .model-tip { opacity: 1; transform: translateY(0); }
 .model-wrap.menu-open .model-tip { opacity: 0 !important; }
-.model-tip-name { display: block; font-size: 12px; font-weight: 700; color: var(--text); }
-.model-tip-desc { display: block; margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--text-secondary); }
+.model-tip-head { display: flex; align-items: center; gap: 6px; }
+.model-tip-name { font-size: 13px; font-weight: 700; color: var(--primary, #4f46e5); }
+.model-tip-desc { display: block; margin-top: 5px; font-size: 12px; line-height: 1.55; color: var(--text-secondary); }
 .model-menu-mask { position: fixed; inset: 0; z-index: 90; }
 .model-menu {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
   z-index: 91;
-  min-width: 200px;
-  max-width: 240px;
-  max-height: 260px;
+  min-width: 220px;
+  max-width: 270px;
+  /* 自适应：仅当菜单超高（小屏）时才出现滚动，平时无滚动条 */
+  max-height: calc(100dvh - 180px);
   overflow-y: auto;
   padding: 6px;
   background: var(--surface);
@@ -648,6 +665,9 @@ const textareaRef = ref<HTMLTextAreaElement>()
   border-radius: 14px;
   box-shadow: 0 16px 44px rgba(15, 23, 42, 0.18);
 }
+.model-menu::-webkit-scrollbar { width: 4px; }
+.model-menu::-webkit-scrollbar-track { background: transparent; }
+.model-menu::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 .model-menu-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 9px 10px; border: none; border-radius: 9px; background: transparent; color: var(--text); font-size: 13px; font-family: inherit; cursor: pointer; text-align: left; transition: background 0.12s; }
 .model-menu-item:hover { background: var(--bg); }
 .model-menu-item.active { color: var(--primary, #4f46e5); }
