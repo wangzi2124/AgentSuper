@@ -572,3 +572,16 @@ html[data-theme='dark'] {
     color: var(--text-secondary, #64748b);
   }
 }
+
+/* [F8] 聊天图片放大预览：移动端触控适配 */
+@media (max-width: 768px) {
+  .image-preview-overlay { z-index: 4000; }
+  .image-preview-close {
+    width: 44px !important;
+    height: 44px !important;
+    font-size: 24px !important;
+    top: 14px !important;
+    right: 14px !important;
+  }
+  .image-preview-img { max-width: 96vw !important; max-height: 90vh !important; }
+}

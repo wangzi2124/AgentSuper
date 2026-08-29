@@ -23,6 +23,8 @@ const wsInput = ref('')
 const wsError = ref('')
 const wsBusy = ref(false)
 const showDirPicker = ref(false)
+// [F8] 聊天图片点击放大预览（当前预览图的 data URL；空串 = 未预览）
+const previewImage = ref('')
 const extraWorkspaces = computed(() => perm.workspaces.length > 1 ? perm.workspaces.slice(1) : [])
 const mainWorkspace = computed(() => perm.workspaces[0] || '')
 
@@ -319,6 +321,7 @@ async function handleCopy(messageId: string, text: string) {
                       :src="`data:${f.mime_type};base64,${f.data}`"
                       class="msg-file-image"
                       alt=""
+                      @click="previewImage = `data:${f.mime_type};base64,${f.data}`"
                     />
                     <span v-else class="msg-file-name">📄 {{ f.filename }}</span>
                   </div>
@@ -381,6 +384,12 @@ async function handleCopy(messageId: string, text: string) {
     </div>
 
     <DirPickerModal :show="showDirPicker" @close="showDirPicker = false" @select="handleDirPick" />
+
+    <!-- [F8] 聊天图片放大预览遮罩：点击图片放大，点击遮罩/图片关闭 -->
+    <div v-if="previewImage" class="image-preview-overlay" @click.self="previewImage = ''">
+      <img :src="previewImage" class="image-preview-img" alt="预览" @click="previewImage = ''" />
+      <span class="image-preview-close" @click="previewImage = ''">✕</span>
+    </div>
   </div>
 </template>
 
@@ -601,7 +610,7 @@ async function handleCopy(messageId: string, text: string) {
 .content { white-space: pre-wrap; word-break: break-word; }
 /* [F8] 用户消息附件回显 */
 .msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.msg-file-image { max-width: 200px; max-height: 200px; border-radius: 8px; object-fit: cover; display: block; }
+.msg-file-image { max-width: 200px; max-height: 200px; border-radius: 8px; object-fit: cover; display: block; cursor: zoom-in; }
 .msg-file-name { font-size: 12px; padding: 3px 8px; border-radius: 6px; background: rgba(255,255,255,0.18); display: inline-block; }
 .is-error .bubble { background: rgba(239,68,68,0.06); border-color: rgba(239,68,68,0.3); }
 .message-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 11px; }
@@ -674,4 +683,40 @@ async function handleCopy(messageId: string, text: string) {
   .scroll-fade-leave-active { transition: opacity 0.22s ease, transform 0.22s ease; }
   .scroll-fade-enter-from,
   .scroll-fade-leave-to { opacity: 0; transform: translateY(12px); }
+
+  /* [F8] 聊天图片放大预览遮罩 */
+  .image-preview-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 3000;
+    background: rgba(0, 0, 0, 0.82);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: zoom-out;
+  }
+  .image-preview-img {
+    max-width: 92vw;
+    max-height: 88vh;
+    object-fit: contain;
+    border-radius: 8px;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  }
+  .image-preview-close {
+    position: fixed;
+    top: 16px;
+    right: 18px;
+    font-size: 26px;
+    color: #fff;
+    cursor: pointer;
+    padding: 6px;
+    line-height: 1;
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 50%;
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
 </style>
