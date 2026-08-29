@@ -249,18 +249,24 @@ class RAGAgentTools(RAGAgentBase):
                             mgr.add_temp_command_approval(e.path)
                         else:
                             mgr.add_temp_approval(e.path)
-                        if eq and name == "tool_execute":
-                            try:
-                                return await self._execute_tool_streaming(args, eq, state.get("_on_activity"))
-                            except NeedsPermission:
-                                pass
-                            except Exception as e2:
-                                logger.warning("tool_execute streaming failed on retry, falling back: %s", e2)
-                        if inspect.iscoroutinefunction(t.fn):
-                            result = await t.fn(**args)
-                        else:
-                            result = await asyncio.to_thread(t.fn, **args)
-                        return self._bound_plugin_result(name, result)
+                        try:
+                            if eq and name == "tool_execute":
+                                try:
+                                    return await self._execute_tool_streaming(args, eq, state.get("_on_activity"))
+                                except NeedsPermission:
+                                    pass
+                                except Exception as e2:
+                                    logger.warning("tool_execute streaming failed on retry, falling back: %s", e2)
+                            if inspect.iscoroutinefunction(t.fn):
+                                result = await t.fn(**args)
+                            else:
+                                result = await asyncio.to_thread(t.fn, **args)
+                            return self._bound_plugin_result(name, result)
+                        except NeedsPermission as e2:
+                            # [C5 修复] 审批放行后的重试仍被拒 → 返回拒绝消息而非向调用方
+                            # 抛裸异常（修复前在 except 处理器内再抛，绕过外层 except Exception）。
+                            logger.warning("Permission retry still denied: %s", e2.path)
+                            return _permission_denied_msg(e2.operation, e2.path, name)
                     return _permission_denied_msg(e.operation, e.path, name)
                 except Exception as e:
                     return f"Error executing {name}: {e}"

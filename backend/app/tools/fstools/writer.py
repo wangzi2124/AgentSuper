@@ -398,11 +398,18 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
     ending = _detect_line_ending(text)
     try:
         if old_string == "":
-            content_new = _convert_line_ending(_normalize_line_endings(new_string), ending)
-        else:
-            old = _convert_line_ending(_normalize_line_endings(old_string), ending)
-            replacement = _convert_line_ending(_normalize_line_endings(new_string), ending)
-            content_new = _edit_replace(text, old, replacement, replace_all)
+            # [C5 修复] 空 old_string 曾被解释为「整文件替换」→ LLM 误发空字符串会
+            # 静默清空文件（foot-gun）。对齐 opencode edit.ts：old_string 必填，
+            # 空值直接报错，绝不执行替换。
+            return _env(
+                "edit",
+                "Error: old_string 不能为空（空值曾导致整文件被替换的清空风险），"
+                "请提供要查找的确切文本；若需新建/覆盖请用 tool_write_file。",
+                error=True,
+            )
+        old = _convert_line_ending(_normalize_line_endings(old_string), ending)
+        replacement = _convert_line_ending(_normalize_line_endings(new_string), ending)
+        content_new = _edit_replace(text, old, replacement, replace_all)
     except ValueError as e:
         return _env("edit", f"Error: {e}", error=True)
     try:

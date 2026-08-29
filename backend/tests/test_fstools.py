@@ -197,10 +197,13 @@ class TestWriterTools:
         r = writer.tool_edit_file("e2.txt", "zzz", "q")
         assert "Error" in r["output"]
 
-    def test_edit_file_empty_oldstring_replaces(self, ws):
+    def test_edit_file_empty_oldstring_rejected(self, ws):
+        """[C5 修复] 空 old_string 不得触发整文件替换（防 LLM 误发空字符串清空文件）。"""
         writer.tool_write_file("e3.txt", "abc")
         r = writer.tool_edit_file("e3.txt", "", ">> ")
-        assert ws.joinpath("e3.txt").read_text(encoding="utf-8") == ">> "
+        assert "old_string 不能为空" in r["output"]
+        assert r["metadata"]["error"] is True
+        assert ws.joinpath("e3.txt").read_text(encoding="utf-8") == "abc"  # 文件未被改动
 
     def test_edit_file_crlf_preserved(self, ws):
         p = ws.joinpath("crlf.txt")

@@ -206,7 +206,8 @@ def test_replay_agent_steps(repo):
     ]
     b.replay_agent_steps(steps, agent_id="rag")
     assert len(repo.parts) == 1  # 非 dict 跳过；tool_end 无对应 tool_start → 无 part
-    # step part 不落 agent_id（产品现状：仅 tool part 带 agent_id）
+    # [C5 修复] step part 现在也落 agent_id（多 Agent 历史按 agent 归档）
+    assert repo.parts[0][3].get("agent_id") == "rag"
 
 
 def test_replay_agent_steps_persist_failure(repo, caplog):

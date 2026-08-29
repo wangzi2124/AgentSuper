@@ -120,6 +120,7 @@ class PartBridgeQueue:
                 "step_id": event.get("step_id", ""),
                 "state": "running",
                 "name": event.get("name", ""),
+                "agent_id": event.get("agent_id", ""),  # [C5] 多 Agent 历史按 agent 归档
             })
             out["part_id"] = part.id
         elif et == "step_end":
@@ -129,6 +130,7 @@ class PartBridgeQueue:
                 "name": event.get("name", ""),
                 "detail": event.get("detail", ""),
                 "duration_ms": event.get("duration_ms", 0),
+                "agent_id": event.get("agent_id", ""),  # [C5] 多 Agent 历史按 agent 归档
             })
             out["part_id"] = part.id
         elif et == "tool_start":

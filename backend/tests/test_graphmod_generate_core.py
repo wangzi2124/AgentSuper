@@ -295,10 +295,10 @@ async def test_execute_permission_command_approval(monkeypatch):
     agent = _agent_with_tool(fn, name="tool_flaky")
     monkeypatch.setattr(tools_mod, "get_perm_mgr", lambda: mgr)
     q = asyncio.Queue()
-    # fn 每次调用都抛 → 审批放行后重试仍抛 NeedsPermission，且不受外层 except
-    # Exception 包装（在 except 处理器内再抛）→ 直接向上传播（产品现状锁定）
-    with pytest.raises(NeedsPermission):
-        await agent._execute_tool("tool_flaky", {}, make_state(_event_queue=q))
+    # [C5 修复] fn 每次调用都抛 → 审批放行后重试仍抛 NeedsPermission，此时应返回
+    # 拒绝消息而非向调用方抛裸异常（修复前在 except 处理器内再抛，绕过外层包装）
+    r = await agent._execute_tool("tool_flaky", {}, make_state(_event_queue=q))
+    assert "Permission denied: command on 'node --version'" in r
     assert mgr.temp_cmd == ["node --version"]
 
 
