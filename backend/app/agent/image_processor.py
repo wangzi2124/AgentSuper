@@ -153,19 +153,39 @@ def _peek_dimensions(raw: bytes) -> tuple[int, int]:
 def ocr_image(data_b64: str, filename: str = "") -> str:
     """图片 OCR 提取文本（截图/文档图，信息保真优先）。
 
-    IMAGE_USE_OCR=false 或 OCR 引擎不可用（未装 pytesseract + tesseract 二进制）
-    时返回 ""（不启用，降级链继续）。启用时用 pytesseract（chi_sim+eng）。
+    IMAGE_USE_OCR=false 或 OCR 引擎不可用（未装 pytesseract / tesseract 二进制）
+    时返回 ""（不启用，降级链继续）。启用时用 pytesseract（eng，chi_sim 可选）。
+    Windows 下自动定位常见安装路径（winget/UB-Mannheim）。
     """
     from app.config import settings
     if not settings.image_use_ocr:
         return ""
     try:
         import io as _io
+        import os as _os
+        import shutil
         from PIL import Image
         import pytesseract
+
+        # 定位 tesseract 二进制（PATH 优先，其次 Windows 常见安装路径）
+        cmd = _os.environ.get("TESSERACT_CMD") or shutil.which("tesseract")
+        if not cmd and _os.name == "nt":
+            for cand in (
+                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            ):
+                if _os.path.exists(cand):
+                    cmd = cand
+                    break
+        if cmd:
+            pytesseract.pytesseract.tesseract_cmd = cmd
+
         raw = base64.b64decode(data_b64 or "", validate=False)
         img = Image.open(_io.BytesIO(raw))
-        text = pytesseract.image_to_string(img, lang="chi_sim+eng")
+        try:
+            text = pytesseract.image_to_string(img, lang="chi_sim+eng")
+        except Exception:  # noqa: BLE001 —— chi_sim 未装时回退 eng
+            text = pytesseract.image_to_string(img, lang="eng")
         text = (text or "").strip()
         logger.info("image ocr ok (%s): %d chars", filename, len(text))
         return text
