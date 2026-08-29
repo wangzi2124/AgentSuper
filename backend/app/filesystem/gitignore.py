@@ -113,15 +113,17 @@ def _parse_rule(line: str) -> Optional[_Rule]:
         line = line[1:]
     if not line:
         return None
-    anchored = "/" in line
-    if anchored and line.startswith("/"):
-        line = line[1:]
-    if not line:
-        return None
+    # 先剥尾部 /（仅目录标记，不算路径分隔符）：`build/` 在 git(5) 语义下匹配任意
+    # 层级的 build 目录（不锚定）；仅模式体中的 / 与前置 / 才是锚定分隔符。
     dir_only = False
     if line.endswith("/"):
         dir_only = True
         line = line[:-1]
+    if not line:
+        return None
+    anchored = "/" in line
+    if anchored and line.startswith("/"):
+        line = line[1:]
     if not line:
         return None
     try:

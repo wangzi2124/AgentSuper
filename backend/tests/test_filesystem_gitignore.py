@@ -65,10 +65,10 @@ class TestParseRule:
         assert not r.dir_only
 
     def test_dir_only_trailing_slash(self):
-        # 产品语义：尾部 / 同时把 anchored 置为 True（因 "/" in line）
+        # 修复后：尾部 / 只是目录标记，不再置 anchored（对齐 git(5) 任意层级语义）
         r = parse_gitignore("build/")[0]
         assert r.dir_only is True
-        assert r.anchored is True
+        assert r.anchored is False
         assert r.regex.pattern == "build"
 
     def test_line_loses_everything_returns_none(self):
@@ -190,9 +190,14 @@ class TestMatcherIgnored:
         _write(mroot / ".gitignore", "build/\n")
         m = GitignoreMatcher(mroot)
         assert m.is_ignored(mroot / "build", True)
-        assert not m.is_ignored(mroot / "build", False)
-        # 产品偏差点：尾部 / 锚定到顶层，仅匹配名为 build 的目录本身
-        assert m.is_ignored(mroot / "a" / "build" / "x.txt", False) is False
+        assert not m.is_ignored(mroot / "build", False)  # 文件名叫 build 不忽略
+        # 回归（修复尾部 / 锚定偏差）：build/ 匹配任意层级的 build 目录（git 语义）
+        assert m.is_ignored(mroot / "a" / "build", True) is True
+        assert m.is_ignored(mroot / "a" / "b" / "build", True) is True
+        # 被忽略目录下的文件/子目录随之忽略
+        assert m.is_ignored(mroot / "a" / "build" / "x.txt", False) is True
+        # build.txt 不是 build 目录 → 不忽略
+        assert m.is_ignored(mroot / "build.txt", False) is False
 
     def test_negation_reinclude(self, mroot):
         _write(mroot / ".gitignore", "*.log\n!keep.log\n")
