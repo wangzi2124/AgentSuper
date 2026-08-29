@@ -240,11 +240,15 @@ async def test_search_duckduckgo_parse(monkeypatch):
     assert results[1]["url"] == "https://direct.example/x"
 
 
-def test_attachment_text_empty_and_with_files(monkeypatch):
-    assert wsa.WebSearchAgent._attachment_text([]) == ""
-    monkeypatch.setattr(wsa, "attachment_context_text", lambda files, budget=3000: "正文")
-    out = wsa.WebSearchAgent._attachment_text([{"filename": "a.txt", "mime_type": "text/plain", "data": "x"}])
-    assert "用户附带的文档内容" in out and "正文" in out
+@pytest.mark.asyncio
+async def test_attachment_text_empty_and_with_files(monkeypatch):
+    import app.agent.image_processor as ip_mod
+    assert await wsa.WebSearchAgent._attachment_text([]) == ""
+    async def fake_ctx(files, budget=3000):
+        return "正文"
+    monkeypatch.setattr(ip_mod, "attachment_context_with_images", fake_ctx)
+    out = await wsa.WebSearchAgent._attachment_text([{"filename": "a.txt", "mime_type": "text/plain", "data": "x"}])
+    assert "用户附带的文档/图片内容" in out and "正文" in out
 
 
 @pytest.mark.asyncio

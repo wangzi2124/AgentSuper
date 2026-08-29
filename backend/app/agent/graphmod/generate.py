@@ -255,6 +255,17 @@ class RAGAgentGenerate(RAGAgentTools):
         # P4: 读取并归一化 finish_reason（对齐 opencode FinishReason：tool-calls/unknown 不算完成）
         finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
 
+        # [F8 · D 步 每轮不重发] 首轮已展示图片 → 后续工具轮替换为占位文本，
+        # 避免每轮重发大 base64 撑爆上下文（图片描述/OCR 文本仍保留供模型参照）。
+        if msg.tool_calls:
+            for m in messages:
+                if isinstance(m.get("content"), list):
+                    m["content"] = [
+                        ({"type": "text", "text": "[已附图：图片已在首轮展示]"}
+                         if isinstance(p, dict) and p.get("type") == "image_url" else p)
+                        for p in m["content"]
+                    ]
+
         # 硬兜底：单次请求内最多 LLM 调用轮数（每轮 = 一次完整 LLM 调用）
         max_tool_rounds = settings.max_tool_rounds
         # 主步骤上限（对齐 opencode agent.steps）：生效上限 = min(MAX_STEPS, MAX_TOOL_ROUNDS)

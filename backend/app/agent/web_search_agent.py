@@ -18,7 +18,6 @@ from app.agent.base import BaseAgent, AgentMessage
 from app.agent.memory import MemoryManager
 from app.agent.stream_events import agent_meta, emit, step_event
 from app.agent.sub_tools import tool_loop_chat
-from app.agent.attachment_loader import attachment_context_text
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -114,7 +113,7 @@ class WebSearchAgent(BaseAgent):
                     event_queue=event_queue, agent_id=self._id,
                     history=payload.get("history") or [],
                     directory=payload.get("directory", ""),
-                    attachment_context=self._attachment_text(payload.get("files") or []),
+                    attachment_context=await self._attachment_text(payload.get("files") or []),
                 )
                 emit(event_queue, {
                     "type": "agent_step",
@@ -294,14 +293,15 @@ class WebSearchAgent(BaseAgent):
         return results[:max_results]
 
     @staticmethod
-    def _attachment_text(files: list[dict]) -> str:
-        """把附件解析为一段文本上下文，附带说明。空则返回空串。"""
+    async def _attachment_text(files: list[dict]) -> str:
+        """把附件解析为一段文本上下文（文档正文 + 图片 caption/OCR），附带说明。空则空串。"""
         if not files:
             return ""
-        ctx = attachment_context_text(files, budget=3000)
+        from app.agent.image_processor import attachment_context_with_images
+        ctx = await attachment_context_with_images(files, budget=3000)
         if not ctx.strip():
             return ""
-        return f"\n[用户附带的文档内容]:\n{ctx}\n"
+        return f"\n[用户附带的文档/图片内容]:\n{ctx}\n"
 
     async def _synthesize(
         self,

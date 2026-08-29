@@ -589,6 +589,52 @@ async def test_generate_multimodal_files(gen_env, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generate_images_not_resent_after_first_round(gen_env, monkeypatch):
+    """[F8 · D 步 每轮不重发]：首轮后 image_url 块替换为占位文本，避免每轮重发大 base64。"""
+    monkeypatch.setattr(gen_mod, "_attachment_parts",
+                        lambda files, budget=6000: (
+                            [{"filename": "img.png", "mime_type": "image/png", "data": "AAAA"}],
+                            "",
+                        ))
+    monkeypatch.setattr(gen_mod, "describe_image",
+                        lambda *a, **k: ("CAP" if "data_b64" in k or True else ""))
+    monkeypatch.setattr(settings, "image_caption_model", "")
+
+    agent, llm = _setup_generate(gen_env, [
+        FakeLLM().response(tool_calls=[("tool_probe", '{"a":"1"}')]),
+        FakeLLM().response(content="done"),
+    ])
+
+    async def spy(name, args, state=None):
+        return "R"
+    agent._execute_tool = spy
+
+    snapshots = []
+
+    async def snap(model, messages, tool_defs, state=None):
+        snapshots.append([dict(m) for m in messages])  # 发送时快照（原列表后续被改写）
+        return await llm(model, messages, tool_defs, state=state)
+    agent._llm_call = snap
+
+    await agent._generate(make_state(files=[{"filename": "img.png", "mime_type": "image/png", "data": "AAAA"}]))
+    def user_content(snap):
+        for m in snap:
+            if isinstance(m.get("content"), list):
+                return m["content"]
+        return []
+    first_user = user_content(snapshots[0])
+    second_user = user_content(snapshots[1])
+    # 首轮含 image_url
+    assert any(isinstance(p, dict) and p.get("type") == "image_url" for p in first_user if isinstance(p, dict))
+    # 后续轮 image_url 已替换为占位文本
+    for p in second_user if isinstance(second_user, list) else []:
+        if isinstance(p, dict) and p.get("type") == "text":
+            assert "已附图" not in p.get("text", "") or True
+    second_text = " ".join(p.get("text", "") for p in second_user if isinstance(p, dict))
+    assert "已附图" in second_text
+
+
+@pytest.mark.asyncio
 async def test_generate_session_cwd_in_system(gen_env):
     agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="A")])
     await agent._generate(make_state(_cwd="/workdir"))

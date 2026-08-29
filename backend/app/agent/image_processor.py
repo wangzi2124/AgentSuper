@@ -223,3 +223,58 @@ async def describe_image(data_b64: str, mime_type: str = "", filename: str = "")
         if cap:
             return cap
     return ocr_image(data_b64, filename)
+
+
+def is_image_file(f: dict) -> bool:
+    """按 mime/扩展名判断是否为图片附件。"""
+    from pathlib import Path
+    from app.agent.attachment_loader import _IMAGE_EXTENSIONS
+    mime = (f.get("mime_type") or "").lower()
+    ext = Path(f.get("filename") or "").suffix.lower()
+    return mime.startswith("image/") or ext in _IMAGE_EXTENSIONS
+
+
+async def attachment_context_with_images(files: list[dict], budget: int = 3000) -> str:
+    """[F8 · C 步] 子 Agent 附件上下文：文档正文 + 图片 caption/OCR 文本。
+
+    让 web_search/code 等非视觉子 Agent 也能「看到」上传图片的内容
+    （此前只给 `[图片附件]` 占位）。
+    """
+    from app.agent.attachment_loader import attachment_context_text
+
+    text_files = [f for f in files if not is_image_file(f)]
+    parts: list[str] = []
+    if text_files:
+        t = attachment_context_text(text_files, budget=budget)
+        if t.strip():
+            parts.append(t)
+    caps: list[str] = []
+    for f in files:
+        if not is_image_file(f):
+            continue
+        cap = await describe_image(
+            f.get("data") or "", f.get("mime_type") or "", f.get("filename") or "",
+        )
+        if cap:
+            caps.append(f"[图片 {f.get('filename', '')}]: {cap}")
+    if caps:
+        parts.append("[图片描述]\n" + "\n".join(caps))
+    return "\n\n".join(parts)
+
+
+def make_thumbnail(data_b64: str, px: int = 256) -> str:
+    """[F8 · D 步] 生成缩略图 base64（回显/缓存用，避免传原图）。Pillow 缺失返回原图。"""
+    import base64 as _b64
+    if not _pil_available():
+        return data_b64
+    try:
+        import io as _io
+        from PIL import Image
+        raw = _b64.b64decode(data_b64 or "", validate=False)
+        img = Image.open(_io.BytesIO(raw))
+        img.thumbnail((px, px), Image.LANCZOS)
+        buf = _io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=70)
+        return _b64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:  # noqa: BLE001
+        return data_b64

@@ -153,3 +153,42 @@ async def test_describe_image_chain(caption_on, monkeypatch):
 
 def test_ocr_hook_disabled_by_default():
     assert ip.ocr_image(_b64_1x1(), "x.png") == ""
+
+
+# ── C 步：子 Agent 附件上下文（文档 + 图片 caption）────────────────────────
+
+def test_is_image_file():
+    assert ip.is_image_file({"filename": "a.png", "mime_type": "image/png"}) is True
+    assert ip.is_image_file({"filename": "b.JPG", "mime_type": "application/octet-stream"}) is True
+    assert ip.is_image_file({"filename": "c.txt", "mime_type": "text/plain"}) is False
+
+
+@pytest.mark.asyncio
+async def test_attachment_context_with_images(caption_on, monkeypatch):
+    async def fake_describe(data_b64="", mime_type="", filename=""):
+        return "CAT" if "img" in filename else ""
+    monkeypatch.setattr(ip, "describe_image", fake_describe)
+    import app.agent.attachment_loader as al
+    orig = al.attachment_context_text
+    al.attachment_context_text = lambda files, budget=3000: "文档正文" if files else ""
+    try:
+        out = await ip.attachment_context_with_images([
+            {"filename": "doc.txt", "mime_type": "text/plain", "data": "x"},
+            {"filename": "img1.png", "mime_type": "image/png", "data": "y"},
+        ])
+    finally:
+        al.attachment_context_text = orig
+    assert "文档正文" in out
+    assert "[图片 img1.png]: CAT" in out
+
+
+# ── D 步：缩略图 ───────────────────────────────────────────────────────────
+
+def test_make_thumbnail():
+    raw = _mk_image(2000, 1200)
+    thumb = ip.make_thumbnail(_b64bytes(raw), px=256)
+    assert len(thumb) < len(_b64bytes(raw))
+    from PIL import Image
+    import io as _io
+    img = Image.open(_io.BytesIO(base64.b64decode(thumb)))
+    assert max(img.size) <= 256
