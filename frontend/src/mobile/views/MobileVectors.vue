@@ -8,6 +8,7 @@ const vs = useVectorStore()
 const ds = useDocumentStore()
 
 const searchText = ref('')
+const filterSheet = ref(false)
 const selectedDocId = ref('')
 
 const totalPages = computed(() => Math.ceil(vs.total / vs.limit))
@@ -17,6 +18,11 @@ const docOptions = computed(() => [
   { name: '全部文档', value: '' },
   ...ds.documents.map(d => ({ name: d.filename, value: d.id })),
 ])
+
+function selectedDocLabel() {
+  const hit = docOptions.value.find(o => o.value === selectedDocId.value)
+  return hit ? hit.name : '全部文档'
+}
 
 function chunkSource(chunk: { metadata: Record<string, unknown> }): string {
   const f = chunk.metadata.filename
@@ -91,23 +97,21 @@ async function handleRepair() {
 
 <template>
   <div class="m-vectors">
-    <!-- 查询卡：搜索 + 文档筛选 合一（去除多余的搜索/取消按钮） -->
+    <!-- 查询卡：搜索 + 文档筛选 同一行 -->
     <div class="m-query-card">
-      <van-search
-        v-model="searchText"
-        placeholder="搜索分块内容..."
-        shape="round"
-        @search="onSearch"
-        @clear="onSearch"
-      />
-      <div class="m-query-row">
-        <span
-          v-for="opt in docOptions"
-          :key="opt.value || '__all__'"
-          class="m-filter-chip"
-          :class="{ active: selectedDocId === opt.value }"
-          @click="onPickDoc(opt)"
-        >{{ opt.name }}</span>
+      <div class="m-query-line">
+        <van-search
+          v-model="searchText"
+          placeholder="搜索分块内容..."
+          shape="round"
+          @search="onSearch"
+          @clear="onSearch"
+        />
+        <button class="m-query-filter" @click="filterSheet = true">
+          <van-icon name="filter-o" />
+          <span class="m-query-filter-label">{{ selectedDocLabel() }}</span>
+          <van-icon name="arrow-down" />
+        </button>
       </div>
     </div>
 
@@ -166,6 +170,14 @@ async function handleRepair() {
         </button>
       </div>
     </div>
+
+    <van-action-sheet
+      v-model:show="filterSheet"
+      :actions="docOptions"
+      title="按文档筛选"
+      cancel-text="取消"
+      @select="onPickDoc"
+    />
   </div>
 </template>
 
@@ -231,38 +243,37 @@ async function handleRepair() {
 }
 .m-query-card :deep(.van-search) { padding: 8px 8px 2px; }
 .m-query-card :deep(.van-search__content) { background: var(--m-vector-soft, rgba(16, 185, 129, 0.08)); }
-.m-query-row {
+.m-query-line {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 14px 10px;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
+  padding: 8px;
 }
-.m-query-row::-webkit-scrollbar { display: none; }
-.m-filter-chip {
-  flex-shrink: 0;
+.m-query-line :deep(.van-search) { flex: 1; min-width: 0; padding: 0; }
+.m-query-filter {
   display: inline-flex;
   align-items: center;
-  height: 24px;
-  padding: 0 10px;
+  gap: 4px;
+  height: 32px;
+  padding: 0 11px;
+  border: none;
   border-radius: 999px;
-  background: var(--m-vector-soft, rgba(16, 185, 129, 0.10));
-  color: var(--text-secondary, #64748b);
+  background: var(--m-vector-soft, rgba(16, 185, 129, 0.12));
+  color: var(--m-vector, #10b981);
   font-size: 11px;
-  font-weight: 500;
-  white-space: nowrap;
-  max-width: 120px;
+  font-weight: 600;
+  flex-shrink: 0;
+  max-width: 108px;
+  cursor: pointer;
+  transition: transform 0.1s, opacity 0.15s;
+}
+.m-query-filter:active { transform: scale(0.95); opacity: 0.8; }
+.m-query-filter-label {
   overflow: hidden;
   text-overflow: ellipsis;
-  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
 }
-.m-filter-chip.active {
-  background: var(--m-vector, #10b981);
-  color: #fff;
-  font-weight: 600;
-}
+.m-query-filter .van-icon { font-size: 12px; flex-shrink: 0; }
 
 /* 分块卡片 */
 .chunk-list { display: flex; flex-direction: column; gap: 10px; }
