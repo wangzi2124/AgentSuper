@@ -88,6 +88,8 @@ def test_session_workspace_blank_normalized(tmp_path):
     assert current_session_workspace() == ""
     token = set_session_workspace(tmp_path / "rel")
     assert current_session_workspace() == str((tmp_path / "rel").resolve())
+    reset_session_workspace(token)
+    assert current_session_workspace() == ""
 
 
 def test_needs_permission_exception():
@@ -112,11 +114,12 @@ def test_classify_workspace(tmp_path):
 def test_classify_session_workspace(tmp_path):
     mgr = _mgr(tmp_path)
     ses = tmp_path / "sesdir"
-    set_session_workspace(str(ses))
+    token = set_session_workspace(str(ses))
     try:
         assert mgr.classify_path(str(ses / "f.txt")) == "workspace"
     finally:
-        reset_session_workspace(set_session_workspace(""))
+        reset_session_workspace(token)
+    assert current_session_workspace() == ""
 
 
 def test_classify_extra_workspace(tmp_path):

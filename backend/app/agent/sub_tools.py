@@ -429,12 +429,19 @@ async def tool_loop_chat(
 
             # 并行执行全部工具调用（对齐主 Agent asyncio.gather）
             results = await asyncio.gather(*[_exec_one(tc) for tc in tool_calls], return_exceptions=True)
-            for (tc_id, result), tc in zip(results, tool_calls):
+            for result, tc in zip(results, tool_calls):
                 if isinstance(result, Exception):
-                    result = f"Error executing {tc.function.name}: {result}"
+                    # 工具级异常隔离：不得让单个工具崩溃拖垮整轮（_exec_one 异常被
+                    # gather 捕获为 Exception，而非 (id, result) 元组）
+                    bounded = bound_tool_output(
+                        f"Error executing {tc.function.name}: {result}", tc.function.name
+                    )
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": bounded})
+                    continue
+                tc_id, result_str = result
                 # 与主 Agent 一致：入口截断 + 超限写盘（data/truncation/）+ 续读提示，
                 # 避免大文件读取把子 Agent 上下文撑爆且截断后无法续读（对齐 opencode truncate.ts）
-                bounded = bound_tool_output(str(result), tc.function.name)
+                bounded = bound_tool_output(str(result_str), tc.function.name)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
