@@ -20,6 +20,20 @@ function formatDate(iso: string): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+// 文件类型 → 彩色方块（颜色/缩写）
+function typeMeta(filename: string): { label: string; color: string; soft: string } {
+  const ext = (filename.split('.').pop() || '').toUpperCase()
+  const map: Record<string, { label: string; color: string; soft: string }> = {
+    PDF: { label: 'PDF', color: 'var(--m-pdf)', soft: 'var(--m-pdf-soft)' },
+    MD: { label: 'MD', color: 'var(--m-md)', soft: 'var(--m-md-soft)' },
+    MARKDOWN: { label: 'MD', color: 'var(--m-md)', soft: 'var(--m-md-soft)' },
+    TXT: { label: 'TXT', color: 'var(--m-txt)', soft: 'var(--m-txt-soft)' },
+    DOC: { label: 'DOC', color: 'var(--m-doc)', soft: 'var(--m-doc-soft)' },
+    DOCX: { label: 'DOCX', color: 'var(--m-doc)', soft: 'var(--m-doc-soft)' },
+  }
+  return map[ext] || { label: ext.slice(0, 4), color: 'var(--m-file)', soft: 'var(--m-file-soft)' }
+}
+
 async function handleDelete(id: string) {
   try {
     await showConfirmDialog({
@@ -47,13 +61,19 @@ async function handleUpload(file: File) {
 
 <template>
   <div class="m-docs">
-    <van-uploader
-      :after-read="(item: any) => handleUpload(item.file as File)"
-      :max-count="1"
-      accept="*"
-    >
-      <div class="upload-btn">＋ 上传文档</div>
-    </van-uploader>
+    <div class="upload-wrap">
+      <van-uploader
+        :after-read="(item: any) => handleUpload(item.file as File)"
+        :max-count="1"
+        accept="*"
+      >
+        <div class="upload-btn">
+          <van-icon name="plus" />
+          <span>上传文档</span>
+          <span class="upload-sub">支持 .txt / .md / .pdf 等</span>
+        </div>
+      </van-uploader>
+    </div>
 
     <van-loading v-if="docs.loading && !docs.uploadStage" class="loading" />
 
@@ -66,19 +86,26 @@ async function handleUpload(file: File) {
     </van-empty>
 
     <div v-else class="doc-list">
-      <div class="doc-count">共 {{ docs.documents.length }} 个文档</div>
-      <van-swipe-cell v-for="doc in docs.documents" :key="doc.id">
-        <van-cell
-          :title="doc.filename"
-          :label="`${formatSize(doc.size)} · ${doc.chunk_count} 分块 · ${formatDate(doc.created_at)}`"
-          icon="description"
-        >
-          <template #icon>
-            <div class="doc-icon">📄</div>
-          </template>
-        </van-cell>
+      <div class="m-count-pill"><van-icon name="description" />共 {{ docs.documents.length }} 个文档</div>
+      <van-swipe-cell v-for="doc in docs.documents" :key="doc.id" class="doc-swipe">
+        <div class="m-card doc-item">
+          <div
+            class="m-type-block"
+            :style="{ background: typeMeta(doc.filename).soft, color: typeMeta(doc.filename).color }"
+          >{{ typeMeta(doc.filename).label }}</div>
+          <div class="doc-main">
+            <div class="doc-name">{{ doc.filename }}</div>
+            <div class="doc-meta">
+              {{ formatSize(doc.size) }} · {{ doc.chunk_count }} 分块 · {{ formatDate(doc.created_at) }}
+            </div>
+          </div>
+          <van-icon name="arrow" class="doc-arrow" />
+        </div>
         <template #right>
-          <div class="swipe-delete" @click="handleDelete(doc.id)">删除</div>
+          <div class="swipe-delete" @click="handleDelete(doc.id)">
+            <van-icon name="delete-o" />
+            删除
+          </div>
         </template>
       </van-swipe-cell>
     </div>
@@ -86,30 +113,64 @@ async function handleUpload(file: File) {
 </template>
 
 <style scoped>
-.m-docs { padding: 4px 12px 16px; }
+.m-docs { padding: 0 12px 16px; }
+
+/* ── 渐变上传卡 ── */
+.upload-wrap { padding: 12px 0 4px; }
 .upload-btn {
-  margin: 12px 0;
-  padding: 12px;
-  text-align: center;
-  font-size: 15px;
-  color: var(--indigo);
-  background: var(--primary-soft);
-  border-radius: 12px;
-  font-weight: 600;
-}
-.loading { display: flex; justify-content: center; padding: 48px 0; }
-.empty-hint { font-size: 13px; color: #97a0b4; margin-top: 4px; }
-.doc-list { display: flex; flex-direction: column; gap: 4px; }
-.doc-count { font-size: 12px; color: #97a0b4; padding: 6px 4px; }
-.doc-icon { margin-right: 10px; font-size: 22px; }
-.swipe-delete {
-  width: 64px;
-  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #ee0a24;
+  gap: 8px;
+  padding: 15px 12px;
+  border-radius: var(--m-card-radius);
+  background: var(--m-brand-grad);
   color: #fff;
-  font-size: 14px;
+  font-size: 15px;
+  font-weight: 600;
+  box-shadow: 0 6px 16px rgba(109, 94, 241, 0.28);
 }
+.upload-btn .van-icon { font-size: 18px; }
+.upload-sub { font-size: 11px; font-weight: 400; opacity: 0.85; }
+
+.loading { display: flex; justify-content: center; padding: 48px 0; }
+.empty-hint { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+
+/* ── 文档卡片 ── */
+.doc-list { display: flex; flex-direction: column; gap: 10px; }
+.doc-swipe { border-radius: var(--m-card-radius); overflow: hidden; }
+.doc-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+}
+.doc-main { flex: 1; min-width: 0; }
+.doc-name {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-all;
+  line-height: 1.4;
+}
+.doc-meta {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-top: 3px;
+  word-break: break-all;
+}
+.doc-arrow { color: #c3c9d4; font-size: 15px; }
+.swipe-delete {
+  width: 76px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  background: linear-gradient(180deg, #f43f5e, #e11d48);
+  color: #fff;
+  font-size: 12px;
+}
+.swipe-delete .van-icon { font-size: 18px; }
 </style>

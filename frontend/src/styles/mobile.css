@@ -294,3 +294,132 @@ html[data-theme='dark'] {
 
 /* 桌面 / 平板（>768px）不套用移动外壳规则 */
 
+
+/* ============================================================================
+ * 移动端设计令牌（Mobile Design Tokens）— 2026-08-29 改版新增
+ *
+ * 用途：统一移动端卡片、品牌渐变、语义色系，全部变量化以兼容深色模式。
+ * 语义色：文档=蓝 / 技能=紫 / 插件=青 / 向量=绿 / 监控=橙 / 工具=粉 / 文件=橙
+ * ============================================================================ */
+:root {
+  --m-bg: #f6f7fb;
+  --m-brand-grad: linear-gradient(135deg, #6d5ef1 0%, #8b5cf6 55%, #38bdf8);
+  --m-card-radius: 16px;
+  --m-card-shadow: 0 2px 12px rgba(31, 41, 55, 0.06);
+
+  --m-chat: #6d5ef1;      --m-chat-soft: rgba(109, 94, 241, 0.12);
+  --m-doc: #3b82f6;       --m-doc-soft: rgba(59, 130, 246, 0.12);
+  --m-skill: #8b5cf6;     --m-skill-soft: rgba(139, 92, 246, 0.12);
+  --m-plugin: #06b6d4;    --m-plugin-soft: rgba(6, 182, 212, 0.12);
+  --m-vector: #10b981;    --m-vector-soft: rgba(16, 185, 129, 0.12);
+  --m-monitor: #f59e0b;   --m-monitor-soft: rgba(245, 158, 11, 0.12);
+  --m-tool: #ec4899;      --m-tool-soft: rgba(236, 72, 153, 0.12);
+  --m-file: #f97316;      --m-file-soft: rgba(249, 115, 22, 0.12);
+
+  --m-pdf: #ef4444;  --m-pdf-soft: rgba(239, 68, 68, 0.12);
+  --m-md: #3b82f6;   --m-md-soft: rgba(59, 130, 246, 0.12);
+  --m-txt: #64748b;  --m-txt-soft: rgba(100, 116, 139, 0.12);
+  --m-js: #f59e0b;   --m-js-soft: rgba(245, 158, 11, 0.12);
+}
+
+html[data-theme='dark'] {
+  --m-bg: #0b1222;
+  --m-card-shadow: 0 2px 14px rgba(0, 0, 0, 0.35);
+}
+
+@media (max-width: 768px) {
+  /* 移动外壳统一背景 */
+  .mobile-shell { background: var(--m-bg) !important; }
+
+  /* 移动端通用卡片：圆角 16px、柔和阴影、细边框 */
+  .m-card {
+    background: var(--surface, #fff);
+    border: 1px solid var(--border, #eef1f6);
+    border-radius: var(--m-card-radius);
+    box-shadow: var(--m-card-shadow);
+  }
+
+  /* 分类标题：左侧彩色圆条 + 加粗文字 */
+  .m-sec-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text, #1e293b);
+    padding: 14px 4px 8px;
+  }
+  .m-sec-title::before {
+    content: '';
+    width: 4px;
+    height: 14px;
+    border-radius: 2px;
+    background: var(--m-brand-grad);
+  }
+
+  /* 统计小胶囊（页首计数） */
+  .m-count-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary, #64748b);
+    background: var(--surface, #fff);
+    border: 1px solid var(--border, #eef1f6);
+    border-radius: 999px;
+    padding: 4px 12px;
+    margin: 4px 0 12px;
+  }
+
+  /* 文件类型彩色方块（文档/生成文件共用） */
+  .m-type-block {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.3px;
+    flex-shrink: 0;
+  }
+
+  /* Vant 搜索框圆角卡片化 */
+  .mobile-body .van-search {
+    padding: 10px 12px 4px;
+  }
+  .mobile-body .van-search .van-search__content {
+    border-radius: 12px;
+    background: var(--surface, #fff);
+    border: 1px solid var(--border, #eef1f6);
+  }
+  .mobile-body .van-search .van-field__control { font-size: 14px; }
+
+  /* Vant cell-group 卡片化 */
+  .mobile-body .van-cell-group--inset {
+    border-radius: var(--m-card-radius);
+    margin: 0 12px;
+    overflow: hidden;
+    box-shadow: var(--m-card-shadow);
+  }
+
+  /* Vant cell 图标位统一为彩色圆角容器（组件自带 icon 时） */
+  .mobile-body .van-cell__left-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 12px;
+  }
+}
+
+html[data-theme='dark'] {
+  /* 抽屉头部在深色下使用更深邃的渐变 */
+  .drawer-head {
+    background: linear-gradient(135deg, #4c3fce 0%, #6d4fd1 55%, #0e7490) !important;
+  }
+}
