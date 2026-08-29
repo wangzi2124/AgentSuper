@@ -91,7 +91,9 @@ def test_attachment_parts_split(monkeypatch):
         {"filename": "doc.pdf", "mime_type": "application/pdf", "data": "z"},
     ]
     images, text = _attachment_parts(files)
-    assert images == ["img.png", "pic.JPG"]
+    # [F8] 图片以 dict 返回（含规范化 data/mime_type + 宽高）
+    assert [im["filename"] for im in images] == ["img.png", "pic.JPG"]
+    assert images[0]["data"] == "x"  # 非合法图片 → 原样返回
     assert calls["others"] == [{"filename": "doc.pdf", "mime_type": "application/pdf", "data": "z"}]
     assert text == "TXT"
 
@@ -101,7 +103,9 @@ def test_attachment_parts_no_others():
     （`from .. import attachment_loader`）——无附件/纯图片附件不应崩。"""
     assert _attachment_parts([]) == ([], "")
     images, text = _attachment_parts([{"filename": "a.png", "mime_type": "image/png", "data": "x"}])
-    assert images == ["a.png"] and text == ""
+    assert [im["filename"] for im in images] == ["a.png"]
+    assert images[0]["mime_type"] == "image/png"
+    assert text == ""
 
 
 def test_attachment_parts_real_loader_text(monkeypatch):

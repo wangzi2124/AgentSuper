@@ -111,6 +111,19 @@ class Settings(BaseSettings):
     long_task_min_question_chars: int = 30
     # 接力时计划最多拆几步
     long_task_max_steps: int = 6
+    # ── [F8/F9] 图片上传解析给模型（多模态附件管线）──
+    # 上传图片先规格化（缩放+JPEG 压缩）再投递给模型，避免大图 base64 撑爆上下文。
+    image_max_dimension: int = 1024          # 长边缩放上限（px）
+    image_max_kb: int = 512                  # 压缩后单图字节上限（KB）
+    image_token_cap: int = 6000              # 单请求图片 token 预算上限（超限进一步降采样）
+    image_thumbnail_px: int = 256            # 回显/缓存缩略图边长
+    image_use_ocr: bool = False              # 图片 OCR 提取文本（截图/文档图，需 OCR 库）
+    image_vlm_caption: bool = True           # 图片描述桥：视觉 LLM 生成 caption 注入文本
+    image_caption_model: str = "openai/gpt-4o-mini"  # caption VLM（litellm 前缀；内网改 ollama/llava）
+    image_caption_api_base: str = ""
+    image_caption_api_key: str = ""
+    image_caption_prompt: str = ""           # 空用默认「用中文简洁描述图片内容与关键细节」
+    image_caption_timeout: int = 15          # caption 调用超时（秒），失败快速降级
     # 摘要中间件缓存大小（按历史分块缓存，避免每请求全量重算）
     summarization_cache_size: int = 200
 

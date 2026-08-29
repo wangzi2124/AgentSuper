@@ -156,25 +156,52 @@ def _find_attachment(files: list[dict], filename: str) -> dict:
     raise KeyError(filename)
 
 def _attachment_parts(files: list[dict], budget: int = 6000):
-    """把附件拆分为 (图片文件名列表, 文本上下文)。
+    """把附件拆分为 (图片文件列表, 文本上下文)。
 
-    图片交给多模态 image_url；文档附件经 LangChain loaders
-    （attachment_loader.attachment_context_text）解析为文本上下文。
+    [F8] 图片先规格化（缩放+压缩，见 image_processor.normalize_image）再返回：
+    避免大图 base64 撑爆上下文；返回的图片 dict 携带规范化 data/mime_type 及
+    宽高（供 token 预算）。图片 token 合计超 IMAGE_TOKEN_CAP 时进一步降采样一次。
+    文档附件经 LangChain loaders（attachment_loader.attachment_context_text）解析。
     """
     from .. import attachment_loader
+    from app.agent.image_processor import estimate_image_tokens, normalize_image
+    from app.config import settings
 
-    image_names: list[str] = []
+    images: list[dict] = []
     others: list[dict] = []
     for f in files:
         mime = (f.get("mime_type") or "").lower()
         ext = Path((f.get("filename") or "")).suffix.lower()
         if mime.startswith("image/") or ext in {".jpg", ".jpeg", ".png", ".gif",
                                                 ".webp", ".bmp", ".svg", ".ico"}:
-            image_names.append(f.get("filename") or "file")
+            norm = normalize_image(f.get("data") or "", mime, f.get("filename") or "file")
+            images.append({
+                **f,
+                "data": norm["data"],
+                "mime_type": norm["mime_type"],
+                "_width": norm["width"],
+                "_height": norm["height"],
+            })
         else:
             others.append(f)
+
+    # [F8] 图片 token 预算：超 IMAGE_TOKEN_CAP → 进一步降采样一次（仍超则保留，由 C5 截断兜底）
+    cap = max(1, int(settings.image_token_cap))
+    total = sum(estimate_image_tokens(im.get("_width", 0), im.get("_height", 0)) for im in images)
+    if images and total > cap:
+        smaller = max(1, int(settings.image_max_dimension) // 2)
+        re_normed = []
+        for im in images:
+            n = normalize_image(
+                im.get("data") or "", im.get("mime_type") or "", im.get("filename") or "",
+                max_dimension=smaller,
+            )
+            re_normed.append({**im, "data": n["data"], "mime_type": n["mime_type"],
+                              "_width": n["width"], "_height": n["height"]})
+        images = re_normed
+
     text_ctx = attachment_loader.attachment_context_text(others, budget=budget) if others else ""
-    return image_names, text_ctx
+    return images, text_ctx
 
 
 

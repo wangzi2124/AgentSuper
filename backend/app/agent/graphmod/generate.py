@@ -37,6 +37,7 @@ from app.context.tool_dedup import ToolResultDedup
 from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
 from app.context.budget import llm_call_budget
 from app.context.token_counter import estimate_tokens_messages
+from app.agent.image_processor import describe_image
 
 from app.utils.json_repair import parse_tool_args
 
@@ -201,16 +202,27 @@ class RAGAgentGenerate(RAGAgentTools):
         if user_files:
             user_content: list[dict] = [{"type": "text", "text": user_question}]
             # [F8 后端] 附件处理：
-            #   - image/* → 多模态 image_url 数据块（LLM 原生看图）
+            #   - image/* → 规格化后的多模态 image_url 数据块（LLM 原生看图）
             #   - 其余（pdf/docx/xlsx/txt/md/csv/json 等）→ 经 LangChain document
             #     loaders 解析为文本上下文（attachment_loader），让模型能读到文档正文。
-            image_names, text_ctx = _attachment_parts(user_files)
-            for name in image_names:
-                f = _find_attachment(user_files, name)
+            image_files, text_ctx = _attachment_parts(user_files)
+            for img in image_files:
                 user_content.append({
                     "type": "image_url",
-                    "image_url": {"url": f"data:{f['mime_type']};base64,{f['data']}"},
+                    "image_url": {"url": f"data:{img['mime_type']};base64,{img['data']}"},
                 })
+            # [F8] 图片描述桥：视觉 LLM caption 注入文本（非视觉主模型/子 Agent 也能看图）
+            if image_files and settings.image_vlm_caption and settings.image_caption_model:
+                caps = []
+                for img in image_files:
+                    cap = await describe_image(
+                        img.get("data") or "", img.get("mime_type") or "",
+                        img.get("filename") or "",
+                    )
+                    if cap:
+                        caps.append(f"[图片 {img.get('filename', '')}]: {cap}")
+                if caps:
+                    user_content.append({"type": "text", "text": "[图片描述]\n" + "\n".join(caps)})
             if text_ctx:
                 user_content.append({"type": "text", "text": text_ctx})
             messages.append({"role": "user", "content": user_content})

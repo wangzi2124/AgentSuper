@@ -523,6 +523,8 @@ def gen_env(monkeypatch, tmp_path):
         monkeypatch.setattr(gen_mod, name, lambda *a, **k: None)
     # [C5 · 方案 D] 旧用例不 mock 摘要组件 → 关闭小步快走，保持既有行为
     monkeypatch.setattr(settings, "step_summary_enabled", False)
+    # [F8] 旧用例不 mock caption VLM → 关闭图片描述桥（避免测试触发真实视觉调用）
+    monkeypatch.setattr(settings, "image_caption_model", "")
     return monkeypatch
 
 
@@ -562,9 +564,16 @@ async def test_generate_with_context_and_history(gen_env):
 @pytest.mark.asyncio
 async def test_generate_multimodal_files(gen_env, monkeypatch):
     monkeypatch.setattr(gen_mod, "_attachment_parts",
-                        lambda files, budget=6000: (["img.png"], "FILE_TEXT"))
-    monkeypatch.setattr(gen_mod, "_find_attachment",
-                        lambda files, name: {"filename": "img.png", "mime_type": "image/png", "data": "AAAA"})
+                        lambda files, budget=6000: (
+                            [{"filename": "img.png", "mime_type": "image/png", "data": "AAAA"}],
+                            "FILE_TEXT",
+                        ))
+
+    async def fake_describe(data_b64="", mime_type="", filename=""):
+        return "图片描述内容"
+    monkeypatch.setattr(gen_mod, "describe_image", fake_describe)
+    monkeypatch.setattr(settings, "image_caption_model", "openai/gpt-4o-mini")  # 开启描述桥
+
     agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="A")])
     state = make_state(files=[{"filename": "img.png", "mime_type": "image/png", "data": "AAAA"}])
     await agent._generate(state)
@@ -572,9 +581,11 @@ async def test_generate_multimodal_files(gen_env, monkeypatch):
     user = messages[-1]["content"]
     assert isinstance(user, list)
     types = [p["type"] for p in user]
-    assert types == ["text", "image_url", "text"]
+    assert types == ["text", "image_url", "text", "text"]  # 问题 + image_url + 图片描述 + FILE_TEXT
     img = next(p for p in user if p["type"] == "image_url")
     assert img["image_url"]["url"] == "data:image/png;base64,AAAA"
+    # [F8] 图片描述桥：caption 文本注入（非视觉模型也能看图）
+    assert any("图片描述内容" in (p.get("text") or "") for p in user)
 
 
 @pytest.mark.asyncio
