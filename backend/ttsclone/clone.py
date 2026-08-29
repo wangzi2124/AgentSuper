@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Qwen3-TTS 聲音複製 CLI 工具
 用法：

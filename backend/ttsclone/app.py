@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Qwen3-TTS 聲音複製與語音合成系統（本地版）
 參考官方 HuggingFace Spaces Demo 改寫，針對本地 GPU 優化

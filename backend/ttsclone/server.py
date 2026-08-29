@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Qwen3-TTS 本地语音合成 REST API
 供外部服务(如 OMNI STUDIO 后端)调用。
