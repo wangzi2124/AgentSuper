@@ -109,6 +109,14 @@ async function handleRepair() {
       @cancel="onSearch"
     />
 
+    <!-- 顶部操作栏：清空向量库（危险操作置顶，醒目分离） -->
+    <div class="m-top-bar">
+      <div class="m-top-title"><van-icon name="apps-o" />向量库管理</div>
+      <button class="m-manage-btn danger" @click="handleClearAll">
+        <van-icon name="delete-o" /><span>清空向量库</span>
+      </button>
+    </div>
+
     <!-- 统计横幅（绿色系） -->
     <div class="m-hero">
       <div class="m-hero-icon"><van-icon name="apps-o" /></div>
@@ -154,27 +162,24 @@ async function handleRepair() {
       <van-button size="small" round plain type="primary" @click="loadMore">加载更多</van-button>
     </div>
 
-    <!-- 底部管理栏：次级操作（清理过期/自愈重建）居左，危险清空居右 -->
-    <div class="m-manage-bar">
+    <!-- 底部管理栏：次级操作（清理过期/自愈重建），无待办时隐藏 -->
+    <div v-if="vs.config && ((vs.config.ttl_days ?? 0) > 0 || (vs.config.pending_repair ?? 0) > 0)" class="m-manage-bar">
       <div class="m-manage-left">
         <button
-          v-if="vs.config && vs.config.ttl_days > 0"
+          v-if="vs.config.ttl_days > 0"
           class="m-manage-btn"
           @click="handleClearExpired"
         >
           <van-icon name="clock-o" /><span>清理过期</span>
         </button>
         <button
-          v-if="vs.config && (vs.config.pending_repair ?? 0) > 0"
+          v-if="(vs.config.pending_repair ?? 0) > 0"
           class="m-manage-btn repair"
           @click="handleRepair"
         >
           <van-icon name="rebuild" /><span>自愈重建 ({{ vs.config!.pending_repair }})</span>
         </button>
       </div>
-      <button class="m-manage-btn danger" @click="handleClearAll">
-        <van-icon name="delete-o" /><span>清空向量库</span>
-      </button>
     </div>
 
     <van-action-sheet
@@ -313,7 +318,26 @@ async function handleRepair() {
 }
 .load-more { display: flex; justify-content: center; padding: 16px 0; }
 
-/* ── 底部管理栏（固定，次级操作 + 危险清空分离）── */
+/* 顶部操作栏 */
+.m-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 2px 0 10px;
+  padding: 0 2px;
+}
+.m-top-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text, #1e293b);
+}
+.m-top-title .van-icon { color: var(--m-vector, #10b981); }
+
+/* 底部管理栏（固定，次级操作） */
 .m-vectors { padding-bottom: 92px; }
 .m-manage-bar {
   position: sticky;
