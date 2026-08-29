@@ -267,6 +267,110 @@ async def test_step_summarize_failure_keeps_raw(monkeypatch):
     assert await agent._step_summarize(msgs, 10_000) is msgs  # 回退原列表
 
 
+# ── 方案 E/F · 长任务多请求接力 ─────────────────────────────────────────────
+
+def test_parse_plan():
+    from app.agent.long_task import _parse_plan
+    assert _parse_plan('["a", "b", "c"]', 5) == ["a", "b", "c"]
+    assert _parse_plan('```json\n["x"]\n```', 5) == ["x"]
+    assert _parse_plan("not json", 5) == []
+    assert _parse_plan('["a", "b", "c", "d"]', 3) == ["a", "b", "c"]  # 超限截断
+    assert _parse_plan("", 5) == []
+
+
+class _CoordAgent:
+    """假 RAGAgent：_llm_call 返回计划；invoke 记录每步上下文。"""
+
+    def __init__(self, plan_text, answers):
+        self.plan_text = plan_text
+        self.answers = answers
+        self.model = "m"
+        self.invoke_calls = []
+
+    async def _llm_call(self, model, messages, tool_defs, state=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=self.plan_text))])
+
+    async def invoke(self, question, use_vector_db=False, directory="", conversation_id=""):
+        self.invoke_calls.append((question, directory, conversation_id))
+        return {"answer": self.answers[len(self.invoke_calls) - 1],
+                "sources": [], "steps": [], "tokens": {"input": 10, "output": 5}}
+
+
+@pytest.mark.asyncio
+async def test_coordinator_single_step_falls_back(monkeypatch):
+    from app.agent.long_task import LongTaskCoordinator
+    agent = _CoordAgent('["single"]', ["普通回答"])
+    out = await LongTaskCoordinator(agent, max_steps=6).run("q")
+    assert out["answer"] == "普通回答"
+    assert len(agent.invoke_calls) == 1  # 非长任务 → 普通单请求
+
+
+@pytest.mark.asyncio
+async def test_coordinator_multi_step_fresh_context(tmp_path):
+    from app.agent.long_task import LongTaskCoordinator
+    agent = _CoordAgent('["步骤1", "步骤2", "步骤3"]', ["A1", "A2", "A3"])
+    out = await LongTaskCoordinator(agent, max_steps=6).run("长任务", directory=str(tmp_path), conversation_id="cid")
+    assert len(agent.invoke_calls) == 3  # 每步一个独立请求
+    # 每步上下文只含计划 + 已完成进度 + 当前步（fresh，不携带旧步骤全文）
+    for i, (q, d, cid) in enumerate(agent.invoke_calls):
+        assert "长任务" in q
+        assert f"当前第 {i+1}/3 步" in q
+        assert "已完成进度" in q
+        assert d == str(tmp_path) and cid == "cid"
+    # 汇总回答含各步结果
+    assert "【步骤1】A1" in out["answer"] and "【步骤3】A3" in out["answer"]
+    assert out["tokens"]["input"] == 30  # 3 步 × 10
+    # STEP_STATE 落盘
+    latest = list((tmp_path / ".agents" / "steps").glob("0003.md"))
+    assert latest and "step3" in latest[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_code_agent_wires_coordinator_when_enabled(monkeypatch):
+    """LONG_TASK_STEP_MODE=true 时 code 子 Agent chat 走接力。"""
+    import app.agent.code_agent as ca_mod
+    from app.agent.code_agent import CodeAgent
+    from app.agent.base import AgentMessage
+    from _graphmod_support import build_agent
+    monkeypatch.setattr(settings, "long_task_step_mode", True)
+
+    inner = build_agent()
+    coordinator_calls = []
+
+    async def fake_run(self, question, directory="", conversation_id=""):
+        coordinator_calls.append((question, directory, conversation_id))
+        return {"answer": "RELAY", "sources": [], "steps": [], "tokens": {}}
+    monkeypatch.setattr("app.agent.long_task.LongTaskCoordinator.run", fake_run)
+
+    agent = CodeAgent(inner=inner)
+    msg = AgentMessage(source="user", target="code", type="request", action="chat",
+                       payload={"question": "写一个多文件项目", "conversation_id": "cid", "directory": "/w"})
+    replies = [r async for r in agent.handle_message(msg)]
+    assert replies[0].payload["answer"] == "RELAY"
+    assert coordinator_calls == [("写一个多文件项目", "/w", "cid")]
+
+
+@pytest.mark.asyncio
+async def test_code_agent_normal_when_disabled(monkeypatch):
+    from app.agent.code_agent import CodeAgent
+    from app.agent.base import AgentMessage
+    monkeypatch.setattr(settings, "long_task_step_mode", False)
+    called = []
+
+    class Inner:
+        async def invoke(self, **kw):
+            called.append(kw.get("question"))
+            return {"answer": "NORMAL", "sources": [], "steps": [], "tokens": {}}
+    agent = CodeAgent(inner=Inner())
+    msg = AgentMessage(source="user", target="code", type="request", action="chat",
+                       payload={"question": "简单问题"})
+    replies = [r async for r in agent.handle_message(msg)]
+    assert replies[0].payload["answer"] == "NORMAL"
+    assert called == ["简单问题"]
+
+
 @pytest.mark.asyncio
 async def test_generate_long_task_small_step_wiring(monkeypatch, tmp_path):
     """长任务（≥min_rounds）周期性调用 _step_summarize，发送上下文保持有界。"""

@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     step_summary_interval: int = 2
     # 摘要后原样保留的最近消息条数（覆盖最近一轮 assistant+tool 结果）
     step_summary_keep_messages: int = 4
+    # [C5 · 方案 E/F 多请求接力] 长任务小步快走：开启后 code 子 Agent 对多步骤
+    # 实现类任务先拆计划、每步一个独立 fresh-context 请求执行，步间只传落盘
+    # STEP_STATE（上下文永不膨胀）。默认关闭（保持既有单请求路径）。
+    long_task_step_mode: bool = False
+    # 接力时计划最多拆几步
+    long_task_max_steps: int = 6
     # 摘要中间件缓存大小（按历史分块缓存，避免每请求全量重算）
     summarization_cache_size: int = 200
 

@@ -114,18 +114,26 @@ class CodeAgent(BaseAgent):
                     "agent_id": self._id,
                     "step": step_event("generate", "生成回答", "running"),
                 })
-                result = await self._inner.invoke(
-                    question=question,
-                    model=payload.get("model"),
-                    history=history,
-                    use_vector_db=payload.get("use_vector_db", False),
-                    files=payload.get("files", []),
-                    conversation_id=conv_id,
-                    on_activity=self._notify,
-                    event_queue=tagged,
-                    directory=directory,
-                    task_depth=task_depth,
-                )
+                if settings.long_task_step_mode:
+                    # [C5 · 方案 E/F] 长任务小步快走：多步骤任务拆计划、每步独立
+                    # fresh-context 请求执行，步间只传落盘 STEP_STATE（上下文不膨胀）。
+                    from app.agent.long_task import LongTaskCoordinator
+                    result = await LongTaskCoordinator(
+                        self._inner, max_steps=settings.long_task_max_steps,
+                    ).run(question, directory=directory, conversation_id=conv_id)
+                else:
+                    result = await self._inner.invoke(
+                        question=question,
+                        model=payload.get("model"),
+                        history=history,
+                        use_vector_db=payload.get("use_vector_db", False),
+                        files=payload.get("files", []),
+                        conversation_id=conv_id,
+                        on_activity=self._notify,
+                        event_queue=tagged,
+                        directory=directory,
+                        task_depth=task_depth,
+                    )
                 emit(event_queue, {
                     "type": "agent_step",
                     "agent_id": self._id,
