@@ -107,7 +107,9 @@
 
 ## 五、原则四：功能收纳 — 聊天框只留对话，设置入左侧抽屉
 
-> 现状：移动端聊天头部占用空间的控件（模型选择 `.model-selector` / 向量库检索 `.toggle` / 天气预警 `.weather-alert-container` / 工作目录 `.ws-manager` / 清空会话 `.chat-footer .btn-danger`）已全部收纳进左侧抽屉「设置」分组（`MobileShell.vue`，含 `@@CHAT_PANEL_SCRIPT@@` / `@@CHAT_PANEL_TEMPLATE@@` / `@@CHAT_PANEL_STYLE@@` 三处注入标记），聊天框头部仅保留标题 + 流式状态 badge（排队中 / 运行中），视觉对齐 ChatGPT。移动端隐藏规则在 `mobile.css` 尾部（`@@CHAT_PANEL_CSS@@` 标记，`@media (max-width:768px)` 下 `display:none !important`），升级入口为 `scripts/upgrade_chat_panel.py`（独立于 `upgrade_mobile_ui.py` / `upgrade_chat_scroll.py`）。
+> 现状：移动端聊天头部占用空间的控件（模型选择 `.model-selector` / 向量库检索 `.toggle` / 天气预警 `.weather-alert-container` / 工作目录 `.ws-manager` / 清空会话 `.chat-footer .btn-danger`）已全部收纳（`MobileShell.vue`），聊天框头部仅保留标题 + 流式状态 badge（排队中 / 运行中），视觉对齐 ChatGPT。移动端隐藏规则在 `mobile.css` 尾部（`@@CHAT_PANEL_CSS@@` 标记，`@media (max-width:768px)` 下 `display:none !important`），升级入口为 `scripts/upgrade_chat_panel.py`（独立于 `upgrade_mobile_ui.py` / `upgrade_chat_scroll.py`）。
+>
+> **实现机制（2026-08 实测校正）**：实际落地为「抽屉「设置」入口 → 弹出设置表单弹层（`van-popup` bottom sheet）」而非文档早期描述的「抽屉内联设置分组」——聊天框更干净、设置不挤占抽屉导航。注入标记：抽屉入口 `@@CHAT_SETTINGS_ENTRY@@`、表单弹层 `@@CHAT_SETTINGS_FORM_TEMPLATE@@` / `@@CHAT_SETTINGS_FORM_SCRIPT@@` / `@@CHAT_SETTINGS_FORM_STYLE@@`；`upgrade_chat_panel.py` 的幂等标记为 `@@CHAT_PANEL_SCRIPT@@` / `@@CHAT_PANEL_TEMPLATE@@` / `@@CHAT_PANEL_STYLE@@` / `@@CHAT_PANEL_CSS@@`（模板标记 `@@CHAT_PANEL_TEMPLATE@@` 已作为幂等注释置于表单弹层标记旁）。重跑脚本不会重复注入。
 
 ### 5.1 收纳映射（源码事实）
 
@@ -150,9 +152,9 @@
 | 头部毛玻璃 + 工具条压缩 | mobile.css / 检索报告 3.1 | ✅ 已落地 |
 | **回到底部按钮** | `MultiAgentView.vue`（`showScrollBtn` / `scrollToBottom` / `isTrusted`）+ `mobile.css` L481-506 + `scripts/upgrade_chat_scroll.py` | ✅ 已落地 |
 | **功能收纳（设置入抽屉，聊天框零菜单）** | `MobileShell.vue`（`@@CHAT_PANEL_*@@` 三处注入）+ `mobile.css` 尾部隐藏规则（`@@CHAT_PANEL_CSS@@`）+ `scripts/upgrade_chat_panel.py` | ✅ 已落地 |
-| 重试幂等 / 断连落库（弱网可靠性） | 优化行动计划 F1（P1） | ⏳ 待办 |
-| `part.delta` 真增量渲染（流式流畅度） | 优化行动计划 F2（P2） | ⏳ 待办 |
-| 多 Agent 子会话 parts 落库（历史完整） | 优化行动计划 F3（P2） | ⏳ 待办 |
+| 重试幂等 / 断连落库（弱网可靠性） | 优化行动计划 F1（P1） | ✅ 已落地（B4 client_msg_id 幂等 + B10 统一 session.db 历史管线 + B11 断连兜底落库） |
+| `part.delta` 真增量渲染（流式流畅度） | 优化行动计划 F2（P2） | ✅ 已落地（`text_delta` 经 `TaggedEventQueue` 直通 SSE 打上 agent_id，前端实时增量追加主回答） |
+| 多 Agent 子会话 parts 落库（历史完整） | 优化行动计划 F3（P2） | ✅ 已落地（`_persist_multi_agent_parts` 主会话 assistant parts + agent/step/tool part 落库） |
 
 ### 6.2 落地建议（按优先级）
 
@@ -160,8 +162,8 @@
 |---|---|---|
 | ✅ 已完成 | 「回到底部」悬浮按钮 | 已按第三节规范落地（经 `scripts/upgrade_chat_scroll.py` 执行，样式在 `mobile.css` L481-506）；规范固化见 6.3 |
 | ✅ 已完成 | 功能收纳（原则四） | 设置入左侧抽屉「设置」分组（`MobileShell.vue` 经 `scripts/upgrade_chat_panel.py` 注入），聊天框零菜单；样式在 `mobile.css` 尾部 `@@CHAT_PANEL_CSS@@`；规范固化见第五节 |
-| P1 | F1 聊天链路补全 | B4 重试幂等、B10 统一历史管线、B11 断连落库；成功指标：断连重连不丢消息 |
-| P2 | F2/F3 流式增量 | `part.delta` 真增量渲染 + 子会话 parts 落库，是"跟随滚动流畅度"的技术基础 |
+| P1 | F1 聊天链路补全 | B4 重试幂等、B10 统一历史管线、B11 断连落库；成功指标：断连重连不丢消息 | ✅ 已完成（后端 B4/B10/B11 已落地，见 6.1） |
+| P2 | F2/F3 流式增量 | `part.delta` 真增量渲染 + 子会话 parts 落库，是"跟随滚动流畅度"的技术基础 | ✅ 已完成（F2 `text_delta` 直通 SSE、F3 parts 落库，见 6.1） |
 
 ### 6.3 修改入口约束（知识库强制规范）
 

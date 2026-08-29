@@ -204,6 +204,7 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
         </div>
       </div>
     </van-popup>
+  <!-- @@CHAT_PANEL_TEMPLATE@@ -->
   <!-- @@CHAT_SETTINGS_FORM_TEMPLATE@@ -->
   <!-- ── 设置表单弹层：模型 / 向量库 / 工作目录 / 清空会话 ── -->
   <van-popup
