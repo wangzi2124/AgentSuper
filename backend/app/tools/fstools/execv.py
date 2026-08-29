@@ -334,10 +334,13 @@ _NET_COMMANDS = frozenset({
 
 def _ssrf_check_command(command: str) -> None:
     """对出站网络命令做 SSRF 校验：URL 目标为内网地址时拦截。"""
-    from app.utils.ssrf import check_url, _host_is_internal
+    from app.utils.ssrf import allow_internal, check_url, _host_is_internal
 
     parts = _win_flag_split(command)
     if not parts or parts[0].lower() not in _NET_COMMANDS:
+        return
+    if allow_internal():
+        # SSRF_ALLOW_INTERNAL=true（本地调试）→ 放行内网；协议校验仍交给 check_url
         return
     for tok in parts[1:]:
         t = tok.lower()
@@ -350,6 +353,12 @@ def _ssrf_check_command(command: str) -> None:
         candidate = t
         if ":" in t and not t.endswith(":"):
             candidate = t.rsplit(":", 1)[0]
+        if candidate in ("", "-"):
+            continue
+        # scp/ssh 常带 user@ 前缀（user@10.0.0.9:/path）：先剥掉 userinfo 再判主机，
+        # 否则 getaddrinfo 会拿整个 "user@host" 去解析 → gaierror → 误判为公网漏放。
+        if "@" in candidate:
+            candidate = candidate.rsplit("@", 1)[-1].strip("[]")
         if candidate in ("", "-"):
             continue
         if _host_is_internal(candidate):
