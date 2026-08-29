@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""预下载 Qwen3-TTS 模型到 backend/ttsclone/models（**不自动下载**，同向量模型下载方式）。
+"""预下载 Qwen3-TTS 模型到 backend/ttsclone/models（手动/离线备用）。
 
-模型不会在运行时自动下载：先运行本脚本（ModelScope 优先 / HuggingFace 回退，
-复用 app/utils/model_download.py 的断点续传/重试/超时/哨兵）。
+默认链路：VOICE_TTS_ENABLED=true 时服务启动会自动下载（后台线程，同向量模型），
+本脚本用于手动/离线预下载或补全其它规格模型。
+ModelScope 优先 / HuggingFace 回退（复用 app/utils/model_download.py 的断点续传/重试/超时）。
 
 用法：
     .venv\\Scripts\\python.exe scripts/download_tts_model.py            # 默认 1.7B CustomVoice

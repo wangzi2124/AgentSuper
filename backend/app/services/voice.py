@@ -12,6 +12,8 @@ graphmod/tools.py），不阻塞 SelectorEventLoop（对齐 tool_execute 线程�
 import datetime
 import json
 import logging
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -50,19 +52,59 @@ class VoiceService:
         self.output_dir = Path(output_dir or (base / "data" / "generated"))
 
     @property
+    def model_id(self) -> str:
+        """当前配置模型规格对应的模型仓库 id。"""
+        return f"Qwen/Qwen3-TTS-12Hz-{self.model_size}-CustomVoice"
+
+    @property
     def model_path(self) -> Path:
         """当前配置模型规格对应的本地模型目录（ttsclone/models 下扁平命名）。"""
-        return self.tts_dir / "models" / f"Qwen_Qwen3-TTS-12Hz-{self.model_size}-CustomVoice"
+        return self.tts_dir / "models" / self.model_id.replace("/", "_")
 
     @property
     def has_model(self) -> bool:
-        """模型是否已预下载（不自动下载，缺失时需 scripts/download_tts_model.py）。"""
+        """模型是否已就绪（不自动下载已由启动 ensure_models 处理）。"""
         return self.model_path.is_dir() and any(self.model_path.iterdir())
 
     @property
     def enabled(self) -> bool:
-        """总开关：配置启用 且 clone.py 存在 且 模型已预下载。"""
+        """总开关：配置启用 且 clone.py 存在 且 模型已下载。"""
         return bool(settings.voice_tts_enabled) and self._clone_script().exists() and self.has_model
+
+    def _ensure_flat(self, path: Path) -> Path:
+        """download_model 可能返回 ModelScope 嵌套布局，统一到 ttsclone 期望的扁平命名。"""
+        flat = self.tts_dir / "models" / self.model_id.replace("/", "_")
+        if flat == path or (flat.exists() and any(flat.iterdir())):
+            return flat
+        flat.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            if flat.exists():
+                shutil.rmtree(flat)
+            os.replace(str(path), str(flat))
+        return flat
+
+    def ensure_models(self) -> None:
+        """启动时预下载模型（同向量/嵌入模型：ModelScope 优先 / HF 回退，断点续传）。
+
+        不抛异常：下载失败仅降级（语音端点返回 503 并引导手动脚本），不阻断服务启动。
+        后台线程调用（runtime.py），已就绪时直接跳过。
+        """
+        if self.has_model:
+            logger.info("[voice] 模型已就绪: %s", self.model_path)
+            return
+        try:
+            from app.utils.model_download import download_model
+            models_dir = self.tts_dir / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("[voice] 启动下载模型 %s → %s", self.model_id, models_dir)
+            p = download_model(self.model_id, cache_dir=models_dir)
+            self._ensure_flat(p)
+            logger.info("[voice] 模型下载完成: %s", self.model_path)
+        except Exception as e:  # noqa: BLE001 —— 下载失败降级，不阻断启动
+            logger.warning(
+                "[voice] 模型下载失败，语音功能降级（可稍后手动运行 "
+                "scripts/download_tts_model.py）：%s", e,
+            )
 
     def _clone_script(self) -> Path:
         return self.tts_dir / "clone.py"

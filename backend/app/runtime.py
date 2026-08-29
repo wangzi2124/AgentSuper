@@ -150,10 +150,12 @@ def _do_init(app):
     agent_bus = AgentBus()
     shared_memory = MemoryManager(default_ttl=300)  # 共享记忆，5 分钟过期
 
-    # [语音] 本地 Qwen3-TTS 服务（子进程，无外部 HTTP）：仅在配置启用时注入主线
+    # [语音] 本地 Qwen3-TTS 服务（子进程，无外部 HTTP）：启用时注入主线，
+    # 后台线程启动下载模型（同向量模型：ModelScope 优先，失败降级不阻断启动）
     voice_service = VoiceService() if settings.voice_tts_enabled else None
     if voice_service is not None:
-        logger.info("Voice service injected (enabled=%s dir=%s)", voice_service.enabled, voice_service.tts_dir)
+        threading.Thread(target=voice_service.ensure_models, daemon=True, name="voice-model-dl").start()
+        logger.info("Voice service enabled (dir=%s)", voice_service.tts_dir)
 
     agent = RAGAgent(
         retriever, skill_loader, plugin_loader,

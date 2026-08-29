@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
-"""voice service 全量用例：子进程解析、错误、超时、门控、合成/转写路径。
+﻿# -*- coding: utf-8 -*-
+"""voice service 全量用例：子进程解析、错误、超时、门控、合成/转写路径、启动预下载。
 
 运行：pytest tests/test_voice_service.py
 """
@@ -73,11 +73,11 @@ def test_speaker_model_fallback():
 
 def test_run_parses_json(monkeypatch, tmp_path):
     svc = _make_service(monkeypatch, tmp_path)
-    proc = _Proc(returncode=0, stdout='some log\n{"ok": true, "text": "你好"}\n')
+    proc = _Proc(returncode=0, stdout='some log\n{"ok": true, "text": "\u4f60\u597d"}\n')
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: proc)
     ok, res = svc._run(["transcribe", "x.wav"])
     assert ok is True
-    assert res["text"] == "你好"
+    assert res["text"] == "\u4f60\u597d"
 
 
 def test_run_returns_raw_output(monkeypatch, tmp_path):
@@ -140,7 +140,7 @@ def test_synthesize_writes_wav(monkeypatch, tmp_path):
         return True, {"ok": True, "path": args[idx + 1]}
 
     monkeypatch.setattr(svc, "_run", fake_run)
-    ok, msg, path = svc.synthesize("你好")
+    ok, msg, path = svc.synthesize("\u4f60\u597d")
     assert ok is True
     assert path is not None
     assert Path(path).exists()
@@ -156,7 +156,7 @@ def test_synthesize_passes_args(monkeypatch, tmp_path):
         return False, {"error": "no model"}
 
     monkeypatch.setattr(svc, "_run", fake_run)
-    svc.synthesize("测试", speaker="Dylan", language="Chinese", instruct="happy", model_size="0.6B")
+    svc.synthesize("test", speaker="Dylan", language="Chinese", instruct="happy", model_size="0.6B")
     assert "--speaker" in captured["args"]
     assert "Dylan" in captured["args"]
     assert "--lang" in captured["args"]
@@ -167,7 +167,7 @@ def test_synthesize_passes_args(monkeypatch, tmp_path):
 def test_synthesize_failure(monkeypatch, tmp_path):
     svc = _make_service(monkeypatch, tmp_path)
     monkeypatch.setattr(svc, "_run", lambda args, timeout=None: (False, {"error": "no model"}))
-    ok, msg, path = svc.synthesize("你好")
+    ok, msg, path = svc.synthesize("test")
     assert ok is False
     assert "no model" in msg
     assert path is None
@@ -179,10 +179,10 @@ def test_transcribe_text(monkeypatch, tmp_path):
     svc = _make_service(monkeypatch, tmp_path)
     audio = tmp_path / "a.wav"
     audio.write_bytes(b"fake")
-    monkeypatch.setattr(svc, "_run", lambda args, timeout=None: (True, {"text": "今天天气不错"}))
+    monkeypatch.setattr(svc, "_run", lambda args, timeout=None: (True, {"text": "\u4eca\u5929\u5929\u6c14\u4e0d\u9519"}))
     ok, text = svc.transcribe(str(audio))
     assert ok is True
-    assert text == "今天天气不错"
+    assert text == "\u4eca\u5929\u5929\u6c14\u4e0d\u9519"
 
 
 def test_transcribe_missing_audio(monkeypatch, tmp_path):
@@ -200,3 +200,44 @@ def test_transcribe_failure(monkeypatch, tmp_path):
     ok, text = svc.transcribe(str(audio))
     assert ok is False
     assert "whisper failed" in text
+
+
+# ── 启动预下载 ─────────────────────────────────────────────────────────────
+
+def test_ensure_models_skips_when_ready(monkeypatch, tmp_path):
+    svc = _make_service(monkeypatch, tmp_path, model=True)
+    called = []
+    monkeypatch.setattr(
+        "app.utils.model_download.download_model",
+        lambda *a, **k: called.append(a) or Path(tmp_path),
+    )
+    svc.ensure_models()
+    assert called == []
+
+
+def test_ensure_models_downloads_and_flattens(monkeypatch, tmp_path):
+    svc = _make_service(monkeypatch, tmp_path, model=False)
+    # 模拟 ModelScope 返回嵌套目录（Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice）
+    nested = tmp_path / "ttsclone" / "models" / "Qwen" / "Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "model.safetensors").write_bytes(b"fake")
+    monkeypatch.setattr(
+        "app.utils.model_download.download_model",
+        lambda model_id, cache_dir=None: nested,
+    )
+    svc.ensure_models()
+    assert svc.has_model is True
+    assert svc.model_path.is_dir()
+    assert (svc.model_path / "model.safetensors").exists()
+
+
+def test_ensure_models_failure_degrades(monkeypatch, tmp_path):
+    svc = _make_service(monkeypatch, tmp_path, model=False)
+
+    def _boom(*a, **k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr("app.utils.model_download.download_model", _boom)
+    svc.ensure_models()  # 不抛异常
+    assert svc.has_model is False
+    assert svc.enabled is False
