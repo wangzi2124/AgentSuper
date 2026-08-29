@@ -518,3 +518,57 @@ html[data-theme='dark'] {
     display: none !important;
   }
 }
+
+/* ============================================================================
+ * 聊天框顶部会话标签条 + 头部路径隐藏（@@CHAT_TABLIST_CSS@@）
+ * A. 移动端隐藏 chat-header 中的文件/权限路径（session-dir 📁 目录等）
+ * B. 移动端 tablist 吸顶在聊天框最上方；桌面端不显示（保持原布局）
+ * ============================================================================ */
+.chat-tablist { display: none; }
+
+@media (max-width: 768px) {
+  /* A. 隐藏文件/权限路径：工作目录已在先前规则隐藏，这里隐藏会话目录 📁 */
+  .mobile-body .chat-header .session-dir { display: none !important; }
+
+  /* B. 会话标签条：吸顶在消息列表上方，横向可滚动 */
+  .mobile-body .chat-tablist {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    overflow-x: auto;
+    flex-shrink: 0;
+    border-bottom: 1px solid #f0f1f5;
+    background: var(--surface, #fff);
+    scrollbar-width: none;
+  }
+  .mobile-body .chat-tablist::-webkit-scrollbar { display: none; }
+  .mobile-body .chat-tab {
+    display: inline-flex;
+    align-items: center;
+    max-width: 160px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border, #eef1f6);
+    background: var(--bg, #f8fafc);
+    font-size: 12px;
+    color: var(--text, #1e293b);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.15s;
+  }
+  .mobile-body .chat-tab.current {
+    border-color: #6d5ef1;
+    background: rgba(109, 94, 241, 0.12);
+    color: #6d5ef1;
+    font-weight: 600;
+  }
+  .mobile-body .chat-tab-new {
+    padding: 6px 10px;
+    border-style: dashed;
+    color: var(--text-secondary, #64748b);
+  }
+}

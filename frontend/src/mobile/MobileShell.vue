@@ -93,6 +93,35 @@ const mobileViews: Record<string, unknown> = {
   function refreshWorkspaces() {
     perm.loadWorkspaces()
   }
+  /* @@CHAT_SETTINGS_FORM_SCRIPT@@ */
+  // ── 设置表单：模型 / 向量库 / 工作目录 / 清空会话（弹层表单） ──
+  const showSettingsForm = ref(false)
+  const showModelPicker = ref(false)
+  const formModel = ref(agent.selectedModel)
+  const formDirectory = ref(agent.sessionDirectory)
+  const modelColumns = computed(() => SUPPORTED_MODELS.map(m => ({ text: m.label, value: m.value })))
+  const formModelText = computed(
+    () => SUPPORTED_MODELS.find(m => m.value === formModel.value)?.label || formModel.value
+  )
+
+  function openSettings() {
+    formModel.value = agent.selectedModel
+    formDirectory.value = agent.sessionDirectory
+    showSettingsForm.value = true
+  }
+
+  function onModelConfirm(params: any) {
+    const opt = params?.selectedOptions?.[0]
+    if (opt && opt.value) formModel.value = opt.value
+    agent.selectedModel = formModel.value
+    showModelPicker.value = false
+  }
+
+  function saveSettings() {
+    // 直接写 store 状态（不依赖 setSessionDirectory 方法签名）
+    agent.sessionDirectory = formDirectory.value.trim()
+    showSettingsForm.value = false
+  }
 const currentView = computed(() => mobileViews[route.name as string] || null)
 </script>
 
@@ -116,7 +145,7 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
       <router-view v-else />
     </div>
 
-    <van-tabbar v-model="activeTab" fixed placeholder safe-area-inset-bottom route>
+    <!-- <van-tabbar v-model="activeTab" fixed placeholder safe-area-inset-bottom route>
       <van-tabbar-item
         v-for="t in tabs"
         :key="t.name"
@@ -130,7 +159,7 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
         </template>
         {{ t.title }}
       </van-tabbar-item>
-    </van-tabbar>
+    </van-tabbar> -->
 
     <van-popup
       v-model:show="showMenu"
@@ -160,56 +189,72 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
             <span class="drawer-item-title">{{ m.title }}</span>
             <van-icon name="arrow" class="drawer-item-arrow" />
           </div>
-          <!-- @@CHAT_PANEL_TEMPLATE@@ -->
-          <!-- ── 设置分组：移动端聊天对齐 ChatGPT，头部控件收纳于此 ── -->
+                    <!-- @@CHAT_SETTINGS_ENTRY@@ -->
+          <!-- ── 设置：与「功能导航」同款 drawer-item，点开弹出参数表单 ── -->
           <div class="drawer-group-label" style="margin-top: 16px">设置</div>
 
-          <div class="drawer-sub-group">
-            <div class="drawer-sub-label">模型</div>
-            <div class="model-options">
-              <div
-                v-for="m in SUPPORTED_MODELS"
-                :key="m.value"
-                class="model-opt"
-                :class="{ current: agent.selectedModel === m.value }"
-                @click="agent.selectedModel = m.value"
-              >
-                <span class="model-opt-name">{{ m.label }}</span>
-                <van-icon v-if="agent.selectedModel === m.value" name="success" color="#4f46e5" />
-              </div>
+          <div class="drawer-item settings-item" @click="openSettings">
+            <div class="drawer-item-ico" style="background: rgba(109,94,241,.12); color: #6d5ef1;">
+              <van-icon name="setting-o" />
             </div>
+            <span class="drawer-item-title">参数设置</span>
+            <van-icon name="arrow" class="drawer-item-arrow" />
           </div>
 
-          <div class="drawer-item settings-item" @click="agent.useVectorDb = !agent.useVectorDb">
-            <div class="drawer-item-ico" style="background: rgba(16,185,129,.12); color: #10b981;">
-              <van-icon name="cluster-o" />
-            </div>
-            <span class="drawer-item-title">向量库检索</span>
-            <van-switch v-model="agent.useVectorDb" size="22" @click.stop />
-          </div>
-
-          <div class="drawer-item settings-item" @click="refreshWorkspaces">
-            <div class="drawer-item-ico" style="background: rgba(59,130,246,.12); color: #3b82f6;">
-              <van-icon name="folder-o" />
-            </div>
-            <div class="drawer-item-main">
-              <div class="drawer-item-title">工作目录</div>
-              <div class="drawer-item-sub">{{ workspacesText }}</div>
-            </div>
-            <van-icon name="refresh" class="drawer-item-arrow" />
-          </div>
-
-          <div class="drawer-item settings-item" @click="onClearClick">
-            <div class="drawer-item-ico" style="background: rgba(239,68,68,.12); color: #ef4444;">
-              <van-icon name="delete-o" />
-            </div>
-            <span class="drawer-item-title" :class="{ 'danger-text': clearConfirm }">
-              {{ clearConfirm ? '再点一次确认清空' : '清空当前会话' }}
-            </span>
-          </div>
         </div>
       </div>
     </van-popup>
+  <!-- @@CHAT_SETTINGS_FORM_TEMPLATE@@ -->
+  <!-- ── 设置表单弹层：模型 / 向量库 / 工作目录 / 清空会话 ── -->
+  <van-popup
+    v-model:show="showSettingsForm"
+    position="bottom"
+    round
+    :style="{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }"
+  >
+    <div class="settings-form">
+      <div class="settings-form-head">
+        <span class="settings-form-title">参数设置</span>
+        <van-icon name="cross" class="settings-form-close" @click="showSettingsForm = false" />
+      </div>
+      <div class="settings-form-body">
+        <div class="form-field">
+          <div class="form-label">模型</div>
+          <van-field
+            :model-value="formModelText"
+            readonly
+            is-link
+            placeholder="选择模型"
+            @click="showModelPicker = true"
+          />
+        </div>
+        <div class="form-field form-row">
+          <div class="form-label">向量库检索</div>
+          <van-switch v-model="agent.useVectorDb" size="22" />
+        </div>
+        <div class="form-field">
+          <div class="form-label">工作目录</div>
+          <van-field v-model="formDirectory" placeholder="如 F:\\tetris" clearable />
+          <div class="form-tip">作用于当前聊天会话（随消息发送到 Agent）</div>
+        </div>
+        <van-button type="primary" block round class="form-save" @click="saveSettings">
+          保存设置
+        </van-button>
+        <van-button type="danger" plain block round class="form-clear" @click="onClearClick">
+          {{ clearConfirm ? '再点一次确认清空' : '清空当前会话' }}
+        </van-button>
+      </div>
+    </div>
+  </van-popup>
+
+  <van-popup v-model:show="showModelPicker" position="bottom" round>
+    <van-picker
+      :columns="modelColumns"
+      title="选择模型"
+      @confirm="onModelConfirm"
+      @cancel="showModelPicker = false"
+    />
+  </van-popup>
   </div>
 </template>
 
@@ -366,5 +411,35 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
     text-overflow: ellipsis;
   }
   .danger .drawer-item-title { color: #ef4444; }
-  .danger-text { color: #ef4444 !important; }
+  .danger-text { color: #ef4444 !important; }  /* @@CHAT_SETTINGS_FORM_STYLE@@ */
+  /* ── 设置表单弹层（与功能导航 drawer-item 视觉统一） ── */
+  .settings-form { padding: 6px 0 calc(12px + env(safe-area-inset-bottom, 0px)); }
+  .settings-form-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px 6px;
+  }
+  .settings-form-title { font-size: 16px; font-weight: 700; }
+  .settings-form-close {
+    font-size: 18px;
+    color: var(--text-secondary, #94a3b8);
+    cursor: pointer;
+    padding: 4px;
+  }
+  .settings-form-body { padding: 8px 16px; }
+  .form-field { margin-bottom: 14px; }
+  .form-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary, #64748b);
+    margin-bottom: 6px;
+    letter-spacing: 0.5px;
+  }
+  .form-row { display: flex; align-items: center; justify-content: space-between; }
+  .form-row .form-label { margin-bottom: 0; }
+  .form-tip { font-size: 11px; color: var(--text-secondary, #94a3b8); margin-top: 6px; }
+  .form-save { margin-top: 8px; }
+  .form-clear { margin-top: 10px; }
+
 </style>

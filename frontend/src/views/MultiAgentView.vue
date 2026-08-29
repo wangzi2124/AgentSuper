@@ -196,6 +196,19 @@ async function handleCopy(messageId: string, text: string) {
     console.error('Copy failed:', e)
   }
 }
+  /* @@CHAT_TABLIST_SCRIPT@@ */
+  // ── 会话标签条：聊天框顶部切换 / 新建会话（数据源 = agent.conversations） ──
+  agent.loadConversations()
+
+  function switchConversation(id: string) {
+    if (id === agent.conversationId) return
+    router.push({ name: 'MultiAgentConversation', params: { id } })
+  }
+
+  function newConversation() {
+    agent.newChat()
+    router.push({ name: 'MultiAgent' })
+  }
 </script>
 
 <template>
@@ -266,6 +279,23 @@ async function handleCopy(messageId: string, text: string) {
         </div>
       </div>
     </div>
+  <!-- @@CHAT_TABLIST@@ -->
+  <!-- ── 会话标签条：吸顶在聊天框最上方（移动端展示，桌面端 display:none） ── -->
+  <div class="chat-tablist">
+    <div
+      v-for="c in agent.conversations"
+      :key="c.id"
+      class="chat-tab"
+      :class="{ current: c.id === agent.conversationId }"
+      @click="switchConversation(c.id)"
+      :title="c.title || '未命名会话'"
+    >
+      <span class="chat-tab-title">{{ c.title || '未命名会话' }}</span>
+    </div>
+    <div class="chat-tab chat-tab-new" title="新建会话" @click="newConversation">
+      <van-icon name="plus" />
+    </div>
+  </div>
 
     <div class="chat-body">
       <div v-if="messages.length === 0" class="empty-state">
