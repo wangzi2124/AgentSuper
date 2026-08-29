@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+  <defs>
+    <linearGradient id="base" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e1b4b"/>
+      <stop offset="0.45" stop-color="#312e81"/>
+      <stop offset="1" stop-color="#1e293b"/>
+    </linearGradient>
+    <radialGradient id="g-violet" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g-blue" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#38bdf8" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#38bdf8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g-pink" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ec4899" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#ec4899" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g-cyan" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vignette" cx="0.5" cy="0.42" r="0.75">
+      <stop offset="0" stop-color="#0f172a" stop-opacity="0"/>
+      <stop offset="1" stop-color="#0f172a" stop-opacity="0.55"/>
+    </radialGradient>
+    <filter id="blurA" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="60"/>
+    </filter>
+    <filter id="blurB" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="45"/>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="1000" fill="url(#base)"/>
+
+  <!-- 极光色块 -->
+  <g filter="url(#blurA)">
+    <ellipse cx="260" cy="160" rx="460" ry="320" fill="url(#g-violet)"/>
+    <ellipse cx="1380" cy="240" rx="400" ry="300" fill="url(#g-blue)"/>
+    <ellipse cx="900" cy="900" rx="560" ry="340" fill="url(#g-pink)"/>
+    <ellipse cx="180" cy="820" rx="340" ry="260" fill="url(#g-cyan)"/>
+  </g>
+
+  <!-- 细颗粒光点 -->
+  <g filter="url(#blurB)" opacity="0.5">
+    <circle cx="520" cy="300" r="8" fill="#c4b5fd"/>
+    <circle cx="1180" cy="520" r="6" fill="#7dd3fc"/>
+    <circle cx="760" cy="680" r="7" fill="#f0abfc"/>
+    <circle cx="1440" cy="760" r="5" fill="#a5f3fc"/>
+    <circle cx="420" cy="640" r="5" fill="#ddd6fe"/>
+    <circle cx="980" cy="260" r="6" fill="#93c5fd"/>
+  </g>
+
+  <!-- 弱网格 -->
+  <g stroke="#ffffff" stroke-opacity="0.035" stroke-width="1">
+    <path d="M0 160h1600M0 320h1600M0 480h1600M0 640h1600M0 800h1600"/>
+    <path d="M200 0v1000M400 0v1000M600 0v1000M800 0v1000M1000 0v1000M1200 0v1000M1400 0v1000"/>
+  </g>
+
+  <!-- 暗角 -->
+  <rect width="1600" height="1000" fill="url(#vignette)"/>
+</svg>

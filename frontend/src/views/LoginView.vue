@@ -197,9 +197,8 @@ async function submit() {
   justify-content: center;
   padding: 24px;
   background:
-    radial-gradient(1000px 600px at 15% -10%, var(--primary-soft, #eef2ff), transparent 60%),
-    radial-gradient(900px 500px at 110% 110%, rgba(56, 189, 248, 0.08), transparent 55%),
-    var(--bg);
+    url('/login-bg.svg') no-repeat center / cover,
+    linear-gradient(160deg, #1e1b4b, #312e81);
 }
 
 .login-shell {
