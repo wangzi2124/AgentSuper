@@ -136,6 +136,9 @@ class VoiceService:
         if not self._clone_script().exists():
             return False, {"error": f"ttsclone not found: {self.tts_dir}"}
         cmd = [self._python(), str(self._clone_script())] + args
+        # 子进程 stdout 强制 utf-8：Windows 下默认 GBK 会把 json.dumps 中文写成 GBK 字节，
+        # 父进程按 utf-8 解码即乱码。
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         try:
             proc = subprocess.run(
                 cmd,
@@ -145,6 +148,7 @@ class VoiceService:
                 cwd=str(self.tts_dir),
                 encoding="utf-8",
                 errors="replace",
+                env=env,
             )
         except FileNotFoundError:
             return False, {"error": f"python not found: {self._python()}"}

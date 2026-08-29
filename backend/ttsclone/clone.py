@@ -17,6 +17,7 @@ Qwen3-TTS 聲音複製 CLI 工具
 
 import argparse
 import datetime
+import json
 import os
 import sys
 
@@ -151,6 +152,27 @@ def cmd_clone(args):
     print(f"已儲存至: {outfile}")
 
 
+def cmd_transcribe(args):
+    """Whisper 转写音频为文本（输出最后一行 JSON：{"ok": true, "text": "..."}）"""
+    import soundfile as _sf
+    import whisper
+
+    # 旧 whisper 权重含自定义类，torch>=2.6 默认 weights_only=True 会失败 → 回退
+    import torch as _torch
+    _orig_load = _torch.load
+    def _legacy_load(*a, **k):
+        k["weights_only"] = False
+        return _orig_load(*a, **k)
+    _torch.load = _legacy_load
+
+    wav, sr = _sf.read(args.audio, dtype="float32")
+    # whisper 内部自带重采样，无需手动 resample（手动 interpolate 曾引入坏样本 → 转写乱码）
+    device = "cuda" if args.device == "auto" and _torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device)
+    model = whisper.load_model("turbo", device=device)
+    result = model.transcribe(wav, fp16=(device == "cuda"))
+    print(json.dumps({"ok": True, "text": result["text"].strip()}, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Qwen3-TTS 聲音複製 CLI 工具",
@@ -187,6 +209,12 @@ def main():
     p_clone.add_argument("--small", action="store_true",
                          help="使用 0.6B 小模型（VRAM 不足時使用）")
 
+    # transcribe 子命令：Whisper 转写（ASR），供后端 /api/voice/transcribe 调用
+    p_tr = sub.add_parser("transcribe", help="Whisper 转写音频为文本")
+    p_tr.add_argument("audio", help="音频文件路径（wav/mp3/flac 等）")
+    p_tr.add_argument("--device", default="auto",
+                      help="auto（有 GPU 用 cuda）/ cpu / cuda")
+
     args = parser.parse_args()
 
     if args.download:
@@ -196,6 +224,8 @@ def main():
         cmd_custom(args)
     elif args.command == "clone":
         cmd_clone(args)
+    elif args.command == "transcribe":
+        cmd_transcribe(args)
 
 
 if __name__ == "__main__":
