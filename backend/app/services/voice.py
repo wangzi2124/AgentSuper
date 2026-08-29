@@ -35,18 +35,15 @@ class VoiceService:
 
     def __init__(
         self,
-        tts_dir: str | None = None,
+        tts_dir: str | Path | None = None,
         speaker: str = "Vivian",
         model_size: str = "1.7B",
         timeout: int = 600,
         output_dir: str | None = None,
     ):
         base = Path(__file__).resolve().parents[2]  # backend/
-        dir_value = tts_dir or settings.voice_tts_dir
-        self.tts_dir = Path(dir_value)
-        if not self.tts_dir.is_absolute():
-            # 相对路径以 backend 为基准（默认 "../ttsclone" → 仓库根/ttsclone）
-            self.tts_dir = (base / self.tts_dir).resolve()
+        # 目录固定为 backend/ttsclone，不配置路径（测试可显式传入临时目录）
+        self.tts_dir = Path(tts_dir) if tts_dir else (base / "ttsclone")
         self.speaker = speaker if speaker in SPEAKERS else "Vivian"
         self.model_size = model_size if model_size in MODEL_SIZES else "1.7B"
         self.timeout = timeout
