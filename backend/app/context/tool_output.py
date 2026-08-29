@@ -89,27 +89,49 @@ def bound_tool_output(
     tool_name: str = "",
     limits: ToolOutputLimits | None = None,
     save_full_output: bool = True,
+    max_tokens: int | None = None,
 ) -> str:
     """Apply smart bounding to tool output.
 
-    Truncates output that exceeds line-count or byte-size limits.
+    Truncates output that exceeds line-count, byte-size or token limits.
     Preserves the beginning (most important) and appends a truncation notice.
 
     对齐 opencode `tool/truncate.ts`：超限时把完整输出写到 data/truncation/
     目录，上下文只保留预览 + 提示，模型可用 tool_read_file(offset) 或
     tool_grep 续读，避免截断导致信息永久丢失。
 
+    [C5] max_tokens：按 token 封顶（默认 settings.tool_output_max_tokens）。
+    中文场景 32KB 字符 ≈ 48K token 单条过大，字符/行限内仍可能顶爆预算，
+    故在行/字节限之外再按估算 token 逐次减半，直到 ≤ 上限（保留开头+续读提示）。
+
     Args:
         output: Raw tool output string.
         tool_name: Name of the tool (for applying tool-specific limits).
         limits: Custom limits (uses defaults if None).
         save_full_output: 超限时是否把全文写盘。默认 True（对齐 opencode）。
+        max_tokens: 单条工具输出的 token 上限；None 用 settings.tool_output_max_tokens；0 关闭。
 
     Returns:
         Bounded output string, possibly truncated with a notice.
     """
     if not output:
         return output
+
+    full_output = output  # 保存原始全文，供超限写盘续读
+    token_truncated = False
+    if max_tokens is None:
+        try:
+            from app.config import settings
+            max_tokens = int(getattr(settings, "tool_output_max_tokens", 8_000) or 0)
+        except Exception:
+            max_tokens = 8_000
+    if max_tokens and max_tokens > 0:
+        from app.context.token_counter import estimate_tokens
+        # 逐次减半直到估算 token ≤ 上限（避免字符串级二分需多次 estimate，收敛快）
+        while estimate_tokens(output) > max_tokens and len(output) > 512:
+            output = output[: len(output) // 2]
+        if output != full_output:
+            token_truncated = True
 
     lim = limits or _DEFAULT_LIMITS
     max_lines, max_bytes = lim.max_lines, lim.max_bytes
@@ -118,7 +140,6 @@ def bound_tool_output(
     if tool_name in lim.tight_limits:
         max_lines, max_bytes = lim.tight_limits[tool_name]
 
-    full_output = output
     original_bytes = len(output.encode("utf-8"))
     original_lines = output.count("\n") + 1
 
@@ -135,6 +156,8 @@ def bound_tool_output(
     if len(encoded) > max_bytes:
         output = encoded[:max_bytes].decode("utf-8", errors="ignore")
         truncated = True
+
+    truncated = truncated or token_truncated
 
     if truncated:
         # 字节截断可能切在行中间 → 以最终输出重算实际显示行/字节数，保证 notice 精确

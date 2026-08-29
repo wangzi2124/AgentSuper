@@ -82,6 +82,17 @@ class Settings(BaseSettings):
     tool_output_protect_tokens: int = 24_000
     # 清理收益低于该值时不做（避免微小收益的频繁改写）；生效值同样经联动钳制。
     tool_output_prune_minimum_tokens: int = 12_000
+    # [C5 长任务上下文越界根治] 单次 LLM 调用预算的安全系数：截断/压缩目标
+    # 使用 usable × context_safety_ratio（默认 0.9），为估算误差预留 ≥10% 余量，
+    # 避免「截断按估算放行、Provider 按实际拒绝」。见 budget.llm_call_budget。
+    context_safety_ratio: float = 0.9
+    # [C5] 压缩目标系数：压缩后的上下文应尽量落到 usable × compaction_target_ratio
+    # 之下（默认 0.5），保证压缩后仍有充足余量继续多轮工具循环。
+    compaction_target_ratio: float = 0.5
+    # [C5] 单条工具输出 token 上限（对齐 opencode 按 token 截断语义）：中文场景
+    # 32KB 字符 ≈ 48K token 单条过大，bound_tool_output 在字符/行限之外再按 token
+    # 封顶，超限写盘 + 续读提示。0 = 不启用 token 封顶。
+    tool_output_max_tokens: int = 8_000
     # 摘要中间件缓存大小（按历史分块缓存，避免每请求全量重算）
     summarization_cache_size: int = 200
 

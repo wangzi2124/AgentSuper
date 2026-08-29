@@ -21,6 +21,9 @@ def _estimate_correction() -> float:
     ~13%（analyze_token_trace：round8 估算 20,851 vs 实际 23,599）。在
     estimate_tokens 一处校正，truncate_messages / compactor.should_compact 等
     所有下游判断自动随之修正。惰性求值避免模块加载顺序问题。
+
+    [C5] 该系数可经 update_token_correction 用实际 usage 自适应校准（EMA），
+    消除不同负载（中文/代码/长文档）下的残余系统性偏差。
     """
     global _correction
     if _correction is None:
@@ -30,6 +33,39 @@ def _estimate_correction() -> float:
         except Exception:
             _correction = 1.13
     return _correction
+
+
+def token_correction_factor() -> float:
+    """当前估算校正系数（默认 1.13，可经 set/update 自适应校准）。"""
+    return _estimate_correction()
+
+
+def set_token_correction_factor(value: float) -> None:
+    """显式设置估算校正系数（钳制在 [1.0, 2.5]，避免噪声/异常把系数带飞）。"""
+    global _correction
+    _correction = max(1.0, min(2.5, float(value)))
+
+
+def update_token_correction(estimated_tokens: int, actual_tokens: int) -> None:
+    """[C5] 用 Provider 实际 usage 自适应校准估算系数（EMA，alpha=0.02）。
+
+    每次 LLM 调用后调用：observed = actual / estimated。若估算系统性低估
+    （observed > 1.13），系数逐步上修，truncate/compaction 提前介入；
+    高估则下修，避免过度截断。
+
+    observed 先钳制到 [0.9, 1.5]（tokenizer 失配的合理范围）：真实负载比值
+    通常在 1.0~1.4（中英混排/代码），超 1.5 的尖峰多为冷启动/异常负载，
+    逐点逼近会污染长期系数；钳制 + 小 alpha 使系数向真实比值慢收敛且稳定。
+    """
+    if estimated_tokens <= 0 or actual_tokens <= 0:
+        return
+    observed = min(1.5, max(0.9, actual_tokens / estimated_tokens))
+    current = _estimate_correction()
+    updated = current * (1 - _ADAPTIVE_ALPHA) + observed * _ADAPTIVE_ALPHA
+    set_token_correction_factor(updated)
+
+
+_ADAPTIVE_ALPHA = 0.02
 
 
 def _get_encoder():

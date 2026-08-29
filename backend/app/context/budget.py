@@ -20,6 +20,27 @@ def usable_context_tokens() -> int:
     return max(0, settings.max_context_tokens - settings.context_reserve_tokens)
 
 
+def llm_call_budget() -> int:
+    """[C5] 单次 LLM 调用预算（截断/压缩目标）：usable × context_safety_ratio。
+
+    为估算误差预留余量（默认 0.9 → 10% 安全垫）：`truncate_messages` 以此为目标，
+    即使估算（tiktoken×correction）对 DeepSeek 中文/代码低估 15-40%，实际 pt
+    仍落在 MAX_CONTEXT_TOKENS 之内，根治「截断按估算放行、Provider 按实际拒绝」。
+    """
+    ratio = max(0.1, min(1.0, getattr(settings, "context_safety_ratio", 0.9)))
+    return max(1, int(usable_context_tokens() * ratio))
+
+
+def compaction_target_tokens() -> int:
+    """[C5] 压缩后应尽量落到的目标预算：usable × compaction_target_ratio（默认 0.5）。
+
+    压缩只保证「不超阈值」，不保证「留足余量」；以本目标为参考，压缩后仍有
+    充足空间继续多轮工具循环，避免压缩后一两轮又撞上限。
+    """
+    ratio = max(0.1, min(1.0, getattr(settings, "compaction_target_ratio", 0.5)))
+    return max(1, int(usable_context_tokens() * ratio))
+
+
 def compaction_threshold_tokens() -> int:
     """触发上下文压缩的 token 阈值。
 

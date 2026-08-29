@@ -30,6 +30,8 @@ from app.context.token_counter import truncate_messages as _truncate_messages
 
 from app.context.token_counter import sanitize_tool_messages
 
+from app.context.token_counter import estimate_tokens_messages, estimate_tools, update_token_correction
+
 from app.context.tool_output import bound_tool_output, prune_tool_outputs
 
 from app.context.tool_dedup import ToolResultDedup
@@ -99,6 +101,11 @@ class RAGAgent(RAGAgentGenerate):
         hit, miss = _extract_cache_usage(usage, pt=pt)
         trace("llm.usage", where="assemble", model=model, pt=pt, ct=ct, cache_hit=hit, cache_miss=miss, duration_ms=dur)  # [token trace v7]
         record_model_call(model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
+        # [C5] 用实际 usage 自适应校准估算系数（消除对 DeepSeek 中文/代码的系统性低估）
+        if pt:
+            pre = getattr(self, "_last_call_estimate", 0)
+            if pre:
+                update_token_correction(pre, int(pt))
         # 累加本次 invoke 的 token 用量（invoke 前重置），供 assistant 消息结算落库
         if not getattr(self, "_usage_accum", None):
             self._usage_accum = dict(_ZERO_USAGE)
@@ -126,6 +133,8 @@ class RAGAgent(RAGAgentGenerate):
 
         start = tmod.time()
         log_prompt("graph.llm_call", messages, model=model, tool_count=len(tool_defs or []))  # [prompt log v1]
+        # [C5] 记录本次调用的估算 token（供实际 usage 返回后自适应校准估算系数）
+        self._last_call_estimate = estimate_tokens_messages(messages) + estimate_tools(tool_defs)
         try:
             stream = await litellm.acompletion(
                 model=model,
@@ -210,6 +219,9 @@ class RAGAgent(RAGAgentGenerate):
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
         hit, miss = _extract_cache_usage(usage, pt=int(pt or 0))
+        # [C5] 流式路径同样用实际 usage 自适应校准估算系数
+        if int(pt or 0) > 0 and self._last_call_estimate:
+            update_token_correction(self._last_call_estimate, int(pt))
         trace("llm.usage", where="invoke", model=model, pt=int(pt or 0), ct=int(ct or 0), cache_hit=hit, cache_miss=miss, duration_ms=dur)  # [token trace v7]
         record_model_call(model, prompt_tokens=int(pt or 0), completion_tokens=int(ct or 0), duration_ms=dur)
         if not getattr(self, "_usage_accum", None):

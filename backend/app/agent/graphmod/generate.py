@@ -35,6 +35,7 @@ from app.context.tool_output import bound_tool_output, prune_tool_outputs
 from app.context.tool_dedup import ToolResultDedup
 
 from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+from app.context.budget import llm_call_budget
 
 from app.utils.json_repair import parse_tool_args
 
@@ -175,7 +176,7 @@ class RAGAgentGenerate(RAGAgentTools):
             if state.get("_task"):
                 state["_task"].record_compaction()
             self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
-        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0, tool_defs=tool_defs))
+        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(), reserve_tokens=0, tool_defs=tool_defs))
         trace_messages("graph.entry_ready", messages, tool_defs=tool_defs)  # [token trace v7]
 
         response = await self._llm_call(model, messages, tool_defs, state=state)
@@ -304,6 +305,23 @@ class RAGAgentGenerate(RAGAgentTools):
                 state["_task"].increment_step()
                 state["_task"].increment_tool_calls(len(msg.tool_calls))
 
+            # [C5 · 方案 D 基础] 每轮把执行进度落盘为 STEP_STATE（会话工作目录存在时），
+            # 供长任务接力/断点续跑恢复；上下文只装摘要+当前步，旧轮次不再携带。
+            if state.get("_cwd") and rounds >= 1:
+                from app.context.step_state import write_step_state
+                done = [f"round {rounds}: {tc.function.name}" for tc in msg.tool_calls]
+                write_step_state(
+                    state["_cwd"], rounds,
+                    {
+                        "objective": state.get("question", ""),
+                        "completed": done,
+                        "active": ["等待下一轮工具调用或收尾总结"],
+                        "blocked": [],
+                        "next_move": ["继续剩余子任务；若接近上下文上限则先输出已完成部分"],
+                        "files": [],
+                    },
+                )
+
             # Doom-loop 检测：同一组工具调用指纹连续重复 ≥ threshold 轮 → 注入策略变更提示；
             # 首次提示后仍连续重复（升级到 doom_loop_max_strikes）→ 强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具）
             fp = "|".join(
@@ -337,7 +355,7 @@ class RAGAgentGenerate(RAGAgentTools):
             tool_defs = self._build_tool_defs(state.get("question", ""), used_tools)
             # MAX_STEPS 注入后不再允许继续调用工具（对齐 opencode max-steps.ts 的 disable-tools 语义）
             final_tool_defs = None if steps_prompt_injected else tool_defs
-            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0, tool_defs=final_tool_defs))
+            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(), reserve_tokens=0, tool_defs=final_tool_defs))
             trace_messages("graph.round_ready", messages, tool_defs=final_tool_defs)  # [token trace v7]
             response = await self._llm_call(model, messages, final_tool_defs, state=state)
             msg = response.choices[0].message
@@ -402,7 +420,7 @@ class RAGAgentGenerate(RAGAgentTools):
                 if state.get("_task"):
                     state["_task"].record_compaction()
                 self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
-            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=usable_context_tokens(), reserve_tokens=0))
+            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(), reserve_tokens=0))
             trace_messages("graph.final_round_ready", messages, tool_defs=None)  # [token trace v8]
             # 对齐 opencode max-steps 语义：达到上限后工具禁用，仅注入收尾总结提示（assistant 角色）
             messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
