@@ -81,6 +81,10 @@ export interface FileContent {
   filename: string
   data: string
   mime_type: string
+  /** [F8·D2] 后端落库时附带的 256px 缩略图 base64（回显用，避免传原图） */
+  _thumb?: string
+  /** [F8·D2] 后端落库时附带的图片描述（视觉 LLM/OCR） */
+  _caption?: string
 }
 
 // 权限审批请求

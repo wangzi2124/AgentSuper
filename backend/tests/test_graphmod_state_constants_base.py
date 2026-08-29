@@ -123,6 +123,30 @@ def test_attachment_parts_real_loader_text(monkeypatch):
     assert "附件正文内容" in text
 
 
+def test_attachment_parts_real_big_image_normalized(monkeypatch):
+    """[F8] 真实大图：_attachment_parts 走规格化 + 图片 token 预算（降采样一次）。"""
+    from app.agent import image_processor as ip
+    import base64 as _b64, io as _io
+    from PIL import Image
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "image_max_dimension", 1024)
+    monkeypatch.setattr(settings, "image_max_kb", 512)
+    monkeypatch.setattr(settings, "image_token_cap", 100)  # 极小预算 → 触发降采样
+    # 2000x1200 噪声 PNG（真实大图）
+    img = Image.effect_noise((2000, 1200), 40).convert("RGB")
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = _b64.b64encode(buf.getvalue()).decode("ascii")
+
+    images, text = _attachment_parts([{"filename": "big.png", "mime_type": "image/png", "data": b64}])
+    assert len(images) == 1
+    # 规格化后 ≤ max_dimension（首轮 1024；token 超限再降一半 → ≤512）
+    assert max(images[0]["_width"], images[0]["_height"]) <= 512
+    assert images[0]["data"] != b64
+    assert text == ""
+
+
 def test_zero_usage_shape():
     assert set(_ZERO_USAGE) == {"input", "output", "reasoning", "cache_read", "cache_write"}
 

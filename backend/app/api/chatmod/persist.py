@@ -76,11 +76,43 @@ def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | N
         session = service.create(user_id, directory=directory or discover_project_root(), kind="multi-agent")
         return service, session.id, session.directory or ""
 
+async def _enrich_image_files(files: list | None) -> list:
+    """[F8 · D2] 图片附件落库时附加缩略图 + 描述（回显/重放走缩略图，不重发原图）。
+
+    - `_thumb`：256px 缩略图 base64（回显用，体积小）
+    - `_caption`：图片描述（视觉 LLM/OCR，按指纹缓存；失败则为空，回显降级占位）
+    """
+    if not files:
+        return files or []
+    from app.agent.image_processor import describe_image, is_image_file, make_thumbnail
+    enriched = []
+    for f in files:
+        f = dict(f or {})
+        if is_image_file(f):
+            try:
+                f["_thumb"] = make_thumbnail(f.get("data") or "")
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                cap = await describe_image(
+                    f.get("data") or "", f.get("mime_type") or "", f.get("filename") or ""
+                )
+                if cap:
+                    f["_caption"] = cap
+            except Exception:  # noqa: BLE001
+                pass
+        enriched.append(f)
+    return enriched
+
+
 def _session_history_for(service, user_id: str, session_id: str, limit: int = 200) -> list[dict]:
     """把会话消息投影为模型历史（role/content）。
 
     正文优先从 message_parts 的 text part 提取（对齐设计 §3），无 parts 时
     回退 data.content（旧数据/compaction/system 消息）。
+
+    [F8 · D2] 用户消息带图片附件时，把已存的图片描述（_caption）注入历史文本，
+    重放不重发原图（大 base64 只在首次请求携带），模型仍保留图片内容上下文。
 
     B3: 限制拉取条数（默认 200），避免长会话 O(n) 全量拉取 + 全量 parts 查询。
     """
@@ -94,6 +126,16 @@ def _session_history_for(service, user_id: str, session_id: str, limit: int = 20
         role = m.data.get("role") or _msg_type_to_role(m.type)
         if role in ("user", "assistant", "system"):
             content = session_history.text_from_parts(parts_map.get(m.id, [])) or m.data.get("content", "")
+            imgs = [
+                f for f in (m.data.get("files") or [])
+                if isinstance(f, dict) and (f.get("_caption") or f.get("_thumb"))
+            ]
+            if imgs:
+                desc = "\n".join(
+                    f"[图片 {f.get('filename', '')}]: {f.get('_caption') or '(缩略图已存档)'}"
+                    for f in imgs
+                )
+                content = (content + "\n\n[用户上传的图片]\n" + desc).strip() if content else "[用户上传的图片]\n" + desc
             history.append({"role": role, "content": content})
     return history
 
@@ -161,7 +203,7 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
             if user_msg_id is None:
                 user_msg = service.append_message(user_id, session_id, "user", {
                     "role": "user", "content": question, "client_msg_id": client_msg_id,
-                    "files": files or [],
+                    "files": await _enrich_image_files(files) or [],
                 })
                 user_msg_id = user_msg.id
                 if session_repo.latest_seq(session_id) == 1:

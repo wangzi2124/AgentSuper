@@ -327,3 +327,40 @@ async def test_persist_interrupted_partial_failure_tolerated(service, monkeypatc
     svc.create("u1", session_id="c1")
     monkeypatch.setattr(p, "_persist_multi_agent_parts", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
     await p._persist_interrupted_partial(svc, "u1", "s1", "c1", "q", "部分", [], "c1")  # 不抛
+# [F8·D2] 图片附件缩略图 + 描述
+
+
+@pytest.mark.asyncio
+async def test_enrich_image_files(monkeypatch):
+    import app.agent.image_processor as ip_mod
+
+    async def fake_describe(data_b64="", mime_type="", filename=""):
+        return "窗台上的猫"
+    monkeypatch.setattr(ip_mod, "describe_image", fake_describe)
+    monkeypatch.setattr(ip_mod, "make_thumbnail", lambda d, px=256: "THUMB")
+    enriched = await p._enrich_image_files([
+        {"filename": "cat.png", "mime_type": "image/png", "data": "x"},
+        {"filename": "doc.txt", "mime_type": "text/plain", "data": "y"},
+    ])
+    assert enriched[0]["_thumb"] == "THUMB"
+    assert enriched[0]["_caption"] == "窗台上的猫"
+    assert "_thumb" not in enriched[1]
+
+
+def test_session_history_injects_image_caption(service, monkeypatch):
+    svc, req = service
+    svc.create("u1", session_id="s1")
+    svc.append_message("u1", "s1", "user", {
+        "role": "user", "content": "看图",
+        "files": [
+            {"filename": "cat.png", "mime_type": "image/png", "data": "x",
+             "_caption": "窗台上的猫", "_thumb": "T"},
+            {"filename": "doc.txt", "mime_type": "text/plain", "data": "y"},
+        ],
+    })
+    monkeypatch.setattr(p.session_repo, "list_parts_for_messages", lambda ids: {})
+    hist = p._session_history_for(svc, "u1", "s1")
+    assert hist[0]["role"] == "user"
+    assert "看图" in hist[0]["content"]
+    assert "[用户上传的图片]" in hist[0]["content"]
+    assert "[图片 cat.png]: 窗台上的猫" in hist[0]["content"]

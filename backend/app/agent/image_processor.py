@@ -172,16 +172,29 @@ def _caption_kwargs() -> tuple[str, Optional[str], Optional[str], str, int]:
     return model, api_base, api_key, prompt, timeout
 
 
+_caption_cache: dict[str, str] = {}
+
+
+def _img_fingerprint(data_b64: str) -> str:
+    """按输入 base64 指纹缓存 caption（同图不重复调用 VLM）。"""
+    import hashlib
+    return hashlib.md5((data_b64 or "").encode("utf-8")).hexdigest()
+
+
 async def caption_image(data_b64: str, mime_type: str = "", filename: str = "") -> str:
     """图片描述桥：用视觉 LLM（IMAGE_CAPTION_MODEL）生成图片描述。
 
     兼容现有系统：走 litellm.acompletion，OpenAI 兼容接口（接受 image_url
     多模态消息）。失败（模型不支持/无 key/超时）返回 ""，由降级链接 OCR/占位。
+    结果按指纹缓存：同图（同 base64）跨 _generate 与 persist 只调用一次 VLM。
     """
     import litellm
     model, api_base, api_key, prompt, timeout = _caption_kwargs()
     if not model or not data_b64:
         return ""
+    fp = _img_fingerprint(data_b64)
+    if fp in _caption_cache:
+        return _caption_cache[fp]
     try:
         start = tmod.time()
         kwargs: dict = {
@@ -205,6 +218,8 @@ async def caption_image(data_b64: str, mime_type: str = "", filename: str = "") 
             kwargs["api_base"] = api_base
         resp = await litellm.acompletion(**kwargs)
         content = (resp.choices[0].message.content or "").strip()
+        if content:
+            _caption_cache[fp] = content
         logger.info("image caption ok (%s, %.1fs): %s", filename, tmod.time() - start, content[:40])
         return content
     except Exception as e:  # noqa: BLE001

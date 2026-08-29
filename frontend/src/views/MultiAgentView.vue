@@ -318,7 +318,7 @@ async function handleCopy(messageId: string, text: string) {
                   <div v-for="(f, fi) in msg.files" :key="fi" class="msg-file">
                     <img
                       v-if="f.mime_type?.startsWith('image/')"
-                      :src="`data:${f.mime_type};base64,${f.data}`"
+                      :src="f._thumb ? `data:image/jpeg;base64,${f._thumb}` : `data:${f.mime_type};base64,${f.data}`"
                       class="msg-file-image"
                       alt=""
                       @click="previewImage = `data:${f.mime_type};base64,${f.data}`"
