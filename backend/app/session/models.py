@@ -12,7 +12,7 @@ class ModelRef(BaseModel):
     """模型引用（对齐 opencode Model = {id, providerID, variant}）。"""
 
     id: str
-    providerID: str
+    providerID: str = ""
     variant: Optional[str] = None
 
 

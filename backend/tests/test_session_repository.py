@@ -76,6 +76,18 @@ def test_create_session_custom_fields(db_conn):
     assert s.model.providerID == "deepseek"
 
 
+def test_create_session_model_without_provider_id(db_conn):
+    """回归：ModelRef.providerID 允许缺省（此前 get_session 读回缺 providerID 的
+    model JSON 会抛 ValidationError → 会话列表/详情全崩）。"""
+    s = _session(db_conn, model={"id": "m"}, session_id="ses_partial")
+    assert s.model is not None
+    assert s.model.id == "m"
+    assert s.model.providerID == ""
+    got = repo.get_session(s.id)
+    assert got.model.id == "m"
+    assert got.model.providerID == ""
+
+
 def test_list_sessions_filters(db_conn):
     p1 = _proj("/p1")
     p2 = _proj("/p2")
