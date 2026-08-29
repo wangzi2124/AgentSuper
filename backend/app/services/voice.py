@@ -85,14 +85,14 @@ class VoiceService:
         return flat
 
     def _ensure_whisper(self) -> None:
-        """尽力而为预下载 Whisper turbo（ASR 转写用）；失败仅警告，不阻断。"""
+        """（预下载工具专用，启动不再调用）尽力而为预下载 Whisper turbo；失败仅警告。"""
         try:
             import whisper
         except ImportError:
             logger.warning("[voice] openai-whisper 未安装，转写功能不可用")
             return
         root = Path.home() / ".cache" / "whisper"
-        target = root / "turbo.pt"
+        target = root / "large-v3-turbo.pt"
         if target.exists():
             return
         root.mkdir(parents=True, exist_ok=True)
@@ -101,28 +101,29 @@ class VoiceService:
         logger.info("[voice] Whisper turbo 已下载: %s", target)
 
     def ensure_models(self) -> None:
-        """启动时预下载模型（同向量/嵌入模型：ModelScope 优先 / HF 回退，断点续传）。
+        """启动时预下载 TTS 合成模型（同向量/嵌入模型：ModelScope 优先 / HF 回退，断点续传）。
 
         不抛异常：下载失败仅降级（语音端点返回 503 并引导手动脚本），不阻断服务启动。
         后台线程调用（runtime.py），已就绪时直接跳过。
+        Whisper（转写用）不再随启动下载——并入安装/预下载步骤
+        （pip install -r requirements-voice.txt 后 python scripts/download_tts_model.py --whisper）。
         """
         if self.has_model:
             logger.info("[voice] 模型已就绪: %s", self.model_path)
-        else:
-            try:
-                from app.utils.model_download import download_model
-                models_dir = self.tts_dir / "models"
-                models_dir.mkdir(parents=True, exist_ok=True)
-                logger.info("[voice] 启动下载模型 %s → %s", self.model_id, models_dir)
-                p = download_model(self.model_id, cache_dir=models_dir)
-                self._ensure_flat(p)
-                logger.info("[voice] 模型下载完成: %s", self.model_path)
-            except Exception as e:  # noqa: BLE001 —— 下载失败降级，不阻断启动
-                logger.warning(
-                    "[voice] 模型下载失败，语音功能降级（可稍后手动运行 "
-                    "scripts/download_tts_model.py）：%s", e,
-                )
-        self._ensure_whisper()
+            return
+        try:
+            from app.utils.model_download import download_model
+            models_dir = self.tts_dir / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("[voice] 启动下载模型 %s → %s", self.model_id, models_dir)
+            p = download_model(self.model_id, cache_dir=models_dir)
+            self._ensure_flat(p)
+            logger.info("[voice] 模型下载完成: %s", self.model_path)
+        except Exception as e:  # noqa: BLE001 —— 下载失败降级，不阻断启动
+            logger.warning(
+                "[voice] 模型下载失败，语音功能降级（可稍后手动运行 "
+                "scripts/download_tts_model.py）：%s", e,
+            )
 
     def _clone_script(self) -> Path:
         return self.tts_dir / "clone.py"

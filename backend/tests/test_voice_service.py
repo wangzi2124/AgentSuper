@@ -206,7 +206,6 @@ def test_transcribe_failure(monkeypatch, tmp_path):
 
 def test_ensure_models_skips_when_ready(monkeypatch, tmp_path):
     svc = _make_service(monkeypatch, tmp_path, model=True)
-    monkeypatch.setattr(svc, "_ensure_whisper", lambda: None)
     called = []
     monkeypatch.setattr(
         "app.utils.model_download.download_model",
@@ -218,7 +217,6 @@ def test_ensure_models_skips_when_ready(monkeypatch, tmp_path):
 
 def test_ensure_models_downloads_and_flattens(monkeypatch, tmp_path):
     svc = _make_service(monkeypatch, tmp_path, model=False)
-    monkeypatch.setattr(svc, "_ensure_whisper", lambda: None)
     # 模拟 ModelScope 返回嵌套目录（Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice）
     nested = tmp_path / "ttsclone" / "models" / "Qwen" / "Qwen3-TTS-12Hz-1.7B-CustomVoice"
     nested.mkdir(parents=True, exist_ok=True)
@@ -235,7 +233,6 @@ def test_ensure_models_downloads_and_flattens(monkeypatch, tmp_path):
 
 def test_ensure_models_failure_degrades(monkeypatch, tmp_path):
     svc = _make_service(monkeypatch, tmp_path, model=False)
-    monkeypatch.setattr(svc, "_ensure_whisper", lambda: None)
 
     def _boom(*a, **k):
         raise RuntimeError("network down")

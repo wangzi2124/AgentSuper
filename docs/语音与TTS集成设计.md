@@ -110,9 +110,11 @@
 | `VITE_TTS_SPEAKER` | `Vivian` | 前端朗读默认音色 |
 
 > **目录固定**：ttsclone 位于 `backend/ttsclone/`（不配置路径，service 直接定位）。
-> **模型启动自动下载**（同向量/嵌入模型）：`VOICE_TTS_ENABLED=true` 时 runtime 后台线程调 `VoiceService.ensure_models()` 预下载（ModelScope 优先 / HF 回退，断点续传，复用 `app/utils/model_download.py`）到 `backend/ttsclone/models/`——不阻塞启动、失败仅降级（`/api/voice/*` 返回 503 并提示）。ttsclone 自身**不自动下载**（`clone.py` 启动下载已移除、`server.py` 改为缺失即报错）。手动/离线预下载工具：`backend/scripts/download_tts_model.py`（`--size 0.6B|1.7B` / `--all` / `--whisper`）。
-> **图片 caption 模型**：`scripts/download_image_model.py`（默认 `ollama pull llava`；公网 API 模型无需下载）。
-> `VoiceService.enabled` 同时校验模型已就绪（`has_model`）。
+> **模型下载**：
+> - **TTS 合成模型**：`VOICE_TTS_ENABLED=true` 时 runtime 后台线程调 `VoiceService.ensure_models()` 预下载（ModelScope 优先 / HF 回退，断点续传，复用 `app/utils/model_download.py`）到 `backend/ttsclone/models/`——不阻塞启动、失败仅降级（`/api/voice/*` 返回 503 并提示）。ttsclone 自身**不自动下载**（`clone.py` 启动下载已移除、`server.py` 改为缺失即报错）。
+> - **Whisper（转写用）**：**不随启动下载**，并入安装/预下载步骤（`pip install -r requirements-voice.txt` 后 `python scripts/download_tts_model.py --whisper`）；缺失时 `clone.py` 转写返回明确错误，不会运行时静默拉取 1.6GB。
+> - **图片 caption 模型**：`scripts/download_image_model.py`（默认 `ollama pull llava`；公网 API 模型无需下载）。
+> `VoiceService.enabled` 仅校验 TTS 合成模型已就绪（`has_model`）；Whisper 缺失只影响转写（降级 503）。
 
 ---
 

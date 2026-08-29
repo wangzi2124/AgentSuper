@@ -166,6 +166,16 @@ def cmd_transcribe(args):
         return _orig_load(*a, **k)
     _torch.load = _legacy_load
 
+    # 不随运行自动下载 whisper：缺失时明确报错，引导安装/预下载步骤
+    _target = os.path.join(os.path.expanduser("~"), ".cache", "whisper", "large-v3-turbo.pt")
+    if not os.path.exists(_target):
+        print(json.dumps({
+            "ok": False,
+            "error": "Whisper 模型未下载（large-v3-turbo.pt）。"
+                     "请先执行 backend/scripts/download_tts_model.py --whisper 预下载。",
+        }, ensure_ascii=False))
+        return
+
     wav, sr = _sf.read(args.audio, dtype="float32")
     # whisper 内部自带重采样，无需手动 resample（手动 interpolate 曾引入坏样本 → 转写乱码）
     device = "cuda" if args.device == "auto" and _torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device)
