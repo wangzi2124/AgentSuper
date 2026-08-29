@@ -2,7 +2,7 @@
 """模块拆分器：把超大模块按主题机械拆成子包（AST 行切片移动，杜绝转录错误）。
 
 用法: python scripts/split_module.py <key>
-支持 key: file_tools / chat / graph（configs 在文件底部）。
+支持 key: file_tools / chat / graph / supervisor（configs 在文件底部）。
 
 产出:
   - <parent>/<sublib>/<mod>.py   各子模块（自动补跨模块 import + 前置注释 + __all__）
@@ -336,7 +336,7 @@ def build_class_chunks(cls_node, spec, src_lines):
 
     result = []
     for i, ch in enumerate(spec["chunks"]):
-        base = spec["chunks"][i - 1]["class"] if i > 0 else None
+        base = spec["chunks"][i - 1]["class"] if i > 0 else spec.get("first_base")
         result.append({"class": ch["class"], "base": base, "members": []})
     last_end = doc_end
     for n, ci in global_members:
@@ -478,7 +478,7 @@ def split(cfg):
             parts.append("# ── 复制自原模块的顶层 import ──")
             parts.append(header_src)
             imp_lines = []
-            if ch["base"]:
+            if ch["base"] and ci > 0:
                 prev_mod = cspec["chunks"][ci - 1]["module"]
                 imp_lines.append(f"from .{prev_mod} import {ch['base']}")
             if need_cross:
@@ -697,6 +697,35 @@ CONFIGS = {
                 "decode_process_output", "_run_shell", "_CMD_DIALECT_HINT",
                 "append_cmd_dialect_hint", "_format_execute_output", "tool_execute",
             ],
+        },
+    },
+    "supervisor": {
+        "src": r"backend/app/agent/supervisor.py",
+        "module": "app.agent.supervisor",
+        "sublib": "supermod",
+        "per_module_consts": {"logger": "logging.getLogger(__name__)"},
+        "modules": {
+            "constants": [
+                "SUB_RESULT_TRUNC", "DECOMPOSE_SYSTEM_PROMPT",
+                "SYNTHESIS_SYSTEM_PROMPT",
+            ],
+        },
+        "class_split": {
+            "SupervisorAgent": {
+                "first_base": "BaseAgent",
+                "chunks": [
+                    {"module": "base", "class": "SupervisorAgentBase", "base": None,
+                     "members": ["__init__", "_timeout_for", "agent_id",
+                                 "_start_heartbeat"],
+                     "ranges": [[72, 72]]},
+                    {"module": "core", "class": "SupervisorAgentCore", "base": "SupervisorAgentBase",
+                     "members": ["handle_message", "_route_to"]},
+                    {"module": "decompose", "class": "SupervisorAgentDecompose", "base": "SupervisorAgentCore",
+                     "members": ["_decompose", "_is_greeting", "_llm_decompose", "_validate_subtasks"]},
+                    {"module": "parallel", "class": "SupervisorAgent", "base": "SupervisorAgentDecompose",
+                     "members": ["_execute_parallel", "_synthesize"]},
+                ],
+            },
         },
     },
 }
