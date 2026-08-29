@@ -89,6 +89,33 @@ from .state import _find_attachment
 logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgentGenerate(RAGAgentTools):
+    # 产出文件的工具 → 从工具实参提取路径的字段（[C5] 步骤文件交接用）
+    _FILE_TOOL_ARGS = {
+        "tool_write_file": ("path",),
+        "tool_append_file": ("path",),
+        "tool_edit_file": ("path",),
+        "tool_delete_file": ("path",),
+        "tool_rename_file": ("path", "new_path"),
+        "plugin_docx-generator_tool_create_docx": ("output_path",),
+        "plugin_pdf-generator_tool_create_pdf": ("output_path",),
+        "plugin_excel-generator_tool_create_excel": ("output_path",),
+        "plugin_kb-export_tool_export_kb_to_docx": ("output_path",),
+    }
+
+    @staticmethod
+    def _extract_step_files(tool_calls) -> list[str]:
+        """从一轮工具调用实参中提取产出文件路径（供 STEP_STATE 交接）。"""
+        files: list[str] = []
+        for tc in tool_calls or []:
+            args = parse_tool_args(getattr(tc.function, "arguments", ""))
+            if not isinstance(args, dict):
+                continue
+            for key in RAGAgentGenerate._FILE_TOOL_ARGS.get(tc.function.name, ()):
+                v = args.get(key)
+                if isinstance(v, str) and v.strip():
+                    files.append(v.strip())
+        return list(dict.fromkeys(files))
+
     async def _step_summarize(self, messages: list[dict], budget: int) -> list[dict]:
         """[C5 · 方案 D] 小步快走摘要替换：用 HierarchicalSummarizationMiddleware
         把旧轮次压成摘要，上下文只装 [摘要 checkpoint + 最近一轮 + 当前步]。
@@ -339,6 +366,7 @@ class RAGAgentGenerate(RAGAgentTools):
 
             # [C5 · 方案 D 基础] 每轮把执行进度落盘为 STEP_STATE（会话工作目录存在时），
             # 供长任务接力/断点续跑恢复；上下文只装摘要+当前步，旧轮次不再携带。
+            # files 从本轮工具实参提取（写/改/删/生成器的真实路径），供下一步读取衔接。
             if state.get("_cwd") and rounds >= 1:
                 from app.context.step_state import write_step_state
                 done = [f"round {rounds}: {tc.function.name}" for tc in msg.tool_calls]
@@ -350,7 +378,7 @@ class RAGAgentGenerate(RAGAgentTools):
                         "active": ["等待下一轮工具调用或收尾总结"],
                         "blocked": [],
                         "next_move": ["继续剩余子任务；若接近上下文上限则先输出已完成部分"],
-                        "files": [],
+                        "files": self._extract_step_files(msg.tool_calls),
                     },
                 )
 

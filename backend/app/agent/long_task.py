@@ -32,11 +32,52 @@ STEP_PROMPT = """任务目标: {question}
 已完成进度:
 {progress}
 
+{handoff}
 当前步骤: {step}
 
-请完成该步骤（可用 tool_write_file/append_file/edit_file/execute 等文件工具），
-在结尾用一两句简要汇报你完成了什么改动。
+请完成该步骤（可用 tool_write_file/append_file/edit_file/execute 等文件工具）。
+务必先读取「已完成步骤产出的文件」（如适用）再继续，避免重复创建。
+在结尾用一两句简要汇报改动，并单独用一行列出你创建/修改的文件路径：
+产出文件: path1, path2, ...
 """
+
+# 协调器落盘 STEP_STATE 的 seq 偏移：避免与 _generate 每轮落盘的 1..N 冲突
+_COORD_SEQ_OFFSET = 1000
+
+_FILES_LINE_RE = __import__("re").compile(r"产出文件[:：]\s*(.+)")
+
+
+def _collect_files_from_steps(directory: str) -> list[str]:
+    """收集会话目录下已落盘 STEP_STATE 中的产出文件（in-loop 写入 + 协调器写入）。"""
+    from app.context.step_state import step_state_dir
+    d = step_state_dir(directory)
+    if d is None or not d.exists():
+        return []
+    import re
+    out: list[str] = []
+    for p in sorted(d.glob("*.md")):
+        if p.name == "latest.md":
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            continue
+        m = re.search(r"## Relevant Files\n(.*?)(?=\n## |\Z)", text, re.S)
+        if not m:
+            continue
+        for line in m.group(1).splitlines():
+            line = line.strip().lstrip("- ").strip()
+            if line and line != "(none)":
+                out.append(line)
+    return list(dict.fromkeys(out))
+
+
+def _parse_files_from_answer(answer: str) -> list[str]:
+    """从步骤回答的 `产出文件: a, b` 行提取文件路径。"""
+    m = _FILES_LINE_RE.search(answer or "")
+    if not m:
+        return []
+    return [p.strip() for p in m.group(1).split(",") if p.strip()]
 
 
 def _parse_plan(text: str, max_steps: int) -> list[str]:
@@ -88,11 +129,21 @@ class LongTaskCoordinator:
         logger.info("LongTask: %d steps, small-step execution", len(plan))
         results: list[str] = []
         progress: list[str] = []
+        produced_files: list[str] = []
         token_total = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
         for i, step in enumerate(plan, 1):
+            # 步骤交接：把已完成步骤产出的文件注入当前步（fresh context 下唯一的信息桥）
+            collected = _collect_files_from_steps(directory) or produced_files
+            handoff = (
+                "已完成步骤产出的文件（可直接读取/引用，避免重复创建）:\n"
+                + "\n".join(f"- {f}" for f in collected)
+                if collected
+                else "(尚无产出文件)"
+            )
             step_prompt = STEP_PROMPT.format(
                 question=question, total=len(plan), current=i, step=step,
                 progress="\n".join(f"- {s}" for s in progress) or "- (刚开始，尚未完成任何步骤)",
+                handoff=handoff,
             )
             result = await self.agent.invoke(
                 step_prompt, use_vector_db=False, directory=directory,
@@ -101,17 +152,21 @@ class LongTaskCoordinator:
             answer = (result.get("answer") or "").strip()
             results.append(answer)
             progress.append(f"step{i}: {step} -> {answer[:120]}")
-            # STEP_STATE 落盘：断点续跑/审计用
+            # 收集本步产出文件：优先答案 `产出文件:` 行，其次落盘 STEP_STATE（in-loop）
+            produced_files = list(dict.fromkeys(
+                produced_files + _parse_files_from_answer(answer) + _collect_files_from_steps(directory)
+            ))
+            # STEP_STATE 落盘：断点续跑/审计用（seq 偏移避免与 in-loop 轮次文件冲突）
             from app.context.step_state import write_step_state
             write_step_state(
-                directory, i,
+                directory, _COORD_SEQ_OFFSET + i,
                 {
                     "objective": question,
                     "completed": [f"step{i}: {step}"],
                     "active": ["所有步骤已完成"] if i == len(plan) else [f"等待执行步骤 {i + 1}"],
                     "blocked": [],
                     "next_move": [] if i == len(plan) else [f"执行步骤 {i + 1}: {plan[i]}"],
-                    "files": [],
+                    "files": produced_files,
                 },
             )
             for k in ("input", "output", "reasoning", "cache_read", "cache_write"):

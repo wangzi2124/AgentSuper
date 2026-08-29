@@ -146,8 +146,8 @@ async def test_generate_truncates_to_llm_call_budget(monkeypatch, tmp_path):
     monkeypatch.setattr(agent, "_build_tool_defs", lambda *a, **k: [])  # 无 schema 开销
     llm = FakeLLM()
     llm.responses = [
-        FakeLLM().response(tool_calls=[("tool_read_file", '{"path": "/x"}')]),
-        FakeLLM().response(tool_calls=[("tool_read_file", '{"path": "/x"}')]),
+        FakeLLM().response(tool_calls=[("tool_write_file", '{"path": "/x/a.py"}')]),
+        FakeLLM().response(tool_calls=[("tool_write_file", '{"path": "/x/a.py"}')]),
         FakeLLM().response(content="done"),
     ]
     sent_snapshots = []
@@ -170,9 +170,11 @@ async def test_generate_truncates_to_llm_call_budget(monkeypatch, tmp_path):
     for msgs in sent_snapshots:
         est = tc.estimate_tokens_messages(msgs)
         assert est <= 4500 + 300, est
-    # STEP_STATE 已落盘（第二轮执行后）
+    # STEP_STATE 已落盘（第二轮执行后）且 files 从写工具实参提取（步骤交接用）
     step_files = list((tmp_path / ".agents" / "steps").glob("*.md"))
     assert any(p.name == "latest.md" for p in step_files)
+    body = "".join(p.read_text(encoding="utf-8") for p in step_files if p.name != "latest.md")
+    assert "/x/a.py" in body  # tool_write_file 的 path 已被提取进 STEP_STATE
 
 
 # ── tool_output token 封顶 ─────────────────────────────────────────────────
@@ -322,9 +324,35 @@ async def test_coordinator_multi_step_fresh_context(tmp_path):
     # 汇总回答含各步结果
     assert "【步骤1】A1" in out["answer"] and "【步骤3】A3" in out["answer"]
     assert out["tokens"]["input"] == 30  # 3 步 × 10
-    # STEP_STATE 落盘
-    latest = list((tmp_path / ".agents" / "steps").glob("0003.md"))
+    # STEP_STATE 落盘（协调器 seq 偏移 1000+，不与 in-loop 冲突）
+    latest = list((tmp_path / ".agents" / "steps").glob("1003.md"))
     assert latest and "step3" in latest[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_coordinator_file_handoff(tmp_path):
+    """步骤文件交接：前一步产出的文件注入下一步 prompt（fresh context 信息桥）。"""
+    from app.agent.long_task import LongTaskCoordinator
+    agent = _CoordAgent('["步骤1", "步骤2"]', [
+        "完成了模块，产出文件: calculator.py, test_calculator.py",
+        "读取了已有文件继续",
+    ])
+    out = await LongTaskCoordinator(agent, max_steps=6).run("建项目", directory=str(tmp_path))
+    # 第 2 步 prompt 注入了第 1 步产出的文件
+    q2 = agent.invoke_calls[1][0]
+    assert "calculator.py" in q2 and "test_calculator.py" in q2
+    assert "已完成步骤产出的文件" in q2
+    # 协调器 STEP_STATE 的 files 携带产出文件（resume 可读回）
+    coord_files = list((tmp_path / ".agents" / "steps").glob("1002.md"))
+    assert coord_files and "calculator.py" in coord_files[0].read_text(encoding="utf-8")
+    assert out["answer"]
+
+
+def test_parse_files_from_answer():
+    from app.agent.long_task import _parse_files_from_answer
+    assert _parse_files_from_answer("完成。产出文件: a.py, b/c.py") == ["a.py", "b/c.py"]
+    assert _parse_files_from_answer("完成。产出文件：x.py") == ["x.py"]
+    assert _parse_files_from_answer("无产出文件") == []
 
 
 @pytest.mark.asyncio
