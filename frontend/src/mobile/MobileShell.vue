@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { showConfirmDialog, showToast } from 'vant'
+import { useVectorStore } from '../stores/vectors'
 
 import MobileChat from './views/MobileChat.vue'
 import MobileDocuments from './views/MobileDocuments.vue'
@@ -89,6 +91,20 @@ const mobileViews: Record<string, unknown> = {
     clearConfirm.value = false
     if (clearTimer) clearTimeout(clearTimer)
     agent.deleteConversation()
+  }
+  // 清空向量库（危险操作归入参数设置）
+  const vs = useVectorStore()
+  async function onClearVectorsClick() {
+    try {
+      await showConfirmDialog({
+        title: '清空向量库',
+        message: '将删除向量库全部分块、章节库记录、BM25 索引和全部上传文件，此操作不可撤销！',
+      })
+      await vs.clearAll()
+      showToast('已清空向量库')
+    } catch (err: any) {
+      if (err?.message && !String(err.message).includes('cancel')) showToast(err.message || '清空失败')
+    }
   }
   function refreshWorkspaces() {
     perm.loadWorkspaces()
@@ -243,6 +259,9 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
         </van-button>
         <van-button type="danger" plain block round class="form-clear" @click="onClearClick">
           {{ clearConfirm ? '再点一次确认清空' : '清空当前会话' }}
+        </van-button>
+        <van-button type="danger" plain block round class="form-clear form-clear-vectors" @click="onClearVectorsClick">
+          清空向量库数据
         </van-button>
       </div>
     </div>
@@ -442,5 +461,6 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
   .form-tip { font-size: 11px; color: var(--text-secondary, #94a3b8); margin-top: 6px; }
   .form-save { margin-top: 8px; }
   .form-clear { margin-top: 10px; }
+  .form-clear-vectors { margin-top: 0; opacity: 0.85; }
 
 </style>
