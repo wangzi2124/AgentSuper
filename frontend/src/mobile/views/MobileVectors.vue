@@ -24,10 +24,6 @@ function selectedDocLabel() {
   return hit ? hit.name : '全部文档'
 }
 
-const chunksTitle = computed(() =>
-  `${vs.total} 个分块${vs.searchQuery ? ` · 匹配 "${vs.searchQuery}"` : ''}`
-)
-
 function chunkSource(chunk: { metadata: Record<string, unknown> }): string {
   const f = chunk.metadata.filename
   const s = chunk.metadata.source
@@ -101,23 +97,26 @@ async function handleRepair() {
 
 <template>
   <div class="m-vectors">
-    <van-search
-      v-model="searchText"
-      placeholder="搜索分块内容..."
-      show-action
-      @search="onSearch"
-      @cancel="onSearch"
-    />
-
-    <!-- 顶部操作栏：清空向量库（危险操作置顶，醒目分离） -->
-    <div class="m-top-bar">
-      <div class="m-top-title"><van-icon name="apps-o" />向量库管理</div>
-      <button class="m-manage-btn danger" @click="handleClearAll">
-        <van-icon name="delete-o" /><span>清空向量库</span>
-      </button>
+    <!-- 查询卡：搜索 + 文档筛选 合一（去除多余的搜索/取消按钮） -->
+    <div class="m-query-card">
+      <van-search
+        v-model="searchText"
+        placeholder="搜索分块内容..."
+        shape="round"
+        @search="onSearch"
+        @clear="onSearch"
+      />
+      <div class="m-query-row">
+        <span class="m-query-chip" @click="filterSheet = true">
+          <van-icon name="filter-o" />
+          <span class="m-query-chip-label">{{ selectedDocLabel() }}</span>
+          <van-icon name="arrow-down" />
+        </span>
+        <span v-if="vs.searchQuery" class="m-query-hint">匹配 {{ vs.chunks.length }} 条</span>
+      </div>
     </div>
 
-    <!-- 统计横幅（绿色系） -->
+    <!-- 统计横幅（绿色系）+ 清空向量库 -->
     <div class="m-hero">
       <div class="m-hero-icon"><van-icon name="apps-o" /></div>
       <div class="m-hero-meta">
@@ -128,18 +127,9 @@ async function handleRepair() {
         <div class="m-hero-mini"><span class="m-hero-num">{{ ds.documents.length }}</span> 文档</div>
         <div class="m-hero-mini" v-if="vs.searchQuery"><span class="m-hero-num">{{ vs.chunks.length }}</span> 匹配</div>
       </div>
-    </div>
-
-    <!-- 筛选入口 -->
-    <div class="m-filter-card" @click="filterSheet = true">
-      <div class="m-filter-left">
-        <div class="m-filter-icon"><van-icon name="filter-o" /></div>
-        <div class="m-filter-meta">
-          <div class="m-filter-title">{{ chunksTitle }}</div>
-          <div class="m-filter-sub">{{ selectedDocLabel() }}</div>
-        </div>
-      </div>
-      <van-icon name="arrow" class="m-filter-arrow" />
+      <button class="m-hero-clear" @click="handleClearAll" aria-label="清空向量库">
+        <van-icon name="delete-o" /><span>清空</span>
+      </button>
     </div>
 
     <van-loading v-if="vs.loading && vs.chunks.length === 0" class="loading" />
@@ -226,44 +216,58 @@ async function handleRepair() {
 .m-hero-extra { text-align: right; flex-shrink: 0; }
 .m-hero-mini { font-size: 11px; opacity: 0.92; margin-top: 2px; }
 .m-hero-num { font-weight: 700; font-size: 13px; }
-
-/* 筛选入口卡片 */
-.m-filter-card {
-  display: flex;
+.m-hero-clear {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 12px;
-  padding: 13px 14px;
+  gap: 4px;
+  height: 30px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: transform 0.1s, background 0.15s;
+}
+.m-hero-clear:active { transform: scale(0.95); background: rgba(255, 255, 255, 0.34); }
+
+/* 查询卡：搜索 + 文档筛选 合一 */
+.m-query-card {
+  margin: 4px 0 10px;
   background: var(--surface, #fff);
   border: 1px solid var(--border, #eef1f6);
   border-radius: var(--m-card-radius, 16px);
   box-shadow: var(--m-card-shadow, 0 2px 12px rgba(31, 41, 55, 0.06));
+  overflow: hidden;
 }
-.m-filter-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.m-filter-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
+.m-query-card :deep(.van-search) { padding: 8px 8px 2px; }
+.m-query-card :deep(.van-search__content) { background: var(--m-vector-soft, rgba(16, 185, 129, 0.08)); }
+.m-query-row {
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  color: var(--m-vector, #10b981);
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 14px 10px;
+}
+.m-query-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
   background: var(--m-vector-soft, rgba(16, 185, 129, 0.12));
-  flex-shrink: 0;
-}
-.m-filter-meta { min-width: 0; }
-.m-filter-title {
-  font-size: 13px;
+  color: var(--m-vector, #10b981);
+  font-size: 12px;
   font-weight: 600;
-  color: var(--text, #1e293b);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 60%;
 }
-.m-filter-sub { font-size: 12px; color: var(--text-secondary, #64748b); margin-top: 2px; }
-.m-filter-arrow { color: var(--text-tertiary, #94a3b8); font-size: 14px; }
+.m-query-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.m-query-chip .van-icon { font-size: 13px; flex-shrink: 0; }
+.m-query-hint { font-size: 11px; color: var(--text-tertiary, #94a3b8); flex-shrink: 0; }
 
 /* 分块卡片 */
 .chunk-list { display: flex; flex-direction: column; gap: 10px; }
@@ -318,25 +322,6 @@ async function handleRepair() {
 }
 .load-more { display: flex; justify-content: center; padding: 16px 0; }
 
-/* 顶部操作栏 */
-.m-top-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 2px 0 10px;
-  padding: 0 2px;
-}
-.m-top-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--text, #1e293b);
-}
-.m-top-title .van-icon { color: var(--m-vector, #10b981); }
-
 /* 底部管理栏（固定，次级操作） */
 .m-vectors { padding-bottom: 92px; }
 .m-manage-bar {
@@ -383,12 +368,6 @@ async function handleRepair() {
 .m-manage-btn.repair {
   background: rgba(217, 119, 6, 0.12);
   color: #d97706;
-}
-.m-manage-btn.danger {
-  background: linear-gradient(135deg, #f43f5e, #e11d48);
-  color: #fff;
-  flex-shrink: 0;
-  box-shadow: 0 4px 12px rgba(225, 29, 72, 0.28);
 }
 </style>
 
