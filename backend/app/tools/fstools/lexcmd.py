@@ -233,6 +233,16 @@ def _first_command(seg: list[str]) -> Optional[str]:
         return tok
     return None
 
+def _is_write_redirect_token(tok: str) -> bool:
+    """判断 token 是否为「写文件」重定向（>、>>、&>、2>、2>>、3>…）。
+
+    输入重定向（<、<<、<&）与 fd 复制（2>&1、1<&2、>&）不产生文件写入目标，
+    不应做写权限检查（修复前 Windows 分支把 `< in.txt` 也当写目标过度校验）。
+    """
+    if tok in (">", ">>", "&>"):
+        return True
+    return bool(re.fullmatch(r"\d+>(>?)", tok))
+
 def _extract_redirect_targets(command: str) -> list[str]:
     """从 shell 命令中提取写重定向的目标文件路径。
 
@@ -244,7 +254,7 @@ def _extract_redirect_targets(command: str) -> list[str]:
         tokens = _cmd_lex(command)
         targets: list[str] = []
         for idx, (tok, kind) in enumerate(tokens):
-            if kind != "redirect":
+            if kind != "redirect" or not _is_write_redirect_token(tok):
                 continue
             for nxt, nkind in tokens[idx + 1:]:
                 if nkind in ("word",):
@@ -298,4 +308,4 @@ def _check_redirect_targets_permission(command: str, resolved_cwd: Path) -> None
 
 
 
-__all__ = ["_CMD_CMDSEP_CHARS", "_CMD_REDIRECT_CHARS", "_CMD_REDIRECT_OP_TOKENS", "_REDIRECT_OPS", "_SHELL_SEP", "_WRITE_REDIRECT_OPS", "_check_redirect_targets_permission", "_cmd_lex", "_cmd_split_shell_segments", "_extract_redirect_targets", "_first_command", "_is_redirect_token", "_win_flag_split"]
+__all__ = ["_CMD_CMDSEP_CHARS", "_CMD_REDIRECT_CHARS", "_CMD_REDIRECT_OP_TOKENS", "_REDIRECT_OPS", "_SHELL_SEP", "_WRITE_REDIRECT_OPS", "_check_redirect_targets_permission", "_cmd_lex", "_cmd_split_shell_segments", "_extract_redirect_targets", "_first_command", "_is_redirect_token", "_is_write_redirect_token", "_win_flag_split"]

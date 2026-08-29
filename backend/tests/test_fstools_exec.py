@@ -41,6 +41,24 @@ def test_is_redirect_token():
     assert lx._is_redirect_token("") is False
 
 
+def test_is_write_redirect_token():
+    # 写重定向 → True
+    assert lx._is_write_redirect_token(">") is True
+    assert lx._is_write_redirect_token(">>") is True
+    assert lx._is_write_redirect_token("&>") is True
+    assert lx._is_write_redirect_token("2>") is True
+    assert lx._is_write_redirect_token("2>>") is True
+    assert lx._is_write_redirect_token("3>") is True
+    # 输入重定向 / fd 复制 → False
+    assert lx._is_write_redirect_token("<") is False
+    assert lx._is_write_redirect_token("<<") is False
+    assert lx._is_write_redirect_token("<&") is False
+    assert lx._is_write_redirect_token(">&") is False
+    assert lx._is_write_redirect_token("2>&1") is False
+    assert lx._is_write_redirect_token("1<&2") is False
+    assert lx._is_write_redirect_token("echo") is False
+
+
 def test_first_command_skips_env_and_redirect():
     assert lx._first_command(["FOO=bar", "echo", "hi"]) == "echo"
     assert lx._first_command(["$", "echo", "hi"]) == "echo"
@@ -54,8 +72,11 @@ def test_extract_redirect_targets_windows(monkeypatch):
     assert lx._extract_redirect_targets("echo hi > out.txt 2> err.txt &> both.txt") == [
         "out.txt", "err.txt", "both.txt",
     ]
-    # 产品现状：Windows 分支对 < 输入重定向也提取为目标（保守过度检查，锁定）
-    assert lx._extract_redirect_targets("cat < in.txt | head") == ["in.txt"]
+    # 回归：< 输入重定向与 2>&1 fd 复制不是写目标（修复前把 in.txt 误当写目标）
+    assert lx._extract_redirect_targets("cat < in.txt | head") == []
+    assert lx._extract_redirect_targets("python x.py < input.txt 2>&1") == []
+    # fd 数字重定向目标仍提取
+    assert lx._extract_redirect_targets("cmd /c dir 3> log.txt") == ["log.txt"]
 
 
 def test_extract_redirect_targets_posix(monkeypatch):
