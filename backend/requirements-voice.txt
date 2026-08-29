@@ -1,0 +1,8 @@
+# 语音 / TTS 本地内置模型运行依赖（ttsclone 子进程，全部安装到后端 venv）
+# 安装：.venv\Scripts\python.exe -m pip install -r requirements-voice.txt
+# 说明：clone.py（合成/转写）依赖 torch/qwen-tts/soundfile/openai-whisper；
+#       gradio 仅供 app.py 独立 UI（server.py/clone.py 不依赖），可选。
+torch --index-url https://download.pytorch.org/whl/cpu
+qwen-tts>=0.1.1
+soundfile>=0.13.1
+openai-whisper>=20250625

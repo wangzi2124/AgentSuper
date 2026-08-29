@@ -15,6 +15,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from app.config import settings
@@ -83,6 +84,22 @@ class VoiceService:
             os.replace(str(path), str(flat))
         return flat
 
+    def _ensure_whisper(self) -> None:
+        """尽力而为预下载 Whisper turbo（ASR 转写用）；失败仅警告，不阻断。"""
+        try:
+            import whisper
+        except ImportError:
+            logger.warning("[voice] openai-whisper 未安装，转写功能不可用")
+            return
+        root = Path.home() / ".cache" / "whisper"
+        target = root / "turbo.pt"
+        if target.exists():
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        from whisper import _download as _dl
+        _dl(whisper._MODELS["turbo"], str(root), False)
+        logger.info("[voice] Whisper turbo 已下载: %s", target)
+
     def ensure_models(self) -> None:
         """启动时预下载模型（同向量/嵌入模型：ModelScope 优先 / HF 回退，断点续传）。
 
@@ -91,29 +108,28 @@ class VoiceService:
         """
         if self.has_model:
             logger.info("[voice] 模型已就绪: %s", self.model_path)
-            return
-        try:
-            from app.utils.model_download import download_model
-            models_dir = self.tts_dir / "models"
-            models_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("[voice] 启动下载模型 %s → %s", self.model_id, models_dir)
-            p = download_model(self.model_id, cache_dir=models_dir)
-            self._ensure_flat(p)
-            logger.info("[voice] 模型下载完成: %s", self.model_path)
-        except Exception as e:  # noqa: BLE001 —— 下载失败降级，不阻断启动
-            logger.warning(
-                "[voice] 模型下载失败，语音功能降级（可稍后手动运行 "
-                "scripts/download_tts_model.py）：%s", e,
-            )
+        else:
+            try:
+                from app.utils.model_download import download_model
+                models_dir = self.tts_dir / "models"
+                models_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("[voice] 启动下载模型 %s → %s", self.model_id, models_dir)
+                p = download_model(self.model_id, cache_dir=models_dir)
+                self._ensure_flat(p)
+                logger.info("[voice] 模型下载完成: %s", self.model_path)
+            except Exception as e:  # noqa: BLE001 —— 下载失败降级，不阻断启动
+                logger.warning(
+                    "[voice] 模型下载失败，语音功能降级（可稍后手动运行 "
+                    "scripts/download_tts_model.py）：%s", e,
+                )
+        self._ensure_whisper()
 
     def _clone_script(self) -> Path:
         return self.tts_dir / "clone.py"
 
     def _python(self) -> str:
-        venv = self.tts_dir / ".venv" / "Scripts" / "python.exe"
-        if venv.exists():
-            return str(venv)
-        return "python"
+        """全部依赖已安装到后端 venv（不再使用 ttsclone 独立 .venv）。"""
+        return sys.executable
 
     def _run(self, args: list[str], timeout: int | None = None) -> tuple[bool, dict]:
         """运行 ttsclone CLI，返回 (ok, result)；result 含 error/text/path/output。"""

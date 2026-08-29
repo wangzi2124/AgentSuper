@@ -71,7 +71,7 @@ def download_whisper() -> None:
     except ImportError:
         print("[FAIL] 未安装 openai-whisper（ttsclone 环境安装后重试）")
         return
-    from whisper._download import _download as _dl
+    from whisper import _download as _dl
 
     root = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
     os.makedirs(root, exist_ok=True)
