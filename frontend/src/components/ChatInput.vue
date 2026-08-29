@@ -539,13 +539,19 @@ const textareaRef = ref<HTMLTextAreaElement>()
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  height: 28px;
-  padding: 0 6px 0 9px;
+  height: 30px;
+  padding: 0 8px 0 10px;
   border-radius: 999px;
-  background: var(--bg);
+  background: color-mix(in srgb, var(--text-secondary, #64748b) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--text-secondary, #64748b) 16%, var(--border));
   color: var(--text-secondary);
   cursor: pointer;
   max-width: 190px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.model-pill:hover {
+  border-color: var(--primary, #4f46e5);
+  background: color-mix(in srgb, var(--primary, #4f46e5) 6%, var(--surface));
 }
 .model-pill .model-icon { color: var(--primary, #4f46e5); flex-shrink: 0; }
 .model-pill select {
@@ -559,7 +565,7 @@ const textareaRef = ref<HTMLTextAreaElement>()
   appearance: none;
   -webkit-appearance: none;
   padding: 0 2px;
-  max-width: 120px;
+  max-width: 116px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
