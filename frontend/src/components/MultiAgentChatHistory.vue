@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { usePermissionStore } from '../stores/permission'
+import { useAuthStore } from '../stores/auth'
 import { deleteConversation as apiDelete } from '../api/sessions'
 import type { ConversationMeta } from '../api/sessions'
 import DirPickerModal from './DirPickerModal.vue'
@@ -10,6 +11,7 @@ import DirPickerModal from './DirPickerModal.vue'
 const router = useRouter()
 const agent = useMultiAgentStore()
 const perm = usePermissionStore()
+const auth = useAuthStore()
 const searchQuery = ref('')
 const editingId = ref<string | null>(null)
 const editingTitle = ref('')
@@ -17,6 +19,8 @@ const showDirMenu = ref(false)
 const showDirPicker = ref(false)
 
 onMounted(() => {
+  // 双保险：鉴权启用但未登录时不发会话/工作区请求（登录页不会挂载本组件，防止时序异常）
+  if (auth.enabled && !auth.isLoggedIn) return
   agent.loadConversations()
   perm.loadWorkspaces()
 })
