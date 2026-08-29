@@ -146,6 +146,7 @@ function onScroll(e: Event) {
 }
 
 function handleSend(text: string, files?: FileContent[]) {
+  markPendingAutoRead()
   agent.send(text, undefined, files || []).then((completed) => {
     // 仅在真正完成（收到 done）时跳转会话路由并触发 loadConversation，
     // 避免「SSE 断连→重连失败」时导航到服务器 id 新建空会话、把已显示内容顶掉
@@ -180,6 +181,26 @@ function handleClearConversation() {
 // [TTS] AI 消息朗读：本地 Qwen3-TTS 合成播放，服务不可达降级浏览器 speechSynthesis
 const speakingId = ref<string | null>(null)
 let speakAudio: HTMLAudioElement | null = null
+
+// [TTS] AI 回复自动朗读：开关持久化 localStorage，回复完成后自动朗读最新助手消息
+const AUTO_TTS_KEY = 'agent_super_auto_tts'
+let autoReadInit = false
+try { autoReadInit = localStorage.getItem(AUTO_TTS_KEY) === '1' } catch { /* noop */ }
+const autoRead = ref(autoReadInit)
+watch(autoRead, v => { try { localStorage.setItem(AUTO_TTS_KEY, v ? '1' : '0') } catch { /* noop */ } })
+// 仅对「刚发送的新回复」自动朗读：发送时置位，回复完成后消费；
+// 历史回放/手动加载不触发
+let pendingAutoRead = false
+function markPendingAutoRead() { if (autoRead.value) pendingAutoRead = true }
+watch(() => agent.loading, (loading) => {
+  if (loading || !pendingAutoRead) return
+  pendingAutoRead = false
+  const last = agent.messages[agent.messages.length - 1]
+  if (!last || last.role !== 'assistant' || last.isError || !last.content) return
+  const text = last.content.trim()
+  if (text) handleSpeak(last.id, text)
+})
+
 async function handleSpeak(id: string, content: string) {
   if (speakingId.value === id) { stopSpeaking(); return }
   stopSpeaking()
@@ -307,6 +328,11 @@ async function handleCopy(messageId: string, text: string) {
           <input type="checkbox" v-model="agent.useVectorDb" :disabled="agent.loading" />
           <span class="toggle-slider"></span>
           <span class="toggle-label">向量库检索</span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" v-model="autoRead" :disabled="agent.loading" />
+          <span class="toggle-slider"></span>
+          <span class="toggle-label">自动朗读</span>
         </label>
         <button
           class="icon-btn clear-chat-btn"

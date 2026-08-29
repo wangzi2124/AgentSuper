@@ -105,7 +105,7 @@
 | `VOICE_TTS_SPEAKER` | `Vivian` | 默认音色（9 个预设之一） |
 | `VOICE_TTS_MODEL_SIZE` | `1.7B` | `0.6B`（快）或 `1.7B`（好） |
 | `VOICE_TTS_TIMEOUT` | `600` | 单次合成/转写超时（秒） |
-| `VOICE_TTS_AUTO` | `false` | AI 回复结束是否自动合成语音（v1 不做，预留） |
+| `VOICE_TTS_AUTO` | `false` | AI 回复结束是否自动朗读（**v1 已实现为前端开关**：MultiAgentView「自动朗读」toggle + localStorage，`pendingAutoRead` 仅在发送后置位、回复完成消费，历史回放不触发；非后端预合成） |
 | `VITE_TTS_BASE` | `/api/voice` | 前端语音基址（默认走后端，无外部直连） |
 | `VITE_TTS_SPEAKER` | `Vivian` | 前端朗读默认音色 |
 
