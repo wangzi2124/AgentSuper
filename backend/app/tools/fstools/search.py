@@ -53,7 +53,7 @@ def tool_glob(pattern: str, path: str = ".") -> dict:
     root_path = _resolve(path)
     _ensure_safe(root_path, "read")
     if not root_path.is_dir():
-        return _env("glob", f"Error: '{root}' is not a directory", error=True)
+        return _env("glob", f"Error: '{root_path}' is not a directory", error=True)
     matcher = _gitignore_matcher()
     if matcher is not None:
         matches = [m for m in matcher.glob(pattern, top=root_path) if _is_read_allowed(m)]

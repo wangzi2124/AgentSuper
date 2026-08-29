@@ -322,6 +322,14 @@ class TestSearch:
         none = search.tool_glob("*.zzz")
         assert none["output"] == "No files found"
 
+    def test_glob_non_directory_returns_error(self, ws):
+        f = ws / "plain.txt"
+        f.write_text("x")
+        out = search.tool_glob("*", path="plain.txt")
+        assert out["metadata"]["error"] is True
+        assert "is not a directory" in out["output"]
+        assert "undefined" not in out["output"]
+
     def test_glob_recent_first(self, ws):
         for i in range(3):
             (ws / f"file{i}.md").write_text("x")

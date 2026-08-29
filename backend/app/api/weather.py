@@ -40,12 +40,7 @@ _cache: Dict[str, Any] = {
 
 def _create_ssl_context():
     """返回校验证书的默认 SSL 上下文，防止中间人攻击。"""
-   #return ssl.create_default_context()
-
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+    return ssl.create_default_context()
 
 
 def _fetch_json(url: str, timeout: int = 10) -> dict:
