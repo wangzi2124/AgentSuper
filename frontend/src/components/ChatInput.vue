@@ -40,12 +40,12 @@ const placeholder = computed(() =>
   props.loading ? '正在处理，请稍候…' : '输入消息，Enter 发送，Shift+Enter 换行'
 )
 
-// F3: textarea 自动增高（min 80px / max 200px）
+// F3: textarea 自动增高（min 30px 单行 / max 200px）
 function autoResize() {
   const el = textareaRef.value
   if (!el) return
   el.style.height = 'auto'
-  const clamped = Math.min(Math.max(el.scrollHeight, 80), 200)
+  const clamped = Math.min(Math.max(el.scrollHeight, 30), 200)
   el.style.height = clamped + 'px'
 }
 
@@ -337,63 +337,64 @@ const textareaRef = ref<HTMLTextAreaElement>()
         </div>
       </div>
     </div>
-    <div class="textarea-wrapper">
+    <!-- Gemini 风格大圆角输入卡 -->
+    <div class="input-card">
       <textarea
         ref="textareaRef"
         v-model="text"
         :maxlength="MAX_LENGTH"
         :placeholder="placeholder"
-        rows="3"
+        rows="1"
         @keydown="onKeydown"
         @input="autoResize"
         @paste="onPaste"
       ></textarea>
-      <span
-        v-if="showCounter"
-        class="char-counter"
-        :class="{ 'char-counter--danger': counterDanger }"
-      >{{ remaining }}</span>
-      <button class="attach-btn" :disabled="loading" title="添加附件" @click="triggerFilePicker">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-      </button>
-      <input
-        ref="fileInputRef"
-        type="file"
-        multiple
-        style="display: none"
-        @change="onFileInput"
-      />
-      <button
-        v-if="!loading"
-        class="send-btn"
-        :disabled="!canSend"
-        @click="handleSend"
-        title="发送"
-      >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 4L12 20" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
-            <path d="M6 10L12 4L18 10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-      </button>
-      <button
-        v-else
-        class="cancel-btn"
-        @click="handleCancel"
-        title="取消"
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="6" y="6" width="12" height="12" rx="2"/>
-        </svg>
-      </button>
+      <div class="input-actions">
+        <button class="attach-btn" :disabled="loading" title="添加附件" @click="triggerFilePicker">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <span class="actions-spacer"></span>
+        <span
+          v-if="showCounter"
+          class="char-counter"
+          :class="{ 'char-counter--danger': counterDanger }"
+        >{{ remaining }}</span>
+        <button
+          v-if="!loading"
+          class="send-btn"
+          :disabled="!canSend"
+          @click="handleSend"
+          title="发送"
+          aria-label="发送"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+        </button>
+        <button
+          v-else
+          class="send-btn cancel"
+          @click="handleCancel"
+          title="取消"
+          aria-label="取消"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        </button>
+      </div>
     </div>
+    <input
+      ref="fileInputRef"
+      type="file"
+      multiple
+      style="display: none"
+      @change="onFileInput"
+    />
   </div>
 </template>
 
 <style scoped>
 .chat-input {
-  padding: 16px 24px;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
+  position: relative;
+  padding: 8px 24px calc(12px + env(safe-area-inset-bottom, 0px));
+  background: transparent;
 }
 /* [F9] 历史导航提示条 */
 .history-hint {
@@ -428,31 +429,69 @@ const textareaRef = ref<HTMLTextAreaElement>()
 .history-hint__exit:hover {
   text-decoration: underline;
 }
-.textarea-wrapper {
-  position: relative;
-}
-.textarea-wrapper textarea {
-  width: 100%;
-  padding: 10px 44px 10px 14px;
+
+/* Gemini 风格大圆角输入卡 */
+.input-card {
+  max-width: 860px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 14px 10px;
+  background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 24px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.10);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input-card:focus-within {
+  border-color: var(--primary, #4f46e5);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--primary, #4f46e5) 12%, transparent),
+    0 8px 28px rgba(15, 23, 42, 0.10);
+}
+.input-card textarea {
+  width: 100%;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 8px;
   resize: none;
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: 15px;
+  line-height: 1.55;
   outline: none;
-  transition: border-color 0.15s;
-  background: var(--bg);
+  background: transparent;
   color: var(--text);
   box-sizing: border-box;
-  min-height: 80px;
+  min-height: 30px;
+  max-height: 200px;
 }
-.textarea-wrapper textarea:focus { border-color: var(--primary); }
-.textarea-wrapper textarea:disabled { opacity: 0.6; cursor: not-allowed; }
-
+.input-card textarea:disabled { opacity: 0.6; cursor: not-allowed; }
+.input-card textarea::placeholder { color: var(--text-secondary); opacity: 0.7; }
+.input-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.actions-spacer { flex: 1; }
+.attach-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.attach-btn:hover:not(:disabled) {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary, #4f46e5) 10%, transparent);
+}
+.attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .char-counter {
-  position: absolute;
-  right: 50px;
-  bottom: 10px;
   font-size: 11px;
   line-height: 1;
   color: var(--text-muted, #9ca3af);
@@ -463,64 +502,57 @@ const textareaRef = ref<HTMLTextAreaElement>()
   color: var(--danger, #dc2626);
   font-weight: 600;
 }
-
-.send-btn,
-.cancel-btn {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+.send-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
   border: none;
   cursor: pointer;
-  transition: all 0.15s;
+  background: linear-gradient(135deg, #6d5ef1 0%, #8b5cf6 55%, #38bdf8);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(109, 94, 241, 0.35);
+  transition: transform 0.1s, opacity 0.15s;
 }
-.send-btn {
-  background: var(--primary);
-  color: white;
-}
-.send-btn:hover:not(:disabled) {
-  background: var(--primary-hover, #4338ca);
-  transform: scale(1.05);
-}
-.send-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.cancel-btn {
-  background: var(--danger);
-  color: white;
-}
-.cancel-btn:hover {
-  background: var(--danger-hover, #dc2626);
-  transform: scale(1.05);
+.send-btn:hover:not(:disabled) { transform: scale(1.06); }
+.send-btn:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
+.send-btn.cancel {
+  background: var(--danger, #ef4444);
+  box-shadow: 0 4px 14px rgba(239, 68, 68, 0.3);
 }
 
 /* [F8] 附件相关样式 */
-.chat-input { position: relative; }
-.chat-input.dragging .textarea-wrapper textarea {
+.chat-input.dragging .input-card {
   border-color: var(--primary, #4f46e5);
-  background: color-mix(in srgb, var(--primary, #4f46e5) 6%, var(--bg, #fff));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--primary, #4f46e5) 12%, transparent),
+    0 8px 28px rgba(15, 23, 42, 0.10);
 }
 .file-list {
-  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;
+  max-width: 860px;
+  margin: 0 auto 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .file-chip {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 4px 6px 4px 4px;
-  border: 1px solid var(--border); border-radius: 8px;
-  background: var(--bg); max-width: 220px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  max-width: 220px;
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .file-chip:hover { border-color: var(--primary, #4f46e5); box-shadow: 0 0 0 1px var(--primary, #4f46e5); }
 .file-thumb {
   width: 32px; height: 32px; object-fit: cover;
-  border-radius: 6px; flex-shrink: 0;
+  border-radius: 7px; flex-shrink: 0;
 }
 .file-icon { font-size: 20px; line-height: 1; flex-shrink: 0; }
 .file-name {
@@ -534,16 +566,6 @@ const textareaRef = ref<HTMLTextAreaElement>()
   cursor: pointer; flex-shrink: 0; padding: 0;
 }
 .file-remove:hover { background: var(--danger, #dc2626); color: #fff; }
-.attach-btn {
-  position: absolute; left: 8px; bottom: 8px;
-  width: 32px; height: 32px; border-radius: 8px;
-  display: flex; align-items: center; justify-content: center;
-  border: none; background: transparent; color: var(--text-secondary);
-  cursor: pointer; transition: all 0.15s;
-}
-.attach-btn:hover:not(:disabled) { color: var(--primary); background: color-mix(in srgb, var(--primary, #4f46e5) 10%, transparent); }
-.attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.textarea-wrapper textarea { padding-left: 44px; }
 
 /* [预览] 附件预览浮层 */
 .preview-overlay {
@@ -622,11 +644,10 @@ const textareaRef = ref<HTMLTextAreaElement>()
 
 /* 移动端适配（与 MultiAgentView 768px 断点对齐） */
 @media (max-width: 768px) {
-  .chat-input { padding: 10px 12px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
+  .chat-input { padding: 8px 12px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
   .history-hint { margin-bottom: 6px; font-size: 11px; padding: 3px 8px; }
-  .textarea-wrapper textarea { font-size: 16px; min-height: 64px; }
-  .char-counter { right: 46px; bottom: 8px; }
-  .send-btn, .cancel-btn, .attach-btn { bottom: 6px; }
+  .input-card { padding: 12px 12px 8px; border-radius: 20px; }
+  .input-card textarea { font-size: 16px; min-height: 26px; }
   .file-chip { max-width: 100%; }
   .preview-overlay { padding: 12px; }
   .preview-panel { max-width: 100%; max-height: 86vh; }

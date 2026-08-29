@@ -378,7 +378,7 @@ async function handleCopy(messageId: string, text: string) {
     <div v-if="agent.notice" class="chat-notice">{{ agent.notice }}</div>
 
     <div class="chat-footer">
-      <button v-if="messages.length > 0" class="btn btn-danger" @click="agent.deleteConversation()" style="margin: 0 24px 8px;" :disabled="agent.loading">
+      <button v-if="messages.length > 0" class="btn btn-danger" @click="agent.deleteConversation()" style="margin: 8px auto 2px; max-width: 860px; width: calc(100% - 48px);" :disabled="agent.loading">
         Clear conversation
       </button>
       <ChatInput ref="chatInputRef" :loading="agent.loading" @send="handleSend" @cancel="handleCancel" />
@@ -598,16 +598,16 @@ async function handleCopy(messageId: string, text: string) {
 .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--text-secondary); }
 .empty-state .icon { font-size: 48px; }
 .empty-state .hint { font-size: 13px; margin-top: 4px; }
-.message-list { flex: 1; overflow-y: auto; padding: 20px 24px; scroll-behavior: smooth; }
+.message-list { flex: 1; overflow-y: auto; padding: 20px 24px; scroll-behavior: smooth; max-width: 860px; margin: 0 auto; width: 100%; box-sizing: border-box; }
 .message-list::-webkit-scrollbar { width: 6px; }
 .message-list::-webkit-scrollbar-track { background: transparent; }
 .message-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 .chat-footer { flex-shrink: 0; }
-.chat-message { display: flex; gap: 12px; margin-bottom: 16px; }
+.chat-message { display: flex; gap: 12px; margin-bottom: 20px; }
 .chat-message.user { flex-direction: row-reverse; }
 .avatar { width: 36px; height: 36px; border-radius: 50%; background: var(--bg); display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
-.bubble { flex: 1; width: 100%; max-width: 100%; padding: 12px 16px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); line-height: 1.7; font-size: 15px; box-sizing: border-box; }
-.user .bubble { flex: none; width: auto; max-width: 80%; background: var(--primary); color: white; border-color: var(--primary); }
+.bubble { flex: 1; width: 100%; max-width: 100%; padding: 12px 16px; border-radius: 20px; background: var(--surface); border: 1px solid var(--border); line-height: 1.7; font-size: 15px; box-sizing: border-box; border-top-left-radius: 4px; }
+.user .bubble { flex: none; width: auto; max-width: 80%; background: var(--bg); color: var(--text); border-color: var(--border); border-top-left-radius: 20px; border-top-right-radius: 4px; }
 .content { white-space: pre-wrap; word-break: break-word; }
 /* [F8] 用户消息附件回显 */
 .msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
