@@ -199,6 +199,11 @@ def update_session(session_id: str, **fields: Any) -> SessionInfo:
             continue
         if key == "model":
             value = json.dumps(value) if value else None
+        if key == "archived":
+            # sessions 表只有 time_archived（无 archived 列）：把布尔归档标识
+            # 映射为归档时间戳（true→当前时间，false→清除归档）
+            key = "time_archived"
+            value = int(time.time() * 1000) if value else None
         sets.append(f"{key} = ?")
         params.append(value)
     if not sets:
