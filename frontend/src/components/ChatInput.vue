@@ -14,6 +14,7 @@ const agent = useMultiAgentStore()
 
 // [模型选择] 向上弹出的自绘下拉（原生 select 只能向下且无法自定义样式）
 const modelMenuOpen = ref(false)
+const tipVisible = ref(false)
 const currentModel = computed(
   () => SUPPORTED_MODELS.find(m => m.value === agent.selectedModel) ?? SUPPORTED_MODELS[0]
 )
@@ -419,14 +420,18 @@ const textareaRef = ref<HTMLTextAreaElement>()
             class="model-pill"
             :disabled="loading"
             @click.stop="toggleModelMenu"
+            @mouseenter="tipVisible = true"
+            @mouseleave="tipVisible = false"
+            @focus="tipVisible = true"
+            @blur="tipVisible = false"
             title="选择模型"
           >
             <svg class="model-icon" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"/></svg>
             <span class="model-current">{{ currentModelLabel }}</span>
             <svg class="model-chevron" :class="{ open: modelMenuOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
-          <!-- hover 悬浮说明框（当前模型描述，展开菜单时隐藏） -->
-          <div class="model-tip">
+          <!-- hover 悬浮说明框（JS 驱动，展开菜单时隐藏） -->
+          <div v-show="tipVisible && !modelMenuOpen" class="model-tip">
             <div class="model-tip-head">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4z"/></svg>
               <span class="model-tip-name">{{ currentModelLabel }}</span>
@@ -619,17 +624,13 @@ const textareaRef = ref<HTMLTextAreaElement>()
   position: absolute;
   bottom: calc(100% + 12px);
   left: 0;
-  z-index: 92;
+  z-index: 1001;
   width: 250px;
   padding: 11px 13px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e2e8f0);
   border-radius: 12px;
-  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.24);
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(6px);
-  transition: opacity 0.2s, transform 0.2s;
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.26);
 }
 .model-tip::after {
   content: '';
@@ -638,16 +639,14 @@ const textareaRef = ref<HTMLTextAreaElement>()
   left: 24px;
   width: 10px;
   height: 10px;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  background: var(--surface, #fff);
+  border-right: 1px solid var(--border, #e2e8f0);
+  border-bottom: 1px solid var(--border, #e2e8f0);
   transform: rotate(45deg);
 }
-.model-wrap:hover .model-tip { opacity: 1; transform: translateY(0); }
-.model-wrap.menu-open .model-tip { opacity: 0 !important; }
-.model-tip-head { display: flex; align-items: center; gap: 6px; }
+.model-tip-head { display: flex; align-items: center; gap: 6px; color: var(--primary, #4f46e5); }
 .model-tip-name { font-size: 13px; font-weight: 700; color: var(--primary, #4f46e5); }
-.model-tip-desc { display: block; margin-top: 5px; font-size: 12px; line-height: 1.55; color: var(--text-secondary); }
+.model-tip-desc { display: block; margin-top: 5px; font-size: 12px; line-height: 1.55; color: var(--text-secondary, #64748b); }
 .model-menu-mask { position: fixed; inset: 0; z-index: 90; }
 .model-menu {
   position: absolute;
