@@ -7,6 +7,8 @@ __pycache__/
 frontend/build/
 wheels/
 *.egg-info
+# split_module.py 验证快照
+*.names.json
 
 # Virtual environments
 .venv
