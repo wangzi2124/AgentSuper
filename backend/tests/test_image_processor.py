@@ -155,6 +155,28 @@ def test_ocr_hook_disabled_by_default():
     assert ip.ocr_image(_b64_1x1(), "x.png") == ""
 
 
+@pytest.mark.asyncio
+async def test_caption_image_ollama_routing(caption_on, monkeypatch):
+    """[F8] Ollama 本地视觉模型配置：model/ollama 前缀 + api_base 透传 litellm。"""
+    import litellm as lm
+    monkeypatch.setattr(settings, "image_caption_model", "ollama/llava")
+    monkeypatch.setattr(settings, "image_caption_api_base", "http://localhost:11434")
+    monkeypatch.setattr(settings, "image_caption_api_key", "")
+    calls = {}
+
+    async def fake_acompletion(**kw):
+        calls.update(kw)
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="猫"))])
+
+    monkeypatch.setattr(lm, "acompletion", fake_acompletion)
+    cap = await ip.caption_image(_b64_1x1(), "image/png", "cat.png")
+    assert cap == "猫"
+    assert calls["model"] == "ollama/llava"
+    assert calls["api_base"] == "http://localhost:11434"
+    assert "api_key" not in calls  # Ollama 无需 key
+
+
 # ── C 步：子 Agent 附件上下文（文档 + 图片 caption）────────────────────────
 
 def test_is_image_file():
