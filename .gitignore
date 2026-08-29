@@ -12,6 +12,7 @@ wheels/
 .venv
 backend/.env
 backend/data.zip
-*.bak_*
+*.bak
 backend/logs/
 data/logs/
+scripts/upgrade_chat_panel.py
