@@ -36,9 +36,13 @@ REQUIRED_MODELS = [
 
 
 def download_all_models():
-    """啟動時下載所有需要的模型到本地目錄"""
+    """显式下载所有模型到本地目录（仅 --download 时调用，不自动触发）。
+
+    模型文件由后端脚本 scripts/download_tts_model.py 预下载（ModelScope 优先/HF 回退，
+    对齐向量/嵌入模型下载方式）。此处保留 CLI 入口供 ttsclone 独立使用。
+    """
     print("=" * 60)
-    print("檢查模型下載狀態...")
+    print("下载 Qwen3-TTS 模型（可由 backend/scripts/download_tts_model.py 预下载）")
     print("=" * 60)
 
     for model_id in REQUIRED_MODELS:
@@ -68,13 +72,18 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def get_model(model_id: str):
-    """載入模型（使用本地模型）"""
+    """載入模型（使用本地模型，不自動下載）"""
     from qwen_tts import Qwen3TTSModel
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
     local_path = os.path.join(LOCAL_MODELS_DIR, model_id.replace("/", "_"))
+    if not (os.path.exists(local_path) and os.path.isdir(local_path)):
+        raise FileNotFoundError(
+            f"模型不存在: {local_path}\n"
+            f"请先运行 backend/scripts/download_tts_model.py 预下载模型（模型不会自动下载）。"
+        )
     print(f"正在載入模型: {local_path} ...")
     print(f"裝置: {device} | 精度: {dtype}")
 
@@ -143,12 +152,13 @@ def cmd_clone(args):
 
 
 def main():
-    download_all_models()
     parser = argparse.ArgumentParser(
         description="Qwen3-TTS 聲音複製 CLI 工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    parser.add_argument("--download", action="store_true",
+                        help="预下载全部模型（默认不自动下载；也可用 backend/scripts/download_tts_model.py）")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # custom 子命令
@@ -178,6 +188,9 @@ def main():
                          help="使用 0.6B 小模型（VRAM 不足時使用）")
 
     args = parser.parse_args()
+
+    if args.download:
+        download_all_models()
 
     if args.command == "custom":
         cmd_custom(args)

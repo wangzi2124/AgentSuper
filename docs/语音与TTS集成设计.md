@@ -102,13 +102,18 @@
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `VOICE_TTS_ENABLED` | `false` | 主 Agent 语音工具与 `/api/voice` 总开关（默认关，避免无模型环境误挂） |
-| `VOICE_TTS_DIR` | `../ttsclone` | ttsclone 目录（含 `clone.py`/`.venv`） |
+| `VOICE_TTS_DIR` | `ttsclone` | ttsclone 独立目录（**backend 下**，相对路径以 backend 为基准，含 `clone.py`/`.venv`/`models`） |
 | `VOICE_TTS_SPEAKER` | `Vivian` | 默认音色（9 个预设之一） |
 | `VOICE_TTS_MODEL_SIZE` | `1.7B` | `0.6B`（快）或 `1.7B`（好） |
 | `VOICE_TTS_TIMEOUT` | `600` | 单次合成/转写超时（秒） |
 | `VOICE_TTS_AUTO` | `false` | AI 回复结束是否自动合成语音（v1 不做，预留） |
 | `VITE_TTS_BASE` | `/api/voice` | 前端语音基址（默认走后端，无外部直连） |
 | `VITE_TTS_SPEAKER` | `Vivian` | 前端朗读默认音色 |
+
+> **模型不自动下载**（同向量/嵌入模型）：运行时/服务**不会**自动拉取模型（ttsclone `clone.py` 启动下载已移除、`server.py` 自动下载改为缺失即报错）。先用工具预下载：
+> - 语音模型：`backend/scripts/download_tts_model.py`（`--size 0.6B|1.7B` / `--all` / `--whisper`；ModelScope 优先 / HF 回退，复用 `app/utils/model_download.py`）→ 落到 `backend/ttsclone/models/`。
+> - 图片 caption 模型：`backend/scripts/download_image_model.py`（默认 `ollama pull llava`；公网 API 模型无需下载）。
+> `VoiceService.enabled` 同时校验模型已预下载（`has_model`），缺失时 `/api/voice/*` 返回 503 并提示运行下载脚本。
 
 ---
 

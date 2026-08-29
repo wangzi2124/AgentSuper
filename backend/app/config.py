@@ -43,8 +43,9 @@ class Settings(BaseSettings):
     summarization_keep_messages: int = 20
 
     # ── 语音 / TTS（本地 Qwen3-TTS 子进程，无外部 HTTP 接口调用）──
+    # 模型不自动下载：先用 scripts/download_tts_model.py 预下载到 backend/ttsclone/models
     voice_tts_enabled: bool = False
-    voice_tts_dir: str = "../ttsclone"
+    voice_tts_dir: str = "ttsclone"  # backend 下独立文件夹
     voice_tts_speaker: str = "Vivian"
     voice_tts_model_size: str = "1.7B"
     voice_tts_timeout: int = 600

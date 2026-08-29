@@ -50,14 +50,14 @@ def _read_upload_audio(upload: UploadFile):
 
 
 def _ensure_model(model_type: str, model_size: str):
-    """模型缺失时按需下载后再加载(避免启动时全量下载)"""
+    """校验模型已预下载（不自动下载）。缺失时抛错，由调用方返回 500。"""
     model_id = f"Qwen/Qwen3-TTS-12Hz-{model_size}-{model_type}"
     local_path = os.path.join(tts.LOCAL_MODELS_DIR, model_id.replace("/", "_"))
     if not (os.path.exists(local_path) and os.path.isdir(local_path)):
-        from huggingface_hub import snapshot_download
-
-        print(f"[DL] 按需下载模型: {model_id}")
-        snapshot_download(repo_id=model_id, local_dir=local_path)
+        raise RuntimeError(
+            f"模型未下载: {model_id}\n"
+            f"请先运行 backend/scripts/download_tts_model.py 预下载（模型不会自动下载）。"
+        )
 
 
 @app.get("/health")

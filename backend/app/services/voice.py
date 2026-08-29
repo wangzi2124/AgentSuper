@@ -53,9 +53,19 @@ class VoiceService:
         self.output_dir = Path(output_dir or (base / "data" / "generated"))
 
     @property
+    def model_path(self) -> Path:
+        """当前配置模型规格对应的本地模型目录（ttsclone/models 下扁平命名）。"""
+        return self.tts_dir / "models" / f"Qwen_Qwen3-TTS-12Hz-{self.model_size}-CustomVoice"
+
+    @property
+    def has_model(self) -> bool:
+        """模型是否已预下载（不自动下载，缺失时需 scripts/download_tts_model.py）。"""
+        return self.model_path.is_dir() and any(self.model_path.iterdir())
+
+    @property
     def enabled(self) -> bool:
-        """总开关：配置启用 且 clone.py 存在。"""
-        return bool(settings.voice_tts_enabled) and self._clone_script().exists()
+        """总开关：配置启用 且 clone.py 存在 且 模型已预下载。"""
+        return bool(settings.voice_tts_enabled) and self._clone_script().exists() and self.has_model
 
     def _clone_script(self) -> Path:
         return self.tts_dir / "clone.py"

@@ -32,6 +32,16 @@ def _get_service():
     return _service
 
 
+_DISABLED_MSG = (
+    "语音服务未启用或模型未下载（VOICE_TTS_ENABLED=false / ttsclone 缺失 / "
+    "模型缺失——请先运行 scripts/download_tts_model.py 预下载）"
+)
+
+
+def _disabled() -> dict:
+    return error_response(503, _DISABLED_MSG, 503)
+
+
 @router.get("/status")
 def voice_status():
     svc = _get_service()
@@ -39,6 +49,7 @@ def voice_status():
         "enabled": svc.enabled,
         "speakers": SPEAKERS,
         "languages": LANGUAGES,
+        "has_model": svc.has_model,
     })
 
 
@@ -46,7 +57,7 @@ def voice_status():
 async def voice_transcribe(audio: UploadFile = File(...)):
     svc = _get_service()
     if not svc.enabled:
-        return error_response(503, "语音服务未启用（VOICE_TTS_ENABLED=false 或 ttsclone 缺失）", 503)
+        return _disabled()
     try:
         data = await audio.read()
     except Exception as e:  # noqa: BLE001
@@ -80,7 +91,7 @@ async def voice_tts(
 ):
     svc = _get_service()
     if not svc.enabled:
-        return error_response(503, "语音服务未启用（VOICE_TTS_ENABLED=false 或 ttsclone 缺失）", 503)
+        return _disabled()
     if not text or not text.strip():
         return error_response(400, "text is required", 400)
     succ, msg, path = await asyncio.to_thread(

@@ -201,7 +201,8 @@ class RAGAgentTools(RAGAgentBase):
         """
         vs = getattr(self, "voice_service", None)
         if vs is None or not getattr(vs, "enabled", False):
-            return "Error: 语音服务未启用（VOICE_TTS_ENABLED=false 或 ttsclone 缺失）"
+            return "Error: 语音服务不可用（VOICE_TTS_ENABLED=false / ttsclone 缺失 / 模型未下载——" \
+                   "请先运行 scripts/download_tts_model.py 预下载）"
         try:
             if name == "tool_tts_synthesize":
                 text = str(args.get("text") or "").strip()

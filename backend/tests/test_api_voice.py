@@ -25,6 +25,7 @@ class FakeService:
 
     def __init__(self, enabled=True):
         self.enabled = enabled
+        self.has_model = True
         self.transcribe_result = (True, "识别文本")
         self.synth_result = None  # None → 自动写一个假 wav
 

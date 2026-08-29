@@ -17,12 +17,16 @@ import app.services.voice as vs
 from app.config import settings
 
 
-def _make_service(monkeypatch, tmp_path, script=True, enabled=True):
+def _make_service(monkeypatch, tmp_path, script=True, enabled=True, model=True):
     monkeypatch.setattr(settings, "voice_tts_enabled", enabled)
     tts_dir = tmp_path / "ttsclone"
     tts_dir.mkdir(exist_ok=True)
     if script:
         (tts_dir / "clone.py").write_text("#!/usr/bin/env python\n", encoding="utf-8")
+    if model:
+        model_dir = tts_dir / "models" / "Qwen_Qwen3-TTS-12Hz-1.7B-CustomVoice"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "model.safetensors").write_bytes(b"fake")
     return vs.VoiceService(
         tts_dir=str(tts_dir),
         speaker="Vivian",
@@ -51,6 +55,12 @@ def test_enabled_gate(monkeypatch, tmp_path):
 def test_enabled_missing_script(monkeypatch, tmp_path):
     svc = _make_service(monkeypatch, tmp_path, script=False, enabled=True)
     assert svc.enabled is False
+
+
+def test_enabled_missing_model(monkeypatch, tmp_path):
+    svc = _make_service(monkeypatch, tmp_path, script=True, enabled=True, model=False)
+    assert svc.enabled is False
+    assert svc.has_model is False
 
 
 def test_speaker_model_fallback():
