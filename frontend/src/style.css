@@ -90,7 +90,9 @@ input, textarea {
 
 .sidebar {
   width: var(--sidebar-width);
-  background: var(--surface);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--primary, #4f46e5) 4%, transparent), transparent 180px),
+    var(--surface);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -143,9 +145,10 @@ input, textarea {
 }
 
 .nav-item.active {
-  background: #eef2ff;
+  background: var(--primary-soft, #eef2ff);
   color: var(--primary);
   font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--primary);
 }
 
 .nav-icon {
@@ -174,8 +177,9 @@ input, textarea {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-  /* 主页背景：顶部两处品牌光晕 + 底部柔光，随主题自适应，浅色衬纸感 */
+  /* 主页背景：细点阵纹理 + 顶部两处品牌光晕 + 底部柔光，随主题自适应 */
   background:
+    radial-gradient(color-mix(in srgb, var(--text-secondary, #64748b) 7%, transparent) 1px, transparent 1px) 0 0 / 22px 22px,
     radial-gradient(900px 380px at 78% -10%, color-mix(in srgb, var(--primary, #4f46e5) 9%, transparent), transparent 62%),
     radial-gradient(640px 320px at 6% -10%, color-mix(in srgb, #38bdf8 7%, transparent), transparent 58%),
     radial-gradient(1400px 480px at 50% 120%, color-mix(in srgb, var(--primary, #4f46e5) 5%, transparent), transparent 62%),
@@ -185,7 +189,7 @@ input, textarea {
 .page-header {
   padding: 20px 24px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--primary, #4f46e5) 4%, var(--surface)), var(--surface));
 }
 
 .page-header h2 {
