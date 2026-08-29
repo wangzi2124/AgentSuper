@@ -60,6 +60,39 @@ const mobileViews: Record<string, unknown> = {
   Monitoring: MobileMonitoring,
   CustomTools: MobileCustomTools,
 }
+  /* @@CHAT_PANEL_SCRIPT@@ */
+  // ── 设置分组（移动端聊天对齐 ChatGPT：头部控件收纳进左侧抽屉） ──
+  import { useMultiAgentStore } from '../stores/multiAgent'
+  import { usePermissionStore } from '../stores/permission'
+  import { SUPPORTED_MODELS } from '../config/models'
+
+  const agent = useMultiAgentStore()
+  const perm = usePermissionStore()
+
+  // 工作目录摘要（过长省略展示）
+  const workspacesText = computed(() => {
+    const list = perm.workspaces
+    if (!list.length) return '未授权，点击刷新'
+    const shown = list.slice(0, 2).join(' · ')
+    return list.length > 2 ? shown + ' 等' + list.length + ' 个' : shown
+  })
+
+  // 清空会话：二次确认（3 秒未确认自动复位）
+  const clearConfirm = ref(false)
+  let clearTimer: ReturnType<typeof setTimeout> | undefined
+  function onClearClick() {
+    if (!clearConfirm.value) {
+      clearConfirm.value = true
+      clearTimer = setTimeout(() => { clearConfirm.value = false }, 3000)
+      return
+    }
+    clearConfirm.value = false
+    if (clearTimer) clearTimeout(clearTimer)
+    agent.deleteConversation()
+  }
+  function refreshWorkspaces() {
+    perm.loadWorkspaces()
+  }
 const currentView = computed(() => mobileViews[route.name as string] || null)
 </script>
 
@@ -126,6 +159,53 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
             </div>
             <span class="drawer-item-title">{{ m.title }}</span>
             <van-icon name="arrow" class="drawer-item-arrow" />
+          </div>
+          <!-- @@CHAT_PANEL_TEMPLATE@@ -->
+          <!-- ── 设置分组：移动端聊天对齐 ChatGPT，头部控件收纳于此 ── -->
+          <div class="drawer-group-label" style="margin-top: 16px">设置</div>
+
+          <div class="drawer-sub-group">
+            <div class="drawer-sub-label">模型</div>
+            <div class="model-options">
+              <div
+                v-for="m in SUPPORTED_MODELS"
+                :key="m.value"
+                class="model-opt"
+                :class="{ current: agent.selectedModel === m.value }"
+                @click="agent.selectedModel = m.value"
+              >
+                <span class="model-opt-name">{{ m.label }}</span>
+                <van-icon v-if="agent.selectedModel === m.value" name="success" color="#4f46e5" />
+              </div>
+            </div>
+          </div>
+
+          <div class="drawer-item settings-item" @click="agent.useVectorDb = !agent.useVectorDb">
+            <div class="drawer-item-ico" style="background: rgba(16,185,129,.12); color: #10b981;">
+              <van-icon name="cluster-o" />
+            </div>
+            <span class="drawer-item-title">向量库检索</span>
+            <van-switch v-model="agent.useVectorDb" size="22" @click.stop />
+          </div>
+
+          <div class="drawer-item settings-item" @click="refreshWorkspaces">
+            <div class="drawer-item-ico" style="background: rgba(59,130,246,.12); color: #3b82f6;">
+              <van-icon name="folder-o" />
+            </div>
+            <div class="drawer-item-main">
+              <div class="drawer-item-title">工作目录</div>
+              <div class="drawer-item-sub">{{ workspacesText }}</div>
+            </div>
+            <van-icon name="refresh" class="drawer-item-arrow" />
+          </div>
+
+          <div class="drawer-item settings-item" @click="onClearClick">
+            <div class="drawer-item-ico" style="background: rgba(239,68,68,.12); color: #ef4444;">
+              <van-icon name="delete-o" />
+            </div>
+            <span class="drawer-item-title" :class="{ 'danger-text': clearConfirm }">
+              {{ clearConfirm ? '再点一次确认清空' : '清空当前会话' }}
+            </span>
           </div>
         </div>
       </div>
@@ -245,4 +325,46 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
   box-shadow: 0 4px 12px rgba(109, 94, 241, 0.35);
   transform: translateY(-1px);
 }
+  /* @@CHAT_PANEL_STYLE@@ */
+  /* ── 设置分组（移动端聊天对齐 ChatGPT） ── */
+  .drawer-sub-group { padding: 0 12px 10px; }
+  .drawer-sub-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--text-secondary, #64748b);
+    padding: 2px 2px 8px;
+  }
+  .model-options { display: flex; flex-wrap: wrap; gap: 8px; }
+  .model-opt {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border, #eef1f6);
+    background: var(--bg, #f8fafc);
+    font-size: 13px;
+    color: var(--text, #1e293b);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .model-opt.current {
+    border-color: var(--primary, #4f46e5);
+    background: var(--primary-soft, #eef2ff);
+    color: var(--primary, #4f46e5);
+    font-weight: 600;
+  }
+  .settings-item { cursor: pointer; }
+  .drawer-item-main { flex: 1; min-width: 0; }
+  .drawer-item-sub {
+    font-size: 11px;
+    color: var(--text-secondary, #94a3b8);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .danger .drawer-item-title { color: #ef4444; }
+  .danger-text { color: #ef4444 !important; }
 </style>

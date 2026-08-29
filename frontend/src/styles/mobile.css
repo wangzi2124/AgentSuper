@@ -504,3 +504,17 @@ html[data-theme='dark'] {
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45) !important;
   }
 }
+
+/* ============================================================================
+ * 移动端聊天对齐 ChatGPT · 头部控件收纳（@@CHAT_PANEL_CSS@@）
+ * 覆盖 MultiAgentView scoped 样式：头部仅保留标题 + 运行状态 badge，
+ * 模型选择 / 向量库开关 / 天气预警 / 清空按钮 收纳进左侧抽屉「设置」。
+ * ============================================================================ */
+@media (max-width: 768px) {
+  .header-controls .model-selector,
+  .header-controls .toggle,
+  .header-controls .weather-alert-container,
+  .chat-footer .btn-danger {
+    display: none !important;
+  }
+}

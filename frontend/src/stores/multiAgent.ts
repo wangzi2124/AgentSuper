@@ -43,7 +43,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const activeSessionId = ref<string | undefined>(undefined)
   const conversations = ref<ConversationMeta[]>([])
   const routingStatus = ref<string>('')
-  const selectedModel = ref(SUPPORTED_MODELS[0].value)
+  const selectedModel = ref<string>(SUPPORTED_MODELS[0].value)
   const useVectorDb = ref(false)
   // 当前/新建会话绑定的工作目录（opencode ctx.directory）。首条消息发送时
   // 随请求 directory 创建会话；已有会话在 loadConversation 时同步为服务器值。
