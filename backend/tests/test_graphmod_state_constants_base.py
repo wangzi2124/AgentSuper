@@ -84,8 +84,7 @@ def test_attachment_parts_split(monkeypatch):
         calls["others"] = others
         calls["budget"] = budget
         return "TXT"
-    fake_mod = SimpleNamespace(attachment_context_text=fake_text)
-    monkeypatch.setitem(sys.modules, "app.agent.graphmod.attachment_loader", fake_mod)
+    monkeypatch.setattr("app.agent.attachment_loader.attachment_context_text", fake_text)
     files = [
         {"filename": "img.png", "mime_type": "image/png", "data": "x"},
         {"filename": "pic.JPG", "mime_type": "application/octet-stream", "data": "y"},  # 扩展名识别
@@ -97,19 +96,27 @@ def test_attachment_parts_split(monkeypatch):
     assert text == "TXT"
 
 
-def test_attachment_parts_no_others(monkeypatch):
-    fake_mod = SimpleNamespace(attachment_context_text=lambda others, budget=6000: "X")
-    monkeypatch.setitem(sys.modules, "app.agent.graphmod.attachment_loader", fake_mod)
-    images, text = _attachment_parts([])
-    assert images == [] and text == ""
+def test_attachment_parts_no_others():
+    """回归：attachment_loader 从 graphmod 子包误引用导致 ImportError 已修复
+    （`from .. import attachment_loader`）——无附件/纯图片附件不应崩。"""
+    assert _attachment_parts([]) == ([], "")
+    images, text = _attachment_parts([{"filename": "a.png", "mime_type": "image/png", "data": "x"}])
+    assert images == ["a.png"] and text == ""
 
 
-def test_attachment_parts_latent_import_bug():
-    """已知产品缺陷锁定：graphmod 无 attachment_loader 子模块，`from . import
-    attachment_loader` 无条件执行 → 任何附件请求都抛 ImportError（即使无文本附件）。
-    修法：state.py 改为 `from .. import attachment_loader`。"""
-    with pytest.raises(ImportError):
-        _attachment_parts([])
+def test_attachment_parts_real_loader_text(monkeypatch):
+    """回归（真实 loader 端到端）：文本附件经修复后的 `from .. import
+    attachment_loader` 解析到真实模块，正文可内联（修复前此处 ImportError）。"""
+    import base64 as _b64
+    content = "你好，这是附件正文内容。"
+    f = {
+        "filename": "note.txt",
+        "mime_type": "text/plain",
+        "data": _b64.b64encode(content.encode("utf-8")).decode("ascii"),
+    }
+    images, text = _attachment_parts([f])
+    assert images == []
+    assert "附件正文内容" in text
 
 
 def test_zero_usage_shape():

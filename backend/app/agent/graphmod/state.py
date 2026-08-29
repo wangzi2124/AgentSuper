@@ -161,7 +161,7 @@ def _attachment_parts(files: list[dict], budget: int = 6000):
     图片交给多模态 image_url；文档附件经 LangChain loaders
     （attachment_loader.attachment_context_text）解析为文本上下文。
     """
-    from . import attachment_loader
+    from .. import attachment_loader
 
     image_names: list[str] = []
     others: list[dict] = []
