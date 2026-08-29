@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch, onMounted } from 'vue'
+import { computed, nextTick, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { SUPPORTED_MODELS } from '../config/models'
 import type { FileContent } from '../types'
 import { usePermissionStore } from '../stores/permission'
+import { synthesize, speakNative, stopNative } from '../api/voice'
 import MultiAgentResponse from '../components/MultiAgentResponse.vue'
 import ChatInput from '../components/ChatInput.vue'
 import WeatherAlert from '../components/WeatherAlert.vue'
@@ -175,6 +176,37 @@ function handleClearConversation() {
   if (!confirm('确定清空当前对话？此操作不可撤销。')) return
   agent.deleteConversation()
 }
+
+// [TTS] AI 消息朗读：本地 Qwen3-TTS 合成播放，服务不可达降级浏览器 speechSynthesis
+const speakingId = ref<string | null>(null)
+let speakAudio: HTMLAudioElement | null = null
+async function handleSpeak(id: string, content: string) {
+  if (speakingId.value === id) { stopSpeaking(); return }
+  stopSpeaking()
+  const text = (content || '').trim()
+  if (!text) return
+  speakingId.value = id
+  try {
+    const url = await synthesize(text)
+    const audio = new Audio(url)
+    speakAudio = audio
+    audio.onended = () => { if (speakingId.value === id) speakingId.value = null }
+    audio.onerror = () => { stopSpeaking(); speakNative(text) }
+    await audio.play()
+  } catch {
+    speakNative(text)
+  }
+}
+function stopSpeaking() {
+  if (speakAudio) {
+    try { speakAudio.pause() } catch { /* noop */ }
+    if (speakAudio.src) URL.revokeObjectURL(speakAudio.src)
+    speakAudio = null
+  }
+  stopNative()
+  speakingId.value = null
+}
+onBeforeUnmount(stopSpeaking)
 
 function handleRetry(messageId: string) {
   agent.manualRetry(messageId)
@@ -347,6 +379,9 @@ async function handleCopy(messageId: string, text: string) {
                     </button>
                     <span v-if="copiedId === msg.id" class="copy-toast">复制成功</span>
                   </div>
+                  <button v-if="msg.role !== 'user'" class="icon-btn speak-btn" :class="{ speaking: speakingId === msg.id }" @click="handleSpeak(msg.id, msg.content)" :title="speakingId === msg.id ? '停止朗读' : '朗读'">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+                  </button>
                   <button v-if="msg.role === 'user'" class="icon-btn" @click="handleUndo(idx)" title="撤销到此处">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
                   </button>
@@ -458,6 +493,8 @@ async function handleCopy(messageId: string, text: string) {
 .clear-chat-btn { flex-shrink: 0; }
 .clear-chat-btn:hover:not(:disabled) { color: var(--danger, #ef4444); background: color-mix(in srgb, var(--danger, #ef4444) 12%, transparent); opacity: 1; }
 .clear-chat-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.speak-btn.speaking { color: var(--primary, #4f46e5); opacity: 1; animation: speak-pulse 1.2s ease-in-out infinite; }
+@keyframes speak-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 .ws-manager {
   position: relative;
   flex-shrink: 0;

@@ -29,9 +29,18 @@ function pickModel(value: string) {
   modelMenuOpen.value = false
 }
 
-// [录音] Web Speech API 语音输入（浏览器原生，Chrome/Edge 桌面可用，无需后端）
+// [录音] 语音输入：Web Speech API 优先，不可用（Firefox/部分移动端）降级
+// MediaRecorder → 本地 Qwen3-TTS ASR 转写（ttsclone /api/tts/transcribe）
+import { transcribeAudio } from '../api/voice'
+
 const listening = ref(false)
 const recognition = ref<{ start(): void; stop(): void } | null>(null)
+const hasSpeechRecognition = computed(() =>
+  typeof window !== 'undefined' && !!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition
+)
+let mediaRecorder: MediaRecorder | null = null
+let mediaChunks: Blob[] = []
+
 function initRecognition() {
   const w = window as any
   const SR = w.SpeechRecognition || w.webkitSpeechRecognition
@@ -49,21 +58,61 @@ function initRecognition() {
   r.onend = () => { listening.value = false }
   recognition.value = r
 }
-function toggleMic() {
-  if (props.loading) return
-  if (!recognition.value) initRecognition()
-  if (!recognition.value) return
-  if (listening.value) {
-    recognition.value.stop()
-    listening.value = false
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop()
   } else {
-    try {
-      recognition.value.start()
-      listening.value = true
-    } catch {
+    recognition.value?.stop()
+    listening.value = false
+  }
+}
+
+async function initRecorder(): Promise<boolean> {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    const rec = new MediaRecorder(stream)
+    mediaRecorder = rec
+    rec.ondataavailable = (e: BlobEvent) => { if (e.data.size) mediaChunks.push(e.data) }
+    rec.onstop = async () => {
+      try { stream.getTracks().forEach(t => t.stop()) } catch { /* noop */ }
+      const blob = new Blob(mediaChunks, { type: rec.mimeType || 'audio/webm' })
+      mediaChunks = []
+      try {
+        const t = await transcribeAudio(blob)
+        if (t) text.value = (text.value ? text.value + ' ' : '') + t
+      } catch { /* 转写失败静默，保持输入框内容 */ }
       listening.value = false
     }
+    return true
+  } catch {
+    return false // 麦克风权限被拒或不可用
   }
+}
+
+async function toggleMic() {
+  if (props.loading) return
+  if (listening.value) { stopRecording(); return }
+  if (hasSpeechRecognition.value) {
+    if (!recognition.value) initRecognition()
+    if (recognition.value) {
+      try {
+        recognition.value.start()
+        listening.value = true
+      } catch {
+        listening.value = false
+      }
+      return
+    }
+  }
+  // 降级：MediaRecorder + 本地 ASR
+  if (!mediaRecorder) {
+    const ok = await initRecorder()
+    if (!ok) return
+  }
+  mediaChunks = []
+  mediaRecorder!.start()
+  listening.value = true
 }
 onBeforeUnmount(() => { try { recognition.value?.stop() } catch { /* noop */ } })
 
