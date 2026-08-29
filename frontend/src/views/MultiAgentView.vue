@@ -28,6 +28,19 @@ const mainWorkspace = computed(() => perm.workspaces[0] || '')
 
 const messages = computed(() => agent.messages)
 
+// ── ChatGPT 式滚动交互 ──
+// 用户滚动优先：仅「用户手势」滚动（isTrusted=true）更新 isNearBottom，
+// 程序滚动（scrollTo 等，isTrusted=false）不打断，避免 smooth 回底中途按钮闪烁。
+// 用户离开底部时显示「回到底部」浮动按钮，点击后平滑回底并恢复自动跟随。
+const showScrollBtn = computed(() => !isNearBottom.value && messages.value.length > 0)
+
+function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
+  const el = parentRef.value
+  if (!el) return
+  isNearBottom.value = true
+  el.scrollTo({ top: el.scrollHeight, behavior })
+}
+
 async function checkWeatherPlugin() {
   try {
     const { addAuthHeaders } = await import('../api/fetch')
@@ -120,7 +133,10 @@ watch(() => route.params.id, (newId) => {
   else agent.newChat()
 })
 
-function onScroll() {
+function onScroll(e: Event) {
+  // 程序滚动（scrollTo/scrollBy 触发，isTrusted=false）不参与「离开底部」判定，
+  // 避免 smooth 回底中途按钮闪烁；仅用户手势滚动更新 isNearBottom（用户滚动优先）。
+  if (!e.isTrusted) return
   const el = parentRef.value
   if (!el) return
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 100
@@ -310,6 +326,19 @@ async function handleCopy(messageId: string, text: string) {
           </div>
         </div>
       </div>
+
+      <!-- ChatGPT 式「回到底部」：用户离开底部时浮现，点击平滑回底并恢复自动跟随 -->
+      <transition name="scroll-fade">
+        <button
+          v-if="showScrollBtn"
+          class="scroll-to-bottom-btn"
+          @click="scrollToBottom()"
+          title="回到底部"
+          aria-label="回到底部"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
+        </button>
+      </transition>
     </div>
 
     <div v-if="agent.notice" class="chat-notice">{{ agent.notice }}</div>
@@ -525,7 +554,7 @@ async function handleCopy(messageId: string, text: string) {
 }
 .ws-remove:hover { color: #ef4444; }
 .ws-empty { font-size: 12px; color: var(--text-secondary); margin: 0; }
-.chat-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.chat-body { position: relative; flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--text-secondary); }
 .empty-state .icon { font-size: 48px; }
 .empty-state .hint { font-size: 13px; margin-top: 4px; }
@@ -582,4 +611,37 @@ async function handleCopy(messageId: string, text: string) {
 .btn-danger { background: #ef4444; color: #fff; border: none; border-radius: var(--radius); padding: 6px 12px; font-size: 13px; cursor: pointer; }
 .btn-danger:hover { background: #dc2626; }
 .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* @@CHAT_SCROLL_INJECTED@@ */
+  /* ── ChatGPT 式「回到底部」浮动按钮（用户滚动优先） ── */
+  .scroll-to-bottom-btn {
+    position: absolute;
+    right: 20px;
+    bottom: 16px;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 1px solid var(--border, #eef1f6);
+    background: var(--surface, #ffffff);
+    color: var(--text-secondary, #64748b);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: 0 6px 20px rgba(31, 41, 55, 0.14);
+    transition: all 0.2s ease;
+    z-index: 20;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .scroll-to-bottom-btn:hover {
+    color: var(--primary, #4f46e5);
+    transform: translateY(-1px);
+    box-shadow: 0 8px 24px rgba(31, 41, 55, 0.18);
+  }
+  .scroll-to-bottom-btn:active { transform: scale(0.94); }
+
+  /* 进入/离开过渡：淡入 + 上浮 */
+  .scroll-fade-enter-active,
+  .scroll-fade-leave-active { transition: opacity 0.22s ease, transform 0.22s ease; }
+  .scroll-fade-enter-from,
+  .scroll-fade-leave-to { opacity: 0; transform: translateY(12px); }
 </style>

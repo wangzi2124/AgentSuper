@@ -423,3 +423,84 @@ html[data-theme='dark'] {
     background: linear-gradient(135deg, #4c3fce 0%, #6d4fd1 55%, #0e7490) !important;
   }
 }
+
+/* ============================================================================
+ * 移动端聊天 UI 微调（第 5 轮优化追加）
+ * 目标：气泡圆角、输入区阴影、发送按钮品牌渐变，与全局卡片语言统一。
+ * ============================================================================ */
+@media (max-width: 768px) {
+  /* 聊天气泡：圆角加大到 16px，贴合全局卡片语言；用户/助手保留小尾巴 */
+  .bubble {
+    border-radius: 16px !important;
+  }
+  .user .bubble {
+    border-bottom-right-radius: 6px !important;
+  }
+  .chat-message:not(.user) .bubble {
+    border-bottom-left-radius: 6px !important;
+  }
+
+  /* 输入区：顶部柔和品牌阴影 + 细分隔线，增强悬浮感 */
+  .chat-input {
+    box-shadow: 0 -2px 14px rgba(109, 94, 241, 0.08) !important;
+    border-top: 1px solid var(--border, #eef1f6);
+  }
+
+  /* 发送按钮：品牌渐变胶囊 + 投影（未禁用时） */
+  .send-btn:not(:disabled) {
+    background: var(--m-brand-grad) !important;
+    border: none !important;
+    border-radius: 999px !important;
+    box-shadow: 0 4px 12px rgba(109, 94, 241, 0.35);
+    color: #fff !important;
+  }
+  .send-btn:disabled {
+    opacity: 0.45;
+  }
+
+  /* 会话头部：毛玻璃，滚动时内容不刺眼 */
+  .chat-header {
+    backdrop-filter: blur(10px);
+    background: rgba(255, 255, 255, 0.72) !important;
+  }
+}
+
+html[data-theme='dark'] {
+  .chat-input {
+    box-shadow: 0 -2px 14px rgba(0, 0, 0, 0.35) !important;
+  }
+  .send-btn:not(:disabled) {
+    box-shadow: 0 4px 14px rgba(109, 94, 241, 0.45);
+  }
+  .chat-header {
+    background: rgba(11, 18, 34, 0.78) !important;
+  }
+}
+
+/* ============================================================================
+ * 移动端「回到底部」按钮触控适配（ChatGPT 式滚动交互 · 第 6 轮追加）
+ * 覆盖 MultiAgentView scoped 样式：加大触控区、贴 safe-area、毛玻璃、深色适配。
+ * ============================================================================ */
+/* @@CHAT_SCROLL_INJECTED@@ */
+@media (max-width: 768px) {
+  .scroll-to-bottom-btn {
+    width: 48px !important;
+    height: 48px !important;
+    right: 14px !important;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px)) !important;
+    background: rgba(255, 255, 255, 0.92) !important;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-color: #eef1f6 !important;
+    box-shadow: 0 6px 24px rgba(31, 41, 55, 0.16) !important;
+  }
+}
+
+html[data-theme='dark'] {
+  .scroll-to-bottom-btn {
+    background: rgba(17, 26, 45, 0.92) !important;
+    border-color: var(--border, #2b3650) !important;
+    color: #cbd5e1 !important;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45) !important;
+  }
+}
