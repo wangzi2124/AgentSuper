@@ -394,9 +394,12 @@ async function submit() {
 .login-hint a { color: var(--primary, #4f46e5); font-weight: 500; }
 .login-hint a:hover { text-decoration: underline; }
 
-/* ── 移动端（≤768px）：单栏，品牌区收为顶部小标 ── */
+/* ── 移动端（≤768px）：单栏全屏，纯色背景，无背景图 ── */
 @media (max-width: 768px) {
-  .login-view { padding: 0; }
+  .login-view {
+    padding: 0;
+    background: var(--bg);
+  }
   .login-shell {
     grid-template-columns: 1fr;
     width: 100%;
