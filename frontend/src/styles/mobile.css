@@ -1,0 +1,296 @@
+/* ============================================================================
+ * mobile.css — 手机端统一适配样式模块
+ *
+ * 引入：由 `main.ts` 全局 import（Vite 自动打包）。
+ * 断点：沿用全局 style.css 约定 — 768px（平板/手机）/ 480px（小屏手机）。
+ * 各组件/视图多为 `<style scoped>`（选择器带 data-v 属性、特异性更高），
+ * 因此这里用 `!important` 在声明级覆盖 scoped/内联样式。
+ * 桌面端（>768px）本文件不发规则，不影响原布局。
+ * ============================================================================ */
+
+@media (max-width: 768px) {
+  /* ---------- 全局微调 ---------- */
+  html, body {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+  html {
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+  }
+  .main { overflow-x: hidden; }
+
+  /* 触控友好：移动端表单控件加高、字号统一 16px（防 iOS 聚焦放大） */
+  input, select, textarea { font-size: 16px !important; }
+
+  /* ---------- 页面头部 / 内容 / 卡片 ---------- */
+  .page-header { padding: 14px 16px !important; }
+  .page-header h2 { font-size: 18px !important; }
+  .page-content { padding: 16px !important; }
+  .card { padding: 12px !important; }
+
+  /* 筛选/操作行内的 select、文本输入框在手机上允许收缩换行（中和内联 min-width） */
+  .page-content select,
+  .page-content input[type="text"],
+  .page-content input[type="search"] {
+    min-width: 0 !important;
+    box-sizing: border-box;
+  }
+
+  /* ---------- 空状态 ---------- */
+  .empty-state { padding: 40px 16px !important; }
+  .empty-state .icon { font-size: 40px !important; }
+
+  /* ---------- 通用按钮触控 ---------- */
+  .btn {
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
+@media (max-width: 480px) {
+  .page-content { padding: 12px !important; }
+  .card { padding: 10px !important; }
+  .btn { padding: 7px 12px !important; font-size: 13px !important; }
+}
+
+/* ============================================================================
+ * 视图级适配
+ * ============================================================================ */
+
+/* ---------- MultiAgentView（多智能体聊天） ---------- */
+@media (max-width: 768px) {
+  .chat-header { padding: 14px 16px !important; }
+  .chat-header .session-dir { max-width: 180px !important; }
+  .chat-header .header-controls { width: 100%; }
+  .chat-header .model-selector select {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .message-list { padding: 14px 16px !important; }
+  .chat-message { gap: 8px; }
+  .avatar { width: 30px; height: 30px; font-size: 15px; }
+  .bubble { font-size: 15px; padding: 10px 12px; }
+  .chat-footer .btn-danger { margin: 0 16px 8px !important; }
+  .ws-panel { right: auto; left: 16px; width: calc(100vw - 32px); max-width: none; }
+  .user .bubble { max-width: 88%; }
+  .content { font-size: 15px; }
+}
+
+/* ---------- DocumentsView（文档管理） ---------- */
+@media (max-width: 768px) {
+  .file-upload { padding: 20px 12px !important; }
+  .document-card { gap: 10px; }
+  .doc-icon { font-size: 24px !important; }
+  .doc-meta { font-size: 11px !important; }
+  .doc-meta { word-break: break-all; }
+}
+
+/* ---------- SkillsView / PluginsView（技能/插件卡片，flex 换行已自适应） ---------- */
+@media (max-width: 768px) {
+  /* 徽标与按钮不换行挤压：让按钮独立成行更清晰 */
+  .page-content .card { flex-wrap: wrap; gap: 10px; }
+  .page-content .card > .btn { margin-left: auto; }
+}
+
+/* ---------- VectorsView（向量库） ---------- */
+/* 表格由内层 overflow:auto 容器横向滚动，分页为内联样式可自然换行； */
+/* 筛选/搜索输入框已由上方通用规则在中和 min-width 后收缩换行。 */
+
+/* ---------- MonitoringView（系统监控：统计网格改两列） ---------- */
+@media (max-width: 768px) {
+  .stat-grid { grid-template-columns: repeat(2, 1fr) !important; gap: 8px; }
+  .stat-grid-4 { grid-template-columns: repeat(2, 1fr) !important; }
+  .stat-value { font-size: 18px !important; }
+}
+
+/* ---------- GeneratedFilesView（生成文件） ---------- */
+@media (max-width: 768px) {
+  .search-bar { flex-wrap: wrap; }
+  .search-input { min-width: 0 !important; width: 100% !important; box-sizing: border-box; }
+  .file-row { align-items: flex-start; gap: 10px; }
+  .file-actions { flex-wrap: wrap; }
+  /* 输出弹窗全宽 */
+  .output-modal {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 92vh !important;
+  }
+  .output-body {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+}
+
+/* ---------- CustomToolsView（自定义工具） ---------- */
+@media (max-width: 768px) {
+  .tool-card { gap: 8px; align-items: flex-start; }
+}
+
+/* ---------- LoginView（登录页） ---------- */
+@media (max-width: 768px) {
+  .login-view { padding: 16px !important; }
+  .login-card { padding: 24px 18px !important; }
+}
+
+/* ============================================================================
+ * 组件级适配
+ * ============================================================================ */
+
+/* ---------- Sidebar（抽屉化已在全局 style.css） ---------- */
+@media (max-width: 768px) {
+  .sidebar-bottom .user-card { margin: 8px !important; }
+}
+
+/* ---------- ChatInput（输入框；基础适配在组件内，这里确保 safe-area） ---------- */
+@media (max-width: 768px) {
+  .chat-input { padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)) !important; }
+}
+
+/* ---------- DirPickerModal（目录选择弹窗 → 底部 sheet） ---------- */
+@media (max-width: 768px) {
+  .dir-modal-overlay { align-items: flex-end; }
+  .dir-modal {
+    width: 100% !important;
+    max-width: 100% !important;
+    border-radius: 12px 12px 0 0;
+  }
+  .dir-modal-footer { padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)) !important; }
+  .dir-item-main { padding: 10px 8px; } /* 触控增大 */
+}
+
+/* ---------- PermissionDialog（在侧栏内内联卡片，无需全屏） ---------- */
+@media (max-width: 768px) {
+  .perm-card { padding: 10px; }
+  .perm-cmd, .perm-path { word-break: break-all; }
+}
+
+/* ---------- AgentPanel / MultiAgentResponse（步骤列表在窄屏紧凑） ---------- */
+@media (max-width: 768px) {
+  .agent-panel { padding: 10px; }
+  .steps-list { gap: 6px; }
+  .step-item { flex-wrap: wrap; }
+  .step-args, .step-result { word-break: break-all; }
+  .step-detail, .step-tool { word-break: break-all; }
+}
+
+/* ---------- MultiAgentChatHistory（侧栏历史列表） ---------- */
+@media (max-width: 768px) {
+  .history-item { gap: 6px; }
+  .item-title { font-size: 13px; }
+}
+
+/* ---------- WeatherAlert（天气弹窗全宽 + 天气详情列） ---------- */
+@media (max-width: 768px) {
+  .weather-popup {
+    max-width: 100% !important;
+    height: 100%;
+    max-height: 100%;
+    border-radius: 0;
+  }
+  .popup-content { padding: 12px; }
+  .weather-details { gap: 6px; }
+  .forecast-grid { gap: 8px; }
+  .weather-popup { overflow-y: auto; }
+}
+
+/* ============================================================================
+ * Vant 移动端外壳集成（MobileShell）
+ * ============================================================================ */
+
+/* 主题色对齐应用 --primary */
+:root {
+  --van-primary-color: #4f46e5;
+  --van-nav-bar-background: #ffffff;
+  --van-nav-bar-title-text-color: #1e293b;
+}
+
+@media (max-width: 768px) {
+  /* 进入 Vant 外壳后，页面自带的桌面 page-header 与 NavBar 重复 → 隐藏 */
+  .mobile-body .page-header { display: none !important; }
+
+  /* 页面内容去掉顶部大间距，紧贴 NavBar */
+  .mobile-body .page-content { padding-top: 4px !important; }
+
+  /* NavBar + TabBar + 底部安全区留白 */
+  .mobile-body {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+
+  /* 卡片在移动端圆角更大、去强阴影，更接近 APP 卡片观感 */
+  .mobile-body .card {
+    border-radius: 12px;
+    border: 1px solid #f0f1f5;
+    box-shadow: 0 1px 6px rgba(31, 41, 55, 0.06);
+  }
+
+  /* 隐藏桌面侧栏抽屉的汉堡按钮（Vant NavBar 已有菜单入口） */
+  .sidebar-toggle { display: none !important; }
+
+  /* 工具栏按纽在移动端拉满可点区 */
+  .mobile-body .btn,
+  .mobile-body .icon-btn {
+    min-height: 40px;
+  }
+
+  /* ── 移动端聊天页（复用 MultiAgentView）── */
+  /* 隐藏与 Vant NavBar 重复的大标题与副标题 */
+  .mobile-body .chat-header h2,
+  .mobile-body .chat-header p:not(.session-dir) {
+    display: none !important;
+  }
+  /* 头部收敛为紧凑工具栏，紧贴 NavBar */
+  .mobile-body .chat-header {
+    padding: 8px 12px !important;
+    border-bottom: 1px solid #f0f1f5 !important;
+  }
+  .mobile-body .header-controls {
+    gap: 8px !important;
+    width: 100%;
+  }
+  .mobile-body .header-controls .ws-manager { display: none !important; }
+  /* 消息列表更贴合移动端窄屏 */
+  .mobile-body .message-list { padding: 12px !important; }
+  .mobile-body .bubble { font-size: 14px !important; }
+}
+
+/* ============================================================================
+ * 深色主题补充覆盖（html[data-theme="dark"]）
+ * 处理各组件/视图中写死的浅色色值；语义字体色尽量收敛到 CSS 变量。
+ * ============================================================================ */
+
+html[data-theme='dark'] {
+  /* MobileShell：抽屉 / NavBar / 列表单元格背景 */
+  .side-drawer { background: var(--surface) !important; }
+  .side-drawer .van-cell { background: var(--surface) !important; }
+  .van-nav-bar { background: var(--van-nav-bar-background) !important; }
+  .van-nav-bar .van-nav-bar__title { color: var(--van-text-color) !important; }
+
+  /* 写死的字体色 → 语义变量 */
+  .row-label,
+  .sec-title { color: var(--text) !important; }
+  .chunk-text,
+  .idx { color: var(--text-secondary) !important; }
+
+  /* 浅色靛蓝激活/高亮底 → 深色底 */
+  .pin-options .van-cell.active,
+  .doc-active,
+  .doc-badge { background: var(--primary-hover) !important; }
+
+  /* 卡片描边在深色下清晰化 */
+  .mobile-body .card {
+    border-color: var(--border) !important;
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4) !important;
+  }
+  .mobile-body .chat-header {
+    border-bottom-color: var(--border) !important;
+  }
+}
+
+/* 桌面 / 平板（>768px）不套用移动外壳规则 */
+

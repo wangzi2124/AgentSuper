@@ -460,4 +460,14 @@ const textareaRef = ref<HTMLTextAreaElement>()
 .attach-btn:hover:not(:disabled) { color: var(--primary); background: color-mix(in srgb, var(--primary, #4f46e5) 10%, transparent); }
 .attach-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .textarea-wrapper textarea { padding-left: 44px; }
+
+/* 移动端适配（与 MultiAgentView 768px 断点对齐） */
+@media (max-width: 768px) {
+  .chat-input { padding: 10px 12px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
+  .history-hint { margin-bottom: 6px; font-size: 11px; padding: 3px 8px; }
+  .textarea-wrapper textarea { font-size: 16px; min-height: 64px; }
+  .char-counter { right: 46px; bottom: 8px; }
+  .send-btn, .cancel-btn, .attach-btn { bottom: 6px; }
+  .file-chip { max-width: 100%; }
+}
 </style>

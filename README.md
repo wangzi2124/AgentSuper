@@ -47,6 +47,7 @@
 | **用户身份签名** | 可选 `AUTH_TOKEN_SECRET`：trust-on-first-use 注册 → 服务端仅存 HMAC 哈希 → 颁发签名 token（`base64(uid).base64(exp).hmac`）；中间件强制每个 `/api/*` 请求携带 `X-User-Id` + `X-Auth-Token`，未配置时全部关闭（默认本地行为） |
 | **多 Agent 工具链** | `code`/`web_search` 子 Agent 使用 LLM 工具调用循环（≤8 轮）+ 工作区文件系统工具（读写/编辑/搜索/执行），复用统一权限系统；外部路径经权限桥发事件并拒绝而非静默失败 |
 | **文件附件** | 聊天输入框拖拽/粘贴/选择上传附件（图片/PDF/Word/Excel/TXT/MD 等），图片以多模态 `image_url` 直送 LLM，文档经 **LangChain 文档加载器**（`attachment_loader.py`：pypdf/python-docx/openpyxl）解析为文本上下文；附件随消息持久化（服务端 `data.files`），刷新/回放仍可回显 |
+| **移动端响应式** | 统一手机端适配模块 `frontend/src/styles/mobile.css`（`main.ts` 引入，Vite 打包）：768/480px 断点，覆盖全部视图与组件 —— 侧栏抽屉化、触控友好按钮/输入、iOS 输入字号与 safe-area、聊天工具条换行、统计二列、弹窗底部 sheet/全屏、表格横滚等 |
 
 ---
 

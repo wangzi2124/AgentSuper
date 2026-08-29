@@ -19,6 +19,47 @@
   --radius: 8px;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   --sidebar-width: 240px;
+  --primary-soft: #eef2ff;
+  --indigo: #4f46e5;
+}
+
+/* 深色主题：html[data-theme="dark"] 时覆盖语义变量 + Vant 核心 token */
+html[data-theme='dark'] {
+  color-scheme: dark;
+  --primary: #818cf8;
+  --primary-hover: #a5b4fc;
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --surface-2: #263349;
+  --border: #334155;
+  --text: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --danger: #f87171;
+  --success: #4ade80;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  --primary-soft: #1e2547;
+  --indigo: #818cf8;
+
+  --van-background: #0f172a;
+  --van-background-2: #1e293b;
+  --van-background-3: #263349;
+  --van-text-color: #e2e8f0;
+  --van-text-color-2: #94a3b8;
+  --van-text-color-3: #64748b;
+  --van-border-color: #334155;
+  --van-active-color: #263349;
+  --van-cell-background: #1e293b;
+  --van-nav-bar-background: #1e293b;
+  --van-popup-background: #1e293b;
+  --van-dialog-background: #1e293b;
+  --van-field-background: #1e293b;
+  --van-search-background: #1e293b;
+  --van-dropdown-menu-background: #1e293b;
+  --van-tabbar-background: #1e293b;
+  --van-tabbar-item-text-color: #94a3b8;
+  --van-tabbar-item-active-color: #818cf8;
+  --van-sidebar-background: #0f172a;
+  --van-switch-off-background-color: #334155;
 }
 
 html, body, #app {
