@@ -89,6 +89,7 @@ class RAGAgentBase:
         reranker: Reranker | None = None,
         custom_tools: CustomToolStore | None = None,  # [token 优化 v6] 前端添加的自定义工具/固定工具
         memory=None,  # [opencode memory] 共享记忆管理器（runtime.py 注入）
+        voice_service=None,  # [语音] 本地 Qwen3-TTS 服务（runtime.py 按 VOICE_TTS_ENABLED 注入）
     ):
         self.retriever = retriever
         self.reranker = reranker
@@ -96,6 +97,7 @@ class RAGAgentBase:
         self.plugin_loader = plugin_loader
         self.custom_tools = custom_tools
         self.memory = memory
+        self.voice_service = voice_service
         self.model = settings.llm_model
         self.api_key = settings.llm_api_key
         self.api_base = settings.llm_api_base
@@ -164,6 +166,43 @@ class RAGAgentBase:
                 fn=self._memory_tool_placeholder,
             ))
 
+        # [语音] 主 Agent 语音合成/转写工具：仅当注入了启用状态的本地 Qwen3-TTS 服务。
+        # fn 为占位，实际执行在 _execute_tool 特判（与 tool_memory_* 同机制）。
+        if voice_service is not None and getattr(voice_service, "enabled", False):
+            self.tools.append(ToolDef(
+                name="tool_tts_synthesize",
+                description=(
+                    "将一段文本合成为语音文件（本地 Qwen3-TTS 预设音色），保存到 data/generated/ 下，"
+                    "返回文件路径。用于用户要求生成语音/配音/朗读内容时，把答复文本转成可下载/可播放的 wav。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "要合成的文本（中文优先，建议简洁完整句）"},
+                        "speaker": {"type": "string", "description": "可选音色：Vivian/Serena/Uncle_fu/Dylan/Eric/Ryan/Aiden/Ono_anna/Sohee"},
+                        "language": {"type": "string", "description": "语言：Auto/Chinese/English/Japanese/Korean/...（默认 Auto）"},
+                        "instruct": {"type": "string", "description": "可选风格/情绪指令，如 'speak happily'（英文）"},
+                    },
+                    "required": ["text"],
+                },
+                fn=self._voice_tool_placeholder,
+            ))
+            self.tools.append(ToolDef(
+                name="tool_voice_transcribe",
+                description=(
+                    "将一段本地音频文件转写为文本（Whisper ASR）。"
+                    "用于用户提供了音频文件（.wav/.mp3 等）并要求转成文字/听懂内容时。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "audio_path": {"type": "string", "description": "本地音频文件路径（绝对路径或相对工作目录）"},
+                    },
+                    "required": ["audio_path"],
+                },
+                fn=self._voice_tool_placeholder,
+            ))
+
         # 子 Agent 消息总线（runtime.py 注入）：供 tool_task 委派使用
         self.task_bus: object | None = None
 
@@ -172,6 +211,7 @@ class RAGAgentBase:
             plugin_loader or PluginLoader(""),
             include_filesystem=True,
             has_memory=memory is not None,
+            has_voice=voice_service is not None and getattr(voice_service, "enabled", False),
         )
 
         self._usage_accum: dict[str, int] = dict(_ZERO_USAGE)
@@ -189,6 +229,8 @@ class RAGAgentBase:
             self.plugin_loader or PluginLoader(""),
             include_filesystem=True,
             has_memory=getattr(self, "memory", None) is not None,
+            has_voice=getattr(self, "voice_service", None) is not None
+            and getattr(getattr(self, "voice_service", None), "enabled", False),
         )
     def _activity_text(self, event: dict) -> str:
         """把事件转成简短的处理进度描述，用于子 Agent 心跳/超时回传。"""
@@ -297,6 +339,14 @@ class RAGAgentBase:
                 if os.name == "nt"
                 else ""
             )
+            + (
+                "Voice/TTS: use tool_tts_synthesize to turn reply text into a downloadable .wav "
+                "(saved to data/generated); tool_voice_transcribe to transcribe a local audio file to text."
+                "\n\n"
+                if getattr(self, "voice_service", None) is not None
+                and getattr(getattr(self, "voice_service", None), "enabled", False)
+                else ""
+            )
             + LONG_CONTENT_FILE_RULE
         )
 
@@ -318,8 +368,8 @@ class RAGAgentBase:
          ("plugin_internet-search_",)),
         (("图片", "海报", "设计", "艺术", "绘图", "生成图", "image", "poster", "art", "draw"),
          ("load_skill_canvas_design", "load_skill_algorithmic_art", "load_skill_slack_gif_creator")),
-        (("语音", "声音", "配音", "克隆", "合成", "voice", "audio", "speech"),
-         ("plugin_voice-clone_",)),
+        (("语音", "声音", "配音", "克隆", "合成", "朗读", "voice", "audio", "speech"),
+         ("plugin_voice-clone_", "tool_tts_synthesize", "tool_voice_transcribe")),
         (("角色", "人物", "对话", "台词", "character", "dialogue"),
          ("plugin_character-analysis_",)),
         (("知识库", "kb", "导出"),

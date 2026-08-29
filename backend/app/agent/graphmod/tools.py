@@ -89,6 +89,9 @@ class RAGAgentTools(RAGAgentBase):
     def _memory_tool_placeholder(self, **kwargs) -> str:
         """占位实现：_execute_tool 对 tool_memory_* 特判，这里不会被真正调用。"""
         return ""
+    def _voice_tool_placeholder(self, **kwargs) -> str:
+        """占位实现：_execute_tool 对语音工具特判，这里不会被真正调用。"""
+        return ""
     async def _tool_task(self, args: dict, depth: int = 0, event_queue=None, directory: str = "", conversation_id: str = "") -> str:
         """[opencode task tool] 把聚焦子任务委派给子 Agent 并取回最终结果。
 
@@ -189,6 +192,42 @@ class RAGAgentTools(RAGAgentBase):
         except Exception as e:
             logger.warning("Memory tool %s failed: %s", name, e)
             return f"Error executing {name}: {e}"
+    async def _tool_voice(self, name: str, args: dict) -> str:
+        """[语音] 主 Agent 语音合成/转写：本地 Qwen3-TTS 子进程（无外部 HTTP）。
+
+        阻塞的 subprocess 调用经 asyncio.to_thread 执行，不阻塞事件循环。
+        输出写 backend/data/generated/（workspace 内，免审批）；转写长文本交由
+        bound_tool_output 统一截断（主链路自动套用，无需在此处理）。
+        """
+        vs = getattr(self, "voice_service", None)
+        if vs is None or not getattr(vs, "enabled", False):
+            return "Error: 语音服务未启用（VOICE_TTS_ENABLED=false 或 ttsclone 缺失）"
+        try:
+            if name == "tool_tts_synthesize":
+                text = str(args.get("text") or "").strip()
+                if not text:
+                    return "Error: 'text' is required."
+                speaker = str(args.get("speaker") or "")
+                language = str(args.get("language") or "Auto")
+                instruct = str(args.get("instruct") or "")
+                ok, msg, path = await asyncio.to_thread(
+                    vs.synthesize, text, speaker, language, instruct
+                )
+                if not ok:
+                    return f"Error: 语音合成失败: {msg}"
+                return f"语音合成成功，文件已保存到: {path}\n可直接告知用户该路径，或建议其到「生成文件」页面播放/下载。"
+            if name == "tool_voice_transcribe":
+                audio_path = str(args.get("audio_path") or "").strip()
+                if not audio_path:
+                    return "Error: 'audio_path' is required."
+                ok, text = await asyncio.to_thread(vs.transcribe, audio_path)
+                if not ok:
+                    return f"Error: 语音转写失败: {text}"
+                return text or "(空音频，未识别到内容)"
+            return f"Error: unknown voice tool '{name}'"
+        except Exception as e:
+            logger.warning("Voice tool %s failed: %s", name, e)
+            return f"Error executing {name}: {e}"
     async def _execute_tool(self, name: str, args: dict, state: dict | None = None) -> str:
         """执行指定的工具函数，处理权限检查和错误。"""
         for t in self.tools:
@@ -209,6 +248,8 @@ class RAGAgentTools(RAGAgentBase):
                                                      conversation_id=str((state or {}).get("conversation_id") or ""))
                     if name in ("tool_memory_set", "tool_memory_get", "tool_memory_search"):
                         return await self._tool_memory(name, args, state)
+                    if name in ("tool_tts_synthesize", "tool_voice_transcribe"):
+                        return await self._tool_voice(name, args)
                     eq = state.get("_event_queue") if state else None
                     if eq and name == "tool_execute":
                         try:

@@ -15,6 +15,7 @@ from app.rag.reranker import Reranker
 from app.rag.retriever import Retriever
 from app.rag.vector_store import VectorStore
 from app.services.task_manager import TaskManager
+from app.services.voice import VoiceService
 from app.skills.loader import SkillLoader
 from app.storage.file_store import FileStore
 
@@ -149,10 +150,16 @@ def _do_init(app):
     agent_bus = AgentBus()
     shared_memory = MemoryManager(default_ttl=300)  # 共享记忆，5 分钟过期
 
+    # [语音] 本地 Qwen3-TTS 服务（子进程，无外部 HTTP）：仅在配置启用时注入主线
+    voice_service = VoiceService() if settings.voice_tts_enabled else None
+    if voice_service is not None:
+        logger.info("Voice service injected (enabled=%s dir=%s)", voice_service.enabled, voice_service.tts_dir)
+
     agent = RAGAgent(
         retriever, skill_loader, plugin_loader,
         reranker=reranker, custom_tools=custom_tools,
         memory=shared_memory,  # [opencode memory] 主 Agent 记忆读写工具
+        voice_service=voice_service,  # [语音] 主 Agent 语音合成/转写工具
     )
 
     # [opencode task tool] 主 Agent 注入总线引用，供其自主委派子 Agent
@@ -189,5 +196,6 @@ def _do_init(app):
     app.state.skill_loader = skill_loader
     app.state.plugin_loader = plugin_loader
     app.state.custom_tools = custom_tools
+    app.state.voice_service = voice_service
     app.state.task_manager = TaskManager()
     return app.state

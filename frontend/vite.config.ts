@@ -16,12 +16,6 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
-      // 本地 Qwen3-TTS（ttsclone）语音服务：/tts-api/health → 7861/health
-      '/tts-api': {
-        target: 'http://localhost:7861',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/tts-api/, ''),
-      },
     },
   },
 })

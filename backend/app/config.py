@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     summarization_api_base: Optional[str] = None
     summarization_keep_messages: int = 20
 
+    # ── 语音 / TTS（本地 Qwen3-TTS 子进程，无外部 HTTP 接口调用）──
+    voice_tts_enabled: bool = False
+    voice_tts_dir: str = "../ttsclone"
+    voice_tts_speaker: str = "Vivian"
+    voice_tts_model_size: str = "1.7B"
+    voice_tts_timeout: int = 600
+
     # 多 Agent 超时（秒）
     # supervisor 转发到子 Agent 的等待上限（单次生成可能因 LLM 延迟/tool 循环超 60s）
     sub_agent_timeout: float = 150.0

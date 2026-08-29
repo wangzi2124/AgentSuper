@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config, weather, auth as auth_api, custom_tools as custom_tools_api
+from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config, weather, auth as auth_api, custom_tools as custom_tools_api, voice as voice_api
 from app.api.responses import ApiError, error_response
 from app.auth import AuthMiddleware
 from app.config import settings
@@ -159,6 +159,7 @@ app.include_router(generated.router, prefix="/api/generated", tags=["Generated"]
 app.include_router(perm_api.router, prefix="/api", tags=["Permission"])
 app.include_router(config.router, prefix="/api/config", tags=["Config"])
 app.include_router(weather.router, prefix="/api", tags=["Weather"])
+app.include_router(voice_api.router, prefix="/api/voice", tags=["Voice"])
 
 
 @app.get("/")

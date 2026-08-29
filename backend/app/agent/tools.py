@@ -231,7 +231,7 @@ def create_plugin_tools(plugin_loader: PluginLoader) -> List[ToolDef]:
 
 def build_system_prompt_no_kb(
     skill_loader: SkillLoader, plugin_loader: PluginLoader, include_filesystem: bool = True, cwd: str = "",
-    has_memory: bool = False,
+    has_memory: bool = False, has_voice: bool = False,
 ) -> str:
     """构建无知识库时的系统提示词，包含可用工具说明。
 
@@ -326,6 +326,11 @@ def build_system_prompt_no_kb(
             "and & / && instead of ; as command separator."
         ] if sys.platform.startswith("win") else []),
         "- KB export: kb-export tools.",
+        *([
+            "- Voice/TTS: use tool_tts_synthesize to turn reply/text into a downloadable .wav "
+            "(saved to data/generated); tool_voice_transcribe to transcribe a local audio file to text. "
+            "Speakers: Vivian/Serena/Uncle_fu/Dylan/Eric/Ryan/Aiden/Ono_anna/Sohee."
+        ] if has_voice else []),
         "- If no tool fits, answer directly without calling tools.",
         "",
         "IMPORTANT - Before code/design tasks: FIRST call the relevant load_skill_*() tool for best practices, "
