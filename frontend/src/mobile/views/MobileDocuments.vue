@@ -86,28 +86,36 @@ async function handleUpload(file: File) {
     </van-empty>
 
     <div v-else class="doc-list">
-      <div class="m-count-pill"><van-icon name="description" />共 {{ docs.documents.length }} 个文档</div>
-      <van-swipe-cell v-for="doc in docs.documents" :key="doc.id" class="doc-swipe">
-        <div class="m-card doc-item">
-          <div
-            class="m-type-block"
-            :style="{ background: typeMeta(doc.filename).soft, color: typeMeta(doc.filename).color }"
-          >{{ typeMeta(doc.filename).label }}</div>
-          <div class="doc-main">
-            <div class="doc-name">{{ doc.filename }}</div>
-            <div class="doc-meta">
-              {{ formatSize(doc.size) }} · {{ doc.chunk_count }} 分块 · {{ formatDate(doc.created_at) }}
+      <div class="doc-list-head">
+        <div class="m-count-pill"><van-icon name="description" />共 {{ docs.documents.length }} 个文档</div>
+        <span class="doc-list-tip"><van-icon name="wap-nav" />左滑可删除</span>
+      </div>
+      <div class="doc-list-body">
+        <van-swipe-cell v-for="doc in docs.documents" :key="doc.id" class="doc-swipe">
+          <div class="doc-item">
+            <div
+              class="m-type-block"
+              :style="{ background: typeMeta(doc.filename).soft, color: typeMeta(doc.filename).color }"
+            >{{ typeMeta(doc.filename).label }}</div>
+            <div class="doc-main">
+              <div class="doc-name">{{ doc.filename }}</div>
+              <div class="doc-meta">
+                <span class="doc-meta-item">{{ formatSize(doc.size) }}</span>
+                <span class="doc-meta-dot">·</span>
+                <span class="doc-meta-item">{{ doc.chunk_count }} 分块</span>
+              </div>
+              <div class="doc-date">{{ formatDate(doc.created_at) }}</div>
             </div>
+            <van-icon name="arrow" class="doc-arrow" />
           </div>
-          <van-icon name="arrow" class="doc-arrow" />
-        </div>
-        <template #right>
-          <div class="swipe-delete" @click="handleDelete(doc.id)">
-            <van-icon name="delete-o" />
-            删除
-          </div>
-        </template>
-      </van-swipe-cell>
+          <template #right>
+            <div class="swipe-delete" @click="handleDelete(doc.id)">
+              <van-icon name="delete-o" />
+              删除
+            </div>
+          </template>
+        </van-swipe-cell>
+      </div>
     </div>
   </div>
 </template>
@@ -136,15 +144,31 @@ async function handleUpload(file: File) {
 .loading { display: flex; justify-content: center; padding: 48px 0; }
 .empty-hint { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
 
-/* ── 文档卡片 ── */
-.doc-list { display: flex; flex-direction: column; gap: 10px; }
-.doc-swipe { border-radius: var(--m-card-radius); overflow: hidden; }
+/* ── 文档列表（统一白底 + 细分隔线，非悬浮卡）── */
+.doc-list { display: flex; flex-direction: column; margin-top: 10px; }
+.doc-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px 10px;
+}
+.doc-list-tip { font-size: 11px; color: var(--text-tertiary, #94a3b8); display: inline-flex; align-items: center; gap: 3px; }
+.doc-list-body {
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #eef1f6);
+  border-radius: var(--m-card-radius, 16px);
+  overflow: hidden;
+}
+.doc-swipe { border-radius: 0; }
 .doc-item {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px;
+  padding: 13px 14px;
+  background: transparent;
+  border-bottom: 1px solid var(--border, #eef1f6);
 }
+.doc-item:last-child { border-bottom: none; }
 .doc-main { flex: 1; min-width: 0; }
 .doc-name {
   font-size: 14.5px;
@@ -154,12 +178,21 @@ async function handleUpload(file: File) {
   line-height: 1.4;
 }
 .doc-meta {
-  font-size: 11.5px;
-  color: var(--text-secondary);
-  margin-top: 3px;
-  word-break: break-all;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary, #64748b);
+  margin-top: 4px;
 }
-.doc-arrow { color: #c3c9d4; font-size: 15px; }
+.doc-meta-item { color: var(--m-brand, #6d5ef1); font-weight: 600; }
+.doc-meta-dot { color: var(--text-tertiary, #c0c6d2); }
+.doc-date {
+  font-size: 11px;
+  color: var(--text-tertiary, #94a3b8);
+  margin-top: 3px;
+}
+.doc-arrow { color: #c3c9d4; font-size: 15px; flex-shrink: 0; }
 .swipe-delete {
   width: 76px;
   height: 100%;

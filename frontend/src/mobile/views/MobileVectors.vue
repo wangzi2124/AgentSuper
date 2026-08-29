@@ -154,18 +154,27 @@ async function handleRepair() {
       <van-button size="small" round plain type="primary" @click="loadMore">加载更多</van-button>
     </div>
 
-    <div class="actions">
-      <van-button size="small" v-if="vs.config && vs.config.ttl_days > 0" @click="handleClearExpired">
-        清理过期（TTL {{ vs.config.ttl_days }} 天）
-      </van-button>
-      <van-button
-        size="small"
-        v-if="vs.config && (vs.config.pending_repair ?? 0) > 0"
-        plain
-        style="color:#d97706;border-color:#d97706;"
-        @click="handleRepair"
-      >自愈重建 ({{ vs.config!.pending_repair }})</van-button>
-      <van-button size="small" type="danger" plain @click="handleClearAll">清空向量库</van-button>
+    <!-- 底部管理栏：次级操作（清理过期/自愈重建）居左，危险清空居右 -->
+    <div class="m-manage-bar">
+      <div class="m-manage-left">
+        <button
+          v-if="vs.config && vs.config.ttl_days > 0"
+          class="m-manage-btn"
+          @click="handleClearExpired"
+        >
+          <van-icon name="clock-o" /><span>清理过期</span>
+        </button>
+        <button
+          v-if="vs.config && (vs.config.pending_repair ?? 0) > 0"
+          class="m-manage-btn repair"
+          @click="handleRepair"
+        >
+          <van-icon name="rebuild" /><span>自愈重建 ({{ vs.config!.pending_repair }})</span>
+        </button>
+      </div>
+      <button class="m-manage-btn danger" @click="handleClearAll">
+        <van-icon name="delete-o" /><span>清空向量库</span>
+      </button>
     </div>
 
     <van-action-sheet
@@ -303,6 +312,58 @@ async function handleRepair() {
   word-break: break-word;
 }
 .load-more { display: flex; justify-content: center; padding: 16px 0; }
-.actions { display: flex; justify-content: flex-end; gap: 12px; padding: 12px 4px; }
+
+/* ── 底部管理栏（固定，次级操作 + 危险清空分离）── */
+.m-vectors { padding-bottom: 92px; }
+.m-manage-bar {
+  position: sticky;
+  bottom: 8px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0 4px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--surface, #fff) 88%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border, #eef1f6);
+  border-radius: 18px;
+  box-shadow: 0 6px 24px rgba(15, 23, 42, 0.10);
+}
+.m-manage-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.m-manage-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 38px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 999px;
+  background: var(--m-vector-soft, rgba(16, 185, 129, 0.12));
+  color: var(--m-vector, #10b981);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.m-manage-btn:active { transform: scale(0.96); opacity: 0.8; }
+.m-manage-btn.repair {
+  background: rgba(217, 119, 6, 0.12);
+  color: #d97706;
+}
+.m-manage-btn.danger {
+  background: linear-gradient(135deg, #f43f5e, #e11d48);
+  color: #fff;
+  flex-shrink: 0;
+  box-shadow: 0 4px 12px rgba(225, 29, 72, 0.28);
+}
 </style>
 
