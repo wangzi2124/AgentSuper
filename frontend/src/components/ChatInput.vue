@@ -14,9 +14,11 @@ const agent = useMultiAgentStore()
 
 // [模型选择] 向上弹出的自绘下拉（原生 select 只能向下且无法自定义样式）
 const modelMenuOpen = ref(false)
-const currentModelLabel = computed(
-  () => SUPPORTED_MODELS.find(m => m.value === agent.selectedModel)?.label || agent.selectedModel
+const currentModel = computed(
+  () => SUPPORTED_MODELS.find(m => m.value === agent.selectedModel) ?? SUPPORTED_MODELS[0]
 )
+const currentModelLabel = computed(() => currentModel.value.label)
+const currentModelDesc = computed(() => currentModel.value.desc)
 function toggleModelMenu() {
   if (props.loading) return
   modelMenuOpen.value = !modelMenuOpen.value
@@ -411,7 +413,7 @@ const textareaRef = ref<HTMLTextAreaElement>()
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
         <!-- Gemini 式模型选择胶囊（输入卡底部，向上弹出） -->
-        <span class="model-wrap">
+        <span class="model-wrap" :class="{ 'menu-open': modelMenuOpen }">
           <button
             type="button"
             class="model-pill"
@@ -423,6 +425,11 @@ const textareaRef = ref<HTMLTextAreaElement>()
             <span class="model-current">{{ currentModelLabel }}</span>
             <svg class="model-chevron" :class="{ open: modelMenuOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
+          <!-- hover 悬浮说明框（当前模型描述，展开菜单时隐藏） -->
+          <div class="model-tip">
+            <span class="model-tip-name">{{ currentModelLabel }}</span>
+            <span class="model-tip-desc">{{ currentModelDesc }}</span>
+          </div>
           <div v-if="modelMenuOpen" class="model-menu-mask" @click="modelMenuOpen = false"></div>
           <div v-if="modelMenuOpen" class="model-menu">
             <button
@@ -433,7 +440,10 @@ const textareaRef = ref<HTMLTextAreaElement>()
               :class="{ active: agent.selectedModel === m.value }"
               @click="pickModel(m.value)"
             >
-              <span class="model-menu-name">{{ m.label }}</span>
+              <span class="model-menu-text">
+                <span class="model-menu-name">{{ m.label }}</span>
+                <span class="model-menu-desc">{{ m.desc }}</span>
+              </span>
               <svg v-if="agent.selectedModel === m.value" class="check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             </button>
           </div>
@@ -602,6 +612,26 @@ const textareaRef = ref<HTMLTextAreaElement>()
 }
 .model-chevron { flex-shrink: 0; transition: transform 0.2s; }
 .model-chevron.open { transform: rotate(180deg); }
+.model-tip {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  z-index: 92;
+  width: 240px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition: opacity 0.18s, transform 0.18s;
+}
+.model-wrap:hover .model-tip { opacity: 1; transform: translateY(0); }
+.model-wrap.menu-open .model-tip { opacity: 0 !important; }
+.model-tip-name { display: block; font-size: 12px; font-weight: 700; color: var(--text); }
+.model-tip-desc { display: block; margin-top: 3px; font-size: 11px; line-height: 1.5; color: var(--text-secondary); }
 .model-menu-mask { position: fixed; inset: 0; z-index: 90; }
 .model-menu {
   position: absolute;
@@ -618,25 +648,13 @@ const textareaRef = ref<HTMLTextAreaElement>()
   border-radius: 14px;
   box-shadow: 0 16px 44px rgba(15, 23, 42, 0.18);
 }
-.model-menu-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  width: 100%;
-  padding: 9px 10px;
-  border: none;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--text);
-  font-size: 13px;
-  font-family: inherit;
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.12s;
-}
+.model-menu-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 9px 10px; border: none; border-radius: 9px; background: transparent; color: var(--text); font-size: 13px; font-family: inherit; cursor: pointer; text-align: left; transition: background 0.12s; }
 .model-menu-item:hover { background: var(--bg); }
-.model-menu-item.active { color: var(--primary, #4f46e5); font-weight: 600; }
+.model-menu-item.active { color: var(--primary, #4f46e5); }
+.model-menu-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.model-menu-name { font-size: 13px; }
+.model-menu-item.active .model-menu-name { font-weight: 600; }
+.model-menu-desc { font-size: 11px; line-height: 1.45; color: var(--text-secondary); }
 .model-menu-item .check { flex-shrink: 0; }
 .attach-btn {
   width: 34px;
