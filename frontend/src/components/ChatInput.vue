@@ -82,6 +82,8 @@ async function initRecorder(): Promise<boolean> {
     rec.ondataavailable = (e: BlobEvent) => { if (e.data.size) mediaChunks.push(e.data) }
     rec.onstop = async () => {
       try { stream.getTracks().forEach(t => t.stop()) } catch { /* noop */ }
+      // 置空：复用已停止 stream 的 MediaRecorder 再 start 会抛 InvalidStateError
+      mediaRecorder = null
       const blob = new Blob(mediaChunks, { type: rec.mimeType || 'audio/webm' })
       mediaChunks = []
       try {
@@ -104,17 +106,26 @@ async function initRecorder(): Promise<boolean> {
 }
 
 async function tryStartRecorder(silent: boolean): Promise<boolean> {
-  if (!mediaRecorder) {
+  let rec = mediaRecorder
+  if (!rec) {
     const ok = await initRecorder()
     if (!ok) {
       if (!silent) showToast('麦克风不可用，请检查权限')
       return false
     }
+    rec = mediaRecorder
   }
-  mediaChunks = []
-  mediaRecorder!.start()
-  listening.value = true
-  return true
+  try {
+    mediaChunks = []
+    rec!.start()
+    listening.value = true
+    return true
+  } catch {
+    // 已停止的 recorder 复用等异常 → 下次重建
+    mediaRecorder = null
+    if (!silent) showToast('麦克风不可用，请检查权限')
+    return false
+  }
 }
 
 async function toggleMic() {
