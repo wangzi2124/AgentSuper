@@ -176,7 +176,18 @@ def cmd_transcribe(args):
         }, ensure_ascii=False))
         return
 
-    wav, sr = _sf.read(args.audio, dtype="float32")
+    # 解码音频：优先 whisper.load_audio（内部走 ffmpeg，可解码 webm/mp3/m4a/ogg/wav 等任意格式——
+    # 浏览器 MediaRecorder 录音是 webm/opus，soundfile/libsndfile 解析不了 webm，会致 503）。
+    # ffmpeg 缺失时退化 soundfile（仅 wav/flac 等受支持格式）。
+    try:
+        wav = whisper.load_audio(args.audio)  # float32 mono 16k
+        sr = 16000
+    except Exception as load_err:
+        import subprocess as _sp
+        if _sp.run(["ffmpeg", "-version"], capture_output=True).returncode != 0:
+            wav, sr = _sf.read(args.audio, dtype="float32")
+        else:
+            raise
     # whisper 内部自带重采样，无需手动 resample（手动 interpolate 曾引入坏样本 → 转写乱码）
     device = "cuda" if args.device == "auto" and _torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device)
     model = whisper.load_model("turbo", device=device)
