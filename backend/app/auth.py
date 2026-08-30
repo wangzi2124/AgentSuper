@@ -303,6 +303,8 @@ class AuthMiddleware:
     仅当配置了 AUTH_TOKEN_SECRET 时生效。放行：
       - 非 /api/* 路径（文档、健康检查等）
       - /api/auth/*（注册 / 令牌 / 状态）
+      - GET /api/voice/status（只读语音可用性探测，前端免登录判断
+        「显示麦克风/朗读」按钮；transcribe/tts 仍要求鉴权）
       - OPTIONS 预检请求（CORS，不含业务头）
     其余请求必须携带与 user_id 匹配且未过期的签名 token，否则返回 401。
     """
@@ -319,6 +321,7 @@ class AuthMiddleware:
         if (
             not path.startswith("/api/")
             or path.startswith("/api/auth/")
+            or (path == "/api/voice/status" and method == "GET")
             or method == "OPTIONS"
         ):
             await self.app(scope, receive, send)
