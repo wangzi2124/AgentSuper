@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     # 先用 scripts/download_tts_model.py 预下载到 backend/ttsclone/models
     voice_tts_enabled: bool = False
     voice_tts_speaker: str = "Vivian"
-    voice_tts_model_size: str = "1.7B"
+    # 交互默认 0.6B（本机 CPU 单句 ~5s，1.7B ~38s 太慢，仅离线批量质检用大模型）
+    voice_tts_model_size: str = "0.6B"
     voice_tts_timeout: int = 600
 
     # 多 Agent 超时（秒）

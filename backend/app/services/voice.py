@@ -136,17 +136,23 @@ class VoiceService:
     def __init__(
         self,
         tts_dir: str | Path | None = None,
-        speaker: str = "Vivian",
-        model_size: str = "1.7B",
-        timeout: int = 600,
+        speaker: str | None = None,
+        model_size: str | None = None,
+        timeout: int | None = None,
         output_dir: str | None = None,
     ):
         base = Path(__file__).resolve().parents[2]  # backend/
         # 目录固定为 backend/ttsclone，不配置路径（测试可显式传入临时目录）
         self.tts_dir = Path(tts_dir) if tts_dir else (base / "ttsclone")
-        self.speaker = speaker if speaker in SPEAKERS else "Vivian"
-        self.model_size = model_size if model_size in MODEL_SIZES else "1.7B"
-        self.timeout = timeout
+        # 未显式传入时取 Settings（.env：VOICE_TTS_SPEAKER / VOICE_TTS_MODEL_SIZE /
+        # VOICE_TTS_TIMEOUT），避免创建方随手 new VoiceService() 而错过配置。
+        self.speaker = (speaker or settings.voice_tts_speaker)
+        if self.speaker not in SPEAKERS:
+            self.speaker = "Vivian"
+        self.model_size = (model_size or settings.voice_tts_model_size)
+        if self.model_size not in MODEL_SIZES:
+            self.model_size = "1.7B"
+        self.timeout = timeout or settings.voice_tts_timeout
         self.output_dir = Path(output_dir or (base / "data" / "generated"))
         self._whisper_worker: _WhisperWorker | None = None
         self._whisper_ready_val: bool | None = None
@@ -184,20 +190,28 @@ class VoiceService:
         return flat
 
     def _ensure_whisper(self) -> None:
-        """（预下载工具专用，启动不再调用）尽力而为预下载 Whisper small；失败仅警告。"""
+        """（预下载工具专用，启动不再调用）尽力而为预下载 faster-whisper-small + Whisper small；失败仅警告。"""
+        fw_dir = self.tts_dir / "models" / "faster-whisper-small"
+        try:
+            if not (fw_dir / "model.bin").exists():
+                from huggingface_hub import snapshot_download
+                fw_dir.parent.mkdir(parents=True, exist_ok=True)
+                snapshot_download("Systran/faster-whisper-small", local_dir=str(fw_dir))
+                logger.info("[voice] faster-whisper-small 已下载: %s", fw_dir)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[voice] faster-whisper-small 下载失败（转写将回退 openai-whisper small）: %s", e)
         try:
             import whisper
-        except ImportError:
-            logger.warning("[voice] openai-whisper 未安装，转写功能不可用")
-            return
-        root = Path.home() / ".cache" / "whisper"
-        target = root / WHISPER_MODEL_FILE
-        if target.exists():
-            return
-        root.mkdir(parents=True, exist_ok=True)
-        from whisper import _download as _dl
-        _dl(whisper._MODELS[WHISPER_VARIANT], str(root), False)
-        logger.info("[voice] Whisper %s 已下载: %s", WHISPER_VARIANT, target)
+            root = Path.home() / ".cache" / "whisper"
+            target = root / WHISPER_MODEL_FILE
+            if target.exists():
+                return
+            root.mkdir(parents=True, exist_ok=True)
+            from whisper import _download as _dl
+            _dl(whisper._MODELS[WHISPER_VARIANT], str(root), False)
+            logger.info("[voice] Whisper %s 已下载: %s", WHISPER_VARIANT, target)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[voice] openai-whisper 下载失败: %s", e)
 
     def ensure_models(self) -> None:
         """启动时预下载 TTS 合成模型（同向量/嵌入模型：ModelScope 优先 / HF 回退，断点续传）。
@@ -302,8 +316,9 @@ class VoiceService:
             return False, "audio file not found"
         if not self.whisper_ready:
             return False, (
-                "Whisper 模型未下载（small.pt）。"
-                "请先执行 backend/scripts/download_tts_model.py --whisper 预下载。"
+                "增量转写引擎不可用（backend/ttsclone/models/faster-whisper-small 或 "
+                "~/.cache/whisper/small.pt 未下载）。请先执行 "
+                "backend/scripts/download_tts_model.py --whisper 预下载。"
             )
         if self._whisper_worker is None:
             self._whisper_worker = _WhisperWorker(self, self.timeout)
@@ -315,15 +330,48 @@ class VoiceService:
             self._whisper_worker.shutdown()
             self._whisper_worker = None
 
+    def warmup(self) -> None:
+        """后台预热常驻 Whisper worker：拉起子进程让模型（small）在后台加载完成。
+
+        由此把首次转写的模型加载成本（本机 ~5.7s）从用户首次点麦克风挪到服务启动阶段，
+        录音一开始就能以全速（~2s/块）出字。子进程会在读 stdin 前先加载模型，
+        因此仅 spawn 即可触发加载；失败静默（下次 transcribe 时仍会自动重建 worker）。
+        """
+        if not self.whisper_ready or self._whisper_worker is not None:
+            return
+        try:
+            w = _WhisperWorker(self, self.timeout)
+            w._spawn()  # 子进程后台加载模型，返回即开工
+            self._whisper_worker = w
+            logger.info("[voice] Whisper worker 预热启动（模型后台加载中）")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[voice] Whisper worker 预热失败（下次转写自动重建）: %s", e)
+            try:
+                w.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+            self._whisper_worker = None
+
     @property
     def whisper_ready(self) -> bool:
-        """Whisper 模型是否已预下载（后端 venv 无 whisper 依赖时也回 False）。"""
+        """增量转写引擎是否就绪：faster-whisper-small(ct2) 优先，回退 openai-whisper small.pt。"""
         if self._whisper_ready_val is None:
-            try:
-                import whisper  # noqa: F401
-                self._whisper_ready_val = (Path.home() / ".cache" / "whisper" / WHISPER_MODEL_FILE).exists()
-            except ImportError:
-                self._whisper_ready_val = False
+            ok = False
+            # faster-whisper（首选）：模型目录 + 依赖
+            if (self.tts_dir / "models" / "faster-whisper-small" / "model.bin").exists():
+                try:
+                    import faster_whisper  # noqa: F401
+                    ok = True
+                except ImportError:
+                    ok = False
+            # openai-whisper small（回退）
+            if not ok:
+                try:
+                    import whisper  # noqa: F401
+                    ok = (Path.home() / ".cache" / "whisper" / WHISPER_MODEL_FILE).exists()
+                except ImportError:
+                    ok = False
+            self._whisper_ready_val = ok
         return self._whisper_ready_val
 
 

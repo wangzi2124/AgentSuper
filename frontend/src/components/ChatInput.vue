@@ -30,7 +30,7 @@ function pickModel(value: string) {
 }
 
 // [录音] 语音输入：实时(PCM)采集 + 本地 Whisper 增量转写（边说话边出字）。
-//   AudioContext + ScriptProcessorNode 持续采浮点 PCM，每 ~2.5s 把「新增切片」编码为
+//   AudioContext + ScriptProcessorNode 持续采浮点 PCM，每 ~1.8s 把「新增切片」编码为
 //   wav 发 /api/voice/transcribe，结果后缀追加；停止时补转剩余分片。
 //   采集初始化失败退回 MediaRecorder（一次性转写），再退回 Web Speech。
 //   ⚠ 并发转写会同时拉起多个 Whisper 子进程（内存翻倍），增量调用严格排队串行。
@@ -56,6 +56,7 @@ let liveSampleRate = 48000
 let livePending = 0              // 已（排队）交给转写的样本结束下标
 let liveTimer: number | null = null
 let transcribeChain: Promise<void> = Promise.resolve()
+let transcribeBusy = false  // 上一块仍在转写时跳本次 tick，避免出字突发/滞后
 
 function appendSamples(data: Float32Array) {
   const n = liveSamples.length
@@ -88,19 +89,24 @@ function pcmToWav(samples: Float32Array, sampleRate: number): Blob {
 // 增量转写：进入全局串行队列，完成后追加到输入框
 function enqueueTranscribe(slice: Float32Array) {
   const blob = pcmToWav(slice, liveSampleRate)
+  transcribeBusy = true
   transcribeChain = transcribeChain.then(async () => {
     try {
       const t = await transcribeAudio(blob, 'live.wav')
       if (t) text.value = (text.value ? text.value + ' ' : '') + t
     } catch { /* 单块失败静默，最终块兜底提示 */ }
+    transcribeBusy = false
   })
   return transcribeChain
 }
 
-// 定时切块：每 2.5s 把「上次转写结束点 → 当前」的新增样本交给转写
+// 定时切块：每 1.8s 把「上次转写结束点 → 当前」的新增样本交给转写。
+// 上一块仍在转写（busy）时直接跳过本次，保证始终最多一个在途转写——
+// 串行队列只是「不丢」，但会让人听到话后迟几秒才出字，体感更差。
 function tickLiveTranscribe() {
+  if (transcribeBusy) return
   const end = liveSamples.length
-  if (end - livePending >= liveSampleRate * 1.0) {
+  if (end - livePending >= liveSampleRate * 0.9) {
     const slice = liveSamples.slice(livePending, end)
     livePending = end
     void enqueueTranscribe(slice)
@@ -112,6 +118,9 @@ async function initLive(): Promise<boolean> {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     const Ctx = window.AudioContext || (window as any).webkitAudioContext
     const ctx = new Ctx()
+    // Chrome 自动播放策略下 AudioContext 默认 suspended——不 resume() 则
+    // onaudioprocess 永不触发（录音全程采不到样本、一字不出）。须在用户手势内恢复。
+    try { await ctx.resume() } catch { /* 个别浏览器无需 resume */ }
     liveStream = stream
     liveCtx = ctx
     liveSampleRate = ctx.sampleRate || 48000
@@ -258,7 +267,8 @@ async function toggleMic() {
     liveSamples = new Float32Array(0)
     livePending = 0
     transcribeChain = Promise.resolve()
-    liveTimer = window.setInterval(tickLiveTranscribe, 2500)
+    liveTimer = window.setInterval(tickLiveTranscribe, 1800)
+    transcribeBusy = false
     listening.value = true
     return
   }

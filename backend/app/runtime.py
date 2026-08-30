@@ -155,6 +155,9 @@ def _do_init(app):
     voice_service = VoiceService() if settings.voice_tts_enabled else None
     if voice_service is not None:
         threading.Thread(target=voice_service.ensure_models, daemon=True, name="voice-model-dl").start()
+        # 预热常驻 Whisper worker：后台启动并要求模型加载完成，把「首字延迟」（~5.7s 模型加载）
+        # 从用户点麦克风时挪到服务启动阶段，录音刚开始即可出字。
+        threading.Thread(target=voice_service.warmup, daemon=True, name="voice-whisper-warmup").start()
         logger.info("Voice service enabled (dir=%s)", voice_service.tts_dir)
 
     agent = RAGAgent(

@@ -195,15 +195,24 @@ def cmd_transcribe(args):
     print(json.dumps({"ok": True, "text": result["text"].strip()}, ensure_ascii=False))
 
 
-def cmd_transcribe_serve(args):
-    """常驻 Whisper 转写服务：模型只加载一次，增量转写不重复付出模型加载成本。
+def _load_transcriber(device: str):
+    """增量转写引擎：faster-whisper(CTranslate2 int8) 优先，缺失回退 openai-whisper small。
 
-    stdin 协议：每行一个 JSON 请求 {"path": "<音频路径>"}；stdin EOF 或行 "shutdown" 时退出。
-    stdout 协议：每行一个 JSON 响应 {"ok": true, "text": "..."} 或 {"ok": false, "error": "..."}。
-    stderr 静默（tqdm 进度走 stderr，父进程 DEVNULL 丢弃，不阻塞）。
-    父进程死亡 → 管道 EOF → 本进程自行退出（Windows 不留孤儿）。
-    旧 torch 权重兼容：与单次 transcribe 相同的 weights_only 回退。
+    返回 (kind, model)：kind∈{"fw", "ow"}。faster-whisper 是本机 CPU 上的实测最优解
+    （6.2s 中文块 ~0.1s，而 openai-whisper small ~2s、turbo ~16s）；其 CTranslate2 模型
+    由 scripts/download_tts_model.py --whisper 预下载到 backend/ttsclone/models/faster-whisper-small。
     """
+    fw_dir = os.path.join(LOCAL_MODELS_DIR, "faster-whisper-small")
+    if os.path.isfile(os.path.join(fw_dir, "model.bin")):
+        try:
+            from faster_whisper import WhisperModel
+            ct = "int8" if device != "cuda" else "float16"
+            return "fw", WhisperModel(fw_dir, device=device, compute_type=ct)
+        except Exception as e:  # noqa: BLE001
+            print(json.dumps({"ok": False, "error": f"faster-whisper 加载失败: {e}"},
+                             ensure_ascii=False), flush=True)
+            return "ow", None
+    # openai-whisper small 回退路径
     import whisper
     import torch as _torch
     _orig_load = _torch.load
@@ -211,23 +220,38 @@ def cmd_transcribe_serve(args):
         k["weights_only"] = False
         return _orig_load(*a, **k)
     _torch.load = _legacy_load
-
-    # 增量转写用轻量 small 模型（turbo 在这台 CPU 机上每个 3s 块要 ~15s，small 仅 ~3s）。
-    # 不随运行自动下载 whisper：缺失时明确报错（父进程先 _whisper_ready 拦截，这里兜底）
     _target = os.path.join(os.path.expanduser("~"), ".cache", "whisper", "small.pt")
     if not os.path.exists(_target):
+        return "ow", None
+    return "ow", whisper.load_model("small", device=device)
+
+
+def cmd_transcribe_serve(args):
+    """常驻 Whisper 转写服务：模型只加载一次，增量转写不重复付出模型加载成本。
+
+    stdin 协议：每行一个 JSON 请求 {"path": "<音频路径>"}；stdin EOF 或行 "shutdown" 时退出。
+    stdout 协议：每行一个 JSON 响应 {"ok": true, "text": "..."} 或 {"ok": false, "error": "..."}。
+    stderr 静默（tqdm 进度走 stderr，父进程 DEVNULL 丢弃，不阻塞）。
+    父进程死亡 → 管道 EOF → 本进程自行退出（Windows 不留孤儿）。
+    增量引擎优先 faster-whisper(int8)，回退 openai-whisper small（见 _load_transcriber）。
+    """
+    import torch as _torch
+    device = "cuda" if args.device == "auto" and _torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device)
+    kind, model = _load_transcriber(device)
+    if model is None:
         print(json.dumps({
             "ok": False,
-            "error": "Whisper 模型未下载（small.pt）。"
+            "error": "Whisper 模型未下载（faster-whisper-small 或 ~/.cache/whisper/small.pt）。"
                      "请先执行 backend/scripts/download_tts_model.py --whisper 预下载。",
         }, ensure_ascii=False), flush=True)
         return
 
-    device = "cuda" if args.device == "auto" and _torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device)
-    model = whisper.load_model("small", device=device)
-
     sys.stdin.reconfigure(encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8")
+
+    # 语言只在首块自动检测一次并缓存复用——faster-whisper 每次 language=None 都
+    # 重新跑语言检测（本机 ~1.1s/次），连续块固定语言后近乎 0 开销。
+    lang_state: str | None = None
 
     for line in sys.stdin:
         line = line.strip()
@@ -242,16 +266,26 @@ def cmd_transcribe_serve(args):
                 print(json.dumps({"ok": False, "error": "audio file not found"},
                                  ensure_ascii=False), flush=True)
                 continue
-            # 增量块：beam_size=1 大幅降 CPU 开销（默认 beam=5 在 CPU 上每块 15s+）；
-            # condition_on_previous_text=False 避免短块自我偏向历史文本。
-            result = model.transcribe(
-                whisper.load_audio(path),
-                fp16=(device == "cuda"),
-                beam_size=1,
-                condition_on_previous_text=False,
-            )
-            print(json.dumps({"ok": True, "text": (result["text"] or "").strip()},
-                             ensure_ascii=False), flush=True)
+            # 增量块：beam_size=1 大幅降 CPU 开销；condition_on_previous_text=False
+            # 避免短块自我偏向历史文本。faster-whisper 内部 av 解码任意容器，无需 ffmpeg 二进制。
+            if kind == "fw":
+                segs, info = model.transcribe(
+                    path, language=lang_state, beam_size=1,
+                    condition_on_previous_text=False,
+                )
+                text = "".join(seg.text for seg in segs).strip()
+                if lang_state is None and getattr(info, "language", None):
+                    lang_state = info.language
+            else:
+                import whisper
+                result = model.transcribe(
+                    whisper.load_audio(path),
+                    fp16=(device == "cuda"),
+                    beam_size=1,
+                    condition_on_previous_text=False,
+                )
+                text = (result["text"] or "").strip()
+            print(json.dumps({"ok": True, "text": text}, ensure_ascii=False), flush=True)
         except Exception as e:  # noqa: BLE001
             print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"},
                              ensure_ascii=False), flush=True)

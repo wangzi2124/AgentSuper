@@ -65,7 +65,20 @@ def download_one(model: str) -> Path:
 
 
 def download_whisper() -> None:
-    print("[DL] Whisper small ./ turbo（ASR 转写用：small 用于边录边出字的增量转写，turbo 用于单次高质量转写）")
+    print("[DL] faster-whisper-small (int8, 增量转写首选) + Whisper small/turbo (回退/单次)")
+    fw_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "ttsclone", "models", "faster-whisper-small")
+    fw_dir = os.path.normpath(fw_dir)
+    fw_target = os.path.join(fw_dir, "model.bin")
+    if os.path.exists(fw_target):
+        print(f"[OK] 已存在: {fw_target}")
+    else:
+        from huggingface_hub import snapshot_download
+        os.makedirs(fw_dir, exist_ok=True)
+        try:
+            snapshot_download("Systran/faster-whisper-small", local_dir=fw_dir)
+            print(f"[OK] 已下载: {fw_target}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[WARN] faster-whisper-small 下载失败（转写将回退 openai-whisper small）: {e}")
     try:
         import whisper
     except ImportError:

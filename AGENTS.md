@@ -18,6 +18,20 @@
 # Backend (must use .venv Python directly)
 cd backend
 .venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+# ⚠ 本机(E:\ 盘)uvicorn --reload 热重载不可靠 —— WatchFiles 观察不到变更、强制轮询(WATCHFILES_FORCE_POLLING=1)也无效，
+#   且会残留死进程的幽灵 8000 端口监听(使新实例 bind 失败 / [Errno 10048])。
+#   改后端代码后：杀干净 python 进程(taskkill /PID <pid> /T /F)再重启，别依赖 reload；
+#   连旧进程常是 E:\Python313\python.exe 的 multiprocessing spawn 子进程，命令行不含 uvicorn，别漏杀。
+```
+> 语音（`backend/app/services/voice.py` + `backend/ttsclone/`）：
+
+> - **增量转写（边录边出字）**：`transcribe-serve` 常驻 worker，**faster-whisper int8 首选**（CTranslate2，`backend/ttsclone/models/faster-whisper-small`），回退 openai-whisper `small`；`faster-whisper>=1.2.1` 已在 `requirements-voice.txt`。首块自动语言检测并缓存（`lang_state`），后续块直用 `language="zh"`。实测稳态 ~**1.3s/6s音频块**；后端启动预热（`VoiceService.warmup()` 后台线程）。快速自检：`backend\.venv\Scripts\python.exe -X utf8 backend\scripts\voice_quickcheck.py [synth|worker|all]`（合成 ~15-18s / worker req2 ~1.3s，无鉴权）。
+> - **前端不出字根因（已修）**：`initLive` 须 `await ctx.resume()`（Chrome 自动播放策略下 AudioContext 默认 suspended，`onaudioprocess` 不触发）；tick 1800ms、最小分块 0.9s、`transcribeBusy` 跳块避免队列积压。
+> - **TTS 合成**：默认 `VOICE_TTS_MODEL_SIZE=0.6B`（API 单句 ~17s，1.7B ~37s / CLI 同规模）；`VoiceService.__init__` 未显式传参时从 Settings 取（别直接 new 时硬编码 1.7B 默认）。
+
+```powershell
+# Voice status / 一键自检
+backend\.venv\Scripts\python.exe -X utf8 backend\scripts\voice_quickcheck.py all
 
 # Frontend (port 5173, proxies /api → localhost:8000)
 cd frontend

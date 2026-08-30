@@ -6,3 +6,5 @@ torch --index-url https://download.pytorch.org/whl/cpu
 qwen-tts>=0.1.1
 soundfile>=0.13.1
 openai-whisper>=20250625
+# 增量转写首选引擎：CTranslate2 int8，CPU 上比 openai-whisper 快一个数量级（本机 6s 中文块 ~0.1s）
+faster-whisper>=1.2.1
