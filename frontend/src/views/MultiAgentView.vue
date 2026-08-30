@@ -204,18 +204,21 @@ watch(() => agent.loading, (loading) => {
 async function handleSpeak(id: string, content: string) {
   if (speakingId.value === id) { stopSpeaking(); return }
   stopSpeaking()
-  const text = (content || '').trim()
+  let text = (content || '').trim()
   if (!text) return
+  // 过长文本单次合成会超时（后端 CPU 合成慢）：截断前段保证出声，全量仍可 speechSynthesis 兜底
+  const MAX_TTS_CHARS = 1200
+  if (text.length > MAX_TTS_CHARS) text = text.slice(0, MAX_TTS_CHARS) + '。'
   speakingId.value = id
   try {
     const url = await synthesize(text)
     const audio = new Audio(url)
     speakAudio = audio
     audio.onended = () => { if (speakingId.value === id) speakingId.value = null }
-    audio.onerror = () => { stopSpeaking(); speakNative(text) }
+    audio.onerror = () => { stopSpeaking(); speakNative((content || '').trim()) }
     await audio.play()
   } catch {
-    speakNative(text)
+    speakNative((content || '').trim())
   }
 }
 function stopSpeaking() {

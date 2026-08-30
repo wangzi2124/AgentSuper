@@ -29,9 +29,11 @@ function pickModel(value: string) {
   modelMenuOpen.value = false
 }
 
-// [录音] 语音输入：Web Speech API 优先，不可用（Firefox/部分移动端）降级
-// MediaRecorder → 本地 Qwen3-TTS ASR 转写（ttsclone /api/tts/transcribe）
+// [录音] 语音输入：优先本地可靠链路 MediaRecorder → 后端 Whisper（不经外部服务器）；
+// Web Speech API 仅作兜底——Chrome 中已弃用且依赖 Google 服务器，网络不可达时
+// start() 会成功但随后静默报 network 错误、不出任何结果，PC 端「不好用」即此因。
 import { transcribeAudio } from '../api/voice'
+import { showToast } from 'vant'
 
 const listening = ref(false)
 const recognition = ref<{ start(): void; stop(): void } | null>(null)
@@ -54,7 +56,11 @@ function initRecognition() {
     if (t) text.value = (text.value ? text.value + ' ' : '') + t
     listening.value = false
   }
-  r.onerror = () => { listening.value = false }
+  // Web Speech 识别失败（network/not-allowed/service-not-allowed…）→ 自动切本地链路重试
+  r.onerror = async () => {
+    listening.value = false
+    if (!mediaRecorder) await tryStartRecorder(true)
+  }
   r.onend = () => { listening.value = false }
   recognition.value = r
 }
@@ -81,7 +87,14 @@ async function initRecorder(): Promise<boolean> {
       try {
         const t = await transcribeAudio(blob)
         if (t) text.value = (text.value ? text.value + ' ' : '') + t
-      } catch { /* 转写失败静默，保持输入框内容 */ }
+      } catch {
+        // 本地转写失败（后端不可达/超时）：有 Web Speech 能力则兜底，否则提示
+        if (hasSpeechRecognition.value) {
+          if (!recognition.value) initRecognition()
+          try { recognition.value?.start(); listening.value = true; return } catch { /* noop */ }
+        }
+        showToast('语音转写失败，请重试')
+      }
       listening.value = false
     }
     return true
@@ -90,9 +103,25 @@ async function initRecorder(): Promise<boolean> {
   }
 }
 
+async function tryStartRecorder(silent: boolean): Promise<boolean> {
+  if (!mediaRecorder) {
+    const ok = await initRecorder()
+    if (!ok) {
+      if (!silent) showToast('麦克风不可用，请检查权限')
+      return false
+    }
+  }
+  mediaChunks = []
+  mediaRecorder!.start()
+  listening.value = true
+  return true
+}
+
 async function toggleMic() {
   if (props.loading) return
   if (listening.value) { stopRecording(); return }
+  // 先走本地可靠链路；不可用再退回 Web Speech
+  if (await tryStartRecorder(true)) return
   if (hasSpeechRecognition.value) {
     if (!recognition.value) initRecognition()
     if (recognition.value) {
@@ -101,18 +130,12 @@ async function toggleMic() {
         listening.value = true
       } catch {
         listening.value = false
+        showToast('麦克风不可用，请检查权限')
       }
       return
     }
   }
-  // 降级：MediaRecorder + 本地 ASR
-  if (!mediaRecorder) {
-    const ok = await initRecorder()
-    if (!ok) return
-  }
-  mediaChunks = []
-  mediaRecorder!.start()
-  listening.value = true
+  showToast('麦克风不可用，请检查权限')
 }
 onBeforeUnmount(() => { try { recognition.value?.stop() } catch { /* noop */ } })
 
