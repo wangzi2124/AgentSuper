@@ -29,9 +29,11 @@ function pickModel(value: string) {
   modelMenuOpen.value = false
 }
 
-// [录音] 语音输入：优先本地可靠链路 MediaRecorder → 后端 Whisper（不经外部服务器）；
-// Web Speech API 仅作兜底——Chrome 中已弃用且依赖 Google 服务器，网络不可达时
-// start() 会成功但随后静默报 network 错误、不出任何结果，PC 端「不好用」即此因。
+// [录音] 语音输入：实时(PCM)采集 + 本地 Whisper 增量转写（边说话边出字）。
+//   AudioContext + ScriptProcessorNode 持续采浮点 PCM，每 ~2.5s 把「新增切片」编码为
+//   wav 发 /api/voice/transcribe，结果后缀追加；停止时补转剩余分片。
+//   采集初始化失败退回 MediaRecorder（一次性转写），再退回 Web Speech。
+//   ⚠ 并发转写会同时拉起多个 Whisper 子进程（内存翻倍），增量调用严格排队串行。
 import { transcribeAudio } from '../api/voice'
 import { showToast } from 'vant'
 
@@ -40,8 +42,129 @@ const recognition = ref<{ start(): void; stop(): void } | null>(null)
 const hasSpeechRecognition = computed(() =>
   typeof window !== 'undefined' && !!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition
 )
+// MediaRecorder 兜底路径（采集可用时不再使用；历史代码保留）
 let mediaRecorder: MediaRecorder | null = null
 let mediaChunks: Blob[] = []
+
+// ── 实时采集状态 ──
+let liveCtx: AudioContext | null = null
+let liveSource: MediaStreamAudioSourceNode | null = null
+let liveProcessor: ScriptProcessorNode | null = null
+let liveStream: MediaStream | null = null
+let liveSamples: Float32Array = new Float32Array(0)
+let liveSampleRate = 48000
+let livePending = 0              // 已（排队）交给转写的样本结束下标
+let liveTimer: number | null = null
+let transcribeChain: Promise<void> = Promise.resolve()
+
+function appendSamples(data: Float32Array) {
+  const n = liveSamples.length
+  const buf = new Float32Array(n + data.length)
+  buf.set(liveSamples)
+  buf.set(data, n)
+  liveSamples = buf
+}
+
+// Float32 PCM → 16bit PCM wav（本地 Whisper 经 ffmpeg 解码 + 重采样）
+function pcmToWav(samples: Float32Array, sampleRate: number): Blob {
+  const n = samples.length
+  const buf = new ArrayBuffer(44 + n * 2)
+  const v = new DataView(buf)
+  const ws = (off: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)) }
+  ws(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); ws(8, 'WAVE')
+  ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true)
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true)
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true)
+  ws(36, 'data'); v.setUint32(40, n * 2, true)
+  let o = 44
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]))
+    v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true)
+    o += 2
+  }
+  return new Blob([buf], { type: 'audio/wav' })
+}
+
+// 增量转写：进入全局串行队列，完成后追加到输入框
+function enqueueTranscribe(slice: Float32Array) {
+  const blob = pcmToWav(slice, liveSampleRate)
+  transcribeChain = transcribeChain.then(async () => {
+    try {
+      const t = await transcribeAudio(blob, 'live.wav')
+      if (t) text.value = (text.value ? text.value + ' ' : '') + t
+    } catch { /* 单块失败静默，最终块兜底提示 */ }
+  })
+  return transcribeChain
+}
+
+// 定时切块：每 2.5s 把「上次转写结束点 → 当前」的新增样本交给转写
+function tickLiveTranscribe() {
+  const end = liveSamples.length
+  if (end - livePending >= liveSampleRate * 1.0) {
+    const slice = liveSamples.slice(livePending, end)
+    livePending = end
+    void enqueueTranscribe(slice)
+  }
+}
+
+async function initLive(): Promise<boolean> {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    const Ctx = window.AudioContext || (window as any).webkitAudioContext
+    const ctx = new Ctx()
+    liveStream = stream
+    liveCtx = ctx
+    liveSampleRate = ctx.sampleRate || 48000
+    liveSource = ctx.createMediaStreamSource(stream)
+    // ScriptProcessorNode 已弃用但全平台可用；0 gain 静音透传以驱动回调
+    const proc = ctx.createScriptProcessor(4096, 1, 1)
+    const gain = ctx.createGain()
+    gain.gain.value = 0
+    proc.onaudioprocess = (e: AudioProcessingEvent) => {
+      // 通道 0，麦克风一般单声道/立体声首位为拾音
+      appendSamples(e.inputBuffer.getChannelData(0))
+    }
+    liveSource.connect(proc)
+    proc.connect(gain)
+    gain.connect(ctx.destination)
+    liveProcessor = proc
+    return true
+  } catch {
+    cleanupLive()
+    return false
+  }
+}
+
+function cleanupLive() {
+  try { liveSource?.disconnect() } catch { /* noop */ }
+  try { liveProcessor?.disconnect() } catch { /* noop */ }
+  try { liveStream?.getTracks().forEach(t => t.stop()) } catch { /* noop */ }
+  if (liveCtx && liveCtx.state !== 'closed') { try { void liveCtx.close() } catch { /* noop */ } }
+  liveSource = null; liveProcessor = null; liveStream = null; liveCtx = null
+}
+
+async function stopLive() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null }
+  // 补转剩余分片（先采集，结束点不再增长）
+  const end = liveSamples.length
+  if (end > livePending) {
+    const slice = liveSamples.slice(livePending, end)
+    livePending = end
+    transcribeChain = transcribeChain.then(async () => {
+      try {
+        const t = await transcribeAudio(pcmToWav(slice, liveSampleRate), 'live.wav')
+        if (t) text.value = (text.value ? text.value + ' ' : '') + t
+      } catch {
+        showToast('语音转写失败，请重试')
+      }
+    }).catch(() => {})
+  }
+  await transcribeChain
+  cleanupLive()
+  liveSamples = new Float32Array(0)
+  livePending = 0
+  listening.value = false
+}
 
 function initRecognition() {
   const w = window as any
@@ -65,7 +188,9 @@ function initRecognition() {
   recognition.value = r
 }
 
-function stopRecording() {
+async function stopRecording() {
+  // 实时采集路径
+  if (liveProcessor || liveSource || liveStream) { await stopLive(); return }
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop()
   } else {
@@ -82,7 +207,6 @@ async function initRecorder(): Promise<boolean> {
     rec.ondataavailable = (e: BlobEvent) => { if (e.data.size) mediaChunks.push(e.data) }
     rec.onstop = async () => {
       try { stream.getTracks().forEach(t => t.stop()) } catch { /* noop */ }
-      // 置空：复用已停止 stream 的 MediaRecorder 再 start 会抛 InvalidStateError
       mediaRecorder = null
       const blob = new Blob(mediaChunks, { type: rec.mimeType || 'audio/webm' })
       mediaChunks = []
@@ -90,7 +214,6 @@ async function initRecorder(): Promise<boolean> {
         const t = await transcribeAudio(blob)
         if (t) text.value = (text.value ? text.value + ' ' : '') + t
       } catch {
-        // 本地转写失败（后端不可达/超时）：有 Web Speech 能力则兜底，否则提示
         if (hasSpeechRecognition.value) {
           if (!recognition.value) initRecognition()
           try { recognition.value?.start(); listening.value = true; return } catch { /* noop */ }
@@ -121,7 +244,6 @@ async function tryStartRecorder(silent: boolean): Promise<boolean> {
     listening.value = true
     return true
   } catch {
-    // 已停止的 recorder 复用等异常 → 下次重建
     mediaRecorder = null
     if (!silent) showToast('麦克风不可用，请检查权限')
     return false
@@ -130,9 +252,19 @@ async function tryStartRecorder(silent: boolean): Promise<boolean> {
 
 async function toggleMic() {
   if (props.loading) return
-  if (listening.value) { stopRecording(); return }
-  // 先走本地可靠链路；不可用再退回 Web Speech
+  if (listening.value) { await stopRecording(); return }
+  // 1) 首选：实时采集 + 增量转写
+  if (await initLive()) {
+    liveSamples = new Float32Array(0)
+    livePending = 0
+    transcribeChain = Promise.resolve()
+    liveTimer = window.setInterval(tickLiveTranscribe, 2500)
+    listening.value = true
+    return
+  }
+  // 2) 兜底：MediaRecorder 一次性转写
   if (await tryStartRecorder(true)) return
+  // 3) 最后：Web Speech（Chrome 已弃用/依赖 Google 服务器，仅尽力）
   if (hasSpeechRecognition.value) {
     if (!recognition.value) initRecognition()
     if (recognition.value) {
@@ -148,7 +280,11 @@ async function toggleMic() {
   }
   showToast('麦克风不可用，请检查权限')
 }
-onBeforeUnmount(() => { try { recognition.value?.stop() } catch { /* noop */ } })
+onBeforeUnmount(() => {
+  if (liveTimer) clearInterval(liveTimer)
+  cleanupLive()
+  try { recognition.value?.stop() } catch { /* noop */ }
+})
 
 // [F8] 待发送附件：data 为 base64 编码内容（对齐后端 FileContent），
 // 图片额外保留 data URL 预览用

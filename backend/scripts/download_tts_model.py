@@ -65,7 +65,7 @@ def download_one(model: str) -> Path:
 
 
 def download_whisper() -> None:
-    print("[DL] Whisper turbo（ASR 转写用）")
+    print("[DL] Whisper small ./ turbo（ASR 转写用：small 用于边录边出字的增量转写，turbo 用于单次高质量转写）")
     try:
         import whisper
     except ImportError:
@@ -75,12 +75,13 @@ def download_whisper() -> None:
 
     root = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
     os.makedirs(root, exist_ok=True)
-    target = os.path.join(root, "turbo.pt")
-    if os.path.exists(target):
-        print(f"[OK] 已存在: {target}")
-        return
-    _dl(whisper._MODELS["turbo"], root, False)
-    print(f"[OK] 已下载: {target}")
+    for variant in ("small", "turbo"):
+        target = os.path.join(root, f"{variant}.pt")
+        if os.path.exists(target):
+            print(f"[OK] 已存在: {target}")
+            continue
+        _dl(whisper._MODELS[variant], root, False)
+        print(f"[OK] 已下载: {target}")
 
 
 def main():

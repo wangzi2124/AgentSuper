@@ -24,10 +24,10 @@ export async function ttsHealth(): Promise<TtsHealth> {
   }
 }
 
-// ASR 转写：录音 Blob → 文本（后端 subprocess → 本地 Whisper）
-export async function transcribeAudio(blob: Blob): Promise<string> {
+// ASR 转写：音频 Blob → 文本（后端 subprocess → 本地 Whisper）。文件名后缀决定后端临时文件格式（wav/webm/mp3…）
+export async function transcribeAudio(blob: Blob, filename = 'record.webm'): Promise<string> {
   const form = new FormData()
-  form.append('audio', blob, 'record.webm')
+  form.append('audio', blob, filename)
   const res = await fetchWithTimeout(`${TTS_BASE}/transcribe`, { method: 'POST', body: form }, 120000)
   const body = await res.json().catch(() => null)
   if (!res.ok || body?.code !== 0) {

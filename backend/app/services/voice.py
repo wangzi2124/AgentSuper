@@ -13,9 +13,11 @@ import datetime
 import json
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from app.config import settings
@@ -31,6 +33,101 @@ LANGUAGES = [
     "French", "German", "Spanish", "Portuguese", "Russian", "Italian",
 ]
 MODEL_SIZES = ("0.6B", "1.7B")
+
+
+class _WhisperWorker:
+    """常驻 Whisper 转写子进程（`clone.py transcribe-serve`），模型只加载一次。
+
+    增量转写/多请求复用同一进程，避免每次转写重载 ~1.6GB 模型（本机实测单次含加载 ~54s）。
+    json 行协议：stdin 每行 {"path": ...} → stdout 每行 {"ok":..,"text"|"error":..}。
+    请求串行（threading.Lock）；崩溃/超时自动杀进程重启；父进程死亡 → stdin EOF → 子进程自退。
+    """
+
+    def __init__(self, service: "VoiceService", timeout: int):
+        self.svc = service
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+        self._reader: threading.Thread | None = None
+        self._out_q: queue.Queue = queue.Queue()
+
+    def _spawn(self) -> None:
+        self._out_q = queue.Queue()
+        cmd = [self.svc._python(), str(self.svc._clone_script()), "transcribe-serve"]
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,  # tqdm 进度等噪声丢弃，避免管道填塞
+            cwd=str(self.svc.tts_dir),
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        self._reader = threading.Thread(
+            target=_WhisperWorker._read_loop, args=(self._out_q, self._proc), daemon=True,
+        )
+        self._reader.start()
+
+    @staticmethod
+    def _read_loop(out_q: queue.Queue, proc: subprocess.Popen) -> None:
+        try:
+            for line in proc.stdout:
+                out_q.put(line.decode("utf-8", "replace").strip())
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            out_q.put(None)  # EOF 哨兵
+
+    def transcribe(self, audio_path: str) -> tuple[bool, str]:
+        with self._lock:
+            if self._proc is None or self._proc.poll() is not None:
+                self._stop_unlocked()
+                self._spawn()
+            try:
+                self._proc.stdin.write(
+                    (json.dumps({"path": audio_path}) + "\n").encode("utf-8"),
+                )
+                self._proc.stdin.flush()
+                line = self._out_q.get(timeout=self.timeout)
+                if line is None:
+                    raise RuntimeError("whisper worker exited unexpectedly")
+                data = json.loads(line)
+                ok = bool(data.get("ok", False))
+                return ok, str(data.get("text", "") if ok else data.get("error", ""))
+            except queue.Empty:
+                self._stop_unlocked()
+                return False, f"whisper worker timed out after {self.timeout}s"
+            except Exception as e:  # noqa: BLE001
+                self._stop_unlocked()
+                return False, f"whisper worker error: {e}"
+
+    def _stop_unlocked(self) -> None:
+        if self._proc is None:
+            return
+        try:
+            try:
+                self._proc.stdin.write(b"shutdown\n")
+                self._proc.stdin.flush()
+            except Exception:  # noqa: BLE001
+                pass
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    self._proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+        finally:
+            self._proc = None
+            self._reader = None
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._stop_unlocked()
+
+
+WHISPER_MODEL_FILE = "small.pt"
+WHISPER_VARIANT = "small"
 
 
 class VoiceService:
@@ -51,6 +148,8 @@ class VoiceService:
         self.model_size = model_size if model_size in MODEL_SIZES else "1.7B"
         self.timeout = timeout
         self.output_dir = Path(output_dir or (base / "data" / "generated"))
+        self._whisper_worker: _WhisperWorker | None = None
+        self._whisper_ready_val: bool | None = None
 
     @property
     def model_id(self) -> str:
@@ -85,20 +184,20 @@ class VoiceService:
         return flat
 
     def _ensure_whisper(self) -> None:
-        """（预下载工具专用，启动不再调用）尽力而为预下载 Whisper turbo；失败仅警告。"""
+        """（预下载工具专用，启动不再调用）尽力而为预下载 Whisper small；失败仅警告。"""
         try:
             import whisper
         except ImportError:
             logger.warning("[voice] openai-whisper 未安装，转写功能不可用")
             return
         root = Path.home() / ".cache" / "whisper"
-        target = root / "large-v3-turbo.pt"
+        target = root / WHISPER_MODEL_FILE
         if target.exists():
             return
         root.mkdir(parents=True, exist_ok=True)
         from whisper import _download as _dl
-        _dl(whisper._MODELS["turbo"], str(root), False)
-        logger.info("[voice] Whisper turbo 已下载: %s", target)
+        _dl(whisper._MODELS[WHISPER_VARIANT], str(root), False)
+        logger.info("[voice] Whisper %s 已下载: %s", WHISPER_VARIANT, target)
 
     def ensure_models(self) -> None:
         """启动时预下载 TTS 合成模型（同向量/嵌入模型：ModelScope 优先 / HF 回退，断点续传）。
@@ -198,14 +297,34 @@ class VoiceService:
         return True, str(outfile), outfile
 
     def transcribe(self, audio_path: str) -> tuple[bool, str]:
-        """Whisper 转写音频为文本，返回 (ok, text)。"""
+        """Whisper 转写音频为文本。走常驻 worker（模型只加载一次，增量/多次调用快）。"""
         if not Path(audio_path).exists():
             return False, "audio file not found"
-        ok, res = self._run(["transcribe", audio_path])
-        if not ok:
-            return False, str(res.get("error", "transcribe failed"))
-        text = str(res.get("text") or res.get("output") or "").strip()
-        return True, text
+        if not self.whisper_ready:
+            return False, (
+                "Whisper 模型未下载（small.pt）。"
+                "请先执行 backend/scripts/download_tts_model.py --whisper 预下载。"
+            )
+        if self._whisper_worker is None:
+            self._whisper_worker = _WhisperWorker(self, self.timeout)
+        return self._whisper_worker.transcribe(str(audio_path))
+
+    def shutdown(self) -> None:
+        """终止常驻 Whisper 子进程（服务关闭时调用，避免遗留进程）。"""
+        if self._whisper_worker is not None:
+            self._whisper_worker.shutdown()
+            self._whisper_worker = None
+
+    @property
+    def whisper_ready(self) -> bool:
+        """Whisper 模型是否已预下载（后端 venv 无 whisper 依赖时也回 False）。"""
+        if self._whisper_ready_val is None:
+            try:
+                import whisper  # noqa: F401
+                self._whisper_ready_val = (Path.home() / ".cache" / "whisper" / WHISPER_MODEL_FILE).exists()
+            except ImportError:
+                self._whisper_ready_val = False
+        return self._whisper_ready_val
 
 
 def create_voice_service() -> VoiceService:

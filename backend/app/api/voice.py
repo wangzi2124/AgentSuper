@@ -13,7 +13,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, Request, UploadFile
 
 from app.api.responses import ok, error_response
 from app.services.voice import LANGUAGES, SPEAKERS, create_voice_service
@@ -25,7 +25,12 @@ router = APIRouter()
 _service = None
 
 
-def _get_service():
+def _get_service(request: Request):
+    """优先使用运行时注入的共享实例（app.state.voice_service，与主 Agent 工具同源），
+    避免重复创建导致多个常驻 Whisper 子进程；仅测试/独立场景回退本模块懒单例。"""
+    shared = getattr(request.app.state, "voice_service", None)
+    if shared is not None:
+        return shared
     global _service
     if _service is None:
         _service = create_voice_service()
@@ -43,8 +48,8 @@ def _disabled() -> dict:
 
 
 @router.get("/status")
-def voice_status():
-    svc = _get_service()
+def voice_status(request: Request):
+    svc = _get_service(request)
     return ok({
         "enabled": svc.enabled,
         "speakers": SPEAKERS,
@@ -54,8 +59,8 @@ def voice_status():
 
 
 @router.post("/transcribe")
-async def voice_transcribe(audio: UploadFile = File(...)):
-    svc = _get_service()
+async def voice_transcribe(request: Request, audio: UploadFile = File(...)):
+    svc = _get_service(request)
     if not svc.enabled:
         return _disabled()
     try:
@@ -84,12 +89,13 @@ async def voice_transcribe(audio: UploadFile = File(...)):
 
 @router.post("/tts")
 async def voice_tts(
+    request: Request,
     text: str = Form(...),
     speaker: str = Form(""),
     language: str = Form("Auto"),
     instruct: str = Form(""),
 ):
-    svc = _get_service()
+    svc = _get_service(request)
     if not svc.enabled:
         return _disabled()
     if not text or not text.strip():

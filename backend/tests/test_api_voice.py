@@ -16,6 +16,7 @@ if __package__ in (None, ""):
 
 import pytest
 from fastapi import UploadFile
+from types import SimpleNamespace
 
 import app.api.voice as voice_api
 
@@ -40,6 +41,13 @@ class FakeService:
         return True, str(out), out
 
 
+def _req():
+    """假 Request：app.state.voice_service 未注满 → _get_service 回退模块 _service（被 mock）。"""
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(voice_service=None))
+    )
+
+
 def _install(monkeypatch, enabled=True):
     fake = FakeService(enabled=enabled)
     monkeypatch.setattr(voice_api, "_service", fake)
@@ -61,7 +69,7 @@ def _norm(resp):
 
 def test_status_enabled(monkeypatch):
     _install(monkeypatch, enabled=True)
-    resp = voice_api.voice_status()
+    resp = voice_api.voice_status(_req())
     assert resp["code"] == 0
     assert resp["data"]["enabled"] is True
     assert "Vivian" in resp["data"]["speakers"]
@@ -69,7 +77,7 @@ def test_status_enabled(monkeypatch):
 
 def test_status_disabled(monkeypatch):
     _install(monkeypatch, enabled=False)
-    resp = voice_api.voice_status()
+    resp = voice_api.voice_status(_req())
     assert resp["code"] == 0
     assert resp["data"]["enabled"] is False
 
@@ -78,7 +86,7 @@ def test_status_disabled(monkeypatch):
 
 def test_transcribe_success(monkeypatch):
     _install(monkeypatch, enabled=True)
-    resp = asyncio.run(voice_api.voice_transcribe(audio=_upload(b"RIFFaudio")))
+    resp = asyncio.run(voice_api.voice_transcribe(_req(), audio=_upload(b"RIFFaudio")))
     status, body = _norm(resp)
     assert status == 200
     data = json.loads(body)
@@ -88,7 +96,7 @@ def test_transcribe_success(monkeypatch):
 
 def test_transcribe_disabled(monkeypatch):
     _install(monkeypatch, enabled=False)
-    resp = asyncio.run(voice_api.voice_transcribe(audio=_upload(b"RIFFaudio")))
+    resp = asyncio.run(voice_api.voice_transcribe(_req(), audio=_upload(b"RIFFaudio")))
     status, body = _norm(resp)
     assert status == 503
     assert json.loads(body)["code"] != 0
@@ -96,7 +104,7 @@ def test_transcribe_disabled(monkeypatch):
 
 def test_transcribe_empty_audio(monkeypatch):
     _install(monkeypatch, enabled=True)
-    resp = asyncio.run(voice_api.voice_transcribe(audio=_upload(b"")))
+    resp = asyncio.run(voice_api.voice_transcribe(_req(), audio=_upload(b"")))
     status, body = _norm(resp)
     assert status == 400
 
@@ -104,7 +112,7 @@ def test_transcribe_empty_audio(monkeypatch):
 def test_transcribe_failure(monkeypatch):
     fake = _install(monkeypatch, enabled=True)
     fake.transcribe_result = (False, "whisper down")
-    resp = asyncio.run(voice_api.voice_transcribe(audio=_upload(b"RIFFaudio")))
+    resp = asyncio.run(voice_api.voice_transcribe(_req(), audio=_upload(b"RIFFaudio")))
     status, body = _norm(resp)
     assert status == 503
     data = json.loads(body)
@@ -116,7 +124,7 @@ def test_transcribe_failure(monkeypatch):
 
 def test_tts_success(monkeypatch):
     _install(monkeypatch, enabled=True)
-    resp = asyncio.run(voice_api.voice_tts(text="你好"))
+    resp = asyncio.run(voice_api.voice_tts(_req(), text="你好"))
     assert resp.status_code == 200
     assert resp.media_type == "audio/wav"
     assert Path(resp.path).exists()
@@ -124,7 +132,7 @@ def test_tts_success(monkeypatch):
 
 def test_tts_disabled(monkeypatch):
     _install(monkeypatch, enabled=False)
-    resp = asyncio.run(voice_api.voice_tts(text="你好"))
+    resp = asyncio.run(voice_api.voice_tts(_req(), text="你好"))
     status, body = _norm(resp)
     assert status == 503
     assert json.loads(body)["code"] != 0
@@ -132,7 +140,7 @@ def test_tts_disabled(monkeypatch):
 
 def test_tts_missing_text(monkeypatch):
     _install(monkeypatch, enabled=True)
-    resp = asyncio.run(voice_api.voice_tts(text="   "))
+    resp = asyncio.run(voice_api.voice_tts(_req(), text="   "))
     status, body = _norm(resp)
     assert status == 400
 
@@ -140,7 +148,7 @@ def test_tts_missing_text(monkeypatch):
 def test_tts_synthesis_failure(monkeypatch):
     fake = _install(monkeypatch, enabled=True)
     fake.synth_result = (False, "no model", None)
-    resp = asyncio.run(voice_api.voice_tts(text="你好"))
+    resp = asyncio.run(voice_api.voice_tts(_req(), text="你好"))
     status, body = _norm(resp)
     assert status == 503
     data = json.loads(body)

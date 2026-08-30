@@ -195,6 +195,68 @@ def cmd_transcribe(args):
     print(json.dumps({"ok": True, "text": result["text"].strip()}, ensure_ascii=False))
 
 
+def cmd_transcribe_serve(args):
+    """常驻 Whisper 转写服务：模型只加载一次，增量转写不重复付出模型加载成本。
+
+    stdin 协议：每行一个 JSON 请求 {"path": "<音频路径>"}；stdin EOF 或行 "shutdown" 时退出。
+    stdout 协议：每行一个 JSON 响应 {"ok": true, "text": "..."} 或 {"ok": false, "error": "..."}。
+    stderr 静默（tqdm 进度走 stderr，父进程 DEVNULL 丢弃，不阻塞）。
+    父进程死亡 → 管道 EOF → 本进程自行退出（Windows 不留孤儿）。
+    旧 torch 权重兼容：与单次 transcribe 相同的 weights_only 回退。
+    """
+    import whisper
+    import torch as _torch
+    _orig_load = _torch.load
+    def _legacy_load(*a, **k):
+        k["weights_only"] = False
+        return _orig_load(*a, **k)
+    _torch.load = _legacy_load
+
+    # 增量转写用轻量 small 模型（turbo 在这台 CPU 机上每个 3s 块要 ~15s，small 仅 ~3s）。
+    # 不随运行自动下载 whisper：缺失时明确报错（父进程先 _whisper_ready 拦截，这里兜底）
+    _target = os.path.join(os.path.expanduser("~"), ".cache", "whisper", "small.pt")
+    if not os.path.exists(_target):
+        print(json.dumps({
+            "ok": False,
+            "error": "Whisper 模型未下载（small.pt）。"
+                     "请先执行 backend/scripts/download_tts_model.py --whisper 预下载。",
+        }, ensure_ascii=False), flush=True)
+        return
+
+    device = "cuda" if args.device == "auto" and _torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device)
+    model = whisper.load_model("small", device=device)
+
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        if line == "shutdown":
+            break
+        try:
+            req = json.loads(line)
+            path = str(req.get("path") or "")
+            if not os.path.isfile(path):
+                print(json.dumps({"ok": False, "error": "audio file not found"},
+                                 ensure_ascii=False), flush=True)
+                continue
+            # 增量块：beam_size=1 大幅降 CPU 开销（默认 beam=5 在 CPU 上每块 15s+）；
+            # condition_on_previous_text=False 避免短块自我偏向历史文本。
+            result = model.transcribe(
+                whisper.load_audio(path),
+                fp16=(device == "cuda"),
+                beam_size=1,
+                condition_on_previous_text=False,
+            )
+            print(json.dumps({"ok": True, "text": (result["text"] or "").strip()},
+                             ensure_ascii=False), flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                             ensure_ascii=False), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Qwen3-TTS 聲音複製 CLI 工具",
@@ -237,6 +299,12 @@ def main():
     p_tr.add_argument("--device", default="auto",
                       help="auto（有 GPU 用 cuda）/ cpu / cuda")
 
+    # transcribe-serve 子命令：常驻 Whisper 进程（增量转写复用模型，避免重复加载）
+    p_trs = sub.add_parser("transcribe-serve",
+                           help="常驻 Whisper 转写服务（stdin/stdout json 行协议）")
+    p_trs.add_argument("--device", default="auto",
+                       help="auto（有 GPU 用 cuda）/ cpu / cuda")
+
     args = parser.parse_args()
 
     if args.download:
@@ -248,6 +316,8 @@ def main():
         cmd_clone(args)
     elif args.command == "transcribe":
         cmd_transcribe(args)
+    elif args.command == "transcribe-serve":
+        cmd_transcribe_serve(args)
 
 
 if __name__ == "__main__":

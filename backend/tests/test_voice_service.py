@@ -175,14 +175,35 @@ def test_synthesize_failure(monkeypatch, tmp_path):
 
 # ── 转写 ───────────────────────────────────────────────────────────────────
 
+class _FakeWhisperWorker:
+    """替换常驻 _WhisperWorker 的假实现（真实 worker 是 subprocess，测试不启动）。"""
+
+    def __init__(self, ok=True, text="今天天气不错"):
+        self._ok = ok
+        self._text = text
+
+    def transcribe(self, audio_path):
+        return self._ok, self._text
+
+    def shutdown(self):
+        pass
+
+
+def _wire_whisper(monkeypatch, svc, ok=True, text="今天天气不错"):
+    svc._whisper_ready_val = True
+    worker = _FakeWhisperWorker(ok=ok, text=text)
+    monkeypatch.setattr(svc, "_whisper_worker", worker)
+    return worker
+
+
 def test_transcribe_text(monkeypatch, tmp_path):
     svc = _make_service(monkeypatch, tmp_path)
     audio = tmp_path / "a.wav"
     audio.write_bytes(b"fake")
-    monkeypatch.setattr(svc, "_run", lambda args, timeout=None: (True, {"text": "\u4eca\u5929\u5929\u6c14\u4e0d\u9519"}))
+    _wire_whisper(monkeypatch, svc)
     ok, text = svc.transcribe(str(audio))
     assert ok is True
-    assert text == "\u4eca\u5929\u5929\u6c14\u4e0d\u9519"
+    assert text == "今天天气不错"
 
 
 def test_transcribe_missing_audio(monkeypatch, tmp_path):
@@ -196,7 +217,7 @@ def test_transcribe_failure(monkeypatch, tmp_path):
     svc = _make_service(monkeypatch, tmp_path)
     audio = tmp_path / "a.wav"
     audio.write_bytes(b"fake")
-    monkeypatch.setattr(svc, "_run", lambda args, timeout=None: (False, {"error": "whisper failed"}))
+    _wire_whisper(monkeypatch, svc, ok=False, text="whisper failed")
     ok, text = svc.transcribe(str(audio))
     assert ok is False
     assert "whisper failed" in text

@@ -107,6 +107,13 @@ async def lifespan(app: FastAPI):
             _maintenance_task.cancel()
         if _repair_task:
             _repair_task.cancel()
+        # 终止常驻 Whisper 转写子进程，避免遗留进程占内存
+        try:
+            vsvc = getattr(app.state, "voice_service", None)
+            if vsvc is not None and hasattr(vsvc, "shutdown"):
+                await asyncio.to_thread(vsvc.shutdown)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning("voice worker shutdown failed: %s", e)
 
 
 app = FastAPI(
