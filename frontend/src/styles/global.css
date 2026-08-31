@@ -287,7 +287,6 @@ input, textarea { font-family: inherit; }
 /* ── Page Header ── */
 .page-header {
   padding: 24px 32px 20px;
-  border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 80%, transparent), var(--surface));
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
