@@ -527,6 +527,27 @@ function exitHistory() {
   nextTick(() => textareaRef.value?.focus())
 }
 
+// [F9] 历史提示写入输入框：回看时在文本域首行插入「历史 N/M」提示（与输入内容一样作为文本展示，发送时仅发送消息本身）
+const historyHintText = computed(() =>
+  historyActive.value ? `历史 ${historyPosition.value}：` : ''
+)
+const displayValue = computed(() =>
+  historyHintText.value ? historyHintText.value + '\n' + text.value : text.value
+)
+// 输入框改动：剥离首行历史提示后写入 text（编辑提示本身则退出历史模式）
+function onInput(e: Event) {
+  const v = (e.target as HTMLTextAreaElement).value
+  const pre = historyHintText.value ? historyHintText.value + '\n' : ''
+  if (v.startsWith(pre)) {
+    text.value = v.slice(pre.length)
+  } else {
+    historyIndex.value = -1
+    draft.value = ''
+    text.value = v
+  }
+  nextTick(() => autoResize())
+}
+
 // [F9] 历史消息导航：↑ 回溯上一条、↓ 前进（最新在前，索引 0 = 最近一条）
 function navigateHistory(step: number) {
   const len = sentHistory.value.length
@@ -554,9 +575,19 @@ function onKeydown(e: KeyboardEvent) {
     handleSend()
     return
   }
+  // [F9] Esc 退出历史回看（提示条按钮已移除，改为键盘退出）
+  if (e.key === 'Escape' && historyActive.value) {
+    e.preventDefault()
+    exitHistory()
+    return
+  }
   const el = textareaRef.value
   // F9：仅当光标位于首行（↑）或末行末尾（↓）时才拦截，避免影响多行文本内光标移动
-  if (e.key === 'ArrowUp' && el && el.selectionStart === 0 && el.selectionEnd === 0) {
+  // 历史回看时，首行被「历史 N/M」提示占据，消息体从提示行之后开始 → 边界按提示长度偏移
+  const boundary = historyActive.value && displayValue.value
+    ? (displayValue.value.length - text.value.length)
+    : 0
+  if (e.key === 'ArrowUp' && el && el.selectionStart <= boundary && el.selectionEnd <= boundary) {
     e.preventDefault()
     navigateHistory(-1)
   } else if (e.key === 'ArrowDown' && el && el.selectionStart === el.value.length) {
@@ -584,16 +615,6 @@ const textareaRef = ref<HTMLTextAreaElement>()
 
 <template>
   <div class="chat-input" :class="{ dragging }" @dragover.prevent="onDragOver" @dragleave="onDragLeave" @drop.prevent="onDrop">
-    <!-- [F9] 历史导航提示条：有历史时提示 ↑/↓ 浏览；回看中显示位置可退出 -->
-    <div v-if="sentHistory.length" class="history-hint" :class="{ 'history-hint--active': historyActive }">
-      <template v-if="historyActive">
-        <span class="history-hint__pos">历史 {{ historyPosition }}</span>
-        <button class="history-hint__exit" @click="exitHistory">退出历史</button>
-      </template>
-      <template v-else>
-        <span>↑ / ↓ 可浏览历史消息</span>
-      </template>
-    </div>
     <!-- [F8] 附件预览列表（点击查看大图/内容） -->
     <div v-if="files.length" class="file-list">
       <div v-for="f in files" :key="f.id" class="file-chip" @click="openPreview(f)">
@@ -634,12 +655,12 @@ const textareaRef = ref<HTMLTextAreaElement>()
     <div class="input-card">
       <textarea
         ref="textareaRef"
-        v-model="text"
+        :value="displayValue"
         :maxlength="MAX_LENGTH"
         :placeholder="placeholder"
         rows="1"
         @keydown="onKeydown"
-        @input="autoResize"
+        @input="onInput"
         @paste="onPaste"
       ></textarea>
       <div class="input-actions">

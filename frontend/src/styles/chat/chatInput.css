@@ -3,40 +3,6 @@ position: relative;
 padding: 8px 24px calc(12px + env(safe-area-inset-bottom, 0px));
 background: transparent;
 }
-/* [F9] 历史导航提示条 */
-.history-hint {
-display: flex;
-align-items: center;
-justify-content: space-between;
-gap: 8px;
-margin-bottom: 8px;
-padding: 4px 10px;
-font-size: 12px;
-line-height: 1.4;
-color: var(--text-muted, #9ca3af);
-background: color-mix(in srgb, var(--primary, #4f46e5) 6%, var(--bg, #fff));
-border: 1px solid color-mix(in srgb, var(--primary, #4f46e5) 20%, var(--border));
-border-radius: var(--radius);
-}
-.history-hint--active {
-color: var(--primary, #4f46e5);
-font-weight: 500;
-}
-.history-hint__pos {
-flex: 1;
-}
-.history-hint__exit {
-border: none;
-background: transparent;
-color: var(--primary, #4f46e5);
-font-size: 12px;
-cursor: pointer;
-padding: 0;
-}
-.history-hint__exit:hover {
-text-decoration: underline;
-}
-
 /* Gemini 风格大圆角输入卡 */
 .input-card {
 max-width: 900px;
@@ -367,7 +333,6 @@ font-size: 12px; font-weight: 600; cursor: pointer; flex-shrink: 0;
 /* 移动端适配（与 MultiAgentView 768px 断点对齐） */
 @media (max-width: 768px) {
 .chat-input { padding: 8px 12px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
-.history-hint { margin-bottom: 6px; font-size: 11px; padding: 3px 8px; }
 .input-card { padding: 12px 12px 8px; border-radius: 20px; }
 .input-card textarea { font-size: 16px; min-height: 26px; }
 .model-pill { max-width: 150px; }
