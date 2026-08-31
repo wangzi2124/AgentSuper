@@ -286,7 +286,7 @@ input, textarea { font-family: inherit; }
 
 /* ── Page Header ── */
 .page-header {
-  padding: 28px 32px 20px;
+  padding: 24px 32px 20px;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 80%, transparent), var(--surface));
   backdrop-filter: blur(12px);
@@ -294,16 +294,16 @@ input, textarea { font-family: inherit; }
 }
 
 .page-header h2 {
-  font-size: 24px;
+  font-size: 18px;
   font-weight: 800;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.02em;
 }
 
 .page-header p {
-  font-size: 13px;
+  font-size: 11px;
   color: var(--text-secondary);
-  margin-top: 6px;
-  font-weight: 400;
+  margin-top: 4px;
+  font-weight: 500;
 }
 
 /* ── Page Content ── */

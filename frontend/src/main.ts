@@ -4,7 +4,7 @@ import Vant from 'vant'
 import 'vant/lib/index.css'
 import App from './App.vue'
 import router from './router'
-import './style.css'
+import './styles/global.css'
 import './styles/mobile.css'
 
 // 启动：等待首屏路由守卫完成（登录态校验/重定向到 /login）后再挂载，
