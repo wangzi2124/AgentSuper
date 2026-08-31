@@ -255,6 +255,8 @@
   }
   .mobile-body .header-actions { justify-content: flex-end; }
   .mobile-body .header-actions .status-badge { display: none !important; }
+  /* 聊天设置已集成到菜单「设置」：移动端隐藏聊天头独立的设置齿轮 */
+  .mobile-body .header-actions .settings-toggle { display: none !important; }
   /* 消息列表更贴合移动端窄屏 */
   .mobile-body .message-list { padding: 12px !important; }
   .mobile-body .bubble { font-size: 14px !important; }

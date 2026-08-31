@@ -5,6 +5,8 @@ import { useMultiAgentStore } from '../stores/multiAgent'
 import { SUPPORTED_MODELS } from '../config/models'
 import type { FileContent } from '../types'
 import { usePermissionStore } from '../stores/permission'
+import { useThemeStore, BG_VARIANTS } from '../stores/theme'
+import { useChatSettingsStore } from '../stores/chatSettings'
 import { synthesize, speakNative, stopNative } from '../api/voice'
 import MultiAgentResponse from '../components/MultiAgentResponse.vue'
 import ChatInput from '../components/ChatInput.vue'
@@ -15,6 +17,7 @@ const route = useRoute()
 const router = useRouter()
 const agent = useMultiAgentStore()
 const perm = usePermissionStore()
+const theme = useThemeStore()
 const parentRef = ref<HTMLElement>()
 const chatInputRef = ref<any>()
 const isNearBottom = ref(true)
@@ -182,11 +185,8 @@ function openWeather() {
 const speakingId = ref<string | null>(null)
 let speakAudio: HTMLAudioElement | null = null
 
-const AUTO_TTS_KEY = 'agent_super_auto_tts'
-let autoReadInit = false
-try { autoReadInit = localStorage.getItem(AUTO_TTS_KEY) === '1' } catch { /* noop */ }
-const autoRead = ref(autoReadInit)
-watch(autoRead, v => { try { localStorage.setItem(AUTO_TTS_KEY, v ? '1' : '0') } catch { /* noop */ } })
+const chatSettings = useChatSettingsStore()
+const autoRead = computed(() => chatSettings.autoRead)
 let pendingAutoRead = false
 function markPendingAutoRead() { if (autoRead.value) pendingAutoRead = true }
 watch(() => agent.loading, (loading) => {
@@ -311,6 +311,25 @@ async function handleCopy(messageId: string, text: string) {
         </div>
 
         <div class="drawer-body">
+          <!-- 外观 / 背景色 -->
+          <div class="drawer-section">
+            <div class="drawer-label">背景颜色</div>
+            <div class="bg-picker">
+              <button
+                v-for="v in BG_VARIANTS"
+                :key="v.value"
+                class="bg-swatch"
+                :title="v.label"
+                :class="{ active: theme.bgVariant === v.value }"
+                :style="{ '--sw': v.swatch, '--sw-glow': v.glowSwatch || v.swatch }"
+                @click="theme.setBg(v.value)"
+              >
+                <span class="bg-swatch-dot"></span>
+                <span class="bg-swatch-label">{{ v.label }}</span>
+              </button>
+            </div>
+          </div>
+
           <!-- 模型 -->
           <div class="drawer-section">
             <div class="drawer-label">模型</div>
@@ -363,7 +382,7 @@ async function handleCopy(messageId: string, text: string) {
             <div class="toggle-row">
               <span class="toggle-row-label">自动朗读回复</span>
               <label class="toggle">
-                <input type="checkbox" v-model="autoRead" :disabled="agent.loading" />
+                <input type="checkbox" :checked="autoRead" :disabled="agent.loading" @change="chatSettings.autoRead = ($event.target as HTMLInputElement).checked" />
                 <span class="toggle-slider"></span>
               </label>
             </div>
@@ -660,6 +679,39 @@ async function handleCopy(messageId: string, text: string) {
   text-transform: uppercase;
   color: var(--text-muted);
 }
+.bg-picker {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+.bg-swatch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+.bg-swatch:hover { border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); }
+.bg-swatch-dot {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background:
+    radial-gradient(circle at 30% 30%, var(--sw-glow), var(--sw));
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.bg-swatch-label { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+.bg-swatch.active {
+  border-color: var(--primary);
+  background: var(--primary-glow);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+.bg-swatch.active .bg-swatch-label { color: var(--primary); }
 .drawer-select {
   width: 100%;
   padding: 10px 12px;

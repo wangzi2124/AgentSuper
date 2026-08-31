@@ -515,3 +515,88 @@ input, textarea { font-family: inherit; }
   .card { padding: 12px; }
   .btn { padding: 8px 14px; font-size: 13px; }
 }
+
+/* ────────────────────────────────────────────
+ * 背景色预设（html[data-bg="..."]）
+ * 覆盖表面/边框 token，改变整体氛围色。
+ * 深色预设仅在深色模式生效；素白(light)在浅色模式生效。
+ * ──────────────────────────────────────────── */
+html[data-theme='dark'][data-bg='slate'] {
+  --bg: #0f1722;
+  --bg-subtle: #151e2c;
+  --surface: #182131;
+  --surface-elevated: #1e2a3d;
+  --surface-glass: rgba(15, 23, 34, 0.75);
+  --border: #243049;
+  --border-subtle: #1e2a3d;
+  --sidebar-bg: #0f1722;
+  --m-bg: #0f1722;
+}
+html[data-theme='dark'][data-bg='violet'] {
+  --bg: #100c22;
+  --bg-subtle: #181229;
+  --surface: #201841;
+  --surface-elevated: #271d50;
+  --surface-glass: rgba(16, 12, 34, 0.76);
+  --border: #312664;
+  --border-subtle: #271d50;
+  --primary-glow: rgba(140, 120, 255, 0.32);
+  --sidebar-bg: #100c22;
+  --m-bg: #100c22;
+}
+html[data-theme='dark'][data-bg='cyan'] {
+  --bg: #061a28;
+  --bg-subtle: #0b2436;
+  --surface: #103048;
+  --surface-elevated: #143a57;
+  --surface-glass: rgba(6, 26, 40, 0.76);
+  --border: #1a4466;
+  --border-subtle: #143a57;
+  --sidebar-bg: #061a28;
+  --m-bg: #061a28;
+}
+html[data-theme='dark'][data-bg='emerald'] {
+  --bg: #031a14;
+  --bg-subtle: #07241c;
+  --surface: #0d3027;
+  --surface-elevated: #123b30;
+  --surface-glass: rgba(3, 26, 20, 0.76);
+  --border: #154a3b;
+  --border-subtle: #123b30;
+  --sidebar-bg: #031a14;
+  --m-bg: #031a14;
+}
+html[data-theme='dark'][data-bg='rose'] {
+  --bg: #180811;
+  --bg-subtle: #220f1a;
+  --surface: #321527;
+  --surface-elevated: #3d1a30;
+  --surface-glass: rgba(24, 8, 17, 0.76);
+  --border: #4a1f3a;
+  --border-subtle: #3d1a30;
+  --sidebar-bg: #180811;
+  --m-bg: #180811;
+}
+html[data-theme='dark'][data-bg='amber'] {
+  --bg: #160f04;
+  --bg-subtle: #211809;
+  --surface: #33260f;
+  --surface-elevated: #3f3013;
+  --surface-glass: rgba(22, 15, 4, 0.76);
+  --border: #4a3a18;
+  --border-subtle: #3f3013;
+  --sidebar-bg: #160f04;
+  --m-bg: #160f04;
+}
+html[data-theme='light'][data-bg='light'] {
+  --bg: #f8fafc;
+  --bg-subtle: #f1f5f9;
+  --surface: #ffffff;
+  --surface-elevated: #ffffff;
+  --surface-glass: rgba(255, 255, 255, 0.72);
+  --border: #e2e8f0;
+  --border-subtle: #f1f5f9;
+  --sidebar-bg: #ffffff;
+  --m-bg: #f7f8fa;
+}
+

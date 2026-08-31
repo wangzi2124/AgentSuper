@@ -66,10 +66,14 @@ const mobileViews: Record<string, unknown> = {
   // ── 设置分组（移动端聊天对齐 ChatGPT：头部控件收纳进左侧抽屉） ──
   import { useMultiAgentStore } from '../stores/multiAgent'
   import { usePermissionStore } from '../stores/permission'
+  import { useThemeStore, BG_VARIANTS } from '../stores/theme'
+  import { useChatSettingsStore } from '../stores/chatSettings'
   import { SUPPORTED_MODELS } from '../config/models'
 
   const agent = useMultiAgentStore()
   const perm = usePermissionStore()
+  const theme = useThemeStore()
+  const chatSettings = useChatSettingsStore()
 
   // 工作目录摘要（过长省略展示）
   const workspacesText = computed(() => {
@@ -92,7 +96,7 @@ const mobileViews: Record<string, unknown> = {
     if (clearTimer) clearTimeout(clearTimer)
     agent.deleteConversation()
   }
-  // 清空向量库（危险操作归入参数设置）
+  // 清空向量库（危险操作归入设置）
   const vs = useVectorStore()
   async function onClearVectorsClick() {
     try {
@@ -213,7 +217,7 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
             <div class="drawer-item-ico" style="background: rgba(109,94,241,.12); color: #6d5ef1;">
               <van-icon name="setting-o" />
             </div>
-            <span class="drawer-item-title">参数设置</span>
+            <span class="drawer-item-title">设置</span>
             <van-icon name="arrow" class="drawer-item-arrow" />
           </div>
 
@@ -231,10 +235,30 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
   >
     <div class="settings-form">
       <div class="settings-form-head">
-        <span class="settings-form-title">参数设置</span>
+        <span class="settings-form-title">设置</span>
         <van-icon name="cross" class="settings-form-close" @click="showSettingsForm = false" />
       </div>
       <div class="settings-form-body">
+        <div class="form-field">
+          <div class="form-label">背景颜色</div>
+          <div class="bg-picker">
+            <button
+              v-for="v in BG_VARIANTS"
+              :key="v.value"
+              class="bg-swatch"
+              :class="{ active: theme.bgVariant === v.value }"
+              :style="{ '--sw': v.swatch, '--sw-glow': v.glowSwatch || v.swatch }"
+              @click="theme.setBg(v.value)"
+            >
+              <span class="bg-swatch-dot"></span>
+              <span class="bg-swatch-label">{{ v.label }}</span>
+            </button>
+          </div>
+        </div>
+        <div class="form-field form-row">
+          <div class="form-label">自动朗读回复</div>
+          <van-switch v-model="chatSettings.autoRead" size="22" />
+        </div>
         <div class="form-field">
           <div class="form-label">模型</div>
           <van-field
@@ -448,6 +472,33 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
     padding: 4px;
   }
   .settings-form-body { padding: 8px 16px; }
+  .bg-picker { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .bg-swatch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 10px;
+    border: 1px solid var(--border, #eef1f6);
+    border-radius: 10px;
+    background: var(--bg, #f8fafc);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .bg-swatch.active {
+    border-color: var(--primary, #4f46e5);
+    background: var(--primary-soft, #eef2ff);
+    box-shadow: 0 0 0 1px var(--primary, #4f46e5);
+  }
+  .bg-swatch-dot {
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: radial-gradient(circle at 30% 30%, var(--sw-glow, var(--sw)), var(--sw));
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  }
+  .bg-swatch-label { font-size: 12px; color: var(--text-secondary, #64748b); font-weight: 500; }
+  .bg-swatch.active .bg-swatch-label { color: var(--primary, #4f46e5); }
   .form-field { margin-bottom: 14px; }
   .form-label {
     font-size: 12px;
