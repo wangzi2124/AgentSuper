@@ -19,6 +19,8 @@ const parentRef = ref<HTMLElement>()
 const chatInputRef = ref<any>()
 const isNearBottom = ref(true)
 const isWeatherEnabled = ref(false)
+const showWeather = ref(false)
+const showSettings = ref(false)
 const showWsPanel = ref(false)
 const wsInput = ref('')
 const wsError = ref('')
@@ -30,8 +32,6 @@ const extraWorkspaces = computed(() => perm.workspaces.length > 1 ? perm.workspa
 const mainWorkspace = computed(() => perm.workspaces[0] || '')
 
 const messages = computed(() => agent.messages)
-
-const currentModel = computed(() => SUPPORTED_MODELS.find(m => m.value === agent.selectedModel) ?? SUPPORTED_MODELS[0])
 
 // ── ChatGPT 式滚动交互 ──
 const showScrollBtn = computed(() => !isNearBottom.value && messages.value.length > 0)
@@ -173,6 +173,11 @@ function handleClearConversation() {
   agent.deleteConversation()
 }
 
+function openWeather() {
+  showSettings.value = false
+  showWeather.value = true
+}
+
 // [TTS] AI 消息朗读
 const speakingId = ref<string | null>(null)
 let speakAudio: HTMLAudioElement | null = null
@@ -272,42 +277,56 @@ async function handleCopy(messageId: string, text: string) {
       <div class="chat-heading">
         <h2>多智能体编排</h2>
         <p>同时向所有智能体发送消息，并行处理你的请求</p>
-        <p v-if="agent.sessionDirectory" class="session-dir" :title="agent.sessionDirectory">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-          {{ agent.sessionDirectory }}
-        </p>
       </div>
-      <div class="header-controls">
-        <div class="model-selector">
-          <button class="model-chip" :disabled="agent.loading" @click="chatInputRef?.toggleModelMenu?.()" title="当前模型">
-            <span class="model-dot"></span>
-            <span>{{ currentModel.label }}</span>
+      <div class="header-actions">
+        <div v-if="agent.queuePosition != null" class="status-badge queued">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          排队 #{{ agent.queuePosition }}
+        </div>
+        <div v-else-if="agent.loading" class="status-badge running">
+          <span class="pulse-dot"></span> 运行中
+        </div>
+        <button
+          class="icon-btn settings-toggle"
+          :class="{ active: showSettings }"
+          title="设置"
+          @click="showSettings = !showSettings"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- 设置抽屉：收纳所有次要功能 -->
+    <transition name="drawer-fade">
+      <div v-if="showSettings" class="settings-backdrop" @click.self="showSettings = false"></div>
+    </transition>
+    <transition name="drawer-slide">
+      <aside v-if="showSettings" class="settings-drawer">
+        <div class="drawer-head">
+          <span class="drawer-title">对话设置</span>
+          <button class="drawer-close" title="关闭" @click="showSettings = false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
-        <span v-if="agent.queuePosition != null" class="stream-badge queued">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          排队中 #{{ agent.queuePosition }}
-        </span>
-        <span v-else-if="agent.loading" class="stream-badge running">
-          <span class="pulse-dot"></span> 智能体运行中
-        </span>
-        <WeatherAlert v-if="isWeatherEnabled" />
-        <div class="ws-manager">
-          <button class="ws-btn" @click="toggleWsPanel" title="管理可写工作目录">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-            工作目录 ({{ extraWorkspaces.length }})
-          </button>
-          <div v-if="showWsPanel" class="ws-panel">
+
+        <div class="drawer-body">
+          <!-- 模型 -->
+          <div class="drawer-section">
+            <div class="drawer-label">模型</div>
+            <select v-model="agent.selectedModel" class="drawer-select" :disabled="agent.loading">
+              <option v-for="m in SUPPORTED_MODELS" :key="m.value" :value="m.value">{{ m.label }}</option>
+            </select>
+          </div>
+
+          <!-- 会话工作目录 -->
+          <div class="drawer-section">
+            <div class="drawer-label">会话工作目录</div>
             <div class="ws-row">
               <button class="ws-pick-btn" title="选择目录" @click="showDirPicker = true">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
               </button>
-              <input
-                v-model="wsInput"
-                class="ws-input"
-                placeholder="F:\tetris"
-                @keyup.enter="handleAddWorkspace"
-              />
+              <input v-model="wsInput" class="ws-input" placeholder="F:\tetris" @keyup.enter="handleAddWorkspace" />
               <button class="ws-add" :disabled="wsBusy" @click="handleAddWorkspace">
                 {{ wsBusy ? '添加中...' : '添加' }}
               </button>
@@ -328,28 +347,53 @@ async function handleCopy(messageId: string, text: string) {
                 无额外工作区。添加后 Agent 可写该路径（无需重启）。
               </p>
             </div>
+            <p v-if="agent.sessionDirectory" class="drawer-session-dir" :title="agent.sessionDirectory">当前会话：{{ agent.sessionDirectory }}</p>
+          </div>
+
+          <!-- 开关 -->
+          <div class="drawer-section">
+            <div class="drawer-label">选项</div>
+            <div class="toggle-row">
+              <span class="toggle-row-label">知识库检索</span>
+              <label class="toggle">
+                <input type="checkbox" v-model="agent.useVectorDb" :disabled="agent.loading" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="toggle-row">
+              <span class="toggle-row-label">自动朗读回复</span>
+              <label class="toggle">
+                <input type="checkbox" v-model="autoRead" :disabled="agent.loading" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <!-- 工具 -->
+          <div v-if="isWeatherEnabled" class="drawer-section">
+            <div class="drawer-label">辅助工具</div>
+            <button class="drawer-row-btn" @click="openWeather">
+              <span class="drawer-row-icon">🌤️</span>
+              <span class="drawer-row-text">天气预警</span>
+              <span class="drawer-row-chevron">›</span>
+            </button>
+          </div>
+
+          <!-- 危险操作 -->
+          <div class="drawer-section">
+            <button
+              class="drawer-danger"
+              :disabled="agent.loading || messages.length === 0"
+              @click="handleClearConversation"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              清空当前对话
+            </button>
           </div>
         </div>
-        <label class="toggle">
-          <input type="checkbox" v-model="agent.useVectorDb" :disabled="agent.loading" />
-          <span class="toggle-slider"></span>
-          <span class="toggle-label">知识库</span>
-        </label>
-        <label class="toggle">
-          <input type="checkbox" v-model="autoRead" :disabled="agent.loading" />
-          <span class="toggle-slider"></span>
-          <span class="toggle-label">朗读</span>
-        </label>
-        <button
-          class="icon-btn clear-chat-btn"
-          :disabled="agent.loading || messages.length === 0"
-          title="清空当前对话"
-          @click="handleClearConversation"
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-        </button>
-      </div>
-    </div>
+      </aside>
+    </transition>
+    <WeatherAlert v-if="isWeatherEnabled" :show="showWeather" @update:show="showWeather = $event" />
   <!-- @@CHAT_TABLIST@@ -->
   <!-- ── 会话标签条：吸顶在聊天框最上方（移动端展示，桌面端 display:none） ── -->
   <div class="chat-tablist">
@@ -518,10 +562,10 @@ async function handleCopy(messageId: string, text: string) {
   .message-list { padding: 16px; }
 }
 
-.header-controls { display: flex; align-items: center; gap: 10px; flex-shrink: 0; flex-wrap: wrap; }
-.stream-badge { font-size: 12px; padding: 4px 10px; border-radius: var(--radius-pill); white-space: nowrap; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
-.stream-badge.queued { background: var(--warning-soft); color: var(--warning); border: 1px solid color-mix(in srgb, var(--warning) 20%, transparent); }
-.stream-badge.running { background: var(--success-soft); color: var(--success); border: 1px solid color-mix(in srgb, var(--success) 20%, transparent); animation: pulse-stream 2s ease-in-out infinite; }
+.header-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.status-badge { font-size: 12px; padding: 4px 10px; border-radius: var(--radius-pill); white-space: nowrap; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.status-badge.queued { background: var(--warning-soft); color: var(--warning); border: 1px solid color-mix(in srgb, var(--warning) 20%, transparent); }
+.status-badge.running { background: var(--success-soft); color: var(--success); border: 1px solid color-mix(in srgb, var(--success) 20%, transparent); animation: pulse-stream 2s ease-in-out infinite; }
 .pulse-dot {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--success);
@@ -535,27 +579,168 @@ async function handleCopy(messageId: string, text: string) {
 }
 @keyframes pulse-stream { 0%, 100% { opacity: 1; } 50% { opacity: 0.75; } }
 
-.model-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 6px 12px;
+.settings-toggle {
+  width: 36px; height: 36px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--bg-subtle);
-  font-size: 12px;
-  font-weight: 600;
+  border-radius: 10px;
+  background: var(--surface);
   color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--duration) var(--ease);
+  opacity: 1;
+}
+.settings-toggle:hover, .settings-toggle.active {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: var(--primary-glow);
+}
+
+/* ── 设置抽屉 ── */
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.45);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 1000;
+}
+.settings-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 360px;
+  max-width: 90vw;
+  z-index: 1001;
+  background: var(--surface-elevated);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-2xl);
+  display: flex;
+  flex-direction: column;
+}
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.drawer-title { font-size: 16px; font-weight: 800; letter-spacing: -0.02em; color: var(--text); }
+.drawer-close {
+  width: 32px; height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   transition: all var(--duration) var(--ease);
-  max-width: 200px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
-.model-chip:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); background: var(--primary-glow); }
-.model-chip:disabled { opacity: 0.6; }
-.model-dot { width: 7px; height: 7px; border-radius: 50%; background: linear-gradient(135deg, var(--primary), var(--accent)); flex-shrink: 0; }
+.drawer-close:hover { background: var(--bg-subtle); color: var(--text); }
+.drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 22px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.drawer-section { display: flex; flex-direction: column; gap: 8px; }
+.drawer-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.drawer-select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--duration) var(--ease);
+}
+.drawer-select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+.drawer-select:disabled { opacity: 0.6; }
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+.toggle-row-label { font-size: 13px; color: var(--text); font-weight: 500; }
+.drawer-session-dir {
+  font-size: 11.5px;
+  color: var(--primary);
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drawer-row-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+.drawer-row-btn:hover {
+  border-color: var(--primary);
+  background: var(--primary-glow);
+}
+.drawer-row-icon { font-size: 16px; flex-shrink: 0; }
+.drawer-row-text { flex: 1; text-align: left; }
+.drawer-row-chevron { color: var(--text-muted); font-size: 18px; line-height: 1; }
+.drawer-danger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+}
+.drawer-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 14%, var(--surface)); }
+.drawer-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+.drawer-fade-enter-active, .drawer-fade-leave-active { transition: opacity 0.2s var(--ease); }
+.drawer-fade-enter-from, .drawer-fade-leave-to { opacity: 0; }
+.drawer-slide-enter-active, .drawer-slide-leave-active { transition: transform 0.25s var(--ease); }
+.drawer-slide-enter-from, .drawer-slide-leave-to { transform: translateX(100%); }
+@media (max-width: 520px) {
+  .status-badge { display: none; }
+}
+
+/* 天气入口已收纳到设置抽屉，隐藏组件内原来的独立触发器按钮 */
+:deep(.weather-alert-container .weather-toggle) { display: none !important; }
 
 .toggle {
   display: flex;

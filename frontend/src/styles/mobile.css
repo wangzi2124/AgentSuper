@@ -249,13 +249,12 @@
     padding: 8px 12px !important;
     border-bottom: 1px solid #f0f1f5 !important;
   }
-  .mobile-body .header-controls {
+  .mobile-body .header-controls, .mobile-body .header-actions {
     gap: 8px !important;
     width: 100%;
   }
-  .mobile-body .header-controls .ws-manager { display: none !important; }
-  /* 清空当前对话/向量库 归入参数设置：手机端聊天头隐藏垃圾桶 */
-  .mobile-body .header-controls .clear-chat-btn { display: none !important; }
+  .mobile-body .header-actions { justify-content: flex-end; }
+  .mobile-body .header-actions .status-badge { display: none !important; }
   /* 消息列表更贴合移动端窄屏 */
   .mobile-body .message-list { padding: 12px !important; }
   .mobile-body .bubble { font-size: 14px !important; }

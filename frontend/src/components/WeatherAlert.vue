@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { addAuthHeaders } from '../api/fetch'
 
 // 天气数据接口定义
@@ -162,14 +162,23 @@ const globalCities = [
 // 根据当前标签返回对应城市列表
 const currentCities = computed(() => cityTab.value === 'cn' ? cnCities : globalCities)
 
-// 定义组件事件：关闭
+// 定义组件事件：关闭 / 显示状态变化（受控 prop 双向同步）
 const emit = defineEmits<{
   (e: 'close'): void
+  (e: 'update:show', value: boolean): void
 }>()
+
+const props = defineProps<{ show?: boolean }>()
+
+// 受控显示：外部通过 :show 打开，内部关闭时向父级同步
+watch(() => props.show, (v) => {
+  isVisible.value = !!v
+})
 
 // 切换弹窗显示状态
 function toggle() {
   isVisible.value = !isVisible.value
+  emit('update:show', isVisible.value)
   if (isVisible.value && !weatherData.value) {
     fetchWeather()
   }
@@ -178,6 +187,7 @@ function toggle() {
 // 关闭弹窗
 function close() {
   isVisible.value = false
+  emit('update:show', false)
 }
 
 // 获取天气数据
