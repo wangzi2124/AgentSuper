@@ -1,30 +1,64 @@
 .response { font-size: 15px; line-height: 1.8; }
-.routing { display: flex; align-items: center; gap: 8px; padding: 8px 0; font-size: 13px; color: var(--text-secondary); }
+.routing { display: flex; align-items: center; gap: 8px; padding: 10px 0; font-size: 13px; color: var(--text-secondary); }
 .spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .text { white-space: pre-wrap; word-break: break-word; }
-.agents { display: flex; flex-direction: column; gap: 12px; }
+
+/* Deep Space Agent 面板：玻璃卡片 + 左侧品牌光带 */
+.agents { display: flex; flex-direction: column; gap: 14px; }
 .agent {
-border: 1px solid var(--border);
-border-radius: var(--radius-lg);
-padding: 16px 18px;
-background: var(--surface-elevated);
-box-shadow: var(--shadow-sm);
-transition: border-color var(--duration) var(--ease);
+position: relative;
+border: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
+border-radius: 16px;
+padding: 16px 18px 16px 22px;
+background: linear-gradient(135deg, color-mix(in srgb, var(--surface-elevated) 96%, var(--primary)), var(--surface-elevated));
+box-shadow: var(--shadow-sm), inset 0 1px 0 color-mix(in srgb, #fff 3%, transparent);
+transition: border-color var(--duration) var(--ease), box-shadow var(--duration) var(--ease);
 }
-.agent.running { border-color: color-mix(in srgb, var(--primary) 30%, var(--border)); }
-.agent-h { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 15px; }
-.avatar { font-size: 22px; }
+.agent::before {
+content: '';
+position: absolute;
+left: 0; top: 14px; bottom: 14px;
+width: 3px;
+border-radius: 0 3px 3px 0;
+background: linear-gradient(180deg, var(--primary), var(--accent));
+opacity: 0.6;
+transition: opacity var(--duration) var(--ease);
+}
+.agent.running {
+border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+box-shadow: var(--shadow), 0 0 26px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+.agent.running::before { opacity: 1; }
+.agent-h { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 15px; }
+.avatar {
+width: 30px; height: 30px;
+font-size: 15px;
+border-radius: 10px;
+background: color-mix(in srgb, var(--surface) 70%, var(--primary));
+display: inline-flex; align-items: center; justify-content: center;
+flex-shrink: 0;
+border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent);
+box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 5%, transparent);
+}
 .name { font-weight: 600; color: var(--text); }
-.badge { font-size: 12px; padding: 3px 10px; border-radius: var(--radius-pill); margin-left: auto; font-weight: 600; }
+.badge { font-size: 11.5px; padding: 3px 10px; border-radius: var(--radius-pill); margin-left: auto; font-weight: 600; letter-spacing: 0.02em; flex-shrink: 0; }
 .badge.running { background: var(--primary-glow); color: var(--primary); }
 .badge.completed { background: var(--success-soft); color: var(--success); }
 .badge.failed { background: var(--danger-soft); color: var(--danger); }
-.steps { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 4px; }
-.step-item { padding: 8px 10px; border-radius: var(--radius-sm); font-size: 15px; }
-.step-item.completed { background: color-mix(in srgb, var(--success) 5%, transparent); }
-.step-item.failed { background: var(--danger-soft); }
-.step-item.running { background: var(--primary-glow); }
+
+/* 步骤列表：细分组，忙碌步骤高亮 */
+.steps { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 4px; }
+.step-item {
+padding: 8px 12px;
+border-radius: 10px;
+font-size: 15px;
+border: 1px solid transparent;
+transition: background var(--duration) var(--ease), border-color var(--duration) var(--ease);
+}
+.step-item.completed { background: color-mix(in srgb, var(--success) 6%, transparent); border-color: color-mix(in srgb, var(--success) 14%, transparent); }
+.step-item.failed { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 24%, transparent); }
+.step-item.running { background: color-mix(in srgb, var(--primary) 10%, transparent); border-color: color-mix(in srgb, var(--primary) 26%, transparent); }
 .step-row { display: flex; align-items: center; gap: 8px; }
 .step-icon { font-size: 15px; flex-shrink: 0; }
 .step-name { font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -45,12 +79,12 @@ gap: 6px;
 .step-args-toggle { color: var(--text-secondary); cursor: pointer; text-decoration: underline; margin-left: 4px; font-family: inherit; }
 .step-args-toggle:hover { color: var(--primary); }
 .step-args {
-margin: 4px 0 0 23px;
+margin: 6px 0 0 23px;
 padding: 10px 12px;
-background: var(--bg-subtle);
+background: color-mix(in srgb, var(--bg) 60%, transparent);
 border: 1px solid var(--border-subtle);
 border-left: 2px solid var(--primary);
-border-radius: var(--radius-sm);
+border-radius: 10px;
 max-height: 200px;
 overflow-y: auto;
 }
@@ -58,14 +92,14 @@ overflow-y: auto;
 .step-result-toggle { font-size: 14px; color: var(--primary); cursor: pointer; text-decoration: underline; margin-top: 4px; padding-left: 23px; }
 .step-result-toggle:hover { opacity: 0.8; }
 .step-result {
-margin: 4px 0 0 23px;
+margin: 6px 0 0 23px;
 padding: 10px 12px;
-background: var(--bg-subtle);
+background: color-mix(in srgb, var(--bg) 60%, transparent);
 border: 1px solid var(--border-subtle);
 border-left: 2px solid var(--accent);
-border-radius: var(--radius-sm);
+border-radius: 10px;
 max-height: 200px;
 overflow-y: auto;
 }
 .step-result pre { margin: 0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: var(--text-secondary); font-family: 'JetBrains Mono', Consolas, monospace; }
-.err { padding: 10px 14px; background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: var(--radius); font-size: 13px; color: var(--danger); margin-top: 4px; }
+.err { padding: 10px 14px; background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: 12px; font-size: 13px; color: var(--danger); margin-top: 4px; }

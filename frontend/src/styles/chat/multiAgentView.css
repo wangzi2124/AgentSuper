@@ -426,9 +426,9 @@ animation: spin 24s linear infinite;
 .message-list {
 flex: 1;
 overflow-y: auto;
-padding: 24px 32px;
+padding: 28px 32px;
 scroll-behavior: smooth;
-max-width: 900px;
+max-width: 860px;
 margin: 0 auto;
 width: 100%;
 box-sizing: border-box;
@@ -441,58 +441,67 @@ box-sizing: border-box;
 .chat-footer { flex-shrink: 0; }
 
 /* Messages */
-.chat-message { display: flex; gap: 12px; margin-bottom: 24px; animation: fadeSlideUp 0.35s var(--ease); }
+.chat-message { display: flex; gap: 14px; margin-bottom: 28px; animation: fadeSlideUp 0.35s var(--ease); }
 .chat-message.user { flex-direction: row-reverse; }
 
+/* Deep Space 头像：毛玻璃圆角 + 品牌光晕环 */
 .avatar {
-width: 38px; height: 38px;
-border-radius: 12px;
-background: var(--bg-subtle);
+width: 40px; height: 40px;
+border-radius: 13px;
+background: linear-gradient(135deg, color-mix(in srgb, var(--surface-elevated) 92%, var(--primary)), var(--surface-elevated));
 display: flex; align-items: center; justify-content: center;
-font-size: 18px;
+font-size: 20px;
 flex-shrink: 0;
-border: 1px solid var(--border);
-box-shadow: var(--shadow-sm);
+border: 1px solid color-mix(in srgb, var(--primary) 22%, transparent);
+box-shadow: var(--shadow-sm), 0 0 0 3px color-mix(in srgb, var(--primary) 6%, transparent);
+backdrop-filter: blur(8px);
+-webkit-backdrop-filter: blur(8px);
 }
 .avatar.user {
-background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 18%, var(--surface)), color-mix(in srgb, var(--accent) 10%, var(--surface)));
-border-color: color-mix(in srgb, var(--primary) 25%, transparent);
+background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 26%, var(--surface)), color-mix(in srgb, var(--accent) 15%, var(--surface)));
+border-color: color-mix(in srgb, var(--primary) 32%, transparent);
+box-shadow: var(--shadow-sm), 0 0 0 3px color-mix(in srgb, var(--primary) 10%, transparent), 0 4px 18px color-mix(in srgb, var(--primary) 22%, transparent);
 }
 
+/* Deep Space 气泡：玻璃质感、字体 15px、行高 1.8 */
 .bubble {
 flex: 1; width: 100%; max-width: 100%;
-padding: 14px 18px;
-border-radius: var(--radius-lg);
-background: var(--surface);
-border: 1px solid var(--border);
-line-height: 1.75;
-font-size: 14.5px;
+padding: 16px 20px;
+border-radius: 18px;
+background: color-mix(in srgb, var(--surface-glass) 88%, transparent);
+border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+line-height: 1.8;
+font-size: 15px;
 box-sizing: border-box;
 border-top-left-radius: var(--radius-sm);
-box-shadow: var(--shadow-sm);
+box-shadow: var(--shadow-sm), inset 0 1px 0 color-mix(in srgb, #fff 4%, transparent);
+backdrop-filter: blur(14px);
+-webkit-backdrop-filter: blur(14px);
 }
 .user .bubble {
-flex: none; width: auto; max-width: 80%;
-background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 12%, var(--surface)), color-mix(in srgb, var(--accent) 6%, var(--surface)));
+flex: none; width: auto; max-width: 76%;
+background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 15%, var(--surface)), color-mix(in srgb, var(--accent) 8%, var(--surface)));
 color: var(--text);
-border-color: color-mix(in srgb, var(--primary) 20%, var(--border));
-border-top-left-radius: var(--radius-lg);
+border-color: color-mix(in srgb, var(--primary) 26%, var(--border));
+border-top-left-radius: 18px;
 border-top-right-radius: var(--radius-sm);
+box-shadow: var(--shadow-sm), 0 0 0 1px color-mix(in srgb, var(--primary) 6%, transparent), inset 0 1px 0 color-mix(in srgb, #fff 5%, transparent);
 }
 .content { white-space: pre-wrap; word-break: break-word; }
 
 /* [F8] 用户消息附件回显 */
-.msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-.msg-file-image { max-width: 200px; max-height: 200px; border-radius: var(--radius); object-fit: cover; display: block; cursor: zoom-in; box-shadow: var(--shadow-sm); }
+.msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.msg-file-image { max-width: 200px; max-height: 200px; border-radius: 14px; object-fit: cover; display: block; cursor: zoom-in; box-shadow: var(--shadow-sm); border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); }
 .msg-file-caption { display: block; font-size: 12px; color: var(--text-secondary); margin-top: 4px; max-width: 200px; }
-.msg-file-name { font-size: 12px; padding: 4px 10px; border-radius: var(--radius-pill); background: var(--bg-subtle); display: inline-block; border: 1px solid var(--border); }
+.msg-file-name { font-size: 12px; padding: 5px 11px; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--bg) 55%, transparent); display: inline-block; border: 1px solid var(--border); }
 
 .is-error .bubble { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 30%, var(--border)); }
 
-.message-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-subtle); font-size: 11px; }
+.message-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-subtle); font-size: 11px; }
 .user .message-footer { border-top-color: color-mix(in srgb, var(--primary) 15%, var(--border)); }
 .time { color: var(--text-muted); opacity: 0.85; font-variant-numeric: tabular-nums; }
-.message-actions { display: flex; gap: 4px; align-items: center; }
+.message-actions { display: flex; gap: 4px; align-items: center; opacity: 0; transform: translateY(2px); transition: opacity 0.18s var(--ease), transform 0.18s var(--ease); }
+.chat-message:hover .message-actions { opacity: 1; transform: translateY(0); }
 .btn-wrapper { position: relative; display: inline-flex; }
 .copy-toast {
 position: absolute;
