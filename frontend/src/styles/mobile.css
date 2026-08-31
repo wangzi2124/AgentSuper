@@ -205,9 +205,9 @@
 
 /* 主题色对齐应用 --primary */
 :root {
-  --van-primary-color: #4f46e5;
-  --van-nav-bar-background: #ffffff;
-  --van-nav-bar-title-text-color: #1e293b;
+  --van-primary-color: var(--primary);
+  --van-nav-bar-background: var(--surface-elevated);
+  --van-nav-bar-title-text-color: var(--text);
 }
 
 @media (max-width: 768px) {
@@ -325,7 +325,7 @@ html[data-theme='dark'] {
 }
 
 html[data-theme='dark'] {
-  --m-bg: #0b1222;
+  --m-bg: var(--bg, #0a0e1a);
   --m-card-shadow: 0 2px 14px rgba(0, 0, 0, 0.35);
 }
 

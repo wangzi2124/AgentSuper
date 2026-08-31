@@ -572,7 +572,11 @@ function setText(val: string) {
 }
 
 // 暴露方法供父组件调用
-defineExpose({ setText, focus: () => textareaRef.value?.focus() })
+defineExpose({
+  setText,
+  focus: () => textareaRef.value?.focus(),
+  toggleModelMenu: toggleModelMenu,
+})
 
 // 文本域元素引用
 const textareaRef = ref<HTMLTextAreaElement>()
@@ -775,23 +779,23 @@ const textareaRef = ref<HTMLTextAreaElement>()
 
 /* Gemini 风格大圆角输入卡 */
 .input-card {
-  max-width: 860px;
+  max-width: 900px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 14px 14px 10px;
-  background: var(--surface);
+  gap: 8px;
+  padding: 16px 16px 12px;
+  background: var(--surface-elevated);
   border: 1px solid var(--border);
-  border-radius: 24px;
-  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.10);
+  border-radius: 28px;
+  box-shadow: 0 8px 32px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .input-card:focus-within {
-  border-color: var(--primary, #4f46e5);
+  border-color: var(--primary);
   box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--primary, #4f46e5) 12%, transparent),
-    0 8px 28px rgba(15, 23, 42, 0.10);
+    0 0 0 3px var(--primary-glow),
+    0 8px 32px rgba(15, 23, 42, 0.12);
 }
 .input-card textarea {
   width: 100%;
@@ -969,12 +973,12 @@ const textareaRef = ref<HTMLTextAreaElement>()
   justify-content: center;
   border: none;
   cursor: pointer;
-  background: linear-gradient(135deg, #6d5ef1 0%, #8b5cf6 55%, #38bdf8);
+  background: linear-gradient(135deg, var(--primary) 0%, color-mix(in srgb, var(--primary) 65%, var(--accent)) 100%);
   color: #fff;
-  box-shadow: 0 4px 14px rgba(109, 94, 241, 0.35);
-  transition: transform 0.1s, opacity 0.15s;
+  box-shadow: 0 4px 14px var(--primary-glow);
+  transition: transform 0.1s var(--ease-spring), opacity 0.15s;
 }
-.send-btn:hover:not(:disabled) { transform: scale(1.06); }
+.send-btn:hover:not(:disabled) { transform: scale(1.08); }
 .send-btn:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
 .send-btn.cancel {
   background: var(--danger, #ef4444);

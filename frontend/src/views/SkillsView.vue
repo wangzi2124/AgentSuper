@@ -2,15 +2,12 @@
 import { onMounted } from 'vue'
 import { useSkillStore } from '../stores/skills'
 
-// 技能状态管理
 const skills = useSkillStore()
 
-// 组件挂载时加载所有技能
 onMounted(() => {
   skills.fetchAll()
 })
 
-// 切换技能启用/禁用状态
 async function handleToggle(name: string, enabled: boolean) {
   try {
     await skills.toggle(name, !enabled)
@@ -23,10 +20,10 @@ async function handleToggle(name: string, enabled: boolean) {
 <template>
   <div class="page-header">
     <h2>技能管理</h2>
-    <p>管理定义智能体能力的 skill.md 文件</p>
+    <p>定义智能体能力的 skill.md 文件</p>
   </div>
   <div class="page-content">
-    <div v-if="skills.loading" style="display:flex;justify-content:center;padding:40px;">
+    <div v-if="skills.loading" class="loading-wrap">
       <span class="spinner"></span>
     </div>
 
@@ -36,24 +33,21 @@ async function handleToggle(name: string, enabled: boolean) {
       <p style="font-size:13px;margin-top:4px;">技能从后端技能目录加载。</p>
     </div>
 
-    <div v-else style="display:flex;flex-direction:column;gap:8px;">
-      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px;">
-        {{ skills.skills.length }} 个技能可用
-      </div>
-      <div v-for="skill in skills.skills" :key="skill.name" class="card" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-        <div style="font-size:24px;">🧠</div>
-        <div style="flex:1;min-width:0;">
-          <div style="font-weight:600;font-size:14px;">{{ skill.name }}</div>
-          <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">{{ skill.description }}</div>
-          <div style="font-size:11px;color:var(--text-secondary);margin-top:2px;">{{ skill.path }}</div>
+    <div v-else class="item-list">
+      <div class="list-meta">{{ skills.skills.length }} 个技能可用</div>
+      <div v-for="skill in skills.skills" :key="skill.name" class="item-card">
+        <div class="item-icon" data-accent="skill">🧠</div>
+        <div class="item-info">
+          <div class="item-name">{{ skill.name }}</div>
+          <div class="item-desc">{{ skill.description }}</div>
+          <div class="item-path">{{ skill.path }}</div>
         </div>
         <span class="badge" :class="skill.enabled ? 'badge-enabled' : 'badge-disabled'">
           {{ skill.enabled ? '已启用' : '已禁用' }}
         </span>
         <button
-          class="btn"
+          class="btn item-action"
           :class="skill.enabled ? 'btn-danger' : 'btn-primary'"
-          style="font-size:12px;padding:6px 12px;"
           @click="handleToggle(skill.name, skill.enabled)"
         >
           {{ skill.enabled ? '禁用' : '启用' }}
@@ -62,3 +56,68 @@ async function handleToggle(name: string, enabled: boolean) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.loading-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 48px;
+}
+.item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.list-meta {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+.item-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  flex-wrap: wrap;
+  transition: all var(--duration) var(--ease);
+  animation: fadeSlideUp 0.4s var(--ease);
+}
+.item-card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: color-mix(in srgb, var(--primary) 25%, var(--border));
+  transform: translateY(-1px);
+}
+.item-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 12%, transparent), color-mix(in srgb, var(--accent) 8%, transparent));
+  border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent);
+}
+.item-info { flex: 1; min-width: 0; }
+.item-name { font-weight: 700; font-size: 14px; color: var(--text); }
+.item-desc { font-size: 12.5px; color: var(--text-secondary); margin-top: 3px; line-height: 1.5; }
+.item-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.item-action { font-size: 12px; padding: 7px 14px; }
+@media (max-width: 600px) {
+  .item-card { gap: 12px; }
+  .item-action { margin-left: auto; }
+}
+</style>

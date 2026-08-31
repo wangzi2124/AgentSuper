@@ -31,10 +31,9 @@ const mainWorkspace = computed(() => perm.workspaces[0] || '')
 
 const messages = computed(() => agent.messages)
 
+const currentModel = computed(() => SUPPORTED_MODELS.find(m => m.value === agent.selectedModel) ?? SUPPORTED_MODELS[0])
+
 // ── ChatGPT 式滚动交互 ──
-// 用户滚动优先：仅「用户手势」滚动（isTrusted=true）更新 isNearBottom，
-// 程序滚动（scrollTo 等，isTrusted=false）不打断，避免 smooth 回底中途按钮闪烁。
-// 用户离开底部时显示「回到底部」浮动按钮，点击后平滑回底并恢复自动跟随。
 const showScrollBtn = computed(() => !isNearBottom.value && messages.value.length > 0)
 
 function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
@@ -137,8 +136,6 @@ watch(() => route.params.id, (newId) => {
 })
 
 function onScroll(e: Event) {
-  // 程序滚动（scrollTo/scrollBy 触发，isTrusted=false）不参与「离开底部」判定，
-  // 避免 smooth 回底中途按钮闪烁；仅用户手势滚动更新 isNearBottom（用户滚动优先）。
   if (!e.isTrusted) return
   const el = parentRef.value
   if (!el) return
@@ -148,8 +145,6 @@ function onScroll(e: Event) {
 function handleSend(text: string, files?: FileContent[]) {
   markPendingAutoRead()
   agent.send(text, undefined, files || []).then((completed) => {
-    // 仅在真正完成（收到 done）时跳转会话路由并触发 loadConversation，
-    // 避免「SSE 断连→重连失败」时导航到服务器 id 新建空会话、把已显示内容顶掉
     if (completed && agent.conversationId && route.name !== 'MultiAgentConversation') {
       router.push({ name: 'MultiAgentConversation', params: { id: agent.conversationId } })
     }
@@ -178,18 +173,15 @@ function handleClearConversation() {
   agent.deleteConversation()
 }
 
-// [TTS] AI 消息朗读：本地 Qwen3-TTS 合成播放，服务不可达降级浏览器 speechSynthesis
+// [TTS] AI 消息朗读
 const speakingId = ref<string | null>(null)
 let speakAudio: HTMLAudioElement | null = null
 
-// [TTS] AI 回复自动朗读：开关持久化 localStorage，回复完成后自动朗读最新助手消息
 const AUTO_TTS_KEY = 'agent_super_auto_tts'
 let autoReadInit = false
 try { autoReadInit = localStorage.getItem(AUTO_TTS_KEY) === '1' } catch { /* noop */ }
 const autoRead = ref(autoReadInit)
 watch(autoRead, v => { try { localStorage.setItem(AUTO_TTS_KEY, v ? '1' : '0') } catch { /* noop */ } })
-// 仅对「刚发送的新回复」自动朗读：发送时置位，回复完成后消费；
-// 历史回放/手动加载不触发
 let pendingAutoRead = false
 function markPendingAutoRead() { if (autoRead.value) pendingAutoRead = true }
 watch(() => agent.loading, (loading) => {
@@ -206,7 +198,6 @@ async function handleSpeak(id: string, content: string) {
   stopSpeaking()
   let text = (content || '').trim()
   if (!text) return
-  // 过长文本单次合成会超时（后端 CPU 合成慢）：截断前段保证出声，全量仍可 speechSynthesis 兜底
   const MAX_TTS_CHARS = 1200
   if (text.length > MAX_TTS_CHARS) text = text.slice(0, MAX_TTS_CHARS) + '。'
   speakingId.value = id
@@ -259,6 +250,7 @@ async function handleCopy(messageId: string, text: string) {
     console.error('Copy failed:', e)
   }
 }
+
   /* @@CHAT_TABLIST_SCRIPT@@ */
   // ── 会话标签条：聊天框顶部切换 / 新建会话（数据源 = agent.conversations） ──
   agent.loadConversations()
@@ -277,22 +269,33 @@ async function handleCopy(messageId: string, text: string) {
 <template>
   <div class="multi-agent-view">
     <div class="chat-header">
-      <div>
+      <div class="chat-heading">
         <h2>多智能体编排</h2>
         <p>同时向所有智能体发送消息，并行处理你的请求</p>
         <p v-if="agent.sessionDirectory" class="session-dir" :title="agent.sessionDirectory">
-          📁 {{ agent.sessionDirectory }}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          {{ agent.sessionDirectory }}
         </p>
       </div>
       <div class="header-controls">
+        <div class="model-selector">
+          <button class="model-chip" :disabled="agent.loading" @click="chatInputRef?.toggleModelMenu?.()" title="当前模型">
+            <span class="model-dot"></span>
+            <span>{{ currentModel.label }}</span>
+          </button>
+        </div>
         <span v-if="agent.queuePosition != null" class="stream-badge queued">
-          ⏳ 排队中 #{{ agent.queuePosition }}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          排队中 #{{ agent.queuePosition }}
         </span>
-        <span v-else-if="agent.loading" class="stream-badge running">● 智能体运行中</span>
+        <span v-else-if="agent.loading" class="stream-badge running">
+          <span class="pulse-dot"></span> 智能体运行中
+        </span>
         <WeatherAlert v-if="isWeatherEnabled" />
         <div class="ws-manager">
           <button class="ws-btn" @click="toggleWsPanel" title="管理可写工作目录">
-            📁 工作目录 ({{ extraWorkspaces.length }})
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            工作目录 ({{ extraWorkspaces.length }})
           </button>
           <div v-if="showWsPanel" class="ws-panel">
             <div class="ws-row">
@@ -330,12 +333,12 @@ async function handleCopy(messageId: string, text: string) {
         <label class="toggle">
           <input type="checkbox" v-model="agent.useVectorDb" :disabled="agent.loading" />
           <span class="toggle-slider"></span>
-          <span class="toggle-label">向量库检索</span>
+          <span class="toggle-label">知识库</span>
         </label>
         <label class="toggle">
           <input type="checkbox" v-model="autoRead" :disabled="agent.loading" />
           <span class="toggle-slider"></span>
-          <span class="toggle-label">自动朗读</span>
+          <span class="toggle-label">朗读</span>
         </label>
         <button
           class="icon-btn clear-chat-btn"
@@ -367,15 +370,22 @@ async function handleCopy(messageId: string, text: string) {
 
     <div class="chat-body">
       <div v-if="messages.length === 0" class="empty-state">
-        <div class="icon">🤖</div>
-        <p>向所有智能体提问</p>
-        <p class="hint">多个 AI 智能体将并行处理你的请求</p>
+        <div class="empty-orb">
+          <div class="empty-orb-core">🤖</div>
+          <div class="empty-orb-ring"></div>
+        </div>
+        <p class="empty-title">向所有智能体提问</p>
+        <p class="empty-hint">多个 AI 智能体将并行处理你的请求</p>
       </div>
 
       <div v-else ref="parentRef" class="message-list" @scroll="onScroll">
         <div v-for="(msg, idx) in messages" :key="msg.id" class="message-wrapper">
           <div class="chat-message" :class="[msg.role, { 'is-error': msg.isError }]">
-            <div class="avatar">{{ msg.role === 'user' ? '👤' : (msg.isError ? '⚠️' : '🤖') }}</div>
+            <div class="avatar" :class="msg.role">
+              <span v-if="msg.role === 'user'">👤</span>
+              <span v-else-if="msg.isError">⚠️</span>
+              <span v-else>🤖</span>
+            </div>
             <div class="bubble">
               <template v-if="msg.role === 'user'">
                 <div class="content">{{ msg.content }}</div>
@@ -406,7 +416,7 @@ async function handleCopy(messageId: string, text: string) {
                     <button class="icon-btn" @click="handleCopy(msg.id, msg.content)" title="复制">
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                     </button>
-                    <span v-if="copiedId === msg.id" class="copy-toast">复制成功</span>
+                    <span v-if="copiedId === msg.id" class="copy-toast">已复制</span>
                   </div>
                   <button v-if="msg.role !== 'user'" class="icon-btn speak-btn" :class="{ speaking: speakingId === msg.id }" @click="handleSpeak(msg.id, msg.content)" :title="speakingId === msg.id ? '停止朗读' : '朗读'">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
@@ -430,7 +440,7 @@ async function handleCopy(messageId: string, text: string) {
         </div>
       </div>
 
-      <!-- ChatGPT 式「回到底部」：用户离开底部时浮现，点击平滑回底并恢复自动跟随 -->
+      <!-- ChatGPT 式「回到底部」 -->
       <transition name="scroll-fade">
         <button
           v-if="showScrollBtn"
@@ -452,7 +462,7 @@ async function handleCopy(messageId: string, text: string) {
 
     <DirPickerModal :show="showDirPicker" @close="showDirPicker = false" @select="handleDirPick" />
 
-    <!-- [F8] 聊天图片放大预览遮罩：点击图片放大，点击遮罩/图片关闭 -->
+    <!-- [F8] 聊天图片放大预览遮罩 -->
     <div v-if="previewImage" class="image-preview-overlay" @click.self="previewImage = ''">
       <img :src="previewImage" class="image-preview-img" alt="预览" @click="previewImage = ''" />
       <span class="image-preview-close" @click="previewImage = ''">✕</span>
@@ -463,106 +473,167 @@ async function handleCopy(messageId: string, text: string) {
 <style scoped>
 .multi-agent-view { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
 .chat-notice {
-  margin: 0 24px 8px; padding: 8px 12px; border-radius: 8px;
-  background: var(--accent-soft, rgba(59, 130, 246, 0.12));
-  color: var(--text-primary, inherit); font-size: 13px; flex-shrink: 0;
+  margin: 0 24px 8px; padding: 8px 14px; border-radius: var(--radius);
+  background: var(--warning-soft);
+  color: var(--warning); font-size: 13px; flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
+  animation: fadeSlideUp 0.3s var(--ease);
 }
-.chat-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; gap: 8px; }
-.chat-header h2 { margin: 0 0 2px; font-size: 20px; }
+
+/* ── Header ── */
+.chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px 32px 18px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 12px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 70%, transparent), transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.chat-header h2 { margin: 0 0 3px; font-size: 22px; font-weight: 800; letter-spacing: -0.03em; }
 .chat-header p { margin: 0; font-size: 13px; color: var(--text-secondary); }
 .chat-header p.session-dir {
-  margin-top: 4px;
-  font-family: 'Cascadia Code', Consolas, monospace;
-  font-size: 12px;
+  margin-top: 6px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11.5px;
   color: var(--primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 420px;
+  max-width: 460px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--primary-glow);
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
 }
 @media (max-width: 768px) {
   .chat-header { padding: 16px; }
   .chat-header p.session-dir { max-width: 200px; }
   .message-list { padding: 16px; }
 }
-.header-controls { display: flex; align-items: center; gap: 12px; flex-shrink: 0; flex-wrap: wrap; }
-.stream-badge { font-size: 12px; padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
-.stream-badge.queued { background: rgba(251,191,36,0.12); color: #f59e0b; }
-.stream-badge.running { background: rgba(34,197,94,0.12); color: #22c55e; animation: pulse-stream 1.5s ease-in-out infinite; }
-@keyframes pulse-stream { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+.header-controls { display: flex; align-items: center; gap: 10px; flex-shrink: 0; flex-wrap: wrap; }
+.stream-badge { font-size: 12px; padding: 4px 10px; border-radius: var(--radius-pill); white-space: nowrap; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.stream-badge.queued { background: var(--warning-soft); color: var(--warning); border: 1px solid color-mix(in srgb, var(--warning) 20%, transparent); }
+.stream-badge.running { background: var(--success-soft); color: var(--success); border: 1px solid color-mix(in srgb, var(--success) 20%, transparent); animation: pulse-stream 2s ease-in-out infinite; }
+.pulse-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 50%, transparent);
+  animation: dot-pulse 1.6s infinite;
+}
+@keyframes dot-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--success) 50%, transparent); }
+  70% { box-shadow: 0 0 0 6px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes pulse-stream { 0%, 100% { opacity: 1; } 50% { opacity: 0.75; } }
+
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--duration) var(--ease);
+  max-width: 200px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.model-chip:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); background: var(--primary-glow); }
+.model-chip:disabled { opacity: 0.6; }
+.model-dot { width: 7px; height: 7px; border-radius: 50%; background: linear-gradient(135deg, var(--primary), var(--accent)); flex-shrink: 0; }
+
 .toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-secondary);
   user-select: none;
+  font-weight: 500;
 }
 .toggle input { display: none; }
 .toggle-slider {
-  width: 36px; height: 20px;
+  width: 32px; height: 18px;
   background: var(--border);
   border-radius: 10px;
   position: relative;
-  transition: background 0.2s;
+  transition: background 0.2s var(--ease);
+  flex-shrink: 0;
 }
 .toggle-slider::after {
   content: '';
   position: absolute;
-  width: 16px; height: 16px;
+  width: 14px; height: 14px;
   border-radius: 50%;
   background: #fff;
   top: 2px; left: 2px;
-  transition: transform 0.2s;
+  transition: transform 0.2s var(--ease-spring);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
-.toggle input:checked + .toggle-slider { background: var(--primary, #4f46e5); }
-.toggle input:checked + .toggle-slider::after { transform: translateX(16px); }
+.toggle input:checked + .toggle-slider { background: linear-gradient(135deg, var(--primary), var(--accent)); }
+.toggle input:checked + .toggle-slider::after { transform: translateX(14px); }
 .toggle input:disabled + .toggle-slider { opacity: 0.5; }
 .clear-chat-btn { flex-shrink: 0; }
-.clear-chat-btn:hover:not(:disabled) { color: var(--danger, #ef4444); background: color-mix(in srgb, var(--danger, #ef4444) 12%, transparent); opacity: 1; }
+.clear-chat-btn:hover:not(:disabled) { color: var(--danger); background: var(--danger-soft); opacity: 1; }
 .clear-chat-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-.speak-btn.speaking { color: var(--primary, #4f46e5); opacity: 1; animation: speak-pulse 1.2s ease-in-out infinite; }
+.speak-btn.speaking { color: var(--primary); opacity: 1; animation: speak-pulse 1.2s ease-in-out infinite; }
 @keyframes speak-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
-.ws-manager {
-  position: relative;
-  flex-shrink: 0;
-}
+
+/* ── Workspace Manager ── */
+.ws-manager { position: relative; flex-shrink: 0; }
 .ws-btn {
-  padding: 6px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 13px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  transition: all var(--duration) var(--ease);
 }
-.ws-btn:hover { border-color: var(--primary); }
+.ws-btn:hover { border-color: var(--primary); color: var(--primary); }
 .ws-panel {
   position: absolute;
   top: 100%;
   right: 0;
-  margin-top: 6px;
-  width: 360px;
-  max-width: 70vw;
-  background: var(--surface);
+  margin-top: 8px;
+  width: 380px;
+  max-width: 75vw;
+  background: var(--surface-elevated);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
-  padding: 12px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  padding: 14px;
   z-index: 50;
+  animation: scaleIn 0.2s var(--ease-spring);
 }
-.ws-row {
-  display: flex;
-  gap: 8px;
-}
+.ws-row { display: flex; gap: 8px; }
 .ws-pick-btn {
-  width: 32px;
-  height: 32px;
+  width: 34px; height: 34px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--surface);
+  background: var(--bg-subtle);
   color: var(--text-secondary);
   cursor: pointer;
   display: flex;
@@ -574,30 +645,32 @@ async function handleCopy(messageId: string, text: string) {
 .ws-pick-btn:hover { border-color: var(--primary); color: var(--primary); }
 .ws-input {
   flex: 1;
-  padding: 6px 10px;
+  padding: 7px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   font-size: 13px;
-  background: var(--surface);
+  background: var(--bg-subtle);
   color: var(--text);
   outline: none;
+  transition: border-color 0.15s;
 }
-.ws-input:focus { border-color: var(--primary); }
+.ws-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
 .ws-add {
-  padding: 6px 12px;
+  padding: 7px 14px;
   border: none;
   border-radius: var(--radius);
-  background: var(--primary, #4f46e5);
+  background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary) 80%, var(--accent)));
   color: #fff;
   font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
 }
 .ws-add:disabled { opacity: 0.5; cursor: not-allowed; }
-.ws-error { color: #ef4444; font-size: 12px; margin: 6px 0 0; }
+.ws-error { color: var(--danger); font-size: 12px; margin: 8px 0 0; }
 .ws-list {
   margin-top: 10px;
-  max-height: 200px;
+  max-height: 210px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -609,85 +682,132 @@ async function handleCopy(messageId: string, text: string) {
   gap: 8px;
   font-size: 12px;
   color: var(--text);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
 }
 .ws-item.fixed { opacity: 0.7; }
-.ws-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #22c55e;
-  flex-shrink: 0;
-}
-.ws-path {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: 'Cascadia Code', Consolas, monospace;
-}
-.ws-tag {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(79, 70, 229, 0.1);
-  color: var(--primary, #4f46e5);
-  flex-shrink: 0;
-}
-.ws-remove {
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 2px;
-  flex-shrink: 0;
-}
-.ws-remove:hover { color: #ef4444; }
-.ws-empty { font-size: 12px; color: var(--text-secondary); margin: 0; }
+.ws-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
+.ws-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11px; }
+.ws-tag { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--primary-glow); color: var(--primary); flex-shrink: 0; font-weight: 600; }
+.ws-remove { border: none; background: transparent; color: var(--text-muted); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px; flex-shrink: 0; }
+.ws-remove:hover { color: var(--danger); }
+.ws-empty { font-size: 12px; color: var(--text-muted); margin: 0; padding: 4px; }
+
+/* ── Chat Body ── */
 .chat-body { position: relative; flex: 1; overflow: hidden; display: flex; flex-direction: column; }
-.empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--text-secondary); }
-.empty-state .icon { font-size: 48px; }
-.empty-state .hint { font-size: 13px; margin-top: 4px; }
-.message-list { flex: 1; overflow-y: auto; padding: 20px 24px; scroll-behavior: smooth; max-width: 860px; margin: 0 auto; width: 100%; box-sizing: border-box; }
+
+/* Empty State */
+.empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--text-secondary); animation: fadeSlideUp 0.5s var(--ease); }
+.empty-state .empty-orb { position: relative; width: 88px; height: 88px; margin-bottom: 12px; }
+.empty-orb-core {
+  position: absolute; inset: 16px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 20%, var(--surface)), color-mix(in srgb, var(--accent) 12%, var(--surface)));
+  display: flex; align-items: center; justify-content: center;
+  font-size: 30px;
+  box-shadow: 0 0 30px var(--primary-glow), 0 8px 24px rgba(0,0,0,0.1);
+  animation: float-orb 4s ease-in-out infinite;
+}
+.empty-orb-ring {
+  position: absolute; inset: 0;
+  border-radius: 50%;
+  border: 2px dashed color-mix(in srgb, var(--primary) 35%, transparent);
+  animation: spin 24s linear infinite;
+}
+@keyframes float-orb {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+.empty-title { font-size: 16px; font-weight: 700; color: var(--text); }
+.empty-hint { font-size: 13px; margin-top: 2px; }
+
+/* Message List */
+.message-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px;
+  scroll-behavior: smooth;
+  max-width: 900px;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
 .message-list::-webkit-scrollbar { width: 6px; }
 .message-list::-webkit-scrollbar-track { background: transparent; }
 .message-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Footer */
 .chat-footer { flex-shrink: 0; }
-.chat-message { display: flex; gap: 12px; margin-bottom: 20px; }
+
+/* Messages */
+.chat-message { display: flex; gap: 12px; margin-bottom: 24px; animation: fadeSlideUp 0.35s var(--ease); }
 .chat-message.user { flex-direction: row-reverse; }
-.avatar { width: 36px; height: 36px; border-radius: 50%; background: var(--bg); display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
-.bubble { flex: 1; width: 100%; max-width: 100%; padding: 12px 16px; border-radius: 20px; background: var(--surface); border: 1px solid var(--border); line-height: 1.7; font-size: 15px; box-sizing: border-box; border-top-left-radius: 4px; }
-.user .bubble { flex: none; width: auto; max-width: 80%; background: var(--bg); color: var(--text); border-color: var(--border); border-top-left-radius: 20px; border-top-right-radius: 4px; }
-.content { white-space: pre-wrap; word-break: break-word; }
-/* [F8] 用户消息附件回显 */
-.msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.msg-file-image { max-width: 200px; max-height: 200px; border-radius: 8px; object-fit: cover; display: block; cursor: zoom-in; }
-.msg-file-caption { display: block; font-size: 12px; color: var(--text-secondary, #64748b); margin-top: 4px; max-width: 200px; }
-.msg-file-name { font-size: 12px; padding: 3px 8px; border-radius: 6px; background: rgba(255,255,255,0.18); display: inline-block; }
-.is-error .bubble { background: rgba(239,68,68,0.06); border-color: rgba(239,68,68,0.3); }
-.message-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 11px; }
-.user .message-footer { border-top-color: rgba(255,255,255,0.2); }
-.time { color: var(--text-secondary); opacity: 0.7; }
-.user .time { color: rgba(255,255,255,0.6); }
-.message-actions { display: flex; gap: 6px; align-items: center; }
-.btn-wrapper {
-  position: relative;
-  display: inline-flex;
+
+.avatar {
+  width: 38px; height: 38px;
+  border-radius: 12px;
+  background: var(--bg-subtle);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
 }
+.avatar.user {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 18%, var(--surface)), color-mix(in srgb, var(--accent) 10%, var(--surface)));
+  border-color: color-mix(in srgb, var(--primary) 25%, transparent);
+}
+
+.bubble {
+  flex: 1; width: 100%; max-width: 100%;
+  padding: 14px 18px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  line-height: 1.75;
+  font-size: 14.5px;
+  box-sizing: border-box;
+  border-top-left-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+}
+.user .bubble {
+  flex: none; width: auto; max-width: 80%;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 12%, var(--surface)), color-mix(in srgb, var(--accent) 6%, var(--surface)));
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--primary) 20%, var(--border));
+  border-top-left-radius: var(--radius-lg);
+  border-top-right-radius: var(--radius-sm);
+}
+.content { white-space: pre-wrap; word-break: break-word; }
+
+/* [F8] 用户消息附件回显 */
+.msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.msg-file-image { max-width: 200px; max-height: 200px; border-radius: var(--radius); object-fit: cover; display: block; cursor: zoom-in; box-shadow: var(--shadow-sm); }
+.msg-file-caption { display: block; font-size: 12px; color: var(--text-secondary); margin-top: 4px; max-width: 200px; }
+.msg-file-name { font-size: 12px; padding: 4px 10px; border-radius: var(--radius-pill); background: var(--bg-subtle); display: inline-block; border: 1px solid var(--border); }
+
+.is-error .bubble { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 30%, var(--border)); }
+
+.message-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-subtle); font-size: 11px; }
+.user .message-footer { border-top-color: color-mix(in srgb, var(--primary) 15%, var(--border)); }
+.time { color: var(--text-muted); opacity: 0.85; font-variant-numeric: tabular-nums; }
+.message-actions { display: flex; gap: 4px; align-items: center; }
+.btn-wrapper { position: relative; display: inline-flex; }
 .copy-toast {
   position: absolute;
   left: 50%;
-  bottom: calc(100% + 4px);
+  bottom: calc(100% + 6px);
   transform: translateX(-50%);
   white-space: nowrap;
   font-size: 11px;
   background: var(--text);
   color: var(--bg);
-  padding: 2px 8px;
-  border-radius: 4px;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
   pointer-events: none;
   animation: fadeInOut 1.5s ease-in-out;
+  box-shadow: var(--shadow-md);
 }
 @keyframes fadeInOut {
   0% { opacity: 0; transform: translateX(-50%) translateY(4px); }
@@ -695,39 +815,55 @@ async function handleCopy(messageId: string, text: string) {
   85% { opacity: 1; transform: translateX(-50%) translateY(0); }
   100% { opacity: 0; transform: translateX(-50%) translateY(-4px); }
 }
-.icon-btn { width: 28px; height: 28px; border-radius: 6px; border: none; background: transparent; color: inherit; opacity: 0.5; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
-.icon-btn:hover { opacity: 1; background: rgba(255,255,255,0.1); }
-.user .icon-btn:hover { background: rgba(255,255,255,0.2); }
-.retry-countdown { border: none; background: transparent; color: #f59e0b; font-size: 12px; font-variant-numeric: tabular-nums; cursor: default; padding: 0 4px; }
-.delete-btn:hover { color: #ef4444 !important; }
-.btn-danger { background: #ef4444; color: #fff; border: none; border-radius: var(--radius); padding: 6px 12px; font-size: 13px; cursor: pointer; }
-.btn-danger:hover { background: #dc2626; }
+.icon-btn {
+  width: 30px; height: 30px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.5;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--duration) var(--ease);
+}
+.icon-btn:hover { opacity: 1; background: var(--bg-subtle); }
+.user .icon-btn:hover { background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.retry-countdown { border: none; background: transparent; color: var(--warning); font-size: 12px; font-variant-numeric: tabular-nums; cursor: default; padding: 0 4px; }
+.delete-btn:hover { color: var(--danger) !important; background: var(--danger-soft) !important; }
+.btn-danger { background: var(--danger); color: #fff; border: none; border-radius: var(--radius); padding: 6px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.btn-danger:hover { background: color-mix(in srgb, var(--danger) 85%, #000); }
 .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+
   /* @@CHAT_SCROLL_INJECTED@@ */
   /* ── ChatGPT 式「回到底部」浮动按钮（用户滚动优先） ── */
   .scroll-to-bottom-btn {
     position: absolute;
-    right: 20px;
-    bottom: 16px;
-    width: 44px;
-    height: 44px;
+    right: 24px;
+    bottom: 20px;
+    width: 46px;
+    height: 46px;
     border-radius: 50%;
-    border: 1px solid var(--border, #eef1f6);
-    background: var(--surface, #ffffff);
-    color: var(--text-secondary, #64748b);
+    border: 1px solid var(--border);
+    background: var(--surface-glass);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    color: var(--text-secondary);
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    box-shadow: 0 6px 20px rgba(31, 41, 55, 0.14);
-    transition: all 0.2s ease;
+    box-shadow: var(--shadow-lg);
+    transition: all 0.2s var(--ease);
     z-index: 20;
     -webkit-tap-highlight-color: transparent;
   }
   .scroll-to-bottom-btn:hover {
-    color: var(--primary, #4f46e5);
-    transform: translateY(-1px);
-    box-shadow: 0 8px 24px rgba(31, 41, 55, 0.18);
+    color: var(--primary);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-xl);
+    border-color: var(--primary);
   }
   .scroll-to-bottom-btn:active { transform: scale(0.94); }
 
@@ -747,13 +883,16 @@ async function handleCopy(messageId: string, text: string) {
     align-items: center;
     justify-content: center;
     cursor: zoom-out;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
   }
   .image-preview-img {
     max-width: 92vw;
     max-height: 88vh;
     object-fit: contain;
-    border-radius: 8px;
+    border-radius: var(--radius-lg);
     box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+    animation: scaleIn 0.2s var(--ease);
   }
   .image-preview-close {
     position: fixed;
@@ -771,5 +910,7 @@ async function handleCopy(messageId: string, text: string) {
     display: flex;
     align-items: center;
     justify-content: center;
+    transition: all 0.15s;
   }
+  .image-preview-close:hover { background: rgba(255, 255, 255, 0.25); }
 </style>

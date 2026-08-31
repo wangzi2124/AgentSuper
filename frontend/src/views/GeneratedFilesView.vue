@@ -125,7 +125,7 @@ function closeOutput() {
       />
     </div>
 
-    <div v-if="store.loading" style="display:flex;justify-content:center;padding:40px;">
+    <div v-if="store.loading" class="loading-wrap">
       <span class="spinner"></span>
     </div>
 
@@ -141,24 +141,24 @@ function closeOutput() {
       <div class="file-count">{{ store.filteredFiles.length }} 个文件</div>
       <div class="file-row" v-for="f in store.filteredFiles" :key="f.filename">
         <div class="file-info">
-          <div class="file-icon">{{ isJsFile(f.filename) ? '⚡' : '📄' }}</div>
+          <div class="file-thumb" :class="isJsFile(f.filename) ? 'js' : 'doc'">{{ isJsFile(f.filename) ? 'JS' : 'DOC' }}</div>
           <div class="file-details">
             <div class="file-name">{{ f.filename }}</div>
             <div class="file-meta">{{ store.formatSize(f.size) }}</div>
           </div>
         </div>
         <div class="file-actions">
-          <button class="btn" @click="handleDownload(f.filename)">下载</button>
+          <button class="btn btn-sm" @click="handleDownload(f.filename)">下载</button>
           <button
             v-if="isJsFile(f.filename)"
-            class="btn btn-run"
+            class="btn btn-run btn-sm"
             :disabled="runningFile === f.filename"
             @click="handleRun(f.filename)"
           >
             {{ runningFile === f.filename ? '运行中...' : '运行' }}
           </button>
           <button
-            class="btn btn-danger"
+            class="btn btn-sm btn-danger"
             :disabled="deleting.has(f.filename)"
             @click="handleDelete(f.filename)"
           >
@@ -172,80 +172,94 @@ function closeOutput() {
       <div class="output-modal">
         <div class="output-header">
           <span class="output-title">输出：{{ runningFile }}</span>
-          <button class="btn" @click="closeOutput">关闭</button>
+          <button class="btn btn-sm" @click="closeOutput">关闭</button>
         </div>
         <pre v-if="runOutput" class="output-body">{{ runOutput }}</pre>
         <pre v-else-if="runError" class="output-body error">{{ runError }}</pre>
-        <div v-else class="output-body">运行中...</div>
+        <div v-else class="output-body running">运行中...</div>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.search-bar {
-  margin-bottom: 16px;
-}
+.search-bar { margin-bottom: 20px; }
 
 .search-input {
   width: 100%;
-  max-width: 400px;
-  padding: 8px 12px;
+  max-width: 420px;
+  padding: 11px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   font-size: 14px;
   background: var(--surface);
   color: var(--text);
   outline: none;
+  transition: all var(--duration) var(--ease);
 }
-
 .search-input:focus {
   border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-glow);
 }
 
-.file-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
+.loading-wrap { display: flex; justify-content: center; padding: 48px; }
+
+.file-list { display: flex; flex-direction: column; gap: 10px; animation: fadeSlideUp 0.4s var(--ease); }
 
 .file-count {
   font-size: 13px;
   color: var(--text-secondary);
   margin-bottom: 4px;
+  font-weight: 500;
 }
 
 .file-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  padding: 14px 18px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
+  transition: all var(--duration) var(--ease);
+}
+.file-row:hover {
+  box-shadow: var(--shadow-md);
+  border-color: color-mix(in srgb, var(--primary) 25%, var(--border));
+  transform: translateY(-1px);
 }
 
-.file-info {
+.file-info { display: flex; align-items: center; gap: 14px; min-width: 0; }
+
+.file-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius);
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.file-icon {
-  font-size: 24px;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
   flex-shrink: 0;
 }
-
-.file-details {
-  min-width: 0;
+.file-thumb.js {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
+}
+.file-thumb.doc {
+  color: var(--accent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 12%, transparent), color-mix(in srgb, var(--primary) 8%, transparent));
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
+.file-details { min-width: 0; }
 .file-name {
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
@@ -254,82 +268,72 @@ function closeOutput() {
 }
 @media (max-width: 600px) {
   .file-name { max-width: 200px; }
-  .file-row { padding: 10px 12px; }
+  .file-row { padding: 12px; }
 }
 
-.file-meta {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 2px;
-}
+.file-meta { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
 
-.file-actions {
-  display: flex;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
+.file-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.btn-sm { padding: 7px 14px; font-size: 12px; }
 .btn-run {
-  background: var(--primary);
+  background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary) 80%, var(--accent)));
   color: white;
-  border-color: var(--primary);
+  border-color: transparent;
+  box-shadow: 0 2px 8px var(--primary-glow);
 }
-.btn-run:hover {
-  background: var(--primary-hover);
-}
-.btn-run:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
+.btn-run:hover { box-shadow: 0 4px 14px var(--primary-glow); }
+.btn-run:disabled { opacity: 0.6; cursor: not-allowed; box-shadow: none; }
 
 .output-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.4);
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  animation: fadeIn 0.2s var(--ease);
 }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
 .output-modal {
-  background: var(--surface);
+  background: var(--surface-elevated);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   width: 90%;
   max-width: 800px;
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-xl);
+  animation: scaleIn 0.2s var(--ease);
 }
 
 .output-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
+  padding: 14px 18px;
   border-bottom: 1px solid var(--border);
 }
 
-.output-title {
-  font-weight: 600;
-  font-size: 14px;
-}
+.output-title { font-weight: 700; font-size: 14px; color: var(--text); }
 
 .output-body {
-  padding: 16px;
+  padding: 18px;
   margin: 0;
   overflow: auto;
-  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
   font-size: 13px;
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
   max-height: calc(80vh - 60px);
+  color: var(--text);
 }
 
-.output-body.error {
-  color: var(--danger);
-}
+.output-body.error { color: var(--danger); }
+.output-body.running { color: var(--text-muted); }
 </style>

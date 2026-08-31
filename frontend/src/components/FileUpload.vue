@@ -68,19 +68,23 @@ function triggerInput() {
 <style scoped>
 .file-upload {
   border: 2px dashed var(--border);
-  border-radius: var(--radius);
-  padding: 32px;
+  border-radius: var(--radius-lg);
+  padding: 40px 32px;
   text-align: center;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.2s var(--ease);
   color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  position: relative;
+  overflow: hidden;
 }
 
 .file-upload:hover,
 .file-upload.drag-over {
   border-color: var(--primary);
-  background: #eef2ff;
+  background: color-mix(in srgb, var(--primary) 4%, var(--surface));
   color: var(--primary);
+  box-shadow: 0 0 0 4px var(--primary-glow) inset;
 }
 
 .file-upload.uploading {
@@ -89,21 +93,24 @@ function triggerInput() {
 }
 
 .upload-icon {
-  font-size: 36px;
-  margin-bottom: 8px;
+  font-size: 40px;
+  margin-bottom: 10px;
+  opacity: 0.7;
 }
 
 .hint {
   font-size: 12px;
-  margin-top: 4px;
+  margin-top: 6px;
+  color: var(--text-muted);
 }
 
 .upload-status {
-  font-weight: 500;
+  font-weight: 600;
+  font-size: 14px;
 }
 
 .progress-bar {
-  margin-top: 12px;
+  margin-top: 16px;
   height: 8px;
   background: var(--border);
   border-radius: 4px;
@@ -112,14 +119,16 @@ function triggerInput() {
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--primary), #6366f1);
+  background: linear-gradient(90deg, var(--primary), var(--accent));
   border-radius: 4px;
   transition: width 0.3s ease;
 }
 
 .progress-text {
   font-size: 13px;
-  margin-top: 4px;
+  margin-top: 6px;
   font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--primary);
 }
 </style>

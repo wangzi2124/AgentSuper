@@ -4,15 +4,12 @@ import { useDocumentStore } from '../stores/documents'
 import DocumentCard from '../components/DocumentCard.vue'
 import FileUpload from '../components/FileUpload.vue'
 
-// 文档状态管理
 const docs = useDocumentStore()
 
-// 组件挂载时加载所有文档
 onMounted(() => {
   docs.fetchAll()
 })
 
-// 处理文件上传
 async function handleUpload(file: File) {
   try {
     await docs.upload(file)
@@ -21,7 +18,6 @@ async function handleUpload(file: File) {
   }
 }
 
-// 删除指定文档
 async function handleDelete(id: string) {
   if (confirm('Delete this document?')) {
     try {
@@ -41,7 +37,7 @@ async function handleDelete(id: string) {
   <div class="page-content">
     <FileUpload :loading="docs.loading" :progress="docs.uploadProgress" :stage="docs.uploadStage" @upload="handleUpload" />
 
-    <div v-if="docs.loading && !docs.uploadStage" style="display:flex;justify-content:center;padding:40px;">
+    <div v-if="docs.loading && !docs.uploadStage" class="loading-wrap">
       <span class="spinner"></span>
     </div>
 
@@ -51,9 +47,9 @@ async function handleDelete(id: string) {
       <p style="font-size:13px;margin-top:4px;">上传 .txt、.md 或 .pdf 文件来构建你的知识库。</p>
     </div>
 
-    <div v-else style="margin-top:20px;display:flex;flex-direction:column;gap:8px;">
-      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px;">
-        {{ docs.documents.length }} 个文档
+    <div v-else class="doc-list">
+      <div class="list-meta">
+        <span>{{ docs.documents.length }} 个文档</span>
       </div>
       <DocumentCard
         v-for="doc in docs.documents"
@@ -65,3 +61,14 @@ async function handleDelete(id: string) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.loading-wrap { display: flex; justify-content: center; padding: 48px; }
+.doc-list { margin-top: 24px; display: flex; flex-direction: column; gap: 10px; }
+.list-meta {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+</style>

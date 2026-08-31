@@ -93,50 +93,50 @@ async function handleRepair() {
     <h2>向量库</h2>
     <p>浏览和搜索存储在向量数据库中的分块</p>
   </div>
-  <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">
-    <div style="display:flex;gap:8px;align-items:center;margin-left:auto;">
-      <template v-if="vs.config">
-        <span style="font-size:12px;color:var(--text-secondary);">
-          TTL: {{ vs.config.ttl_days > 0 ? vs.config.ttl_days + ' 天' : '未启用' }}
-          <template v-if="vs.config.ttl_days > 0">· 每 {{ vs.config.cleanup_interval_hours }}h 检查</template>
-        </span>
-        <button v-if="vs.config.ttl_days > 0" class="btn" @click="handleClearExpired">清理过期</button>
-        <button
-          v-if="(vs.config.pending_repair ?? 0) > 0"
-          class="btn"
-          style="border-color:#d97706;color:#d97706;"
-          @click="handleRepair"
-        >自愈重建 ({{ vs.config!.pending_repair }})</button>
-      </template>
-      <button class="btn btn-danger" @click="handleClearAll">清空向量库</button>
-    </div>
-  </div>
   <div class="page-content">
-    <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
-      <select v-model="selectedDocId" @change="onFilterChange" style="flex:1;min-width:180px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;">
+    <div class="toolbar">
+      <div class="toolbar-actions">
+        <template v-if="vs.config">
+          <span class="ttl-info">
+            TTL: {{ vs.config.ttl_days > 0 ? vs.config.ttl_days + ' 天' : '未启用' }}
+            <template v-if="vs.config.ttl_days > 0">· 每 {{ vs.config.cleanup_interval_hours }}h 检查</template>
+          </span>
+          <button v-if="vs.config.ttl_days > 0" class="btn btn-sm" @click="handleClearExpired">清理过期</button>
+          <button
+            v-if="(vs.config.pending_repair ?? 0) > 0"
+            class="btn btn-sm btn-repair"
+            @click="handleRepair"
+          >自愈重建 ({{ vs.config!.pending_repair }})</button>
+        </template>
+        <button class="btn btn-sm btn-danger" @click="handleClearAll">清空向量库</button>
+      </div>
+    </div>
+
+    <div class="filter-row">
+      <select v-model="selectedDocId" @change="onFilterChange" class="filter-select">
         <option value="">全部文档</option>
         <option v-for="doc in ds.documents" :key="doc.id" :value="doc.id">{{ doc.filename }} ({{ doc.chunk_count }} chunks)</option>
       </select>
-      <div style="display:flex;gap:4px;flex:2;min-width:200px;">
+      <div class="search-box">
         <input
           v-model="searchText"
           type="text"
           placeholder="搜索分块内容..."
-          style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;"
+          class="search-input"
           @keyup.enter="onSearch"
         />
-        <button class="btn" @click="onSearch">搜索</button>
-        <button v-if="vs.searchQuery" class="btn" @click="searchText = ''; onSearch()">清除</button>
+        <button class="btn btn-primary btn-sm" @click="onSearch">搜索</button>
+        <button v-if="vs.searchQuery" class="btn btn-sm" @click="searchText = ''; onSearch()">清除</button>
       </div>
     </div>
 
-    <div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">
+    <div class="result-meta">
       {{ vs.total }} 个分块
       <template v-if="vs.searchQuery"> — 匹配 "{{ vs.searchQuery }}"</template>
       <template v-if="vs.chunks.length > 0"> — 第 {{ currentPage }} / {{ totalPages }} 页</template>
     </div>
 
-    <div v-if="vs.loading && vs.chunks.length === 0" style="display:flex;justify-content:center;padding:40px;">
+    <div v-if="vs.loading && vs.chunks.length === 0" class="loading-wrap">
       <span class="spinner"></span>
     </div>
 
@@ -147,47 +147,136 @@ async function handleRepair() {
     </div>
 
     <div v-else>
-      <div style="border:1px solid var(--border);border-radius:var(--radius);overflow:auto;">
-        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <div class="table-wrap">
+        <table class="chunk-table">
           <thead>
-            <tr style="background:var(--bg);text-align:left;">
-              <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;white-space:nowrap;">#</th>
-              <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;">来源</th>
-              <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;">章节</th>
-              <th style="padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;">内容</th>
+            <tr>
+              <th>#</th>
+              <th>来源</th>
+              <th>章节</th>
+              <th>内容</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(chunk, i) in vs.chunks" :key="chunk.id" style="border-bottom:1px solid var(--border);">
-              <td style="padding:8px 10px;vertical-align:top;white-space:nowrap;color:var(--text-secondary);font-size:11px;">
-                {{ vs.offset + i + 1 }}
-              </td>
-              <td style="padding:8px 10px;vertical-align:top;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis;font-size:12px;">
-                <code style="font-size:10px;display:block;color:var(--text-secondary);">{{ chunk.id.slice(0, 12) }}...</code>
+            <tr v-for="(chunk, i) in vs.chunks" :key="chunk.id">
+              <td class="row-idx">{{ vs.offset + i + 1 }}</td>
+              <td class="row-source">
+                <code>{{ chunk.id.slice(0, 12) }}...</code>
                 <span>{{ chunk.metadata.filename || chunk.metadata.source || '-' }}</span>
               </td>
-              <td style="padding:8px 10px;vertical-align:top;white-space:nowrap;font-size:12px;">
+              <td>
                 <span v-if="chunk.metadata.chapter_title" class="badge badge-enabled">{{ chunk.metadata.chapter_title }}</span>
                 <span v-else class="badge badge-disabled">-</span>
               </td>
-              <td style="padding:8px 10px;vertical-align:top;">
-                <pre style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:12px;line-height:1.5;max-height:120px;overflow-y:auto;font-family:inherit;">{{ chunk.text.slice(0, 300) }}{{ chunk.text.length > 300 ? '...' : '' }}</pre>
+              <td>
+                <pre class="row-text">{{ chunk.text.slice(0, 300) }}{{ chunk.text.length > 300 ? '...' : '' }}</pre>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <div v-if="totalPages > 1" style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px;">
-        <button class="btn" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">上一页</button>
-        <span style="font-size:13px;color:var(--text-secondary);">
-          <select :value="currentPage" @change="goToPage(Number(($event.target as HTMLSelectElement).value))" style="padding:4px 6px;border:1px solid var(--border);border-radius:var(--radius);font-size:13px;">
+      <div v-if="totalPages > 1" class="pagination">
+        <button class="btn btn-sm" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">上一页</button>
+        <span class="page-info">
+          <select :value="currentPage" @change="goToPage(Number(($event.target as HTMLSelectElement).value))" class="page-select">
             <option v-for="p in totalPages" :key="p" :value="p">第 {{ p }} 页</option>
           </select>
           / {{ totalPages }}
         </span>
-        <button class="btn" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">下一页</button>
+        <button class="btn btn-sm" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">下一页</button>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.toolbar { margin-bottom: 16px; }
+.toolbar-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+.ttl-info { font-size: 12px; color: var(--text-secondary); }
+.btn-sm { padding: 7px 14px; font-size: 12px; }
+.btn-repair { border-color: var(--warning); color: var(--warning); background: var(--warning-soft); }
+.btn-repair:hover { background: color-mix(in srgb, var(--warning) 12%, var(--surface)); color: var(--warning); }
+
+.filter-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.filter-select {
+  flex: 1;
+  min-width: 180px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.filter-select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+.search-box { display: flex; gap: 6px; flex: 2; min-width: 220px; }
+.search-input {
+  flex: 1;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.search-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+
+.result-meta { font-size: 13px; color: var(--text-secondary); margin-bottom: 14px; font-weight: 500; }
+.loading-wrap { display: flex; justify-content: center; padding: 40px; }
+
+.table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: auto;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+.chunk-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.chunk-table th {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  white-space: nowrap;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--bg-subtle);
+}
+.chunk-table td { padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
+.chunk-table tr:last-child td { border-bottom: none; }
+.chunk-table tr { transition: background 0.15s; }
+.chunk-table tbody tr:hover { background: var(--bg-subtle); }
+.row-idx { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.row-source { white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+.row-source code { font-size: 10px; display: block; color: var(--text-muted); }
+.row-source span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 130px;
+  overflow-y: auto;
+  font-family: inherit;
+  color: var(--text);
+}
+
+.pagination { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 16px; }
+.page-info { font-size: 13px; color: var(--text-secondary); }
+.page-select {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+}
+</style>
