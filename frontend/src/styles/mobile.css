@@ -239,24 +239,11 @@
   }
 
   /* ── 移动端聊天页（复用 MultiAgentView）── */
-  /* 隐藏与 Vant NavBar 重复的大标题与副标题 */
-  .mobile-body .chat-header h2,
-  .mobile-body .chat-header p:not(.session-dir) {
+  /* 顶部大标题/NavBar 已由 Vant NavBar 承担：整体隐藏 chat-header（含标题、状态、设置齿轮），
+     避免在消息列表上方残留一条空的工具条。设置已并入菜单「设置」。 */
+  .mobile-body .chat-header {
     display: none !important;
   }
-  /* 头部收敛为紧凑工具栏，紧贴 NavBar */
-  .mobile-body .chat-header {
-    padding: 8px 12px !important;
-    border-bottom: 1px solid #f0f1f5 !important;
-  }
-  .mobile-body .header-controls, .mobile-body .header-actions {
-    gap: 8px !important;
-    width: 100%;
-  }
-  .mobile-body .header-actions { justify-content: flex-end; }
-  .mobile-body .header-actions .status-badge { display: none !important; }
-  /* 聊天设置已集成到菜单「设置」：移动端隐藏聊天头独立的设置齿轮 */
-  .mobile-body .header-actions .settings-toggle { display: none !important; }
   /* 消息列表更贴合移动端窄屏 */
   .mobile-body .message-list { padding: 12px !important; }
   .mobile-body .bubble { font-size: 14px !important; }
@@ -464,7 +451,7 @@ html[data-theme='dark'] {
   /* 会话头部：毛玻璃，滚动时内容不刺眼 */
   .chat-header {
     backdrop-filter: blur(10px);
-    background: rgba(255, 255, 255, 0.72) !important;
+    background: var(--surface-glass) !important;
   }
 }
 
@@ -476,7 +463,7 @@ html[data-theme='dark'] {
     box-shadow: 0 4px 14px rgba(109, 94, 241, 0.45);
   }
   .chat-header {
-    background: rgba(11, 18, 34, 0.78) !important;
+    background: var(--surface-glass) !important;
   }
 }
 

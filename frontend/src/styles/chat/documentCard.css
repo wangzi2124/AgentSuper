@@ -1,0 +1,63 @@
+.document-card {
+display: flex;
+align-items: center;
+gap: 16px;
+padding: 16px 18px;
+background: var(--surface);
+border: 1px solid var(--border);
+border-radius: var(--radius-lg);
+transition: all var(--duration) var(--ease);
+animation: fadeSlideUp 0.4s var(--ease);
+}
+.document-card:hover {
+box-shadow: var(--shadow-md);
+border-color: color-mix(in srgb, var(--primary) 25%, var(--border));
+transform: translateY(-1px);
+}
+.doc-icon {
+font-size: 12px;
+font-weight: 800;
+letter-spacing: 0.04em;
+color: var(--primary);
+flex-shrink: 0;
+width: 46px;
+height: 46px;
+border-radius: var(--radius);
+display: flex;
+align-items: center;
+justify-content: center;
+background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 12%, transparent), color-mix(in srgb, var(--accent) 8%, transparent));
+border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent);
+}
+.doc-info { flex: 1; min-width: 0; }
+.doc-name {
+font-weight: 700;
+font-size: 14px;
+overflow: hidden;
+text-overflow: ellipsis;
+white-space: nowrap;
+color: var(--text);
+}
+.doc-meta {
+font-size: 12px;
+color: var(--text-muted);
+margin-top: 3px;
+}
+.btn-sm {
+padding: 7px 14px;
+font-size: 12px;
+min-width: 64px;
+display: flex;
+align-items: center;
+justify-content: center;
+}
+.spinner-sm {
+display: inline-block;
+width: 14px;
+height: 14px;
+border: 2px solid rgba(255,255,255,0.3);
+border-top-color: #fff;
+border-radius: 50%;
+animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
