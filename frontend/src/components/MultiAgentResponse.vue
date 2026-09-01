@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import type { MultiAgentMessage, AgentStep } from '../types'
+import { computed } from 'vue'
+import type { MultiAgentMessage, AgentStep, AgentOutputPart } from '../types'
+import MarkdownContent from './MarkdownContent.vue'
 
 const props = defineProps<{
   message: MultiAgentMessage
@@ -22,21 +23,11 @@ const showFinalAnswer = computed(() => {
   return true
 })
 
-const expandedResults = ref<Record<string, boolean>>({})
-const expandedArgs = ref<Record<string, boolean>>({})
-
-function toggleResult(key: string) {
-  expandedResults.value[key] = !expandedResults.value[key]
-}
-
-function toggleArgs(key: string) {
-  expandedArgs.value[key] = !expandedArgs.value[key]
-}
-
+// opencode 风格状态符号
 function getStatusIcon(status: string): string {
-  if (status === 'completed') return '✅'
-  if (status === 'failed') return '❌'
-  return '⏳'
+  if (status === 'completed') return '✓'
+  if (status === 'failed') return '✕'
+  return '•'
 }
 
 function formatDuration(ms?: number): string {
@@ -45,23 +36,37 @@ function formatDuration(ms?: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-function formatArgs(args: Record<string, unknown>): string {
-  return JSON.stringify(args, null, 2)
+// 工具/步骤卡片标题（对齐 opencode BasicTool trigger 的子标题文案）
+function stepTitle(step: AgentStep): string {
+  if (step.detail) return step.detail
+  if (step.tool_name) return step.tool_name
+  return step.name
 }
 
-function argsSummary(args: Record<string, unknown>): string {
-  const keys = Object.keys(args)
-  if (keys.length === 0) return '()'
-  const parts = keys.map(k => {
-    const v = args[k]
-    if (typeof v === 'string') return v.length > 30 ? v.slice(0, 30) + '...' : v
-    return String(v)
-  })
-  return '(' + parts.join(', ').slice(0, 60) + ')'
+// 极简工具名展示（去掉 tool_ 前缀，对齐 opencode 工具名可读性）
+function shortToolName(name?: string): string {
+  if (!name) return '工具'
+  return name.replace(/^plugin_[^_]+_/, '').replace(/^tool_/, '')
 }
 
-function stepKey(a: string, s: AgentStep): string {
-  return `${a}:${s.step_id}`
+// 按输出顺序排列的展示部件：优先 parts（真实交错），否则组装 steps（含最终正文）
+function orderedParts(agent: {
+  parts?: AgentOutputPart[]
+  steps: AgentStep[]
+  content: string
+}): AgentOutputPart[] {
+  if (agent.parts && agent.parts.length > 0) return agent.parts
+  // 回退：历史回放（服务端只存 steps+content）——
+  // 组装 [工具卡片…, 最终正文]，最大程度贴近 opencode 的"工具在前、答案收尾"。
+  const parts: AgentOutputPart[] = (agent.steps || []).map((s, i) => ({
+    seq: i,
+    kind: 'tool' as const,
+    step: s,
+  }))
+  if (agent.content) {
+    parts.push({ seq: parts.length, kind: 'text' as const, text: agent.content })
+  }
+  return parts
 }
 </script>
 
@@ -88,32 +93,22 @@ function stepKey(a: string, s: AgentStep): string {
           <span class="badge" :class="a.status">{{ a.status === 'running' ? '● 运行中' : a.status === 'completed' ? '✓ 完成' : '✗ 失败' }}</span>
         </div>
 
-        <!-- realtime steps -->
-        <div v-if="a.steps.length" class="steps">
-          <div v-for="s in a.steps" :key="s.step_id" class="step-item" :class="s.status">
-            <div class="step-row">
-              <span class="step-icon">{{ getStatusIcon(s.status) }}</span>
-              <span class="step-name">{{ s.name }}</span>
-              <span v-if="s.detail" class="step-detail">{{ s.detail }}</span>
-              <span v-if="s.duration_ms != null" class="step-time">{{ formatDuration(s.duration_ms) }}</span>
-              <span v-else-if="s.status === 'running'" class="step-time spinning">...</span>
+        <!-- 输出部件：按 agent 真实输出顺序交错（正文 ↔ 工具卡片，对齐 opencode Part 渲染） -->
+        <div v-if="orderedParts(a).length" class="o-parts">
+          <template v-for="p in orderedParts(a)" :key="p.seq">
+            <!-- 正文块 -->
+            <div v-if="p.kind === 'text'" class="text o-text">
+              <MarkdownContent :text="p.text || ''" />
             </div>
-            <div v-if="s.tool_name" class="step-tool">
-              🔧 {{ s.tool_name }}
-              <span v-if="s.tool_args && Object.keys(s.tool_args).length" class="step-args-toggle" @click.stop="toggleArgs(stepKey(a.agent_id, s))">
-                {{ expandedArgs[stepKey(a.agent_id, s)] ? '收起参数' : argsSummary(s.tool_args) }}
-              </span>
-              <span v-if="s.tool_result && s.status === 'completed'" class="step-result-toggle" @click.stop="toggleResult(stepKey(a.agent_id, s))">
-                {{ expandedResults[stepKey(a.agent_id, s)] ? '收起结果' : '查看结果' }}
-              </span>
+            <!-- 极简工具卡片（无参数 / 无结果展开） -->
+            <div v-else-if="p.kind === 'tool' && p.step" class="o-tool" :class="p.step.status">
+              <span class="o-tool-icon" :class="p.step.status">{{ getStatusIcon(p.step.status) }}</span>
+              <span class="o-tool-name">{{ shortToolName(p.step.tool_name) }}</span>
+              <span class="o-tool-title">{{ stepTitle(p.step) }}</span>
+              <span v-if="p.step.duration_ms != null" class="o-tool-time">{{ formatDuration(p.step.duration_ms) }}</span>
+              <span v-else-if="p.step.status === 'running'" class="o-tool-spin"></span>
             </div>
-            <div v-if="s.tool_args && expandedArgs[stepKey(a.agent_id, s)]" class="step-args" @click.stop>
-              <pre>{{ formatArgs(s.tool_args) }}</pre>
-            </div>
-            <div v-if="s.tool_result && expandedResults[stepKey(a.agent_id, s)]" class="step-result" @click.stop>
-              <pre>{{ s.tool_result }}</pre>
-            </div>
-          </div>
+          </template>
         </div>
         <div v-else-if="a.status === 'running'" class="steps">
           <div class="step-item running">
@@ -125,13 +120,12 @@ function stepKey(a: string, s: AgentStep): string {
           </div>
         </div>
 
-        <div v-if="a.content" class="text" v-text="a.content"></div>
         <div v-if="a.error" class="err">⚠️ {{ a.error }}</div>
       </div>
     </div>
 
     <!-- final answer -->
-    <div v-if="showFinalAnswer" class="text" v-text="message.content"></div>
+    <div v-if="showFinalAnswer" class="text"><MarkdownContent :text="message.content" /></div>
 
     <!-- error -->
     <div v-if="message.isError && message.errorInfo" class="err">

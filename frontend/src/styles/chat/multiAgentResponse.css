@@ -2,7 +2,7 @@
 .routing { display: flex; align-items: center; gap: 8px; padding: 10px 0; font-size: 13px; color: var(--text-secondary); }
 .spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.text { white-space: pre-wrap; word-break: break-word; }
+.text { white-space: normal; word-break: break-word; }
 
 /* Deep Space Agent 面板：玻璃卡片 + 左侧品牌光带 */
 .agents { display: flex; flex-direction: column; gap: 14px; }
@@ -47,59 +47,57 @@ box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 5%, transparent);
 .badge.completed { background: var(--success-soft); color: var(--success); }
 .badge.failed { background: var(--danger-soft); color: var(--danger); }
 
-/* 步骤列表：细分组，忙碌步骤高亮 */
-.steps { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 4px; }
+/* 运行中占位（无部件时提示正在初始化） */
+.steps { display: flex; flex-direction: column; gap: 2px; margin: 10px 0 4px; }
 .step-item {
-padding: 8px 12px;
-border-radius: 10px;
-font-size: 15px;
-border: 1px solid transparent;
-transition: background var(--duration) var(--ease), border-color var(--duration) var(--ease);
-}
-.step-item.completed { background: color-mix(in srgb, var(--success) 6%, transparent); border-color: color-mix(in srgb, var(--success) 14%, transparent); }
-.step-item.failed { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 24%, transparent); }
-.step-item.running { background: color-mix(in srgb, var(--primary) 10%, transparent); border-color: color-mix(in srgb, var(--primary) 26%, transparent); }
-.step-row { display: flex; align-items: center; gap: 8px; }
-.step-icon { font-size: 15px; flex-shrink: 0; }
-.step-name { font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.step-detail { color: var(--text-secondary); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.step-time { margin-left: auto; color: var(--text-secondary); font-size: 14px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
-.step-time.spinning { color: var(--primary); animation: spin 0.8s linear infinite; }
-.step-tool {
+padding: 4px 6px;
+border-radius: 6px;
 font-size: 14px;
-color: var(--primary);
-font-family: 'JetBrains Mono', Consolas, monospace;
-margin-top: 4px;
-padding-left: 23px;
+color: var(--text-secondary);
+}
+.step-row { display: flex; align-items: center; gap: 8px; }
+.step-icon { font-size: 12px; flex-shrink: 0; width: 10px; text-align: center; color: var(--text-secondary); }
+.step-name { font-weight: 500; }
+.step-time { margin-left: auto; color: var(--text-secondary); font-size: 13px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.step-time.spinning { color: var(--primary); animation: spin 0.8s linear infinite; }
+/* 输出部件流（对齐 opencode Part）：文本块与工具卡片按真实输出顺序交错 */
+.o-parts { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; }
+.o-text > *:first-child { margin-top: 0; }
+
+/* 极简工具卡片：对齐 opencode BasicTool trigger —— 无边框独立行，
+   工具名 + 子标题 + 耗时，点击不展开任何参数/结果细节 */
+.o-tool {
 display: flex;
 align-items: center;
-flex-wrap: wrap;
-gap: 6px;
+gap: 8px;
+padding: 6px 10px;
+border-radius: 8px;
+font-size: 13px;
+background: color-mix(in srgb, var(--bg-subtle) 55%, transparent);
+border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+transition: border-color var(--duration) var(--ease), background var(--duration) var(--ease);
 }
-.step-args-toggle { color: var(--text-secondary); cursor: pointer; text-decoration: underline; margin-left: 4px; font-family: inherit; }
-.step-args-toggle:hover { color: var(--primary); }
-.step-args {
-margin: 6px 0 0 23px;
-padding: 10px 12px;
-background: color-mix(in srgb, var(--bg) 60%, transparent);
-border: 1px solid var(--border-subtle);
-border-left: 2px solid var(--primary);
-border-radius: 10px;
-max-height: 200px;
-overflow-y: auto;
+.o-tool.running { background: color-mix(in srgb, var(--primary) 8%, transparent); border-color: color-mix(in srgb, var(--primary) 26%, transparent); }
+.o-tool.failed { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 24%, transparent); }
+.o-tool-icon { font-size: 12px; flex-shrink: 0; width: 12px; text-align: center; color: var(--text-secondary); }
+.o-tool-icon.completed { color: var(--success); }
+.o-tool-icon.failed { color: var(--danger); }
+.o-tool-icon.running { color: var(--primary); }
+.o-tool-name {
+font-weight: 600;
+color: var(--primary);
+flex-shrink: 0;
+font-family: 'JetBrains Mono', Consolas, monospace;
+font-size: 12px;
 }
-.step-args pre { margin: 0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: var(--text); font-family: 'JetBrains Mono', Consolas, monospace; }
-.step-result-toggle { font-size: 14px; color: var(--primary); cursor: pointer; text-decoration: underline; margin-top: 4px; padding-left: 23px; }
-.step-result-toggle:hover { opacity: 0.8; }
-.step-result {
-margin: 6px 0 0 23px;
-padding: 10px 12px;
-background: color-mix(in srgb, var(--bg) 60%, transparent);
-border: 1px solid var(--border-subtle);
-border-left: 2px solid var(--accent);
-border-radius: 10px;
-max-height: 200px;
-overflow-y: auto;
+.o-tool-title {
+color: var(--text-secondary);
+white-space: nowrap;
+overflow: hidden;
+text-overflow: ellipsis;
+min-width: 0;
+flex: 1;
 }
-.step-result pre { margin: 0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; color: var(--text-secondary); font-family: 'JetBrains Mono', Consolas, monospace; }
+.o-tool-time { margin-left: auto; color: var(--text-secondary); font-size: 12px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.o-tool-spin { width: 10px; height: 10px; margin-left: auto; border: 1.5px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
 .err { padding: 10px 14px; background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: 12px; font-size: 13px; color: var(--danger); margin-top: 4px; }

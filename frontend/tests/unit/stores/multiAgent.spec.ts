@@ -65,6 +65,70 @@ function ev(partial: Partial<MultiAgentSSEEvent>): MultiAgentSSEEvent {
 
 const lastMsg = (store: any) => store.messages[store.messages.length - 1]
 
+describe('agent parts 累积（交替渲染顺序）', () => {
+  function step(step_id: string, name: string, status: string, extra: Record<string, unknown> = {}) {
+    return { type: status === 'running' ? 'step_start' : 'step_end', step_id, name, status, ...extra } as any
+  }
+
+  it('agent_start → step → stream → step → done: parts 保持真实交错顺序', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'routing', detail: '路由中' }))
+      onEvent(ev({ type: 'agent_start', agent_id: 'rag', agent_name: '知识库检索', agent_avatar: '📚' }))
+      // 顺序: 工具A(运行) → 正文1 → 工具A(完成) → 工具B → 正文2 → done
+      onEvent(ev({ type: 'agent_step', agent_id: 'rag', step: step('s-read', '读取文件', 'running', { tool_name: 'tool_read_file' }) }))
+      onEvent(ev({ type: 'text_delta', agent_id: 'rag', delta: '正文第一段' }))
+      onEvent(ev({ type: 'agent_step', agent_id: 'rag', step: step('s-read', '读取文件', 'completed', { tool_name: 'tool_read_file', duration_ms: 120 }) }))
+      onEvent(ev({ type: 'agent_step', agent_id: 'rag', step: step('s-grep', '搜索', 'completed', { tool_name: 'tool_grep', duration_ms: 80 }) }))
+      onEvent(ev({ type: 'text_delta', agent_id: 'rag', delta: '正文第二段' }))
+      onEvent(ev({ type: 'agent_done', agent_id: 'rag', content: '完整答案' }))
+      onEvent(ev({ type: 'done', conversation_id: 'server-1', answer: '完整答案', assistant_msg_id: 'am1', user_msg_id: 'um1' }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('hi')
+    const msg = store.messages[1]
+    expect(msg.agents.length).toBe(1)
+    const agent = msg.agents[0]
+    expect(agent.parts).toBeDefined()
+    // 顺序: [tool(read), text(正文第一段), tool(grep), text(完整答案)]
+    const kinds = agent.parts!.map(p => p.kind)
+    expect(kinds).toEqual(['tool', 'text', 'tool', 'text'])
+    // 同一 step_id 只出现一次（running→completed 原位更新）
+    expect(agent.parts!.filter(p => p.step?.step_id === 's-read')).toHaveLength(1)
+    expect(agent.parts![0].step!.status).toBe('completed')
+    // done 权威内容覆盖尾部 text part
+    expect(agent.parts!.filter(p => p.kind === 'text')[1].text).toBe('完整答案')
+  })
+
+  it('agent_stream 增量也并入 parts（text/tool 交错）', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'agent_start', agent_id: 'web', agent_name: '网络搜索', agent_avatar: '🌐' }))
+      onEvent(ev({ type: 'agent_step', agent_id: 'web', step: step('s-search', '搜索网络', 'running') }))
+      onEvent(ev({ type: 'agent_stream', agent_id: 'web', content: '流式正文' }))
+      onEvent(ev({ type: 'agent_done', agent_id: 'web', content: 'web答案' }))
+      onEvent(ev({ type: 'done', conversation_id: 's2', answer: 'web答案' }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('query')
+    const agent = store.messages[1].agents[0]
+    expect(agent.parts!.map(p => p.kind)).toEqual(['tool', 'text'])
+    expect(agent.parts![1].text).toBe('web答案')
+  })
+
+  it('done 兜底补充无流式正文: parts 尾部落最终答案', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'agent_start', agent_id: 'rag', agent_name: '知识库检索' }))
+      onEvent(ev({ type: 'agent_step', agent_id: 'rag', step: step('s', '检索知识库', 'completed', { detail: '找到 3 条结果' }) }))
+      onEvent(ev({ type: 'agent_done', agent_id: 'rag', content: '回放答案' }))
+      onEvent(ev({ type: 'done', conversation_id: 's3', answer: '回放答案' }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('x')
+    const agent = store.messages[1].agents[0]
+    expect(agent.parts!.map(p => p.kind)).toEqual(['tool', 'text'])
+    expect(agent.parts![1].text).toBe('回放答案')
+  })
+})
+
 describe('send 流式', () => {
   it('queued → text_delta → done 全链路', async () => {
     mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void, _signal?: unknown, onSid?: (s: string) => void) => {

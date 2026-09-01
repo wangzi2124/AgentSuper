@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed, reactive, onScopeDispose } from 'vue'
-import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep, FileContent } from '../types'
+import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep, FileContent, AgentOutputPart } from '../types'
 import {
   sendMultiAgentStream,
 } from '../api/multiAgent'
@@ -25,6 +25,46 @@ import { usePermissionStore } from './permission'
 function genId(): string {
   try { return crypto.randomUUID() }
   catch { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16) }) }
+}
+
+// ——— Agent parts 累积（对齐 opencode Part 排序）———
+// 子 Agent 的输出按发送顺序记入 parts 数组：正文增量归并进相邻 text part，
+// 工具调用追加/原位更新 tool part；seq 单调递增保证顺序稳定，组件按序渲染。
+
+/** 下一个文本增量均并入最后一个 text part；否则新建一个 text part 追加到流尾。 */
+function appendAgentTextPart(agent: { parts?: AgentOutputPart[] }, delta: string) {
+  if (!agent.parts) agent.parts = []
+  const last = agent.parts[agent.parts.length - 1]
+  if (last && last.kind === 'text') {
+    last.text = (last.text || '') + delta
+  } else {
+    agent.parts.push({ seq: agent.parts.length, kind: 'text', text: delta })
+  }
+}
+
+/** agent_done 的权威内容：若流尾是 text part 直接替换占位正文，否则追加为最终答案段。 */
+function appendAgentFinalText(agent: { parts?: AgentOutputPart[] }, fullText: string) {
+  if (!agent.parts || agent.parts.length === 0) {
+    agent.parts = [{ seq: 0, kind: 'text', text: fullText }]
+    return
+  }
+  const last = agent.parts[agent.parts.length - 1]
+  if (last && last.kind === 'text') {
+    last.text = fullText
+  } else {
+    agent.parts.push({ seq: agent.parts.length, kind: 'text', text: fullText })
+  }
+}
+
+/** 工具/步骤事件：同一 step_id 原位更新（运行→完成），否则按到达顺序追加为 tool part。 */
+function appendAgentToolPart(agent: { parts?: AgentOutputPart[]; steps: AgentStep[] }, step: AgentStep) {
+  if (!agent.parts) agent.parts = []
+  const i = agent.parts.findIndex(p => p.kind === 'tool' && p.step?.step_id === step.step_id)
+  if (i >= 0 && agent.parts[i].step) {
+    agent.parts[i].step = step
+  } else {
+    agent.parts.push({ seq: agent.parts.length, kind: 'tool', step })
+  }
 }
 
 interface SessionState {
@@ -471,6 +511,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             status: 'running',
             content: '',
             steps: [],
+            parts: [],
           }
           assistantMsg.agents = Object.values(agentsMap)
         } else if (event.type === 'agent_step' && event.step && event.step.step_id) {
@@ -479,20 +520,43 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             const i = agent.steps.findIndex(s => s.step_id === event.step!.step_id)
             if (i >= 0) agent.steps[i] = event.step
             else agent.steps.push(event.step)
+            // [parts] 工具调用按真实输出顺序追加/原位更新（同一 step_id 不重复插入）
+            appendAgentToolPart(agent, event.step)
             assistantMsg.agents = Object.values(agentsMap)
           }
         } else if (event.type === 'agent_stream') {
           const agent = agentsMap[event.agent_id]
-          if (agent && event.content) { agent.content += event.content; assistantMsg.agents = Object.values(agentsMap) }
+          if (agent && event.content) {
+            agent.content += event.content
+            appendAgentTextPart(agent, event.content)
+            assistantMsg.agents = Object.values(agentsMap)
+          }
         } else if (event.type === 'text_delta') {
           // [F2] message.part.delta 真增量：主回答逐增量实时渲染，不再等 done 一次性回填。
           // done 事件仍携带权威完整 answer 兜底（漏帧/重连自动覆盖）。
           if (event.delta) {
             assistantMsg.content += event.delta
           }
+          // [parts] 子 Agent 来源的增量文本（TaggedEventQueue 打上了 agent_id）也并入其 parts，
+          // 保持 text/tool 交错顺序与主回答一致。
+          const agent = event.agent_id ? agentsMap[event.agent_id] : null
+          if (agent && event.delta) {
+            agent.content += event.delta
+            appendAgentTextPart(agent, event.delta)
+            assistantMsg.agents = Object.values(agentsMap)
+          }
         } else if (event.type === 'agent_done') {
           const agent = agentsMap[event.agent_id]
-          if (agent) { agent.status = 'completed'; if (event.content) agent.content = event.content; assistantMsg.agents = Object.values(agentsMap) }
+          if (agent) {
+            agent.status = 'completed'
+            if (event.content) {
+              agent.content = event.content
+              // [parts] done 携带权威完整正文：若尾部是 text part 则整体替换，
+              // 否则追加——保证最终答案一定落在 parts 流末尾的文本段。
+              appendAgentFinalText(agent, event.content)
+            }
+            assistantMsg.agents = Object.values(agentsMap)
+          }
         } else if (event.type === 'agent_error') {
           const agent = agentsMap[event.agent_id]
           if (agent) { agent.status = 'failed'; agent.error = event.error; assistantMsg.agents = Object.values(agentsMap) }

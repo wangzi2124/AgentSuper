@@ -241,6 +241,16 @@ export interface Message {
 
 // ===== Multi-Agent Types =====
 
+// Agent 输出部件（对齐 opencode Part：正文与工具调用按 agent 真实输出顺序交错）
+export interface AgentOutputPart {
+  seq: number
+  kind: 'text' | 'tool'
+  /** kind=text：正文增量（相邻文本段会合并成同一 part，直到下一个工具打断） */
+  text?: string
+  /** kind=tool：工具/步骤调用（渲染为极简卡片，不展示参数/结果） */
+  step?: AgentStep
+}
+
 export interface AgentStreamData {
   agent_id: string
   agent_name: string
@@ -249,6 +259,8 @@ export interface AgentStreamData {
   content: string
   steps: AgentStep[]
   error?: string
+  /** 按 agent 输出顺序排列的部件流（text/tool 交错）；历史回放可能为空 → 组件回退旧渲染 */
+  parts?: AgentOutputPart[]
 }
 
 export interface MultiAgentSSEEvent {
