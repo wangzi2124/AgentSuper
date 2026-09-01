@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick, onBeforeUnmount, watch } from 'vue'
 import type { FileContent } from '../types'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { SUPPORTED_MODELS } from '../config/models'
@@ -38,6 +38,16 @@ import { transcribeAudio } from '../api/voice'
 import { showToast } from 'vant'
 
 const listening = ref(false)
+// [录音圈] 开始录音后每秒 +1，套在麦克风外的状态圈显示录音时长
+const recordSeconds = ref(0)
+let recordTimer: number | null = null
+watch(listening, (on) => {
+  if (recordTimer) { clearInterval(recordTimer); recordTimer = null }
+  if (on) {
+    recordSeconds.value = 0
+    recordTimer = window.setInterval(() => { recordSeconds.value += 1 }, 1000)
+  }
+})
 const recognition = ref<{ start(): void; stop(): void } | null>(null)
 const hasSpeechRecognition = computed(() =>
   typeof window !== 'undefined' && !!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition
@@ -152,23 +162,40 @@ function cleanupLive() {
   liveSource = null; liveProcessor = null; liveStream = null; liveCtx = null
 }
 
+// 静音检测：近静音切片（无语音内容）直接跳过，避免无意义的空转写与等待
+function isSilent(samples: Float32Array): boolean {
+  if (!samples.length) return true
+  let peak = 0
+  for (let i = 0; i < samples.length; i += 64) {
+    const v = Math.abs(samples[i])
+    if (v > peak) peak = v
+    if (peak > 0.01) return false
+  }
+  return peak < 0.008
+}
+
 async function stopLive() {
   if (liveTimer) { clearInterval(liveTimer); liveTimer = null }
   // 补转剩余分片（先采集，结束点不再增长）
   const end = liveSamples.length
   if (end > livePending) {
+    const tailLen = end - livePending
     const slice = liveSamples.slice(livePending, end)
     livePending = end
-    transcribeChain = transcribeChain.then(async () => {
-      try {
-        const t = await transcribeAudio(pcmToWav(slice, liveSampleRate), 'live.wav')
-        if (t) text.value = (text.value ? text.value + ' ' : '') + t
-      } catch {
-        showToast('语音转写失败，请重试')
-      }
-    }).catch(() => {})
+    // 尾部是静音尾音（如说完话后残留）→ 跳过，避免白跑一次 ~1.3s 转写还返回空；
+    // 长度达标或有语音内容则转写，不丢尾部的话。
+    if (tailLen >= liveSampleRate * 0.4 || !isSilent(slice)) {
+      transcribeChain = transcribeChain.then(async () => {
+        try {
+          const t = await transcribeAudio(pcmToWav(slice, liveSampleRate), 'live.wav')
+          if (t) text.value = (text.value ? text.value + ' ' : '') + t
+        } catch {
+          showToast('语音转写失败，请重试')
+        }
+      }).catch(() => {})
+    }
   }
-  await transcribeChain
+  // 立即收尾：不阻塞 stop 等待在途/尾部转写（后台完成后自动追加），界面先恢复可操作
   cleanupLive()
   liveSamples = new Float32Array(0)
   livePending = 0
@@ -292,6 +319,7 @@ async function toggleMic() {
 }
 onBeforeUnmount(() => {
   if (liveTimer) clearInterval(liveTimer)
+  if (recordTimer) clearInterval(recordTimer)
   cleanupLive()
   try { recognition.value?.stop() } catch { /* noop */ }
 })
@@ -716,17 +744,20 @@ const textareaRef = ref<HTMLTextAreaElement>()
           class="char-counter"
           :class="{ 'char-counter--danger': counterDanger }"
         >{{ remaining }}</span>
-        <!-- 录音按钮 -->
-        <button
-          class="mic-btn"
-          :class="{ listening }"
-          :disabled="loading"
-          @click="toggleMic"
-          :title="listening ? '停止录音' : '语音输入'"
-          :aria-label="listening ? '停止录音' : '语音输入'"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-        </button>
+        <!-- 录音按钮：录音中显示已录秒数 -->
+        <span class="mic-wrap" :class="{ listening }">
+          <button
+            class="mic-btn"
+            :class="{ listening }"
+            :disabled="loading"
+            @click="toggleMic"
+            :title="listening ? '停止录音' : '语音输入'"
+            :aria-label="listening ? '停止录音' : '语音输入'"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          </button>
+          <span v-if="listening" class="mic-rec-timer">{{ recordSeconds }}s</span>
+        </span>
         <button
           v-if="!loading"
           class="send-btn"

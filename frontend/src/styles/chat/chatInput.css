@@ -190,6 +190,34 @@ animation: mic-pulse 1.3s ease-in-out infinite;
 0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.45); }
 50% { box-shadow: 0 0 0 7px rgba(239, 68, 68, 0); }
 }
+/* [录音读秒] 录音时在麦克风上方显示已录秒数 */
+.mic-wrap {
+position: relative;
+display: inline-flex;
+align-items: center;
+justify-content: center;
+width: 34px;
+height: 34px;
+}
+.mic-rec-timer {
+position: absolute;
+top: -7px;
+right: -7px;
+min-width: 24px;
+height: 15px;
+padding: 0 5px;
+border-radius: 8px;
+display: inline-flex;
+align-items: center;
+justify-content: center;
+background: var(--danger, #ef4444);
+color: #fff;
+font-size: 10.5px;
+line-height: 1;
+font-weight: 700;
+font-variant-numeric: tabular-nums;
+box-shadow: 0 1px 4px rgba(239, 68, 68, 0.4);
+}
 .send-btn {
 width: 36px;
 height: 36px;
