@@ -28,7 +28,7 @@ const step = (step_id: string, name: string, status: string, extra: Record<strin
 })
 
 describe('MultiAgentResponse 输出部件渲染', () => {
-  it('按 parts 顺序交错渲染 text 与 tool（工具无参数/结果展开）', () => {
+  it('按 parts 仅渲染正文，隐藏工具卡片（工具不占聊天内容）', () => {
     const wrapper = mount(MultiAgentResponse, {
       props: {
         routingStatus: '',
@@ -48,26 +48,23 @@ describe('MultiAgentResponse 输出部件渲染', () => {
 
     const tools = wrapper.findAll('.o-tool')
     const mds = wrapper.findAll('.o-text')
-    // 顺序：tool(seq0) → text(seq1) → tool(seq2) → text(seq3)
+    // 工具卡片被隐藏，仅正文块渲染
     const order = wrapper.findAll('.o-parts > *').map(n => n.classes().includes('o-text') ? 'text' : 'tool')
-    expect(order).toEqual(['tool', 'text', 'tool', 'text'])
-    expect(tools).toHaveLength(2)
+    expect(order).toEqual(['text', 'text'])
+    expect(tools).toHaveLength(0)
     expect(mds).toHaveLength(2)
-    // 工具名去掉 tool_ 前缀（对齐 opencode 可读工具名）
-    expect(tools[0].text()).toContain('read_file')
-    expect(tools[1].text()).toContain('write_file')
-    // 完成的工具带耗时，运行中的带状态符号
-    expect(tools[1].text()).toContain('1.5s')
-    expect(tools[0].classes()).toContain('running')
     // 正文渲染
+    expect(mds[0].text()).toBe('第一段正文')
     expect(mds[1].text()).toBe('答案收尾')
-    // 绝不展示调用参数 JSON / 结果文本
+    // 工具名称/耗时/状态符号一律不展示
+    expect(wrapper.text()).not.toContain('read_file')
+    expect(wrapper.text()).not.toContain('write_file')
+    expect(wrapper.text()).not.toContain('1.5s')
     expect(wrapper.text()).not.toContain('"file"')
     expect(wrapper.text()).not.toContain('查看结果')
-    expect(wrapper.text()).not.toContain('tool_args')
   })
 
-  it('无 parts 时回退组装 steps + 正文（历史回放）', () => {
+  it('无 parts 时回退组装 steps + 正文，但仅渲染正文（历史回放）', () => {
     const wrapper = mount(MultiAgentResponse, {
       props: {
         routingStatus: '',
@@ -80,8 +77,8 @@ describe('MultiAgentResponse 输出部件渲染', () => {
       global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
     })
     const order = wrapper.findAll('.o-parts > *').map(n => n.classes().includes('o-text') ? 'text' : 'tool')
-    expect(order).toEqual(['tool', 'text'])
-    expect(wrapper.findAll('.o-tool')).toHaveLength(1)
+    expect(order).toEqual(['text'])
+    expect(wrapper.findAll('.o-tool')).toHaveLength(0)
     expect(wrapper.findAll('.o-text')[0].text()).toBe('历史答案')
   })
 

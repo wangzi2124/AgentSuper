@@ -174,8 +174,6 @@
 @media (max-width: 768px) {
   .agent { padding: 12px 12px 12px 16px; }
   .step-item { flex-wrap: wrap; }
-  .o-tool { font-size: 12px; padding: 5px 8px; }
-  .o-tool-title { max-width: 55vw; }
 }
 
 /* ---------- MultiAgentChatHistory（侧栏历史列表） ---------- */

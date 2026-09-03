@@ -60,44 +60,8 @@ color: var(--text-secondary);
 .step-name { font-weight: 500; }
 .step-time { margin-left: auto; color: var(--text-secondary); font-size: 13px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .step-time.spinning { color: var(--primary); animation: spin 0.8s linear infinite; }
-/* 输出部件流（对齐 opencode Part）：文本块与工具卡片按真实输出顺序交错 */
+/* 输出部件流：正文块按真实输出顺序交错渲染 */
 .o-parts { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; }
 .o-text > *:first-child { margin-top: 0; }
 
-/* 极简工具卡片：对齐 opencode BasicTool trigger —— 无边框独立行，
-   工具名 + 子标题 + 耗时，点击不展开任何参数/结果细节 */
-.o-tool {
-display: flex;
-align-items: center;
-gap: 8px;
-padding: 6px 10px;
-border-radius: 8px;
-font-size: 13px;
-background: color-mix(in srgb, var(--bg-subtle) 55%, transparent);
-border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-transition: border-color var(--duration) var(--ease), background var(--duration) var(--ease);
-}
-.o-tool.running { background: color-mix(in srgb, var(--primary) 8%, transparent); border-color: color-mix(in srgb, var(--primary) 26%, transparent); }
-.o-tool.failed { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 24%, transparent); }
-.o-tool-icon { font-size: 12px; flex-shrink: 0; width: 12px; text-align: center; color: var(--text-secondary); }
-.o-tool-icon.completed { color: var(--success); }
-.o-tool-icon.failed { color: var(--danger); }
-.o-tool-icon.running { color: var(--primary); }
-.o-tool-name {
-font-weight: 600;
-color: var(--primary);
-flex-shrink: 0;
-font-family: 'JetBrains Mono', Consolas, monospace;
-font-size: 12px;
-}
-.o-tool-title {
-color: var(--text-secondary);
-white-space: nowrap;
-overflow: hidden;
-text-overflow: ellipsis;
-min-width: 0;
-flex: 1;
-}
-.o-tool-time { margin-left: auto; color: var(--text-secondary); font-size: 12px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
-.o-tool-spin { width: 10px; height: 10px; margin-left: auto; border: 1.5px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
 .err { padding: 10px 14px; background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: 12px; font-size: 13px; color: var(--danger); margin-top: 4px; }

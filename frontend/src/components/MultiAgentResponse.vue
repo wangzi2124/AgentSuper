@@ -23,32 +23,6 @@ const showFinalAnswer = computed(() => {
   return true
 })
 
-// opencode 风格状态符号
-function getStatusIcon(status: string): string {
-  if (status === 'completed') return '✓'
-  if (status === 'failed') return '✕'
-  return '•'
-}
-
-function formatDuration(ms?: number): string {
-  if (ms == null) return ''
-  if (ms < 1000) return `${ms.toFixed(0)}ms`
-  return `${(ms / 1000).toFixed(1)}s`
-}
-
-// 工具/步骤卡片标题（对齐 opencode BasicTool trigger 的子标题文案）
-function stepTitle(step: AgentStep): string {
-  if (step.detail) return step.detail
-  if (step.tool_name) return step.tool_name
-  return step.name
-}
-
-// 极简工具名展示（去掉 tool_ 前缀，对齐 opencode 工具名可读性）
-function shortToolName(name?: string): string {
-  if (!name) return '工具'
-  return name.replace(/^plugin_[^_]+_/, '').replace(/^tool_/, '')
-}
-
 // 按输出顺序排列的展示部件：优先 parts（真实交错），否则组装 steps（含最终正文）
 function orderedParts(agent: {
   parts?: AgentOutputPart[]
@@ -93,20 +67,12 @@ function orderedParts(agent: {
           <span class="badge" :class="a.status">{{ a.status === 'running' ? '● 运行中' : a.status === 'completed' ? '✓ 完成' : '✗ 失败' }}</span>
         </div>
 
-        <!-- 输出部件：按 agent 真实输出顺序交错（正文 ↔ 工具卡片，对齐 opencode Part 渲染） -->
-        <div v-if="orderedParts(a).length" class="o-parts">
-          <template v-for="p in orderedParts(a)" :key="p.seq">
+        <!-- 输出部件：仅渲染正文；工具调用不占聊天内容（隐藏 tool 卡片） -->
+        <div v-if="orderedParts(a).filter(p => p.kind === 'text').length" class="o-parts">
+          <template v-for="p in orderedParts(a).filter(p => p.kind === 'text')" :key="p.seq">
             <!-- 正文块 -->
-            <div v-if="p.kind === 'text'" class="text o-text">
+            <div class="text o-text">
               <MarkdownContent :text="p.text || ''" />
-            </div>
-            <!-- 极简工具卡片（无参数 / 无结果展开） -->
-            <div v-else-if="p.kind === 'tool' && p.step" class="o-tool" :class="p.step.status">
-              <span class="o-tool-icon" :class="p.step.status">{{ getStatusIcon(p.step.status) }}</span>
-              <span class="o-tool-name">{{ shortToolName(p.step.tool_name) }}</span>
-              <span class="o-tool-title">{{ stepTitle(p.step) }}</span>
-              <span v-if="p.step.duration_ms != null" class="o-tool-time">{{ formatDuration(p.step.duration_ms) }}</span>
-              <span v-else-if="p.step.status === 'running'" class="o-tool-spin"></span>
             </div>
           </template>
         </div>
