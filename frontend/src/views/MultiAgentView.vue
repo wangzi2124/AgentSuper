@@ -131,7 +131,29 @@ onMounted(() => {
   if (id) agent.loadConversation(id)
   checkWeatherPlugin()
   perm.loadWorkspaces()
+  window.addEventListener('keydown', onGlobalKeydown)
 })
+
+// ── 双击 Esc 快捷取消：连按两次 Esc → 取消当前任务并清空队列 ──
+let escCount = 0
+let escTimer: number | null = null
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Escape') { escCount = 0; return }
+  const now = Date.now()
+  // 1s 外的第一次 Esc 视为新的一次
+  if (escCount === 0) {
+    if (escTimer) { clearTimeout(escTimer); escTimer = null }
+    escTimer = window.setTimeout(() => { escCount = 0 }, 1000)
+  }
+  escCount += 1
+  if (escCount === 2) {
+    escCount = 0
+    if (escTimer) { clearTimeout(escTimer); escTimer = null }
+    if (agent.loading || pendingQueue.value.length) {
+      handleCancel()
+    }
+  }
+}
 
 watch(() => route.params.id, (newId) => {
   if (newId) agent.loadConversation(newId as string)
@@ -147,6 +169,11 @@ function onScroll(e: Event) {
 
 function handleSend(text: string, files?: FileContent[]) {
   markPendingAutoRead()
+  // 任务正在进行时入队，完成后自动发出（排队方案）
+  if (agent.loading) {
+    pendingQueue.value.push({ text, files: files || [] })
+    return
+  }
   agent.send(text, undefined, files || []).then((completed) => {
     if (completed && agent.conversationId && route.name !== 'MultiAgentConversation') {
       router.push({ name: 'MultiAgentConversation', params: { id: agent.conversationId } })
@@ -154,7 +181,26 @@ function handleSend(text: string, files?: FileContent[]) {
   })
 }
 
-function handleCancel() { agent.cancel() }
+// ── 待发消息队列：agent 运行中发送的内容先进队，done 后自动发出下一条 ──
+type QueuedMsg = { text: string; files: FileContent[] }
+const pendingQueue = ref<QueuedMsg[]>([])
+const queueCount = computed(() => pendingQueue.value.length)
+watch(() => agent.loading, (loading) => {
+  // 空闲后自动发队列中的下一条
+  if (!loading && pendingQueue.value.length) {
+    const next = pendingQueue.value.shift()!
+    agent.send(next.text, undefined, next.files).then((completed) => {
+      if (completed && agent.conversationId && route.name !== 'MultiAgentConversation') {
+        router.push({ name: 'MultiAgentConversation', params: { id: agent.conversationId } })
+      }
+    })
+  }
+})
+function cancelQueue() {
+  pendingQueue.value = []
+}
+
+function handleCancel() { cancelQueue(); agent.cancel() }
 
 function handleUndo(index: number) {
   if (agent.loading) agent.cancel()
@@ -226,7 +272,11 @@ function stopSpeaking() {
   stopNative()
   speakingId.value = null
 }
-onBeforeUnmount(stopSpeaking)
+onBeforeUnmount(() => {
+  stopSpeaking()
+  window.removeEventListener('keydown', onGlobalKeydown)
+  if (escTimer) clearTimeout(escTimer)
+})
 
 function handleRetry(messageId: string) {
   agent.manualRetry(messageId)
@@ -518,6 +568,14 @@ async function handleCopy(messageId: string, text: string) {
     </div>
 
     <div v-if="agent.notice" class="chat-notice">{{ agent.notice }}</div>
+
+    <!-- 待发消息队列提示条 -->
+    <div v-if="queueCount" class="send-queue-bar">
+      <span class="send-queue-text">
+        ⏳ 当前任务进行中，已加入队列：{{ queueCount }} 条待发，完成后自动依次发送（按两次 Esc 可取消）
+      </span>
+      <button class="send-queue-clear" @click="cancelQueue">取消全部</button>
+    </div>
 
     <div class="chat-footer">
       <ChatInput ref="chatInputRef" :loading="agent.loading" @send="handleSend" @cancel="handleCancel" />

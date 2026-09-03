@@ -473,10 +473,8 @@ function removeFile(id: string) {
 
 // 发送消息
 function handleSend() {
-  if (props.loading) return
-  // F5: 仅用 trim() 判空，发送原文（保留首尾空白/换行）
+  // loading 时不清空输入，交给父组件入队
   const msg = text.value
-  // [F8] 文本与附件皆空则不发送
   if (!msg.trim() && files.value.length === 0) return
   emit('send', msg, files.value.map(({ id: _id, preview: _pv, size: _sz, ...fc }) => fc))
   // [F9] 记录已发送历史（最新在前），重置导航指针
@@ -759,23 +757,13 @@ const textareaRef = ref<HTMLTextAreaElement>()
           <span v-if="listening" class="mic-rec-timer">{{ recordSeconds }}s</span>
         </span>
         <button
-          v-if="!loading"
           class="send-btn"
           :disabled="!canSend"
           @click="handleSend"
-          title="发送"
-          aria-label="发送"
+          :title="loading ? '加入队列（当前任务完成后发送）' : '发送'"
+          :aria-label="loading ? '加入队列' : '发送'"
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
-        </button>
-        <button
-          v-else
-          class="send-btn cancel"
-          @click="handleCancel"
-          title="取消"
-          aria-label="取消"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
         </button>
       </div>
     </div>

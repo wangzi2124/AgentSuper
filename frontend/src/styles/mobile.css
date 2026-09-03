@@ -76,7 +76,7 @@
   .message-list { padding: 14px 16px !important; }
   .chat-message { gap: 8px; }
   .avatar { width: 30px; height: 30px; font-size: 15px; }
-  .bubble { font-size: 15px; padding: 10px 12px; }
+  .bubble { font-size: 15px; }
   .chat-footer .btn-danger { margin: 0 16px 8px !important; }
   .ws-panel { right: auto; left: 16px; width: calc(100vw - 32px); max-width: none; }
   .user .bubble { max-width: 88%; }
@@ -415,20 +415,9 @@ html[data-theme='dark'] {
 
 /* ============================================================================
  * 移动端聊天 UI 微调（第 5 轮优化追加）
- * 目标：气泡圆角、输入区阴影、发送按钮品牌渐变，与全局卡片语言统一。
+ * 目标：输入区阴影、发送按钮品牌渐变，与全局卡片语言统一。
  * ============================================================================ */
 @media (max-width: 768px) {
-  /* 聊天气泡：圆角加大到 16px，贴合全局卡片语言；用户/助手保留小尾巴 */
-  .bubble {
-    border-radius: 16px !important;
-  }
-  .user .bubble {
-    border-bottom-right-radius: 6px !important;
-  }
-  .chat-message:not(.user) .bubble {
-    border-bottom-left-radius: 6px !important;
-  }
-
   /* 输入区：顶部柔和品牌阴影 + 细分隔线，增强悬浮感 */
   .chat-input {
     box-shadow: 0 -2px 14px rgba(109, 94, 241, 0.08) !important;

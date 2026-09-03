@@ -85,4 +85,4 @@ function onCopy(e: Event) {
   ></div>
 </template>
 
-<style scoped src="../styles/chat/markdownContent.css"></style>
+<style src="../styles/chat/markdownContent.css"></style>

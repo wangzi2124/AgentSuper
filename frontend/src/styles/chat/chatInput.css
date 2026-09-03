@@ -1,11 +1,11 @@
 .chat-input {
 position: relative;
-padding: 8px 24px calc(12px + env(safe-area-inset-bottom, 0px));
+padding: 8px 32px calc(12px + env(safe-area-inset-bottom, 0px));
 background: transparent;
 }
 /* Gemini 风格大圆角输入卡 */
 .input-card {
-max-width: 900px;
+max-width: 860px;
 margin: 0 auto;
 display: flex;
 flex-direction: column;
