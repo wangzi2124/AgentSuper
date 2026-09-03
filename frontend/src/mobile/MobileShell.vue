@@ -67,7 +67,7 @@ const mobileViews: Record<string, unknown> = {
   import { useMultiAgentStore } from '../stores/multiAgent'
   import { usePermissionStore } from '../stores/permission'
   import { useThemeStore, BG_VARIANTS } from '../stores/theme'
-  import { useChatSettingsStore } from '../stores/chatSettings'
+  import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
   import { SUPPORTED_MODELS } from '../config/models'
 
   const agent = useMultiAgentStore()
@@ -135,6 +135,15 @@ const mobileViews: Record<string, unknown> = {
     if (opt && opt.value) formModel.value = opt.value
     agent.selectedModel = formModel.value
     showModelPicker.value = false
+  }
+
+  // 朗读语言
+  const showLangPicker = ref(false)
+  const langColumns = computed(() => TTS_LANGUAGES.map(l => ({ text: l.label, value: l.value })))
+  function onLangConfirm(params: any) {
+    const opt = params?.selectedOptions?.[0]
+    if (opt && opt.value) chatSettings.ttsLang = opt.value
+    showLangPicker.value = false
   }
 
   function saveSettings() {
@@ -260,6 +269,16 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
           <van-switch v-model="chatSettings.autoRead" size="22" />
         </div>
         <div class="form-field">
+          <div class="form-label">朗读语言</div>
+          <van-field
+            :model-value="(TTS_LANGUAGES.find(l => l.value === chatSettings.ttsLang)?.label) || chatSettings.ttsLang"
+            readonly
+            is-link
+            placeholder="选择语言"
+            @click="showLangPicker = true"
+          />
+        </div>
+        <div class="form-field">
           <div class="form-label">模型</div>
           <van-field
             :model-value="formModelText"
@@ -297,6 +316,15 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
       title="选择模型"
       @confirm="onModelConfirm"
       @cancel="showModelPicker = false"
+    />
+  </van-popup>
+
+  <van-popup v-model:show="showLangPicker" position="bottom" round>
+    <van-picker
+      :columns="langColumns"
+      title="选择朗读语言"
+      @confirm="onLangConfirm"
+      @cancel="showLangPicker = false"
     />
   </van-popup>
   </div>

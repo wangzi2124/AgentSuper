@@ -6,7 +6,7 @@ import { SUPPORTED_MODELS } from '../config/models'
 import type { FileContent } from '../types'
 import { usePermissionStore } from '../stores/permission'
 import { useThemeStore, BG_VARIANTS } from '../stores/theme'
-import { useChatSettingsStore } from '../stores/chatSettings'
+  import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
 import { synthesize, speakNative, stopNative } from '../api/voice'
 import MultiAgentResponse from '../components/MultiAgentResponse.vue'
 import ChatInput from '../components/ChatInput.vue'
@@ -253,7 +253,7 @@ async function handleSpeak(id: string, content: string) {
   if (text.length > MAX_TTS_CHARS) text = text.slice(0, MAX_TTS_CHARS) + '。'
   speakingId.value = id
   try {
-    const url = await synthesize(text)
+    const url = await synthesize(text, undefined, chatSettings.ttsLang)
     const audio = new Audio(url)
     speakAudio = audio
     audio.onended = () => { if (speakingId.value === id) speakingId.value = null }
@@ -435,6 +435,12 @@ async function handleCopy(messageId: string, text: string) {
                 <input type="checkbox" :checked="autoRead" :disabled="agent.loading" @change="chatSettings.autoRead = ($event.target as HTMLInputElement).checked" />
                 <span class="toggle-slider"></span>
               </label>
+            </div>
+            <div class="toggle-row">
+              <span class="toggle-row-label">朗读语言</span>
+              <select v-model="chatSettings.ttsLang" class="drawer-select tts-lang-select" :disabled="agent.loading">
+                <option v-for="l in TTS_LANGUAGES" :key="l.value" :value="l.value">{{ l.label }}</option>
+              </select>
             </div>
           </div>
 
