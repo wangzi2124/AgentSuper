@@ -5,7 +5,7 @@ background: transparent;
 }
 /* Gemini 风格大圆角输入卡 */
 .input-card {
-max-width: 860px;
+width: 100%;
 margin: 0 auto;
 display: flex;
 flex-direction: column;
@@ -247,7 +247,7 @@ box-shadow:
   0 8px 28px rgba(15, 23, 42, 0.10);
 }
 .file-list {
-max-width: 860px;
+width: 100%;
 margin: 0 auto 10px;
 display: flex;
 flex-wrap: wrap;
