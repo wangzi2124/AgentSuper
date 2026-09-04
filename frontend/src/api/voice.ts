@@ -37,11 +37,11 @@ export async function transcribeAudio(blob: Blob, filename = 'record.webm'): Pro
 }
 
 // TTS 合成：文本 → 可播放音频 URL（后端 subprocess → 本地 Qwen3-TTS 预设音色）
-export async function synthesize(text: string, speaker: string = TTS_SPEAKER): Promise<string> {
+export async function synthesize(text: string, speaker: string = TTS_SPEAKER, language: string = 'Auto'): Promise<string> {
   const form = new FormData()
   form.append('text', text)
   form.append('speaker', speaker)
-  form.append('language', 'Auto')
+  form.append('language', language)
   const res = await fetchWithTimeout(`${TTS_BASE}/tts`, { method: 'POST', body: form }, 180000)
   if (!res.ok) {
     const body = await res.json().catch(() => null)

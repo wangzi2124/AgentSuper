@@ -213,6 +213,18 @@ border: 1px solid var(--border-subtle);
 border-radius: var(--radius);
 }
 .toggle-row-label { font-size: 13px; color: var(--text); font-weight: 500; }
+.tts-lang-select {
+  flex-shrink: 0;
+  width: 110px;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.tts-lang-select:disabled { opacity: 0.6; }
 .drawer-session-dir {
 font-size: 11.5px;
 color: var(--primary);
