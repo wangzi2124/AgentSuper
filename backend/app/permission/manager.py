@@ -367,7 +367,7 @@ class PermissionManager:
                 # .env/.db/permissions.json：读弹窗审批，写/执行直接拒绝
                 return "ask" if operation == "read" else "deny"
             if operation in ("write", "execute") and self._is_critical_write(p):
-                return "deny"
+                return "ask"
             return "allow"
         now = time.time()
         # Clean up expired temp approvals
