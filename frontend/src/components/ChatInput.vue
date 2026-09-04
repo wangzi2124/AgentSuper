@@ -52,7 +52,16 @@ let micLongPressTimer: number | null = null
 const MIC_LONG_PRESS_MS = 300
 
 function micPointerDown() {
-  if (props.loading || pttHolding.value || listening.value) return
+  if (props.loading || pttUploading) return
+  if (pttHolding.value) return
+  if (listening.value) {
+    // [fix] 正在听写：布防「单击=停止」，但不启动长按（避免与实时采集抢麦）。
+    // 旧逻辑在此 return → 指针落下不布防，pointerup 里 micLongPressTimer 为 null、
+    // pttHolding 为 false，两条分支都不命中，toggleMic() 永不被调用来停止听写。
+    micPointerDownTime = Date.now()
+    micLongPressTimer = null
+    return
+  }
   micPointerDownTime = Date.now()
   micLongPressTimer = window.setTimeout(() => {
     micLongPressTimer = null
@@ -70,6 +79,9 @@ function micPointerUp() {
   } else if (pttHolding.value) {
     // PTT 录音中松开 → 停止并发送
     endPtt()
+  } else if (listening.value) {
+    // [fix] 听写状态下的单击 → 停止实时采集/转写
+    toggleMic()
   }
 }
 
@@ -94,7 +106,10 @@ function micPointerCancel() {
 async function startPtt() {
   if (props.loading) return
   try {
-    await pttRecorder.start((d) => { pttHolding.value = true; pttSeconds.value = 0 })
+    // [fix] 只在此回调里标记"正在录音"，不要再清零 pttSeconds：
+    // recorder.frameTimer 每 200ms 回调一次，若这里每帧把秒数清零，
+    // 会与下方 1s 计时器互相打架 → 红色秒数永远停在 0~1"数不上去"。
+    await pttRecorder.start(() => { pttHolding.value = true })
   } catch {
     showToast('麦克风不可用，请检查权限')
     return
