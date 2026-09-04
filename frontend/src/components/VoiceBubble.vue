@@ -4,11 +4,13 @@
 import { onBeforeUnmount, ref } from 'vue'
 import type { VoiceMessageData } from '../types'
 import { voiceAudioUrl } from '../api/voice'
+import { fetchWithTimeout } from '../api/fetch'
 
 const props = defineProps<{ voice: VoiceMessageData }>()
 
 let sharedAudio: HTMLAudioElement | null = null
 let loadUrl = ''
+let blobUrl = ''
 
 const playing = ref(false)
 const progress = ref(0)
@@ -21,7 +23,7 @@ function resolveUrl(): string {
   return voiceAudioUrl(u)
 }
 
-function toggle() {
+async function toggle() {
   const url = resolveUrl()
   if (!url) return
   const audio = sharedAudio
@@ -32,30 +34,44 @@ function toggle() {
     progress.value = 0
     return
   }
-  // 停掉其它/旧播放，新建或复用 Audio
+  // 停掉其它/旧播放
   if (audio) {
     audio.pause()
     audio.currentTime = 0
   }
-  const a = new Audio(url)
-  sharedAudio = a
-  loadUrl = url
-  playing.value = true
-  a.ontimeupdate = () => {
-    if (a.duration) progress.value = a.currentTime / a.duration
-  }
-  a.onended = () => {
+  // 释放旧 blob URL
+  if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = '' }
+
+  try {
+    // 带鉴权头获取音频 blob（new Audio(url) 不带 auth → 401）
+    const res = await fetchWithTimeout(url, {}, 30000)
+    if (!res.ok) { playing.value = false; progress.value = 0; return }
+    const blob = await res.blob()
+    blobUrl = URL.createObjectURL(blob)
+
+    const a = new Audio(blobUrl)
+    sharedAudio = a
+    loadUrl = url
+    playing.value = true
+    a.ontimeupdate = () => {
+      if (a.duration) progress.value = a.currentTime / a.duration
+    }
+    a.onended = () => {
+      playing.value = false
+      progress.value = 0
+    }
+    a.onerror = () => {
+      playing.value = false
+      progress.value = 0
+    }
+    void a.play().catch(() => {
+      playing.value = false
+      progress.value = 0
+    })
+  } catch {
     playing.value = false
     progress.value = 0
   }
-  a.onerror = () => {
-    playing.value = false
-    progress.value = 0
-  }
-  void a.play().catch(() => {
-    playing.value = false
-    progress.value = 0
-  })
 }
 
 onBeforeUnmount(() => {
@@ -64,6 +80,7 @@ onBeforeUnmount(() => {
     sharedAudio.pause()
     sharedAudio.currentTime = 0
   }
+  if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = '' }
 })
 
 const bars = computedBars()

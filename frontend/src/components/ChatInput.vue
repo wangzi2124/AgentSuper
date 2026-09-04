@@ -45,7 +45,53 @@ const pttHolding = ref(false)
 const pttSeconds = ref(0)
 let pttTimer: number | null = null
 let pttUploading = false
-async function pttStart() {
+
+// ── 统一麦克风按钮：点击=语音转文字，长按=按住说话 ──
+let micPointerDownTime = 0
+let micLongPressTimer: number | null = null
+const MIC_LONG_PRESS_MS = 300
+
+function micPointerDown() {
+  if (props.loading || pttHolding.value || listening.value) return
+  micPointerDownTime = Date.now()
+  micLongPressTimer = window.setTimeout(() => {
+    micLongPressTimer = null
+    // 长按触发 → 进入 PTT 录音模式
+    startPtt()
+  }, MIC_LONG_PRESS_MS)
+}
+
+function micPointerUp() {
+  if (micLongPressTimer) {
+    // 长按未触发 → 点击 → 切换语音转文字
+    clearTimeout(micLongPressTimer)
+    micLongPressTimer = null
+    toggleMic()
+  } else if (pttHolding.value) {
+    // PTT 录音中松开 → 停止并发送
+    endPtt()
+  }
+}
+
+function micPointerLeave() {
+  if (micLongPressTimer) {
+    clearTimeout(micLongPressTimer)
+    micLongPressTimer = null
+  } else if (pttHolding.value) {
+    pttCancel()
+  }
+}
+
+function micPointerCancel() {
+  if (micLongPressTimer) {
+    clearTimeout(micLongPressTimer)
+    micLongPressTimer = null
+  } else if (pttHolding.value) {
+    pttCancel()
+  }
+}
+
+async function startPtt() {
   if (props.loading) return
   try {
     await pttRecorder.start((d) => { pttHolding.value = true; pttSeconds.value = 0 })
@@ -58,7 +104,8 @@ async function pttStart() {
   if (pttTimer) clearInterval(pttTimer)
   pttTimer = window.setInterval(() => { pttSeconds.value += 1 }, 1000)
 }
-async function pttEnd() {
+
+async function endPtt() {
   const r = await pttRecorder.stop()
   if (pttTimer) { clearInterval(pttTimer); pttTimer = null }
   pttHolding.value = false
@@ -70,7 +117,6 @@ async function pttEnd() {
     const up = await uploadVoiceMessage(r.blob, r.duration, r.peaks, '', 'voice.webm')
     if (!up) { showToast('语音上传失败'); return }
     const voice: VoiceMessageData = { id: up.id, url: up.url, duration: up.duration, waveform: up.waveform, text: up.text || '' }
-    // [语音消息] 正文用占位符（保 LLM 管线可跑），voice 字段承载真实音频
     emit('send', '[语音]', [], voice)
   } catch {
     showToast('语音上传失败')
@@ -78,12 +124,17 @@ async function pttEnd() {
     pttUploading = false
   }
 }
+
 function pttCancel() {
   pttRecorder.cancelNow()
   if (pttTimer) { clearInterval(pttTimer); pttTimer = null }
   pttHolding.value = false
 }
-onBeforeUnmount(() => { pttRecorder.cancelNow() })
+
+onBeforeUnmount(() => {
+  pttRecorder.cancelNow()
+  if (micLongPressTimer) { clearTimeout(micLongPressTimer); micLongPressTimer = null }
+})
 
 const listening = ref(false)
 // [录音圈] 开始录音后每秒 +1，套在麦克风外的状态圈显示录音时长
@@ -790,37 +841,24 @@ const textareaRef = ref<HTMLTextAreaElement>()
           class="char-counter"
           :class="{ 'char-counter--danger': counterDanger }"
         >{{ remaining }}</span>
-        <!-- 录音按钮：录音中显示已录秒数 -->
-        <span class="mic-wrap" :class="{ listening }">
+        <!-- 统一麦克风按钮：点击=语音转文字，长按=按住说话 -->
+        <span class="mic-wrap" :class="{ listening, holding: pttHolding }">
           <button
             class="mic-btn"
-            :class="{ listening }"
-            :disabled="loading"
-            @click="toggleMic"
-            :title="listening ? '停止录音' : '语音输入'"
-            :aria-label="listening ? '停止录音' : '语音输入'"
+            :class="{ listening, holding: pttHolding }"
+            :disabled="loading || pttUploading"
+            @pointerdown.prevent="micPointerDown"
+            @pointerup.prevent="micPointerUp"
+            @pointerleave="micPointerLeave"
+            @pointercancel="micPointerCancel"
+            title="点击语音输入，长按发送语音消息"
+            aria-label="点击语音输入，长按发送语音消息"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
           </button>
           <span v-if="listening" class="mic-rec-timer">{{ recordSeconds }}s</span>
+          <span v-else-if="pttHolding" class="mic-rec-timer">{{ pttSeconds }}s</span>
         </span>
-        <!-- [语音消息] 微信式按住说话：按下录音 → 松开上传发送 -->
-        <button
-          class="ptt-btn"
-          :class="{ holding: pttHolding }"
-          :disabled="loading || pttUploading"
-          @pointerdown.prevent="pttStart"
-          @pointerup.prevent="pttEnd"
-          @pointercancel="pttCancel"
-          @pointerleave="pttHolding ? pttCancel() : null"
-          @keydown.space.prevent="pttStart"
-          @keyup.space.prevent="pttEnd"
-          title="按住说话，松开发送语音消息"
-          aria-label="按住说话，松开发送语音消息"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-          <span v-if="pttHolding" class="ptt-rec-timer">{{ pttSeconds }}s</span>
-        </button>
         <button
           class="send-btn"
           :disabled="!canSend"

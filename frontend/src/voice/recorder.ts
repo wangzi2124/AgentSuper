@@ -70,9 +70,8 @@ export class PressToTalkRecorder {
     }, PEAK_INTERVAL_MS)
 
     this.frameTimer = window.setInterval(() => {
-      const seconds = Math.min(MAX_VOICE_SECONDS, (performance.now() - this.startTime) / 1000)
+      const seconds = (performance.now() - this.startTime) / 1000
       this.onFrame?.({ seconds, peaks: [...this.peaks], armed: this.armedFlag })
-      if (seconds >= MAX_VOICE_SECONDS) void this.stop()
     }, 200)
   }
 

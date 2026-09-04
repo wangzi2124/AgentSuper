@@ -442,8 +442,8 @@ html[data-theme='dark'] {
     background: var(--surface-glass) !important;
   }
 
-  /* 按住说话：放大触控区，避免误触 */
-  .ptt-btn {
+  /* 统一麦克风按钮：放大触控区，避免误触 */
+  .mic-btn {
     width: 40px !important;
     height: 40px !important;
   }
