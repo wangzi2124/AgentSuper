@@ -68,6 +68,17 @@ class SupervisorAgent(SupervisorAgentDecompose):
                 sub_payload = dict(original_payload)
                 sub_payload["question"] = st.get("question", original_payload.get("question", ""))
 
+                # [token 优化 v15] 并行子任务 fresh context：LLM 分解出的子问题已自含
+                # 必要上下文，转发整份 history 只会让 N 个并行子 Agent 各自重复 prefill
+                # ≤16K 历史 → 拖慢 + 烧 token。清空 history，并让子问题注明"独立执行"
+                # 以防模型误以为有上文可依赖而向用户索要缺失信息。
+                if settings.sub_task_fresh_history:
+                    sub_payload["history"] = []
+                    sub_payload["question"] = (
+                        "[本任务独立执行，无上文。请依据问题自含信息完成，不要假设存在未提供的上下文]\n\n"
+                        + sub_payload["question"]
+                    )
+
                 reply = await self._bus.send_and_wait(
                     AgentMessage(
                         source=self._id,

@@ -194,6 +194,10 @@ class Settings(BaseSettings):
     extended_timeout_agents: str = "code"
     # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth，默认 1 = 主 Agent 只能再委派一层）
     subagent_depth: int = 1
+    # [token 优化 v15] 并行分解的子任务使用 fresh context（不转发整份 history）。
+    # 并行子问题由 LLM 分解时已自含全部必要信息；history 仅对"单路由连续对话"
+    # 有意义。清空 history 可避免 N 个并行子 Agent 各自重复 prefill ≤16K 历史。
+    sub_task_fresh_history: bool = True
 
     # ── 共享记忆持久化 ──
     # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失

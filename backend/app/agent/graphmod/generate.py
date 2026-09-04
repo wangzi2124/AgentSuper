@@ -184,7 +184,9 @@ class RAGAgentGenerate(RAGAgentTools):
             )
 
         # [token 优化 v5] 按需挂载：首轮按问题关键词筛选工具 schema
-        tool_defs = self._build_tool_defs(state.get("question", ""))
+        # [token 优化 v15] 传入 conversation_id → 会话级缓存：同会话内只增不减，
+        # system+tools 前缀跨请求字节稳定 → DeepSeek 前缀缓存命中
+        tool_defs = self._build_tool_defs(state.get("question", ""), conversation_id=state.get("conversation_id", ""))
 
         messages = [
             {"role": "system", "content": full_system_prompt},
@@ -494,6 +496,7 @@ class RAGAgentGenerate(RAGAgentTools):
                 bounded_result = bound_tool_output(result_str, tool_name)
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tc_id, "tool_name": tool_name, "content": bounded_result})
+                used_tools.add(tool_name)
             # [token 优化 P8] 强制收尾路径补齐"清理→压缩→截断"闭环：此前仅截断，
             # 且截断基于低估估算可能不触发（实测收尾轮裸发 25,779 超 usable 23,808）。
             # 与主循环保持同款处理，避免收尾调用成为单请求内最大单次 pt。
@@ -543,6 +546,9 @@ class RAGAgentGenerate(RAGAgentTools):
             self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "error", "detail": "内容被过滤", "duration_ms": round(gen_dur, 1)})
         else:
             self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "completed", "detail": f"完成（{rounds} 轮工具调用）" if rounds else "完成", "duration_ms": round(gen_dur, 1)})
+        # [token 优化 v15] 本请求实际用到的工具并入会话缓存 → 同会话下一请求 schema 自动带上，
+        # 前缀仅在尾部增长，DeepSeek 前缀缓存跨请求继续命中
+        self._remember_conversation_tools(state.get("conversation_id", ""), used_tools)
         return {
             "answer": answer,
             "messages": [AIMessage(content=answer)],

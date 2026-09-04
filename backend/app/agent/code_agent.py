@@ -121,7 +121,11 @@ class CodeAgent(BaseAgent):
                     from app.agent.long_task import LongTaskCoordinator
                     result = await LongTaskCoordinator(
                         self._inner, max_steps=settings.long_task_max_steps,
-                    ).run(question, directory=directory, conversation_id=conv_id)
+                    ).run(
+                        question, directory=directory, conversation_id=conv_id,
+                        event_queue=tagged, on_activity=self._notify,
+                        model=payload.get("model"), task_depth=task_depth,
+                    )
                 else:
                     result = await self._inner.invoke(
                         question=question,

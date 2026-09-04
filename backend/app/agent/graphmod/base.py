@@ -22,6 +22,8 @@ import uuid
 
 from collections.abc import Sequence
 
+from collections import OrderedDict
+
 from pathlib import Path
 
 from typing import Annotated, Callable, TypedDict
@@ -217,6 +219,13 @@ class RAGAgentBase:
         self._usage_accum: dict[str, int] = dict(_ZERO_USAGE)
         # 工具热更新锁：refresh_tools 重建 graph 期间与并发请求互斥
         self._refresh_lock = asyncio.Lock()
+        # [token 优化 · 前缀缓存 v15] 会话级已挂载工具名缓存（conversation_id → 有序工具名）。
+        # 同一会话内只增不减（新命中工具追加到末尾），使 [system + tools] 前缀跨请求字节稳定，
+        # DeepSeek 前缀缓存命中（0.1x 计费 + TTFT 下降）。跨会话并发访问 → 用独立锁。
+        self._conv_tool_cache: dict[str, list[str]] = {}
+        self._conv_tool_cache_lock = threading.Lock()
+        # 前缀缓存收益上限：缓存工具名快照的最大会话数，超限淘汰最旧（LRU 语义简化版）
+        self._conv_tool_cache_max = 200
 
         self.graph = self._build_graph()
     def rebuild_system_prompt(self):
@@ -398,14 +407,21 @@ class RAGAgentBase:
             if t.name.startswith(prefixes):
                 return True
         return False
-    def _build_tool_defs(self, question: str = "", used_names: set | None = None) -> list[dict] | None:
-        """[token 优化 v5] 按需挂载 OpenAI 工具定义。
+    def _build_tool_defs(self, question: str = "", used_names: set | None = None, conversation_id: str = "") -> list[dict] | None:
+        """[token 优化 v5+v15] 按需挂载 OpenAI 工具定义，会话内只增不减。
 
         system prompt 只列常驻工具名 + 一行 skill 提示（[token 优化 v10]），技能清单与
         描述依赖此处按意图把 load_skill_* schema 挂载给 LLM；此处只发本轮可能用到的
         schema：核心文件工具常驻 + 意图关键词命中 + 已使用工具保留。
         schema 固定开销从 8-12K 降到 2-4K。若模型调用了未挂载工具，
         _execute_tool 仍可执行（self.tools 全量），下一轮该工具自动保留。
+
+        [token 优化 v15 · 前缀缓存] 同一会话（conversation_id）内缓存已挂载工具名，
+        **只增不减**（新命中追加到末尾）：使「system + tools」前缀跨请求字节稳定 →
+        DeepSeek 前缀缓存命中（0.1x 计费 + TTFT 下降），避免旧实现每次按问题意图
+        重建 schema 导致前缀漂移、缓存频繁失效。无 conversation_id（一次性调用）
+        时保持原状态按意图即时筛选，不污染共享缓存。技能/插件热更新移除的工具
+        自动跳过（从缓存剔除，前缀在管理员操作后才会变，可接受）。
         """
         if not self.tools:
             return None
@@ -413,22 +429,80 @@ class RAGAgentBase:
         q = (question or "").lower()
         # [token 优化 v6] 固定（pin）工具集合只读一次，避免循环内反复读 pinned_tools.json
         pinned = self._pinned_tool_names()
-        selected: list[ToolDef] = []
+        by_name = {t.name: t for t in self.tools}
+
+        # 本轮"想要"的工具集：常驻 + 固定 + 已使用 + 意图命中
+        wanted: set[str] = set()
         for t in self.tools:
-            # [token 优化 v6] 前端固定（pin）的工具始终挂载，不受意图筛选影响
             if t.name in pinned:
-                selected.append(t)
+                wanted.add(t.name)
                 continue
             if t.name in used:
-                selected.append(t)
+                wanted.add(t.name)
                 continue
             if t.name.startswith(self._CORE_TOOL_PREFIXES):
-                selected.append(t)
+                wanted.add(t.name)
                 continue
             if self._tool_matches_intent(t, q):
-                selected.append(t)
-                continue
-        return [t.to_openai_tool() for t in selected]
+                wanted.add(t.name)
+
+        key = conversation_id or ""
+        if key:
+            with self._conv_tool_cache_lock:
+                mounted = self._conv_tool_cache.get(key)
+                if mounted is None:
+                    # 会话首个请求：按 self.tools 注册序播种（确定性、与旧行为一致）
+                    mounted = [t.name for t in self.tools if t.name in wanted]
+                    self._conv_tool_cache[key] = mounted
+                    # 简单淘汰最旧，防止多会话无限膨胀（LRU 简化版）
+                    if len(self._conv_tool_cache) > self._conv_tool_cache_max:
+                        oldest = next(iter(self._conv_tool_cache))
+                        if oldest != key:
+                            del self._conv_tool_cache[oldest]
+                else:
+                    # 追加本轮新命中（仅尾部追加 → 前缀不变）
+                    existing = set(mounted)
+                    for t in self.tools:
+                        if t.name not in existing and t.name in wanted:
+                            mounted.append(t.name)
+                            existing.add(t.name)
+                names = list(mounted)
+        else:
+            # 无会话上下文：按注册序即时筛选（不写共享缓存）
+            names = [t.name for t in self.tools if t.name in wanted]
+
+        # 解析为 schema；工具已被热更新移除的名字跳过
+        return [by_name[n].to_openai_tool() for n in names if n in by_name]
+    def _remember_conversation_tools(self, conversation_id: str, used_names: set | str) -> None:
+        """把本请求实际用到的工具名并入会话挂载缓存（只增不减，尾部追加）。
+
+        [token 优化 v15] 与 _build_tool_defs 的会话级缓存配合：模型可能调用未挂载
+        工具（_execute_tool 全量可执行），收尾时把 used 并入缓存，下一次同会话请求
+        的 schema 自动带上，且前缀只在尾部增长 → DeepSeek 前缀缓存继续命中。
+        """
+        if not conversation_id:
+            return
+        names = used_names if isinstance(used_names, (set, list)) else {used_names}
+        names = {str(n) for n in names if n}
+        if not names:
+            return
+        with self._conv_tool_cache_lock:
+            mounted = self._conv_tool_cache.get(conversation_id)
+            if mounted is None:
+                # 未走 _build_tool_defs 的会话（理论上不会），仅记录 used，无注册序可用
+                self._conv_tool_cache[conversation_id] = [n for n in self.tools if n.name in names]
+                return
+            existing = set(mounted)
+            # 按 self.tools 注册序追加，保证与播种/意图追加一致的确定性顺序
+            for t in self.tools:
+                if t.name not in existing and t.name in names:
+                    mounted.append(t.name)
+                    existing.add(t.name)
+            if len(self._conv_tool_cache) > self._conv_tool_cache_max:
+                oldest = next(iter(self._conv_tool_cache))
+                if oldest != conversation_id:
+                    del self._conv_tool_cache[oldest]
+
     def _pinned_tool_names(self) -> set[str]:
         """[token 优化 v6] 返回前端固定（pin）的工具名集合（始终挂载 schema）。"""
         try:

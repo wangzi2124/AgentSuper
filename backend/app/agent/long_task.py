@@ -115,15 +115,23 @@ class LongTaskCoordinator:
             return []
         return _parse_plan(content, self.max_steps)
 
-    async def run(self, question: str, directory: str = "", conversation_id: str = "") -> dict:
-        """执行长任务。计划 >1 步 → 接力；否则回落普通单请求。"""
+    async def run(self, question: str, directory: str = "", conversation_id: str = "",
+                  event_queue=None, on_activity=None, model: str | None = None,
+                  task_depth: int = 0) -> dict:
+        """执行长任务。计划 >1 步 → 接力；否则回落普通单请求。
+
+        event_queue/on_activity/model/task_depth 透传给每步的 agent.invoke，
+        保证权限审批桥（permission_request → 前端弹窗）在长任务路径下仍可用
+        （此前缺省导致长任务内 tool_read 敏感路径时权限请求无人审批被直接拒绝）。
+        """
         plan = await self._plan(question)
         if len(plan) <= 1:
             # 非长任务：正常单请求执行（不额外开销）
             logger.info("LongTask: plan=%d steps, fall back to single request", len(plan))
             return await self.agent.invoke(
                 question, use_vector_db=False, directory=directory,
-                conversation_id=conversation_id,
+                conversation_id=conversation_id, event_queue=event_queue,
+                on_activity=on_activity, model=model, task_depth=task_depth,
             )
 
         logger.info("LongTask: %d steps, small-step execution", len(plan))
@@ -147,7 +155,8 @@ class LongTaskCoordinator:
             )
             result = await self.agent.invoke(
                 step_prompt, use_vector_db=False, directory=directory,
-                conversation_id=conversation_id,
+                conversation_id=conversation_id, event_queue=event_queue,
+                on_activity=on_activity, model=model, task_depth=task_depth,
             )
             answer = (result.get("answer") or "").strip()
             results.append(answer)

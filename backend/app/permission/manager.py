@@ -350,7 +350,8 @@ class PermissionManager:
         """检查指定路径的操作权限，返回allow/deny/ask。
 
         敏感路径（.git/.env/.db）的读操作统一返回 ask → 前端弹审批对话框，
-        用户允许后临时授权；写/执行仍 ask → 前端弹审批对话框 用户允许后临时授权。
+        用户允许后临时授权（add_temp_approval 后重试）；写/执行仍直接 deny，
+        密钥/数据库文件绝不允许被模型改写（弹窗授权写入会暴露篡改风险）。
         """
         cls = self.classify_path(path_str)
         if cls == "system":
@@ -360,14 +361,13 @@ class PermissionManager:
         p = Path(path_str).resolve()
         if cls == "workspace":
             if self._is_git_path(p):
-                # .git 读取弹窗审批
-                return "ask"
+                # .git 内部路径：读弹窗审批，写/执行直接拒绝
+                return "ask" if operation == "read" else "deny"
             if self._is_critical_read(p):
-                # .env/.db 读取弹窗审批
-                return "ask"
+                # .env/.db/permissions.json：读弹窗审批，写/执行直接拒绝
+                return "ask" if operation == "read" else "deny"
             if operation in ("write", "execute") and self._is_critical_write(p):
-                # write/execute 读取弹窗审批
-                return "ask"
+                return "deny"
             return "allow"
         now = time.time()
         # Clean up expired temp approvals
