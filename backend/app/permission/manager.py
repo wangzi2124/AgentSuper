@@ -366,7 +366,7 @@ class PermissionManager:
                 # .env/.db 读取弹窗审批
                 return "ask"
             if operation in ("write", "execute") and self._is_critical_write(p):
-                  # write/execute 读取弹窗审批
+                # write/execute 读取弹窗审批
                 return "ask"
             return "allow"
         now = time.time()
