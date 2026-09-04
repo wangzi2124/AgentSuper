@@ -114,6 +114,37 @@ _CMD_DIALECT_HINT = (
     "and & / && instead of ; as command separator."
 )
 
+def _strip_trailing_backslash(cmd: str) -> str:
+    """去掉 PowerShell 命令中引号内路径末尾的非法反斜杠。
+
+    PowerShell 双引号字符串中 \\ 不是转义字符（只有反引号 ` 是），
+    但尾部 \\ 在 -Filter/-Like 模式中仍是非法转义（"\\ 在模式末尾非法"）。
+    LLM 从 tool 输出复制路径如 .git\\ 后放入命令，产生此错误。
+    修复：奇数个尾部 \\ 时去掉一个（".git\\\\" → ".git\\"）。
+    """
+    result = []
+    i = 0
+    n = len(cmd)
+    while i < n:
+        if cmd[i] == '"':
+            j = i + 1
+            while j < n and cmd[j] != '"':
+                j += 1
+            inner = cmd[i + 1 : j]
+            # count trailing backslashes
+            k = len(inner)
+            while k > 0 and inner[k - 1] == '\\':
+                k -= 1
+            trailing = len(inner) - k
+            if trailing % 2 == 1:
+                inner = inner[:-1]
+            result.append('"' + inner + '"')
+            i = j + 1
+        else:
+            result.append(cmd[i])
+            i += 1
+    return ''.join(result)
+
 def append_cmd_dialect_hint(text: str) -> str:
     """检测 POSIX 方言在 cmd.exe 下的典型失败签名，附一行修正指引给 LLM 自纠。
 
@@ -181,6 +212,11 @@ def tool_execute(command: str, timeout: int = 300, workdir: str = ".") -> dict:
         timeout = 600
     if timeout < 1:
         timeout = 5
+    # Windows 下 PowerShell 模式（-Filter/-Like/-Where）中尾部反斜杠非法
+    # （"\\ 在模式末尾非法"）。LLM 常从 tool 输出复制路径如 ".git\\"，
+    # 在命令中变为 -Filter ".git\\" → PowerShell 报错。预处理去掉。
+    if os.name == "nt":
+        command = _strip_trailing_backslash(command)
     resolved_cwd = _resolve(workdir)
     try:
         _validate_shell_command(command, cwd=resolved_cwd, ask=True)

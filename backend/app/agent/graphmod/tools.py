@@ -327,6 +327,12 @@ class RAGAgentTools(RAGAgentBase):
             timeout = 5
         work_dir = args.get("workdir") or args.get("work_dir") or "."
 
+        # Windows 下清理命令中引号内路径尾部反斜杠（".git\\" → ".git"）
+        import os as _os
+        if _os.name == "nt":
+            from app.tools.fstools.exec import _strip_trailing_backslash
+            command = _strip_trailing_backslash(command)
+
         from app.tools.file_tools import _resolve as _fs_resolve, _kill_process_tree as _kill_tree
         resolved_cwd = _fs_resolve(work_dir)
 

@@ -99,12 +99,23 @@ def _resolve(path_str: str) -> Path:
 
     [会话目录] 本会话绑定了工作目录（opencode ctx.directory）时，相对路径
     以该目录为基准；否则回退到项目 worktree（git 仓库根）。
+
+    [Windows] 末尾反斜杠会被去掉——".git\\" 在 PowerShell 模式中非法
+    （\\ 是转义字符，尾部无后续字符则报错）。
     """
     p = Path(path_str)
     if not p.is_absolute():
         base = current_session_workspace() or str(_workspace())
         p = Path(base) / p
-    return p.resolve()
+    resolved = p.resolve()
+    # Windows 下 Path.resolve() 可能保留尾部反斜杠（如 "E:\\x\\.git\\"）
+    # → PowerShell -Filter/-Like 模式报 "\\ 在模式末尾非法"。
+    # 统一去掉尾部分隔符，保证路径规范化。
+    s = str(resolved)
+    if os.name == "nt" and (s.endswith("\\") or s.endswith("/")):
+        s = s.rstrip("\\/")
+        resolved = Path(s)
+    return resolved
 
 def _ensure_safe(path: Path, operation: str = "write") -> None:
     """检查路径访问权限，不允许时抛出PermissionError或NeedsPermission异常。"""
