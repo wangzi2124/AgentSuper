@@ -218,6 +218,50 @@ font-weight: 700;
 font-variant-numeric: tabular-nums;
 box-shadow: 0 1px 4px rgba(239, 68, 68, 0.4);
 }
+/* [语音消息] 微信式按住说话按钮 */
+.ptt-btn {
+position: relative;
+width: 34px;
+height: 34px;
+border-radius: 50%;
+display: flex;
+align-items: center;
+justify-content: center;
+border: none;
+background: transparent;
+color: var(--text-secondary);
+cursor: pointer;
+transition: all 0.15s;
+}
+.ptt-btn:hover:not(:disabled) {
+color: var(--primary);
+background: color-mix(in srgb, var(--primary, #4f46e5) 10%, transparent);
+}
+.ptt-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ptt-btn.holding {
+color: #fff;
+background: var(--primary, #4f46e5);
+animation: mic-pulse 1.3s ease-in-out infinite;
+}
+.ptt-rec-timer {
+position: absolute;
+top: -7px;
+right: -7px;
+min-width: 24px;
+height: 15px;
+padding: 0 5px;
+border-radius: 8px;
+display: inline-flex;
+align-items: center;
+justify-content: center;
+background: var(--danger, #ef4444);
+color: #fff;
+font-size: 10.5px;
+line-height: 1;
+font-weight: 700;
+font-variant-numeric: tabular-nums;
+box-shadow: 0 1px 4px rgba(239, 68, 68, 0.4);
+}
 .send-btn {
 width: 36px;
 height: 36px;

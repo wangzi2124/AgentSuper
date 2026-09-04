@@ -237,6 +237,17 @@ export interface Message {
   isError?: boolean
   errorInfo?: ChatError
   live?: boolean
+  /** 语音消息：真实音频气泡（url 指向 /api/voice/audio/<id>） */
+  voice?: VoiceMessageData
+}
+
+// 语音消息内容（对齐后端 VoiceContent：指向服务端音频，可回放）
+export interface VoiceMessageData {
+  id: string
+  url: string
+  duration: number
+  waveform: number[]
+  text?: string
 }
 
 // ===== Multi-Agent Types =====
@@ -317,4 +328,6 @@ export interface MultiAgentMessage {
   clientMsgId?: string
   /** [F8] 随消息发送的附件（用于回显/重试时按原样重发） */
   files?: FileContent[]
+  /** [语音消息] 真实音频气泡（回显/历史回放用） */
+  voice?: VoiceMessageData
 }

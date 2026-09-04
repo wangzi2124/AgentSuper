@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, watch } from 'vue'
-import type { FileContent } from '../types'
+import type { FileContent, VoiceMessageData } from '../types'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { SUPPORTED_MODELS } from '../config/models'
 
 // 定义组件事件：发送消息（含可选附件）、取消请求
-const emit = defineEmits<{ send: [text: string, files: FileContent[]]; cancel: [] }>()
+const emit = defineEmits<{ send: [text: string, files: FileContent[], voice?: VoiceMessageData]; cancel: [] }>()
 // 定义组件属性：加载状态
 const props = defineProps<{ loading: boolean }>()
 
@@ -36,6 +36,54 @@ function pickModel(value: string) {
 //   ⚠ 并发转写会同时拉起多个 Whisper 子进程（内存翻倍），增量调用严格排队串行。
 import { transcribeAudio } from '../api/voice'
 import { showToast } from 'vant'
+
+// [语音消息] 微信式按住说话 → 上传音频 → 发送真实语音气泡
+import { PressToTalkRecorder } from '../voice/recorder'
+import { uploadVoiceMessage } from '../api/voice'
+const pttRecorder = new PressToTalkRecorder()
+const pttHolding = ref(false)
+const pttSeconds = ref(0)
+let pttTimer: number | null = null
+let pttUploading = false
+async function pttStart() {
+  if (props.loading) return
+  try {
+    await pttRecorder.start((d) => { pttHolding.value = true; pttSeconds.value = 0 })
+  } catch {
+    showToast('麦克风不可用，请检查权限')
+    return
+  }
+  pttHolding.value = true
+  pttSeconds.value = 0
+  if (pttTimer) clearInterval(pttTimer)
+  pttTimer = window.setInterval(() => { pttSeconds.value += 1 }, 1000)
+}
+async function pttEnd() {
+  const r = await pttRecorder.stop()
+  if (pttTimer) { clearInterval(pttTimer); pttTimer = null }
+  pttHolding.value = false
+  if (!r) return
+  if (r.duration < 1) { showToast('说话时间太短，请按久一点'); return }
+  if (props.loading) { showToast('正在处理，请稍候再发送'); return }
+  pttUploading = true
+  try {
+    const up = await uploadVoiceMessage(r.blob, r.duration, r.peaks, '', 'voice.webm')
+    if (!up) { showToast('语音上传失败'); return }
+    const voice: VoiceMessageData = { id: up.id, url: up.url, duration: up.duration, waveform: up.waveform, text: up.text || '' }
+    // [语音消息] 正文用占位符（保 LLM 管线可跑），voice 字段承载真实音频
+    emit('send', '[语音]', [], voice)
+  } catch {
+    showToast('语音上传失败')
+  } finally {
+    pttUploading = false
+  }
+}
+function pttCancel() {
+  pttRecorder.cancelNow()
+  if (pttTimer) { clearInterval(pttTimer); pttTimer = null }
+  pttHolding.value = false
+}
+onBeforeUnmount(() => { pttRecorder.cancelNow() })
 
 const listening = ref(false)
 // [录音圈] 开始录音后每秒 +1，套在麦克风外的状态圈显示录音时长
@@ -756,6 +804,23 @@ const textareaRef = ref<HTMLTextAreaElement>()
           </button>
           <span v-if="listening" class="mic-rec-timer">{{ recordSeconds }}s</span>
         </span>
+        <!-- [语音消息] 微信式按住说话：按下录音 → 松开上传发送 -->
+        <button
+          class="ptt-btn"
+          :class="{ holding: pttHolding }"
+          :disabled="loading || pttUploading"
+          @pointerdown.prevent="pttStart"
+          @pointerup.prevent="pttEnd"
+          @pointercancel="pttCancel"
+          @pointerleave="pttHolding ? pttCancel() : null"
+          @keydown.space.prevent="pttStart"
+          @keyup.space.prevent="pttEnd"
+          title="按住说话，松开发送语音消息"
+          aria-label="按住说话，松开发送语音消息"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          <span v-if="pttHolding" class="ptt-rec-timer">{{ pttSeconds }}s</span>
+        </button>
         <button
           class="send-btn"
           :disabled="!canSend"

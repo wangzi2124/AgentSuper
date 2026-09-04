@@ -36,6 +36,41 @@ export async function transcribeAudio(blob: Blob, filename = 'record.webm'): Pro
   return body?.data?.text || ''
 }
 
+export interface VoiceMessageUpload {
+  id: string
+  url: string
+  duration: number
+  waveform: number[]
+  text: string
+}
+
+// 语音消息：上传原始音频 → 返回可播放标识（前端先上传，再随消息持久化）
+export async function uploadVoiceMessage(
+  blob: Blob,
+  duration: number,
+  waveform: number[] = [],
+  text = '',
+  filename = 'voice.webm',
+): Promise<VoiceMessageUpload> {
+  const form = new FormData()
+  form.append('audio', blob, filename)
+  form.append('duration', String(duration))
+  form.append('waveform', waveform.join(','))
+  if (text) form.append('text', text)
+  const res = await fetchWithTimeout(`${TTS_BASE}/message`, { method: 'POST', body: form }, 120000)
+  const body = await res.json().catch(() => null)
+  if (!res.ok || body?.code !== 0) {
+    throw new Error(body?.message || `语音上传失败(${res.status})`)
+  }
+  return body?.data as VoiceMessageUpload
+}
+
+// 语音消息播放地址（后端按 id 定位文件，历史回放同样适用）
+export function voiceAudioUrl(filenameOrId: string): string {
+  const name = filenameOrId.includes('/') ? filenameOrId.split('/').pop() : filenameOrId
+  return `${TTS_BASE}/audio/${encodeURIComponent(name || '')}`
+}
+
 // TTS 合成：文本 → 可播放音频 URL（后端 subprocess → 本地 Qwen3-TTS 预设音色）
 export async function synthesize(text: string, speaker: string = TTS_SPEAKER, language: string = 'Auto'): Promise<string> {
   const form = new FormData()

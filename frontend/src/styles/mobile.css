@@ -441,6 +441,20 @@ html[data-theme='dark'] {
     backdrop-filter: blur(10px);
     background: var(--surface-glass) !important;
   }
+
+  /* 按住说话：放大触控区，避免误触 */
+  .ptt-btn {
+    width: 40px !important;
+    height: 40px !important;
+  }
+  /* 语音气泡：移动端加大波形高度与字号 */
+  .voice-bubble {
+    min-width: 150px !important;
+    max-width: 240px !important;
+    padding: 10px 12px !important;
+  }
+  .voice-bubble .voice-wave { height: 30px !important; }
+  .voice-bubble .voice-dur { font-size: 13px !important; }
 }
 
 html[data-theme='dark'] {

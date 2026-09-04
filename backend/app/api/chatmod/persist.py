@@ -183,7 +183,8 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
                                question: str, answer: str, sources: list, steps: list,
                                agents: list | None = None, model: str | None = None,
                                tokens: dict | None = None, client_msg_id: str | None = None,
-                               files: list | None = None) -> tuple[str, str]:
+                               files: list | None = None,
+                               voice: dict | None = None) -> tuple[str, str]:
     """主会话 + 子任务会话各追加 user/assistant 消息；新会话生成标题。
 
     主会话写经 write_lock 串行化（与 /stream 协调器执行体、compact/revert 互斥），
@@ -204,6 +205,7 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
                 user_msg = service.append_message(user_id, session_id, "user", {
                     "role": "user", "content": question, "client_msg_id": client_msg_id,
                     "files": await _enrich_image_files(files) or [],
+                    "voice": voice or None,
                 })
                 user_msg_id = user_msg.id
                 if session_repo.latest_seq(session_id) == 1:

@@ -250,7 +250,7 @@ export interface ConversationMeta {
 }
 
 export interface ConversationDetail extends ConversationMeta {
-  messages: Array<{ id: string; role: string; content: string; sources?: any[]; steps?: any[]; parts?: any[]; agents?: any[]; files?: any[]; seq?: number }>
+  messages: Array<{ id: string; role: string; content: string; sources?: any[]; steps?: any[]; parts?: any[]; agents?: any[]; files?: any[]; voice?: any; seq?: number }>
 }
 
 function _msgTypeToRole(msgType: string): string {
@@ -302,6 +302,7 @@ export async function getConversation(conversationId: string, convType?: string)
       if (m.data?.steps) msg.steps = m.data.steps as any[]
       if (m.data?.agents) msg.agents = m.data.agents as any[]
       if (m.data?.files) msg.files = m.data.files as any[]
+      if (m.data?.voice) msg.voice = m.data.voice as any
       if (m.parts?.length) msg.parts = m.parts as any[]
       return msg
     }),

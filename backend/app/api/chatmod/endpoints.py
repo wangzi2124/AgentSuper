@@ -186,6 +186,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         service, user_id, session_id, child_id, body.message, answer, sources, steps,
         model=body.model, tokens=payload.get("tokens"), client_msg_id=body.client_msg_id,
         files=[f.model_dump() for f in body.files],
+        voice=body.voice.model_dump() if body.voice else None,
     )
     task_bridge.unregister(child_id)
 
@@ -324,6 +325,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         agents=agents, model=body.model, tokens=payload.get("tokens"),
                         client_msg_id=body.client_msg_id,
                         files=[f.model_dump() for f in body.files],
+                        voice=body.voice.model_dump() if body.voice else None,
                     )
 
                     await event_queue.put({

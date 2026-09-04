@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { SUPPORTED_MODELS } from '../config/models'
-import type { FileContent } from '../types'
+import type { FileContent, VoiceMessageData } from '../types'
 import { usePermissionStore } from '../stores/permission'
 import { useThemeStore, BG_VARIANTS } from '../stores/theme'
   import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
@@ -12,6 +12,7 @@ import MultiAgentResponse from '../components/MultiAgentResponse.vue'
 import ChatInput from '../components/ChatInput.vue'
 import WeatherAlert from '../components/WeatherAlert.vue'
 import DirPickerModal from '../components/DirPickerModal.vue'
+import VoiceBubble from '../components/VoiceBubble.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -167,14 +168,14 @@ function onScroll(e: Event) {
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 100
 }
 
-function handleSend(text: string, files?: FileContent[]) {
+function handleSend(text: string, files?: FileContent[], voice?: VoiceMessageData) {
   markPendingAutoRead()
   // 任务正在进行时入队，完成后自动发出（排队方案）
   if (agent.loading) {
-    pendingQueue.value.push({ text, files: files || [] })
+    pendingQueue.value.push({ text, files: files || [], voice })
     return
   }
-  agent.send(text, undefined, files || []).then((completed) => {
+  agent.send(text, undefined, files || [], voice).then((completed) => {
     if (completed && agent.conversationId && route.name !== 'MultiAgentConversation') {
       router.push({ name: 'MultiAgentConversation', params: { id: agent.conversationId } })
     }
@@ -182,14 +183,14 @@ function handleSend(text: string, files?: FileContent[]) {
 }
 
 // ── 待发消息队列：agent 运行中发送的内容先进队，done 后自动发出下一条 ──
-type QueuedMsg = { text: string; files: FileContent[] }
+type QueuedMsg = { text: string; files: FileContent[]; voice?: VoiceMessageData }
 const pendingQueue = ref<QueuedMsg[]>([])
 const queueCount = computed(() => pendingQueue.value.length)
 watch(() => agent.loading, (loading) => {
   // 空闲后自动发队列中的下一条
   if (!loading && pendingQueue.value.length) {
     const next = pendingQueue.value.shift()!
-    agent.send(next.text, undefined, next.files).then((completed) => {
+    agent.send(next.text, undefined, next.files, next.voice).then((completed) => {
       if (completed && agent.conversationId && route.name !== 'MultiAgentConversation') {
         router.push({ name: 'MultiAgentConversation', params: { id: agent.conversationId } })
       }
@@ -508,6 +509,8 @@ async function handleCopy(messageId: string, text: string) {
             <div class="bubble">
               <template v-if="msg.role === 'user'">
                 <div class="content">{{ msg.content }}</div>
+                <!-- [语音消息] 微信式音频气泡 -->
+                <VoiceBubble v-if="msg.voice" :voice="msg.voice" />
                 <!-- [F8] 用户消息带附件时回显（图片显示缩略图，其余显示文件 chip） -->
                 <div v-if="msg.files && msg.files.length" class="msg-files">
                   <div v-for="(f, fi) in msg.files" :key="fi" class="msg-file">

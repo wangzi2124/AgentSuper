@@ -10,6 +10,15 @@ class FileContent(BaseModel):
     mime_type: str
 
 
+class VoiceContent(BaseModel):
+    """语音消息内容：指向 /api/voice/audio/<id> 的音频（前端已先行上传）。"""
+    id: str
+    url: str
+    duration: float = 0.0
+    waveform: list[float] = []
+    text: str = ""
+
+
 class DocumentResponse(BaseModel):
     """文档响应模型，返回文档的基本信息。"""
     id: str
@@ -54,6 +63,7 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     use_vector_db: bool = False
     files: list[FileContent] = []
+    voice: Optional[VoiceContent] = None  # 语音消息（前端已上传，附带在消息上持久化）
     directory: str = ""  # 会话绑定的工作目录（opencode ctx.directory），首条消息时创建会话用
     # [B4] 客户端消息幂等 id：前端自动/手动重试复用同一 id，
     # 服务端按 (user_id, session_id, client_msg_id) 去重，避免断网重试产生重复轮次。

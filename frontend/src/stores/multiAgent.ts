@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed, reactive, onScopeDispose } from 'vue'
-import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep, FileContent, AgentOutputPart } from '../types'
+import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep, FileContent, AgentOutputPart, VoiceMessageData } from '../types'
 import {
   sendMultiAgentStream,
 } from '../api/multiAgent'
@@ -224,6 +224,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         content: m.content || '',
         agents: (m as any).agents || [],
         files: (m as any).files || [],
+        voice: (m as any).voice,
         timestamp: new Date(),
       }))
       // 从 IndexedDB 加载本地缓存（SSE 中断时可能有未同步消息）
@@ -357,7 +358,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     // [S8] 置位抑制 send 开头的计数清零，让独立重试计数在连发间持续累加
     suppressRetryReset = true
     // [F8] 重试复用原附件
-    await send(lastUserMsg.content, lastUserMsg.clientMsgId, lastUserMsg.files)
+    await send(lastUserMsg.content, lastUserMsg.clientMsgId, lastUserMsg.files, lastUserMsg.voice)
   }
 
   // 手动重试（从 error 消息的 UI 触发）
@@ -384,7 +385,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     session.messages = session.messages.slice(0, userIdx)
     // [S2] 手动重试同样复用原 user 消息的 client_msg_id，服务端幂等去重
     // [F8] 重试复用原附件
-    await send(userMsg.content, userMsg.clientMsgId, userMsg.files)
+    await send(userMsg.content, userMsg.clientMsgId, userMsg.files, userMsg.voice)
   }
 
   // 把内存会话的 key 从客户端 genId 迁移到服务器 conversation_id。
@@ -412,7 +413,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (autoRetrySessionId.value === sessionId) autoRetrySessionId.value = serverId
   }
 
-  async function send(text: string, clientMsgId?: string, files?: FileContent[]): Promise<boolean> {
+  async function send(text: string, clientMsgId?: string, files?: FileContent[], voice?: VoiceMessageData): Promise<boolean> {
     let sessionId = activeSessionId.value
     if (!sessionId) {
       sessionId = genId()
@@ -454,6 +455,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       clientMsgId: messageClientId,
       // [F8] 附件随消息落库，回显与重试时按原样重发
       files: files && files.length ? files : undefined,
+      // [语音消息] 音频气泡随消息落库，回显与重试时按原样重发
+      voice: voice || undefined,
     }
     session.messages = [...session.messages, userMsg]
     session.loading = true
@@ -474,7 +477,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     // [S5] 走防抖（非终态写，done/error 的终态 persistSession 会清 timer 兜底覆盖）
     schedulePersist(sessionId)
 
-    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, directory: sessionDirectory.value || undefined, client_msg_id: messageClientId, files: files && files.length ? files : undefined }
+    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, directory: sessionDirectory.value || undefined, client_msg_id: messageClientId, files: files && files.length ? files : undefined, voice: voice || undefined }
     const controller = new AbortController()
     session.abortController = controller
     const signal = controller.signal
