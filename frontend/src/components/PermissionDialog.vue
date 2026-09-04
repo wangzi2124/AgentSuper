@@ -31,6 +31,7 @@ function deny() {
         <span class="perm-op">{{
           currentRequest.operation === 'command' ? '执行命令' :
           currentRequest.operation === 'write' ? '写入文件' :
+          currentRequest.operation === 'read' ? '读取文件' :
           currentRequest.operation
         }}</span>
       </div>
