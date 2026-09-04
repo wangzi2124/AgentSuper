@@ -413,8 +413,13 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
         try:
             while True:
                 event = await event_queue.get()
-                # 跳过内部心跳事件（不推给前端）
+                # B5: keep-alive 心跳 —— 必须真正 yield 字节给客户端。
+                # 前端 multiAgent.ts STALL_TIMEOUT_MS=60s：任何 >60s 无 data 的
+                # 真·安静期（长 tool_execute/子 Agent LLM 轮/等审批）都会触发前端
+                # 断流 + 自动重试（看着像"任务循环"）。SSE 注释行（: 开头）不触发
+                # 前端 onEvent，但能刷新 reader.read() 的 lastEventTime，维持连接。
                 if event.get("type") == "_ping":
+                    yield ": keep-alive\n\n"
                     continue
                 # 注入 conversation_id：前端在流中尽早拿到会话 id，
                 # 使"停止"按钮能调用 /api/sessions/{id}/interrupt 真正打断后台任务

@@ -9,6 +9,7 @@ agent_step 等事件，经 chat.py 的 AgentEventCollector 转发给
 """
 
 import asyncio
+import time
 from typing import Optional
 
 # RAG graph._push_event 产出的、值得转发给前端的步骤类事件
@@ -20,13 +21,17 @@ STEP_EVENT_TYPES = {"step_start", "step_end", "tool_start", "tool_end"}
 #     [F2] message.part.delta 真增量：rag 子 Agent 逐 token 输出时前端主回答实时增量更新，
 #     不再等 done 才一次性回填；事件带 agent_id，前端可辨识来源。
 #   - PASSTHROUGH（原样透传）：permission_request（前端 multi-agent 复用共享审批面板，不能丢）
-#   - DROP（明确丢弃）：tool_output / tool_heartbeat —— 高频瞬时噪音（工具输出/心跳），
-#     会随每次工具调用涌入、前端只按 step upsert 展示最终态，中转无意义；且高强度
-#     循环下直接透传会与 [A4] 背压冲突。保持显式丢弃，避免意外累积。
+#   - THROTTLED（节流后透传）：tool_heartbeat —— 高频进度心跳；按 agent 限流（≥3s/条）后转成
+#     agent_step，复用 step_id=tool_<name> 原位 upsert 同一张工具卡，前端实时看到
+#     “tool_execute 运行中 Ns”，而非干等（配合 keep-alive 消除 60s 停流误判）。
+#   - DROP（明确丢弃）：tool_output —— 逐行工具输出仍属高频噪音（会随每次工具调用涌入、
+#     前端只按 step upsert 展示最终态，中转无意义）；高强度循环下直接透传会与 [A4]
+#     背压冲突。保持显式丢弃。
 ALLOW_STEP_EVENTS = STEP_EVENT_TYPES
 TEXT_DELTA_EVENTS = {"text_delta"}
 PASSTHROUGH_EVENTS = {"permission_request"}
-DROP_HIGH_FREQ_EVENTS = {"tool_output", "tool_heartbeat"}
+THROTTLED_HIGH_FREQ_EVENTS = {"tool_heartbeat"}
+DROP_HIGH_FREQ_EVENTS = {"tool_output"}
 
 AGENT_LABELS = {
     "rag": "知识库检索",
@@ -182,13 +187,18 @@ class TaggedEventQueue:
       - ALLOW_STEP_EVENTS (step_start/step_end/tool_start/tool_end) → 改标 agent_step 转发
       - TEXT_DELTA_EVENTS (text_delta) → [F2] 打上 agent_id 后直通（前端增量渲染主回答）
       - PASSTHROUGH_EVENTS (permission_request) → 原样透传
-      - DROP_HIGH_FREQ_EVENTS (tool_output/tool_heartbeat) → 明确丢弃（高频噪音）
+      - THROTTLED_HIGH_FREQ_EVENTS (tool_heartbeat) → [B12] 节流（≥3s/条）转 agent_step，
+        复用 step_id=tool_<name> 原位刷新运行时长；tool_output → 明确丢弃（逐行高频噪音）
       - 其余未知事件类型 → 丢弃（保守：不转发未显式允许的类型，防止意外泄漏/膨胀）
     """
 
     def __init__(self, collector: AgentEventCollector, agent_id: str):
         self._collector = collector
         self._agent_id = agent_id
+        # 心跳节流：同一个 agent 至少间隔 THROTTLE 秒才转发一条 tool_heartbeat，
+        # 避免长工具（逐行输出的 tool_execute）每行都触发转发淹没前端面板。
+        self._hb_interval = 3.0
+        self._last_hb_ts = 0.0
 
     def put_nowait(self, event: dict) -> None:
         et = event.get("type")
@@ -206,8 +216,34 @@ class TaggedEventQueue:
             })
         elif et in PASSTHROUGH_EVENTS:
             self._collector.put_nowait(event)
-        # 其余（DROP_HIGH_FREQ_EVENTS 或未知类型）一律丢弃：tool_output / 
-        # tool_heartbeat 系高频噪音，未知类型保守不转发，避免事件流意外膨胀。
+        elif et in THROTTLED_HIGH_FREQ_EVENTS:
+            # [B12] tool_heartbeat 节流透传：转成 agent_step 复用 step_id=tool_<name>，
+            # 前端 multiAgent.ts 按 step_id 原位 upsert → 同一张工具卡刷新“运行中 Ns”。
+            now = time.monotonic()
+            if now - self._last_hb_ts < self._hb_interval:
+                return
+            self._last_hb_ts = now
+            tool = event.get("tool_name") or "tool"
+            elapsed = event.get("elapsed_seconds")
+            detail = (
+                f"{tool} 运行中 ({elapsed}s)"
+                if isinstance(elapsed, (int, float))
+                else f"{tool} 运行中"
+            )
+            self._collector.put_nowait({
+                "type": "agent_step",
+                "agent_id": self._agent_id,
+                "step": {
+                    "type": "tool_heartbeat",
+                    "step_id": f"tool_{tool}",
+                    "name": f"调用工具: {tool}",
+                    "status": "running",
+                    "tool_name": tool,
+                    "detail": detail,
+                },
+            })
+        # 其余（DROP_HIGH_FREQ_EVENTS 或未知类型）一律丢弃：tool_output 逐行高频噪音，
+        # 未知类型保守不转发，避免事件流意外膨胀。
 
 
 def step_event(step_id: str, name: str, status: str,
