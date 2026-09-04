@@ -463,12 +463,27 @@ def test_step_event_builder():
     assert "detail" not in ev3 and "duration_ms" not in ev3 and "tool_name" not in ev3
 
 
-async def test_tagged_drops_heartbeat_and_drop_types():
+async def test_tagged_throttles_heartbeat_and_drops_output_types():
+    """[B12] tool_heartbeat 节流透传为 agent_step；tool_output/未知类型仍丢弃。"""
     q = asyncio.Queue()
     c = AgentEventCollector(q)
     tagged = TaggedEventQueue(c, "rag")
-    tagged.put_nowait({"type": "tool_heartbeat", "ts": 1})
+    # 心跳：放行并转 agent_step，复用 step_id=tool_<name>
+    tagged.put_nowait({"type": "tool_heartbeat", "tool_name": "tool_execute", "elapsed_seconds": 5})
+    ev = q.get_nowait()
+    assert ev["type"] == "agent_step" and ev["agent_id"] == "rag"
+    step = ev["step"]
+    assert step["type"] == "tool_heartbeat"
+    assert step["step_id"] == "tool_tool_execute"
+    assert step["status"] == "running" and "5s" in step["detail"]
+    assert q.empty()
+    # 3s 内再推 → 被节流（同 agent 至少间隔 _hb_interval）
+    tagged.put_nowait({"type": "tool_heartbeat", "tool_name": "tool_execute", "elapsed_seconds": 6})
+    assert q.empty()
+    # tool_output / 未知类型仍明确丢弃
     tagged.put_nowait({"type": "tool_output", "content": "x"})
     tagged.put_nowait({"type": "unknown_future_event"})
     assert q.empty()
-    assert c.agents_snapshot() == []
+    # 快照仅一条 step（step_id 稳定，心跳不新增卡片）
+    snap = c.agents_snapshot()
+    assert len(snap) == 1 and len(snap[0]["steps"]) == 1

@@ -1,8 +1,9 @@
 """filesystem 层其余模块测试：ripgrep/search(纯 Python 回退与 rg 分叉)、
 shell、watcher、project、FileSystem 服务抽象、models 数据模型。
 
-rg 二进制在本机未安装(ripgrep_binary 缓存为 None)；测试通过 monkeypatch
-_rg_path / sys.modules['subprocess'] 模拟 rg 子进程的分支(超时/退出码/JSON)。
+rg 二进制可能安装(仓库 bundled data/bin/rg.exe 或 PATH)；测试通过 monkeypatch
+_rg_path/_RG_CANDIDATES / sys.modules['subprocess'] 同时覆盖"有 rg"与"无 rg"两条分支
+(超时/退出码/JSON)。
 """
 import mimetypes
 import os
@@ -103,6 +104,8 @@ class TestRipgrepBasics:
     def test_binary_cached_none(self, monkeypatch):
         calls = []
         monkeypatch.setattr(ripgrep, "_rg_path", None)
+        # [B13] 清空仓库内预置候选，模拟"系统与 bundled 均无 rg"
+        monkeypatch.setattr(ripgrep, "_RG_CANDIDATES", [])
         monkeypatch.setattr(ripgrep.shutil, "which", lambda n: calls.append(n) or None)
         assert ripgrep.ripgrep_binary() is None
         assert ripgrep.ripgrep_binary() is None

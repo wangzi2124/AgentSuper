@@ -152,16 +152,39 @@ def glob_to_regex(pattern: str) -> re.Pattern[str]:
 
 
 class GitignoreMatcher:
-    """基于项目根的 .gitignore 层级匹配器。
+    """基于 git 仓库根的 .gitignore 层级匹配器。
 
-    判定路径是否被忽略:从根逐层收集各目录下的 .gitignore 规则(按 mtime
-    缓存),按"父级在前、子级在后"的顺序对路径的每个前缀求值,最后一条
-    匹配的模式决定结果(支持 ! 取反)。
+    判定路径是否被忽略:从**最近的仓库根(含 .git 的祖先目录)**逐层收集各目录下的
+    .gitignore 规则(按 mtime 缓存),按"父级在前、子级在后"的顺序对路径的每个前缀
+    求值,最后一条匹配的模式决定结果(支持 ! 取反)。
+
+    [B13] 对齐 rg/git 语义:搜索根可以是仓库内的任意子目录——此时仍向上继承仓库根
+    及中间层级的 .gitignore(如搜 F:\\omni\\backend 会继承 F:\\omni\\.gitignore,
+    自动裁剪 node_modules/models/.venv)。找不到 .git 时退回仅应用搜索根自身的规则。
     """
 
     def __init__(self, root: str | os.PathLike[str]) -> None:
         self.root = Path(root).resolve()
         self._rules_cache: dict[str, tuple[Optional[int], list[_Rule]]] = {}
+        self._repo_root = self._nearest_repo_root(self.root)
+
+    @staticmethod
+    def _nearest_repo_root(start: Path) -> Optional[Path]:
+        """向上查找最近的含 .git(目录或 gitfile)的祖先目录;找不到返回 None。"""
+        d = start
+        while True:
+            try:
+                if (d / ".git").exists():
+                    return d
+            except OSError:
+                return None
+            if d.parent == d:
+                return None
+            d = d.parent
+
+    def _ignore_base(self) -> Path:
+        """gitignore 求值的基准目录:有仓库根用仓库根,否则退回搜索根。"""
+        return self._repo_root or self.root
 
     def _rules_for(self, directory: Path) -> list[_Rule]:
         gitignore = directory / ".gitignore"
@@ -180,15 +203,16 @@ class GitignoreMatcher:
         return rules
 
     def is_ignored(self, path: str | os.PathLike[str], is_dir: bool) -> bool:
-        """判断 path 是否被 .gitignore 忽略;位于 root 之外的路径永不忽略。"""
+        """判断 path 是否被 .gitignore 忽略;位于基准目录(仓库根/搜索根)之外的路径永不忽略。"""
+        base = self._ignore_base()
         try:
-            rel = Path(path).resolve().relative_to(self.root)
+            rel = Path(path).resolve().relative_to(base)
         except (ValueError, OSError):
             return False
         parts = rel.parts
         ignored = False
         for idx in range(len(parts)):
-            base_dir = self.root.joinpath(*parts[:idx])
+            base_dir = base.joinpath(*parts[:idx])
             rules = self._rules_for(base_dir)
             if not rules:
                 continue

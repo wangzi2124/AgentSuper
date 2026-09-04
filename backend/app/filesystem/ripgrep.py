@@ -13,6 +13,8 @@ Ripgrep — opencode @opencode-ai/core/ripgrep 移植。
 """
 from __future__ import annotations
 
+import logging
+import os
 import re
 import shutil
 import subprocess
@@ -22,6 +24,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .gitignore import GitignoreMatcher
+
+logger = logging.getLogger(__name__)
 
 MAX_RECORD_BYTES = 64 * 1024
 MAX_SUBMATCHES = 100
@@ -69,19 +73,51 @@ _rg_path: Optional[str] = None
 _rg_lock = threading.Lock()
 
 
+# backend/app/filesystem/ripgrep.py → parents[2] = backend/ 目录
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+
+# rg.exe 候选位置（按序探测）：仓库内预置 bundled > 环境 PATH。
+# data/bin 为官方推荐落点（后端已把 rg.exe 复制至此，跨重启稳定可用，
+# 不依赖 shell PATH——winget/scoop 安装后新 PATH 对已运行进程不生效）。
+_RG_CANDIDATES = [
+    _BACKEND_DIR / "data" / "bin" / ("rg.exe" if os.name == "nt" else "rg"),
+    _BACKEND_DIR / "bin" / ("rg.exe" if os.name == "nt" else "rg"),
+]
+
+
+def _existing(bin_dir: Path) -> Optional[str]:
+    """返回目录中存在的 rg 可执行文件；不存在返回 None。"""
+    try:
+        exe = bin_dir.resolve()
+    except OSError:
+        return None
+    return str(exe) if exe.is_file() else None
+
+
 def ripgrep_binary() -> Optional[str]:
-    """定位系统 rg 二进制(惰性缓存);未安装返回 None。"""
+    """定位 rg 二进制(惰性缓存);未安装返回 None。
+
+    探测顺序：仓库内预置（data/bin、bin）→ 系统 PATH(shutil.which)。
+    """
     global _rg_path
     if _rg_path is not None:
         return _rg_path or None
     with _rg_lock:
         if _rg_path is not None:
             return _rg_path or None
-        try:
-            found = shutil.which("rg")
-        except Exception:
-            found = None
+        found: Optional[str] = None
+        for cand in _RG_CANDIDATES:
+            found = _existing(cand)
+            if found:
+                break
+        if not found:
+            try:
+                found = shutil.which("rg")
+            except Exception:
+                found = None
         _rg_path = found or ""
+        if found:
+            logger.info("ripgrep binary: %s", found)
         return found
 
 
