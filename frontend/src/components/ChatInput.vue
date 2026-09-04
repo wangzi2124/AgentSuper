@@ -114,10 +114,17 @@ async function endPtt() {
   if (props.loading) { showToast('正在处理，请稍候再发送'); return }
   pttUploading = true
   try {
-    const up = await uploadVoiceMessage(r.blob, r.duration, r.peaks, '', 'voice.webm')
+    // 先转写音频，再上传——让模型看到语音内容
+    let transcript = ''
+    try {
+      transcript = await transcribeAudio(r.blob, 'voice.webm')
+    } catch { /* 转写失败不阻塞，降级为占位符 */ }
+
+    const up = await uploadVoiceMessage(r.blob, r.duration, r.peaks, transcript, 'voice.webm')
     if (!up) { showToast('语音上传失败'); return }
-    const voice: VoiceMessageData = { id: up.id, url: up.url, duration: up.duration, waveform: up.waveform, text: up.text || '' }
-    emit('send', '[语音]', [], voice)
+    const voice: VoiceMessageData = { id: up.id, url: up.url, duration: up.duration, waveform: up.waveform, text: transcript || up.text || '' }
+    const msgText = transcript || '[语音]'
+    emit('send', msgText, [], voice)
   } catch {
     showToast('语音上传失败')
   } finally {

@@ -56,6 +56,14 @@ class SupervisorAgentCore(SupervisorAgentBase):
         if action == "chat":
             question = payload.get("question", "")
 
+            # 语音消息降级兜底：前端转写失败时 message 仍为 "[语音]"，
+            # 若 payload 携带 voice.text（后端转写/历史回放），用其替换占位符
+            if question == "[语音]":
+                voice_text = (payload.get("voice") or {}).get("text", "")
+                if voice_text:
+                    question = voice_text
+                    payload["question"] = question
+
             # [token 优化 v9] 本次请求的 LLM 用量汇总（分解 + 子 Agent + 汇总），
             # 随 response payload 落库，与单 Agent executor 口径对齐。
             # 注：bus 事件循环对每个 agent 串行处理消息，无并发写冲突。
