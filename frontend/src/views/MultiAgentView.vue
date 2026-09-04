@@ -258,10 +258,11 @@ async function handleSpeak(id: string, content: string) {
     const audio = new Audio(url)
     speakAudio = audio
     audio.onended = () => { if (speakingId.value === id) speakingId.value = null }
-    audio.onerror = () => { stopSpeaking(); speakNative((content || '').trim()) }
+    audio.onerror = () => { stopSpeaking(); speakNative((content || '').trim(), chatSettings.ttsLang) }
     await audio.play()
   } catch {
-    speakNative((content || '').trim())
+    // [fix] 后端 qwen TTS 失败降级时也要带上「朗读语言」，而非固定中文
+    speakNative((content || '').trim(), chatSettings.ttsLang)
   }
 }
 function stopSpeaking() {

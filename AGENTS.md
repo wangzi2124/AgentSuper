@@ -28,6 +28,8 @@ cd backend
 > - **增量转写（边录边出字）**：`transcribe-serve` 常驻 worker，**faster-whisper int8 首选**（CTranslate2，`backend/ttsclone/models/faster-whisper-small`），回退 openai-whisper `small`；`faster-whisper>=1.2.1` 已在 `requirements-voice.txt`。首块自动语言检测并缓存（`lang_state`），后续块直用 `language="zh"`。实测稳态 ~**1.3s/6s音频块**；后端启动预热（`VoiceService.warmup()` 后台线程）。快速自检：`backend\.venv\Scripts\python.exe -X utf8 backend\scripts\voice_quickcheck.py [synth|worker|all]`（合成 ~15-18s / worker req2 ~1.3s，无鉴权）。
 > - **前端不出字根因（已修）**：`initLive` 须 `await ctx.resume()`（Chrome 自动播放策略下 AudioContext 默认 suspended，`onaudioprocess` 不触发）；tick 1800ms、最小分块 0.9s、`transcribeBusy` 跳块避免队列积压。
 > - **TTS 合成**：默认 `VOICE_TTS_MODEL_SIZE=0.6B`（API 单句 ~17s，1.7B ~37s / CLI 同规模）；`VoiceService.__init__` 未显式传参时从 Settings 取（别直接 new 时硬编码 1.7B 默认）。
+> - **TTS 常驻 worker（启动即加载）**：`clone.py tts-serve`（stdin/stdout json 行协议，模型只加载一次）+ `VoiceService._ensure_tts_worker`（`_TtsWorker`）；启动时 `ensure_models` 在后台线程**先下载 Qwen3-TTS（缺则下）再拉起 worker 并等模型加载完成**，合成复用一个常驻进程——首用不再每次重载模型、消除冷启动偶发 503。尺寸与服务一致走 worker；尺寸不同/worker 失败自动退化为每次临时子进程（`clone.py custom`）。关停走 `shutdown()`（同 Whisper worker）。
+> - **朗读语言**：前端“朗读语言”设置经 `synthesize(..., ttsLang)` 传后端 qwen 合成；后端失败降级 `speakNative(text, ttsLang)`（BCP-47 映射 + 匹配系统 voice），不再固定中文。
 
 ```powershell
 # Voice status / 一键自检

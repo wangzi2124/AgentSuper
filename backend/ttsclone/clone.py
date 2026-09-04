@@ -291,6 +291,61 @@ def cmd_transcribe_serve(args):
                              ensure_ascii=False), flush=True)
 
 
+def cmd_tts_serve(args):
+    """常驻 Qwen3-TTS 合成服务：模型只加载一次，多次合成复用（对齐 transcribe-serve）。
+
+    stdin 协议：每行一个 JSON 请求
+      {"text": "...", "speaker": "Vivian", "lang": "Auto", "instruct": "", "output": "<wav 路径>"}
+    stdout 协议：加载完成先打一行 {"ok": true, "ready": true, "size": "..."}，
+      之后每个请求响应一行 {"ok": true, "path": "..."} 或 {"ok": false, "error": "..."}。
+    stdin EOF 或行 "shutdown" 时退出；stderr 静默（父进程 DEVNULL 丢弃进度噪声）。
+    """
+    import torch as _torch  # noqa: F401  get_model 内自行判定 device/dtype
+    size = "0.6B" if args.small else "1.7B"
+    model_id = f"Qwen/Qwen3-TTS-12Hz-{size}-CustomVoice"
+    model = get_model(model_id)
+
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
+    print(json.dumps({"ok": True, "ready": True, "size": size}, ensure_ascii=False), flush=True)
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        if line == "shutdown":
+            break
+        try:
+            req = json.loads(line)
+            text = str(req.get("text") or "").strip()
+            if not text:
+                print(json.dumps({"ok": False, "error": "empty text"}, ensure_ascii=False), flush=True)
+                continue
+            speaker = str(req.get("speaker") or "Vivian")
+            language = str(req.get("lang") or "Auto")
+            instruct = str(req.get("instruct") or "")
+            output = str(req.get("output") or "")
+            wavs, sr = model.generate_custom_voice(
+                text=text,
+                language=language,
+                speaker=speaker,
+                instruct=instruct,
+            )
+            if not output:
+                import tempfile
+                fd, output = tempfile.mkstemp(prefix="tts_", suffix=".wav")
+                os.close(fd)
+            else:
+                parent = os.path.dirname(os.path.abspath(output))
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+            sf.write(output, wavs[0], sr)
+            print(json.dumps({"ok": True, "path": output}, ensure_ascii=False), flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                             ensure_ascii=False), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Qwen3-TTS 聲音複製 CLI 工具",
@@ -339,6 +394,12 @@ def main():
     p_trs.add_argument("--device", default="auto",
                        help="auto（有 GPU 用 cuda）/ cpu / cuda")
 
+    # tts-serve 子命令：常驻 Qwen3-TTS 合成进程（模型只加载一次，多次合成复用）
+    p_ttss = sub.add_parser("tts-serve",
+                            help="常驻 Qwen3-TTS 合成服务（stdin/stdout json 行协议）")
+    p_ttss.add_argument("--small", action="store_true",
+                        help="使用 0.6B 小模型（VRAM 不足時使用）")
+
     args = parser.parse_args()
 
     if args.download:
@@ -352,6 +413,8 @@ def main():
         cmd_transcribe(args)
     elif args.command == "transcribe-serve":
         cmd_transcribe_serve(args)
+    elif args.command == "tts-serve":
+        cmd_tts_serve(args)
 
 
 if __name__ == "__main__":

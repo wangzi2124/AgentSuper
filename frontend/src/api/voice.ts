@@ -86,14 +86,37 @@ export async function synthesize(text: string, speaker: string = TTS_SPEAKER, la
   return URL.createObjectURL(blob)
 }
 
-// 浏览器系统语音朗读（后端/ttsclone 不可达时降级）
-export function speakNative(text: string) {
+// 浏览器系统语音朗读（后端/ttsclone 不可达时降级）。
+// language 取值与 stores/chatSettings TTS_LANGUAGES / 后端 LANGUAGES 一致。
+const NATIVE_LANG_MAP: Record<string, string> = {
+  Auto: 'zh-CN', // 保持历史默认；未显式选择时按中文兜底
+  Chinese: 'zh-CN',
+  English: 'en-US',
+  Japanese: 'ja-JP',
+  Korean: 'ko-KR',
+  French: 'fr-FR',
+  German: 'de-DE',
+  Spanish: 'es-ES',
+  Portuguese: 'pt-PT',
+  Russian: 'ru-RU',
+  Italian: 'it-IT',
+}
+
+export function speakNative(text: string, language: string = 'Auto') {
   try {
     const synth = window.speechSynthesis
     if (!synth) return
     synth.cancel()
     const u = new SpeechSynthesisUtterance(text)
-    u.lang = 'zh-CN'
+    // [fix] 按「朗读语言」设置选择 BCP-47 语言并尽量匹配对应 voice，
+    // 而非此前写死 zh-CN —— 设置英文/日语等时降级朗读也应使用对应语言。
+    const lang = NATIVE_LANG_MAP[language] || 'zh-CN'
+    u.lang = lang
+    try {
+      const primary = lang.split('-')[0].toLowerCase()
+      const pick = synth.getVoices().find(v => (v.lang || '').toLowerCase().startsWith(primary))
+      if (pick) u.voice = pick
+    } catch { /* noop */ }
     synth.speak(u)
   } catch { /* noop */ }
 }
