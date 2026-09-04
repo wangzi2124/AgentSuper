@@ -347,7 +347,11 @@ class PermissionManager:
         return False
 
     def check(self, path_str: str, operation: str) -> str:
-        """检查指定路径的操作权限，返回allow/deny/ask。"""
+        """检查指定路径的操作权限，返回allow/deny/ask。
+
+        敏感路径（.git/.env/.db）的读操作统一返回 ask → 前端弹审批对话框，
+        用户允许后临时授权；写/执行仍 ask → 前端弹审批对话框 用户允许后临时授权。
+        """
         cls = self.classify_path(path_str)
         if cls == "system":
             return "deny"
@@ -356,11 +360,14 @@ class PermissionManager:
         p = Path(path_str).resolve()
         if cls == "workspace":
             if self._is_git_path(p):
-                return "deny"
+                # .git 读取弹窗审批
+                return "ask"
             if self._is_critical_read(p):
-                return "deny"
+                # .env/.db 读取弹窗审批
+                return "ask"
             if operation in ("write", "execute") and self._is_critical_write(p):
-                return "deny"
+                  # write/execute 读取弹窗审批
+                return "ask"
             return "allow"
         now = time.time()
         # Clean up expired temp approvals
