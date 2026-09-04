@@ -191,3 +191,49 @@ async def health():
 async def monitor_stats():
     """获取系统监控统计信息。"""
     return get_stats()
+
+
+@app.get("/api/monitor/usage")
+async def user_usage(request: Request):
+    """个人 LLM 用量：按当前用户（X-User-Id，默认 anonymous）跨顶层会话累计。
+
+    token 真实值由 supervisor 汇总后存于各 assistant 消息的 data.tokens
+    （{input, output}），这里只统计 kind='multi-agent' 顶层会话，避免子任务
+    （kind='task'，与主会话重复写入同量）重复计数。
+    """
+    uid = request.headers.get("x-user-id", "anonymous")
+    from app.session.db import _get_db
+    import json as _json
+    conn = _get_db()
+    sessions: set[str] = set()
+    requests = 0
+    tokens_input = 0
+    tokens_output = 0
+    try:
+        cur = conn.execute(
+            "SELECT s.id AS sid, m.data AS data FROM session_messages m "
+            "JOIN sessions s ON s.id = m.session_id "
+            "WHERE s.user_id = ? AND s.kind = 'multi-agent' AND m.type = 'assistant'",
+            (uid,),
+        )
+        for sid, raw in cur:
+            sessions.add(sid)
+            requests += 1
+            try:
+                tk = (_json.loads(raw).get("tokens") or {}) if raw else {}
+            except Exception:  # noqa: BLE001
+                tk = {}
+            tokens_input += int(tk.get("input") or 0)
+            tokens_output += int(tk.get("output") or 0)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "user_id": uid,
+        "sessions": len(sessions),
+        "requests": requests,
+        "tokens_input": tokens_input,
+        "tokens_output": tokens_output,
+    }

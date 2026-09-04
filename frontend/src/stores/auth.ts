@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import {
   getAuthInitInfo,
   loginAccount,
@@ -15,6 +15,22 @@ export const useAuthStore = defineStore('auth', () => {
   const username = ref('')
   const accountType = ref<'account' | 'device' | ''>('')
   const busy = ref(false)
+
+  // ── 本地用户资料（昵称/头像，仅存本机；不依赖登录态）──
+  const PROFILE_NICK_KEY = 'agent_super_profile_nickname'
+  const PROFILE_AVATAR_KEY = 'agent_super_profile_avatar'
+  let nickInit = ''
+  let avatarInit = ''
+  try { nickInit = localStorage.getItem(PROFILE_NICK_KEY) || '' } catch { /* noop */ }
+  try { avatarInit = localStorage.getItem(PROFILE_AVATAR_KEY) || '' } catch { /* noop */ }
+  const nickname = ref(nickInit)
+  const avatar = ref(avatarInit)
+  watch(nickname, v => { try { localStorage.setItem(PROFILE_NICK_KEY, v) } catch { /* noop */ } })
+  watch(avatar, v => { try { localStorage.setItem(PROFILE_AVATAR_KEY, v) } catch { /* noop */ } })
+
+  const displayName = computed(() =>
+    nickname.value || (enabled.value ? (username.value || user_id.value) : '本地用户') || '用户',
+  )
 
   const isLoggedIn = computed(() => enabled.value && !!user_id.value)
 
@@ -70,8 +86,17 @@ export const useAuthStore = defineStore('auth', () => {
     accountType.value = ''
   }
 
+  function setNickname(v: string) {
+    nickname.value = (v || '').trim().slice(0, 30)
+  }
+
+  function setAvatar(v: string) {
+    avatar.value = (v || '').trim()
+  }
+
   return {
     enabled, ready, user_id, username, accountType, busy, isLoggedIn,
+    nickname, avatar, displayName, setNickname, setAvatar,
     init, login, register, logout,
   }
 })
