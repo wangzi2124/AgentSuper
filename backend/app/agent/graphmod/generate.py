@@ -528,7 +528,7 @@ class RAGAgentGenerate(RAGAgentTools):
             )
         if not (msg.content or "").strip():
             # Last resort: LLM still returned empty, use a summary
-            msg.content = "任务已完成，请查看结果。"
+            msg.content = ""
 
         # P4: finish_reason 收尾语义（对齐 opencode prompt.ts:1301-1308 / processor.ts）
         # length → 输出被截断，答案不完整，追加提示不静默
