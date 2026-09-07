@@ -41,8 +41,12 @@ logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 class SupervisorAgentBase(BaseAgent):
 
-    # 可路由的 Agent 白名单（排除 supervisor 自身，防止 LLM 返回 "supervisor" 造成自我递归）
-    ROUTABLE_AGENTS = {"rag", "web_search", "code"}
+    # 可路由的 Agent 白名单（对齐 opencode primary/subagent 分层）：
+    #   build   = 默认主 Agent（知识库 + 代码/文件 + 内建 web 搜索，合并原 rag/code/web_search）
+    #   explore = 只读探索子 Agent
+    #   plan    = 规划子 Agent（纯 LLM，不执行工具）
+    # 排除 supervisor 自身，防止 LLM 返回 "supervisor" 造成自我递归。
+    ROUTABLE_AGENTS = {"build", "explore", "plan"}
     def __init__(self, bus: AgentBus, memory: Optional[MemoryManager] = None):
         self._bus = bus
         self._memory = memory
@@ -50,10 +54,12 @@ class SupervisorAgentBase(BaseAgent):
         self._model = settings.llm_model
         self._api_key = settings.llm_api_key
         self._api_base = settings.llm_api_base
-        # 使用更长超时的子 Agent（工具密集型，如 code）
-        self._extended_timeout_agents = {
+        # 使用更长超时的子 Agent（工具密集型）：build（原 code）默认即需长超时，
+        # 再加 env 配置的扩展名单。
+        self._extended_timeout_agents = {"build"}
+        self._extended_timeout_agents.update(
             a.strip() for a in (settings.extended_timeout_agents or "").split(",") if a.strip()
-        }
+        )
     def _timeout_for(self, agent_id: str) -> float:
         """按 Agent 类型分级超时：工具密集型 Agent 使用更长等待，避免长任务被误判超时。"""
         if agent_id in self._extended_timeout_agents:

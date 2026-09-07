@@ -132,17 +132,17 @@ async def test_bus_level_concurrency():
 async def test_supervisor_parallel_fanout():
     """supervisor 分解→_execute_parallel：3 子任务并行且起始时刻互相重叠。"""
     agents = {
-        "rag": _FakeSubAgent("rag", 0.3, "KB 答案"),
-        "web_search": _FakeSubAgent("web_search", 0.3, "网络答案"),
-        "code": _FakeSubAgent("code", 0.3, "代码答案"),
+        "build": _FakeSubAgent("build", 0.3, "主答案"),
+        "explore": _FakeSubAgent("explore", 0.3, "探索答案"),
+        "plan": _FakeSubAgent("plan", 0.3, "规划答案"),
     }
     spv, _, replies, elapsed = await _run(
-        [{"agent": "rag", "question": "Q1"}, {"agent": "web_search", "question": "Q2"},
-         {"agent": "code", "question": "Q3"}], agents)
+        [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
+         {"agent": "plan", "question": "Q3"}], agents)
 
     reply = replies[0]
     assert reply.type == "response"
-    assert reply.payload["routed_to"] == "rag+web_search+code"
+    assert reply.payload["routed_to"] == "build+explore+plan"
     assert spv.synthesize_called
     assert "并行汇总" in reply.payload["answer"]
     assert 0.25 < elapsed < 0.6, f"总耗时 {elapsed:.2f}s（并行应≈0.3s，串行应≈0.9s）"
@@ -150,19 +150,19 @@ async def test_supervisor_parallel_fanout():
 
 
 async def test_error_isolation():
-    """rag 成功、web_search 业务失败、code 崩溃 → 其余不受影响仍产出答案。"""
+    """build 成功、explore 业务失败、plan 崩溃 → 其余不受影响仍产出答案。"""
     agents = {
-        "rag": _FakeSubAgent("rag", 0.2, "KB 答案"),
-        "web_search": _FakeSubAgent("web_search", 0.2, "", outcome="error"),
-        "code": _FakeSubAgent("code", 0.2, "", outcome="raise"),
+        "build": _FakeSubAgent("build", 0.2, "KB 答案"),
+        "explore": _FakeSubAgent("explore", 0.2, "", outcome="error"),
+        "plan": _FakeSubAgent("plan", 0.2, "", outcome="raise"),
     }
     spv, _, replies, elapsed = await _run(
-        [{"agent": "rag", "question": "Q1"}, {"agent": "web_search", "question": "Q2"},
-         {"agent": "code", "question": "Q3"}], agents)
+        [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
+         {"agent": "plan", "question": "Q3"}], agents)
 
     reply = replies[0]
     assert reply.type == "response"
-    assert reply.payload["routed_to"] == "rag"
+    assert reply.payload["routed_to"] == "build"
     assert reply.payload["answer"] == "KB 答案"
     assert not spv.synthesize_called
     assert elapsed < 0.6
@@ -171,47 +171,47 @@ async def test_error_isolation():
 async def test_partial_failure_note():
     """2 成功 + 1 失败 → 多结果汇总且带 ⚠️ 部分 Agent 执行出错 说明。"""
     agents = {
-        "rag": _FakeSubAgent("rag", 0.2, "KB 答案"),
-        "web_search": _FakeSubAgent("web_search", 0.2, "网络答案"),
-        "code": _FakeSubAgent("code", 0.2, "", outcome="error"),
+        "build": _FakeSubAgent("build", 0.2, "主答案"),
+        "explore": _FakeSubAgent("explore", 0.2, "探索答案"),
+        "plan": _FakeSubAgent("plan", 0.2, "", outcome="error"),
     }
     spv, _, replies, _ = await _run(
-        [{"agent": "rag", "question": "Q1"}, {"agent": "web_search", "question": "Q2"},
-         {"agent": "code", "question": "Q3"}], agents)
+        [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
+         {"agent": "plan", "question": "Q3"}], agents)
 
     reply = replies[0]
-    assert reply.payload["routed_to"] == "rag+web_search"
+    assert reply.payload["routed_to"] == "build+explore"
     assert spv.synthesize_called
     assert "⚠️ 部分 Agent 执行出错" in reply.payload["answer"]
-    assert "web_search" in reply.payload["answer"] and "code" in reply.payload["answer"]
+    assert "explore" in reply.payload["answer"] and "plan" in reply.payload["answer"]
 
 
 async def test_graded_timeout_no_hang():
     """不回复的 silent Agent：0.4s 超时 + 一次 0.4s 宽限 → 错误交付，不悬挂整个请求。"""
     agents = {
-        "rag": _FakeSubAgent("rag", 0.2, "KB 答案"),
-        "web_search": _FakeSubAgent("web_search", 0.2, "网络答案"),
-        "code": _FakeSubAgent("code", 30, "", outcome="silent"),
+        "build": _FakeSubAgent("build", 0.2, "主答案"),
+        "explore": _FakeSubAgent("explore", 0.2, "探索答案"),
+        "plan": _FakeSubAgent("plan", 30, "", outcome="silent"),
     }
     _, _, replies, elapsed = await _run(
-        [{"agent": "rag", "question": "Q1"}, {"agent": "web_search", "question": "Q2"},
-         {"agent": "code", "question": "Q3"}], agents, timeout_override=0.4)
+        [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
+         {"agent": "plan", "question": "Q3"}], agents, timeout_override=0.4)
 
     reply = replies[0]
     assert reply.type == "response"
     assert "did not respond in time" in reply.payload["answer"]
-    assert "⚠️" in reply.payload["answer"] and "code" in reply.payload["answer"]
+    assert "⚠️" in reply.payload["answer"] and "plan" in reply.payload["answer"]
     assert elapsed < 2.2, f"超时路径总耗时 {elapsed:.2f}s（应≈1.0s：0.4s 超时 + 0.4s 宽限）"
 
 
 async def test_single_subtask_direct_route():
     """只拆出 1 个子任务 → 直接路由该 Agent，不调用 _synthesize。"""
-    agents = {"rag": _FakeSubAgent("rag", 0.2, "单一答案")}
+    agents = {"build": _FakeSubAgent("build", 0.2, "单一答案")}
     spv, _, replies, _ = await _run(
-        [{"agent": "rag", "question": "只拆出一个"}], agents)
+        [{"agent": "build", "question": "只拆出一个"}], agents)
 
     reply = replies[0]
     assert reply.type == "response"
-    assert reply.payload["routed_to"] == "rag"
+    assert reply.payload["routed_to"] == "build"
     assert reply.payload["answer"] == "单一答案"
     assert not spv.synthesize_called

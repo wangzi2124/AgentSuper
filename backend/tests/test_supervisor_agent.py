@@ -28,7 +28,7 @@ class _StubBus:
     """只实现 supervisor 依赖的三个方法。"""
 
     def __init__(self, agents=None, send=None):
-        self._agents = agents or ["rag", "web_search", "code"]
+        self._agents = agents or ["build", "explore", "plan"]
         self._send = send
         self.touched = []
 
@@ -59,7 +59,7 @@ def test_facade_exports_intact():
                  "SYNTHESIS_SYSTEM_PROMPT", "SUB_RESULT_TRUNC", "logger"):
         assert hasattr(sv, name), name
     assert sv.SUB_RESULT_TRUNC > 0
-    assert "rag" in sv.DECOMPOSE_SYSTEM_PROMPT
+    assert "build" in sv.DECOMPOSE_SYSTEM_PROMPT
 
 
 def test_mro_chain_and_method_placement():
@@ -70,27 +70,27 @@ def test_mro_chain_and_method_placement():
     for m in ("handle_message", "_route_to", "_decompose", "_is_greeting",
               "_llm_decompose", "_validate_subtasks", "_execute_parallel", "_synthesize"):
         assert callable(getattr(SupervisorAgent, m)), m
-    # 类属性经 MRO 可达
-    assert SupervisorAgent.ROUTABLE_AGENTS == {"rag", "web_search", "code"}
+    # 类属性经 MRO 可达（rag/code/web_search 已合并为 build）
+    assert SupervisorAgent.ROUTABLE_AGENTS == {"build", "explore", "plan"}
     assert len(SupervisorAgent._GREETING_KEYWORDS)  # 非空
 
 
 def test_validate_subtasks_whitelist_and_cap():
-    routable = ["rag", "web_search"]
+    routable = ["build", "explore"]
     data = [
-        {"agent": "rag", "question": "  Q1  "},
+        {"agent": "build", "question": "  Q1  "},
         {"agent": "supervisor", "question": "self"},
         {"agent": "code", "question": "not-routable"},
-        {"agent": "web_search", "question": "Q2"},
-        {"agent": "rag", "question": "Q3"},
-        {"agent": "rag", "question": "Q4"},
+        {"agent": "explore", "question": "Q2"},
+        {"agent": "build", "question": "Q3"},
+        {"agent": "build", "question": "Q4"},
         None,
         {"question": "no-agent"},
     ]
     got = SupervisorAgent._validate_subtasks(data, routable)
-    assert got == [{"agent": "rag", "question": "Q1"},
-                   {"agent": "web_search", "question": "Q2"},
-                   {"agent": "rag", "question": "Q3"}]
+    assert got == [{"agent": "build", "question": "Q1"},
+                   {"agent": "explore", "question": "Q2"},
+                   {"agent": "build", "question": "Q3"}]
 
 
 def test_is_greeting_and_timeout_for():
@@ -98,7 +98,7 @@ def test_is_greeting_and_timeout_for():
     assert ag._is_greeting("你好") is True
     assert ag._is_greeting("麻烦你帮我查资料") is True
     assert ag._is_greeting("今天天气如何") is False
-    assert ag._timeout_for("rag") == settings.sub_agent_timeout
+    assert ag._timeout_for("build") == settings.sub_agent_timeout_extended
     assert ag._timeout_for("unknown") == settings.sub_agent_timeout
 
 
@@ -106,16 +106,16 @@ def test_decompose_keyword_fast_path():
     async def main():
         ag = SupervisorAgent(_StubBus())
         code_only = await ag._decompose("帮我写个 Python 爬虫代码")
-        assert code_only == [{"agent": "code", "question": "帮我写个 Python 爬虫代码"}]
+        assert code_only == [{"agent": "build", "question": "帮我写个 Python 爬虫代码"}]
         web_only = await ag._decompose("查一下今天的最新新闻")
-        assert web_only == [{"agent": "web_search", "question": "查一下今天的最新新闻"}]
+        assert web_only == [{"agent": "build", "question": "查一下今天的最新新闻"}]
         greet_short = await ag._decompose("你好呀")
-        assert greet_short == [{"agent": "rag", "question": "你好呀"}]
+        assert greet_short == [{"agent": "build", "question": "你好呀"}]
 
     asyncio.run(main())
 
 
-def test_llm_decompose_fallback_to_rag(monkeypatch):
+def test_llm_decompose_fallback_to_build(monkeypatch):
     async def boom(*args, **kwargs):
         raise RuntimeError("llm unreachable")
 
@@ -123,34 +123,34 @@ def test_llm_decompose_fallback_to_rag(monkeypatch):
 
     async def main():
         ag = SupervisorAgent(_StubBus())
-        got = await ag._llm_decompose("一个足够复杂到必然走 LLM 的问题", ["rag", "web_search", "code"])
-        assert got == [{"agent": "rag", "question": "一个足够复杂到必然走 LLM 的问题"}]
+        got = await ag._llm_decompose("一个足够复杂到必然走 LLM 的问题", ["build", "explore", "plan"])
+        assert got == [{"agent": "build", "question": "一个足够复杂到必然走 LLM 的问题"}]
 
     asyncio.run(main())
 
 
 def test_execute_parallel_one_success_plus_error():
     async def send(msg, timeout):
-        if msg.target == "code":
+        if msg.target == "explore":
             return _resp(is_error=True, error="插件不可用")
         return _resp(answer="知识库答案", sources=[{"t": "s1"}])
 
     async def main():
         ag = SupervisorAgent(_StubBus(send=send))
         out = await ag._execute_parallel(
-            [{"agent": "rag", "question": "Q1"}, {"agent": "code", "question": "Q2"}],
+            [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"}],
             {"question": "origin"}, "thr1",
         )
         assert out.type == "response"
         assert out.payload["answer"] == "知识库答案"
-        assert out.payload["routed_to"] == "rag"
+        assert out.payload["routed_to"] == "build"
 
     asyncio.run(main())
 
 
 def test_handle_message_direct_route():
     async def send(msg, timeout):
-        assert msg.target == "rag"
+        assert msg.target == "build"
         assert msg.type == "request"
         return _resp(answer="回的")
 
@@ -161,7 +161,7 @@ def test_handle_message_direct_route():
         replies = [r async for r in ag.handle_message(msg)]
         assert len(replies) == 1
         assert replies[0].type == "response"
-        assert replies[0].payload["routed_to"] == "rag"
+        assert replies[0].payload["routed_to"] == "build"
         assert ag._usage == {"input": 0, "output": 0}
 
     asyncio.run(main())

@@ -62,12 +62,15 @@ async def test_tool_task_bad_subagent():
     agent = build_agent()
     r = await agent._tool_task({"prompt": "p", "subagent_type": "rag"})
     assert "unknown subagent_type" in r
+    # rag/code/web_search 已并入 build，不再是可委派的子 Agent
+    r2 = await agent._tool_task({"prompt": "p", "subagent_type": "code"})
+    assert "unknown subagent_type" in r2
 
 
 @pytest.mark.asyncio
 async def test_tool_task_no_bus():
     agent = build_agent()
-    r = await agent._tool_task({"prompt": "p", "subagent_type": "web_search"})
+    r = await agent._tool_task({"prompt": "p", "subagent_type": "explore"})
     assert "unavailable" in r
 
 
@@ -75,9 +78,9 @@ async def test_tool_task_no_bus():
 async def test_tool_task_depth_limit(monkeypatch):
     monkeypatch.setattr(settings, "subagent_depth", 1)
     agent = build_agent()
-    agent.task_bus = FakeBus(AgentMessage(source="x", target="web_search", type="response",
+    agent.task_bus = FakeBus(AgentMessage(source="x", target="explore", type="response",
                                           action="chat", payload={"answer": "42"}))
-    r = await agent._tool_task({"prompt": "p", "subagent_type": "code"}, depth=1)
+    r = await agent._tool_task({"prompt": "p", "subagent_type": "explore"}, depth=1)
     assert "depth limit" in r
 
 
@@ -92,13 +95,13 @@ class FakeBus:
 
 
 @pytest.mark.asyncio
-async def test_tool_task_success_web_search():
+async def test_tool_task_success_explore():
     agent = build_agent()
-    bus = FakeBus(AgentMessage(source="x", target="web_search", type="response", action="chat",
+    bus = FakeBus(AgentMessage(source="x", target="explore", type="response", action="chat",
                                payload={"answer": "42"}))
     agent.task_bus = bus
     eq = asyncio.Queue()
-    r = await agent._tool_task({"prompt": "p", "subagent_type": "web_search"}, depth=0,
+    r = await agent._tool_task({"prompt": "p", "subagent_type": "explore"}, depth=0,
                                event_queue=eq, directory="/wd", conversation_id="cid")
     assert r == "42"
     msg, timeout = bus.calls[0]
@@ -109,34 +112,34 @@ async def test_tool_task_success_web_search():
     assert msg.payload["_event_queue"] is eq
     assert msg.payload["use_vector_db"] is False
     assert msg.payload["files"] == []
-    assert msg.target == "web_search"
+    assert msg.target == "explore"
 
 
 @pytest.mark.asyncio
-async def test_tool_task_code_extended_timeout():
+async def test_tool_task_default_timeout():
     agent = build_agent()
-    bus = FakeBus(AgentMessage(source="x", target="code", type="response", action="chat",
+    bus = FakeBus(AgentMessage(source="x", target="explore", type="response", action="chat",
                                payload={"answer": "done"}))
     agent.task_bus = bus
-    await agent._tool_task({"prompt": "p", "subagent_type": "code"}, depth=0)
-    assert bus.calls[0][1] == settings.sub_agent_timeout_extended
+    await agent._tool_task({"prompt": "p", "subagent_type": "explore"}, depth=0)
+    assert bus.calls[0][1] == settings.sub_agent_timeout
 
 
 @pytest.mark.asyncio
 async def test_tool_task_error_reply():
     agent = build_agent()
-    agent.task_bus = FakeBus(AgentMessage(source="x", target="web_search", type="error",
+    agent.task_bus = FakeBus(AgentMessage(source="x", target="explore", type="error",
                                           action="chat", payload={"error": "boom"}))
-    r = await agent._tool_task({"prompt": "p", "subagent_type": "web_search"})
+    r = await agent._tool_task({"prompt": "p", "subagent_type": "explore"})
     assert "boom" in r
 
 
 @pytest.mark.asyncio
 async def test_tool_task_no_answer():
     agent = build_agent()
-    agent.task_bus = FakeBus(AgentMessage(source="x", target="web_search", type="response",
+    agent.task_bus = FakeBus(AgentMessage(source="x", target="explore", type="response",
                                           action="chat", payload={}))
-    r = await agent._tool_task({"prompt": "p", "subagent_type": "web_search"})
+    r = await agent._tool_task({"prompt": "p", "subagent_type": "explore"})
     assert "(no answer)" in r
 
 

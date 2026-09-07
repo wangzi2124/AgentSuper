@@ -88,6 +88,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   // 当前/新建会话绑定的工作目录（opencode ctx.directory）。首条消息发送时
   // 随请求 directory 创建会话；已有会话在 loadConversation 时同步为服务器值。
   const sessionDirectory = ref('')
+  // Agent 模式选择（对齐 opencode agent modes）：default=supervisor路由, plan=规划, explore=探索
+  const agentMode = ref<'default' | 'plan' | 'explore'>('default')
 
   // --- 重试机制 ---
   const AUTO_RETRY_DELAY = 5 // 秒
@@ -257,10 +259,16 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     } catch (e) { console.error('Failed to rename:', e) }
   }
 
-  function newChat() {
+  function newChat(dir?: string) {
     routingStatus.value = ''
     activeSessionId.value = undefined
-    sessionDirectory.value = ''
+    if (dir !== undefined) {
+      sessionDirectory.value = dir
+    } else {
+      // 自动使用设置里的默认工作目录（第一个工作区）
+      const perm = usePermissionStore()
+      sessionDirectory.value = perm.workspaces.length > 0 ? perm.workspaces[0] : ''
+    }
   }
 
   // --- 错误分类 ---
@@ -477,7 +485,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     // [S5] 走防抖（非终态写，done/error 的终态 persistSession 会清 timer 兜底覆盖）
     schedulePersist(sessionId)
 
-    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, directory: sessionDirectory.value || undefined, client_msg_id: messageClientId, files: files && files.length ? files : undefined, voice: voice || undefined }
+    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, directory: sessionDirectory.value || undefined, client_msg_id: messageClientId, files: files && files.length ? files : undefined, voice: voice || undefined, agent_mode: agentMode.value !== 'default' ? agentMode.value : undefined }
     const controller = new AbortController()
     session.abortController = controller
     const signal = controller.signal
@@ -729,7 +737,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
   return {
     sessions, activeSessionId, conversations, routingStatus, selectedModel, useVectorDb,
-    sessionDirectory, setSessionDirectory,
+    sessionDirectory, setSessionDirectory, agentMode,
     messages, conversationId, conversationTitle, loading, streamPhase, queuePosition,
     retryCountdown, notice, setNotice,
     send, cancel, clear, undoMessage, deleteMessage, deleteConversation,

@@ -184,20 +184,21 @@ _DEDUP_READONLY_TOOLS = {"tool_ls", "tool_read_file", "tool_glob", "tool_grep"}
 
 
 # ── [opencode task tool] 主 Agent 可委派聚焦子任务的子 Agent 白名单 ──
-# 排除 rag（= 自身，避免自递归）与 supervisor（编排者不是执行者）。
+# [build 合并] rag/code/web_search 已并入 build 自身（不再注册为独立总线 Agent），
+# 仅保留 explore（只读探索）与 plan（规划）两个聚焦子 Agent 可委派。
 
-_TASK_TOOL_SUBAGENTS = ("web_search", "code")
+_TASK_TOOL_SUBAGENTS = ("explore", "plan")
 
 _TASK_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "tool_task",
         "description": (
-            "Launch a sub-agent (web_search / code) to handle a focused, multi-step subtask "
+            "Launch a sub-agent (explore / plan) to handle a focused, independent subtask "
             "autonomously and return its final result. Use this tool when a piece of the request "
-            "is independent/specialized and benefits from a dedicated context (e.g. realtime web "
-            "search, a separate coding task). You continue working while it runs, and may launch "
-            "multiple sub-agents. Do NOT delegate work you can do directly yourself."
+            "is independent and benefits from a dedicated context (e.g. read-only codebase "
+            "exploration, or producing a structured implementation plan). You continue working "
+            "while it runs, and may launch multiple sub-agents. Do NOT delegate work you can do directly yourself."
         ),
         "parameters": {
             "type": "object",
@@ -211,8 +212,7 @@ _TASK_TOOL_SCHEMA = {
                 "subagent_type": {
                     "type": "string",
                     "enum": list(_TASK_TOOL_SUBAGENTS),
-                    "description": "web_search for realtime/news/network info; code for coding, "
-                    "file analysis or multi-step implementation work.",
+                    "description": "explore for read-only codebase exploration; plan for structured planning.",
                 },
             },
             "required": ["description", "prompt", "subagent_type"],

@@ -67,6 +67,8 @@ from app.agent.tools import (
     build_system_prompt_no_kb,
 )
 
+from app.agent.web_search_agent import web_search_tool
+
 from app.skills.custom_tools import CustomToolStore  # [token 优化 v6]
 
 from app.monitor import record_model_call
@@ -106,11 +108,31 @@ class RAGAgentBase:
 
         self.tools: list[ToolDef] = []
         self.tools.extend(create_filesystem_tools())
+        # [opencode build 合并] 网络搜索内建为 build 的工具（Tavily→DuckDuckGo 引擎），
+        # 取代独立 web_search 子 Agent 承载实时信息搜索的能力。
+        self.tools.append(ToolDef(
+            name="tool_web_search",
+            description=(
+                "Search the web / internet for realtime, news or out-of-knowledge information "
+                "(engines: Tavily if API key set, else DuckDuckGo). Returns numbered results with "
+                "title/snippet/URL. Use when the user asks for current events, live data, "
+                "recent releases, or anything not reliably in your training data or the knowledge base."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词/问题（中文或英文均可）"},
+                    "max_results": {"type": "integer", "description": "最多返回结果数（默认 5，最大 10）"},
+                },
+                "required": ["query"],
+            },
+            fn=web_search_tool,
+        ))
         if skill_loader:
             self.tools.extend(create_skill_tools(skill_loader))
         if plugin_loader:
             self.tools.extend(create_plugin_tools(plugin_loader))
-        # [opencode task tool] 主 Agent 自主委派子 Agent（web_search / code）。
+        # [opencode task tool] 主 Agent 自主委派子 Agent（explore / plan）。
         # fn 仅为 schema 占位：实际执行在 _execute_tool 中特判（需注入任务深度与事件队列）。
         self.tools.append(ToolDef(
             name="tool_task",
@@ -336,8 +358,8 @@ class RAGAgentBase:
             "\n- plugin_character-analysis_tool_get_character_dialogues(character_name, limit): Get all dialogues spoken by a character."
             "\n- plugin_character-analysis_tool_analyze_character_interactions(character_name): Find characters who appear in same chapters."
             "\n\nYou also have a task tool: tool_task(description, prompt, subagent_type). "
-            "Use it to delegate independent or specialized subtasks (realtime web search via 'web_search', "
-            "or a separate coding/file task via 'code') to a sub-agent and get its final result back — "
+            "Use it to delegate independent subtasks ('explore' for read-only codebase exploration, "
+            "or 'plan' for producing a structured plan) to a sub-agent and get its final result back — "
             "it runs with fresh context, so include all needed details. Do NOT delegate work you can do directly."
             "\n\n"
             + (

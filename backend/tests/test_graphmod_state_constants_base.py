@@ -232,7 +232,8 @@ def test_is_multi_agent_queue():
 
 def test_constants_sets():
     assert "tool_ls" in _DEDUP_READONLY_TOOLS
-    assert _TASK_TOOL_SUBAGENTS == ("web_search", "code")
+    # [build 合并] rag/code/web_search 并入 build，task tool 仅可委派 explore/plan
+    assert _TASK_TOOL_SUBAGENTS == ("explore", "plan")
     assert _TASK_TOOL_SCHEMA["function"]["name"] == "tool_task"
     assert _TASK_TOOL_SCHEMA["function"]["parameters"]["required"] == ["description", "prompt", "subagent_type"]
     assert "subagent_type" in _TASK_TOOL_SCHEMA["function"]["parameters"]["properties"]

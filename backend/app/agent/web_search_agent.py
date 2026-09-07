@@ -29,6 +29,43 @@ _SEARCH_ENGINES = {
 }
 
 
+_SEARCH_AGENT = None
+
+
+def _search_agent() -> "WebSearchAgent":
+    """惰性单例 WebSearchAgent（仅复用其搜索引擎实现，不注册到总线）。"""
+    global _SEARCH_AGENT
+    if _SEARCH_AGENT is None:
+        _SEARCH_AGENT = WebSearchAgent()
+    return _SEARCH_AGENT
+
+
+async def web_search_tool(query: str, max_results: int = 5) -> str:
+    """[opencode task 合并] 主 build agent 内建的联网搜索工具。
+
+    code/rag/web_search 合并为单一 build agent 后，网络搜索不再由独立
+    web_search 子 Agent 承载，而是作为 build 的一个工具直接可用（复用
+    WebSearchAgent 的 Tavily→DuckDuckGo 引擎链）。
+    返回格式化文本结果；失败/空结果时返回可解释的占位说明，不抛异常。
+    """
+    try:
+        max_results = max(1, min(int(max_results or 5), 10))
+        results = await _search_agent()._search_web(str(query), max_results)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("web_search_tool failed for %r: %s", str(query)[:80], e)
+        return "Error: 网络搜索失败，请稍后重试或改用其他方式获取该信息。"
+    if not results:
+        return "未找到相关的实时信息。"
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(
+            f"{i}. {r.get('title', '')}\n"
+            f"   {r.get('snippet', '')}\n"
+            f"   {r.get('url', '')}"
+        )
+    return "\n\n".join(lines)
+
+
 class WebSearchAgent(BaseAgent):
     """网络搜索 Agent。
 

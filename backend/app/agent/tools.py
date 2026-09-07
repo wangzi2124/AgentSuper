@@ -266,8 +266,8 @@ def build_system_prompt_no_kb(
         )
         tool_parts.append(
             "   - tool_task(description, prompt, subagent_type) - Delegate a focused, independent subtask "
-            "to a sub-agent ('web_search' for realtime/news/network info, 'code' for coding/file work) and "
-            "get its final result back. The sub-agent starts with fresh context — include all details. "
+            "to a sub-agent ('explore' for read-only codebase exploration, 'plan' for producing a structured "
+            "plan) and get its final result back. The sub-agent starts with fresh context — include all details. "
             "Use it for specialized or parallel work; do NOT delegate what you can do directly."
         )
 
@@ -316,7 +316,7 @@ def build_system_prompt_no_kb(
         "- No knowledge base available; answer from your own knowledge; say so honestly if unsure.",
         "- Only call tools directly relevant to the request.",
         "- Docs: use docx/pdf/excel/pptx generator plugins, or tool_write_file for other formats.",
-        "- Web search: plugin_internet-search_tool_internet_search (region='cn'|'global').",
+        "- Realtime/news/web info: tool_web_search(query, max_results) — built-in web search.",
         "- URL content: plugin_internet-search_tool_extract_urls.",
         "- HTTP: plugin_http-client_tool_http_get/_post/_request (headers as JSON string).",
         "- CRITICAL: tool_execute is for build/install/test/check/verify (npm install, npm run build, python -m py_compile, pytest, npm test, node --check). NEVER use it for curl/wget/ping/network — use http-client plugin.",

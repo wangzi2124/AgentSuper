@@ -327,8 +327,8 @@ async function handleCopy(messageId: string, text: string) {
   <div class="multi-agent-view">
     <div class="chat-header">
       <div class="chat-heading">
-        <h2>多智能体编排</h2>
-        <p>同时向所有智能体发送消息，并行处理你的请求</p>
+        <h2>AI 智能助手</h2>
+        <p>统一 Agent：知识库 + 代码/文件 + 联网搜索（输入框可选 规划/探索 模式）</p>
       </div>
       <div class="header-actions">
         <div v-if="agent.queuePosition != null" class="status-badge queued">
@@ -495,8 +495,8 @@ async function handleCopy(messageId: string, text: string) {
           <div class="empty-orb-core">🤖</div>
           <div class="empty-orb-ring"></div>
         </div>
-        <p class="empty-title">向所有智能体提问</p>
-        <p class="empty-hint">多个 AI 智能体将并行处理你的请求</p>
+        <p class="empty-title">向智能助手提问</p>
+        <p class="empty-hint">知识库检索、代码编写、联网搜索一站完成</p>
       </div>
 
       <div v-else ref="parentRef" class="message-list" @scroll="onScroll">

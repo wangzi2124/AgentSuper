@@ -22,11 +22,34 @@ const currentModelLabel = computed(() => currentModel.value.label)
 const currentModelDesc = computed(() => currentModel.value.desc)
 function toggleModelMenu() {
   if (props.loading) return
+  // 互斥：打开模型菜单时收起 agent 菜单
+  if (agentMenuOpen.value) agentMenuOpen.value = false
   modelMenuOpen.value = !modelMenuOpen.value
 }
 function pickModel(value: string) {
   agent.selectedModel = value
   modelMenuOpen.value = false
+}
+
+// [Agent 选择] 对齐 opencode agent modes：build（默认，知识库+代码+联网合并）/ 规划 / 探索
+const AGENT_OPTIONS = [
+  { value: 'default' as const, icon: '🤖', label: '智能助手', desc: '统一主 Agent（知识库检索 + 代码/文件 + 联网搜索）' },
+  { value: 'plan' as const, icon: '📋', label: '规划', desc: '生成结构化实施计划，不执行操作' },
+  { value: 'explore' as const, icon: '🔍', label: '探索', desc: '只读探索代码库结构和内容' },
+]
+const agentMenuOpen = ref(false)
+const currentAgent = computed(
+  () => AGENT_OPTIONS.find(a => a.value === agent.agentMode) ?? AGENT_OPTIONS[0]
+)
+function toggleAgentMenu() {
+  if (props.loading) return
+  // 互斥：打开 agent 菜单时收起模型菜单
+  if (modelMenuOpen.value) modelMenuOpen.value = false
+  agentMenuOpen.value = !agentMenuOpen.value
+}
+function pickAgent(value: typeof AGENT_OPTIONS[number]['value']) {
+  agent.agentMode = value
+  agentMenuOpen.value = false
 }
 
 // [录音] 语音输入：实时(PCM)采集 + 本地 Whisper 增量转写（边说话边出字）。
@@ -854,6 +877,37 @@ const textareaRef = ref<HTMLTextAreaElement>()
                 <span class="model-menu-desc">{{ m.desc }}</span>
               </span>
               <svg v-if="agent.selectedModel === m.value" class="check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </button>
+          </div>
+        </span>
+        <!-- Agent 选择（样式与模型一致：胶囊 + 向上弹出下拉） -->
+        <span class="model-wrap agent-wrap" :class="{ 'menu-open': agentMenuOpen }">
+          <button
+            type="button"
+            class="model-pill agent-pill"
+            :disabled="loading"
+            @click.stop="toggleAgentMenu"
+            title="选择 Agent"
+          >
+            <span class="agent-icon">{{ currentAgent.icon }}</span>
+            <span class="model-current">{{ currentAgent.label }}</span>
+            <svg class="model-chevron" :class="{ open: agentMenuOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div v-if="agentMenuOpen" class="model-menu-mask" @click="agentMenuOpen = false"></div>
+          <div v-if="agentMenuOpen" class="model-menu agent-menu">
+            <button
+              v-for="a in AGENT_OPTIONS"
+              :key="a.value"
+              type="button"
+              class="model-menu-item"
+              :class="{ active: agent.agentMode === a.value }"
+              @click="pickAgent(a.value)"
+            >
+              <span class="model-menu-text">
+                <span class="model-menu-name"><span class="agent-menu-icon">{{ a.icon }}</span> {{ a.label }}</span>
+                <span class="model-menu-desc">{{ a.desc }}</span>
+              </span>
+              <svg v-if="agent.agentMode === a.value" class="check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             </button>
           </div>
         </span>

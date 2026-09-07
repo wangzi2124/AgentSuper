@@ -34,14 +34,20 @@ THROTTLED_HIGH_FREQ_EVENTS = {"tool_heartbeat"}
 DROP_HIGH_FREQ_EVENTS = {"tool_output"}
 
 AGENT_LABELS = {
-    "rag": "知识库检索",
-    "web_search": "网络搜索",
-    "code": "代码分析",
+    "build": "智能助手",
+    "rag": "知识库检索",      # 旧 id（历史回放兼容）
+    "web_search": "网络搜索",  # 旧 id
+    "code": "代码分析",       # 旧 id
+    "explore": "代码探索",
+    "plan": "规划模式",
 }
 AGENT_AVATARS = {
-    "rag": "📚",
-    "web_search": "🌐",
-    "code": "💻",
+    "build": "🧠",
+    "rag": "📚",       # 旧 id
+    "web_search": "🌐",  # 旧 id
+    "code": "💻",      # 旧 id
+    "explore": "🔍",
+    "plan": "📋",
 }
 
 

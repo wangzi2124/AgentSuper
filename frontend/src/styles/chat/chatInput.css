@@ -134,6 +134,12 @@ box-shadow: 0 16px 44px rgba(15, 23, 42, 0.18);
 .model-menu-item.active .model-menu-name { font-weight: 600; }
 .model-menu-desc { font-size: 11px; line-height: 1.45; color: var(--text-secondary); }
 .model-menu-item .check { flex-shrink: 0; }
+
+/* Agent 选择：复用 model-pill/model-menu，仅做微调 */
+.agent-pill .agent-icon { font-size: 13px; line-height: 1; flex-shrink: 0; }
+.agent-menu { min-width: 260px; }
+.agent-menu .model-menu-name { display: flex; align-items: center; gap: 6px; }
+.agent-menu-icon { font-size: 15px; flex-shrink: 0; }
 .attach-btn {
 width: 34px;
 height: 34px;
@@ -370,8 +376,10 @@ font-size: 12px; font-weight: 600; cursor: pointer; flex-shrink: 0;
 .chat-input { padding: 8px 12px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
 .input-card { padding: 12px 12px 8px; border-radius: 20px; }
 .input-card textarea { font-size: 16px; min-height: 26px; }
-.model-pill { max-width: 150px; }
-.model-current { max-width: 84px; }
+.input-actions { gap: 4px; }
+.model-pill { max-width: 128px; padding: 0 6px 0 8px; }
+.model-current { max-width: 60px; }
+.agent-pill .agent-icon { display: none; }
 .file-chip { max-width: 100%; }
 .preview-overlay { padding: 12px; }
 .preview-panel { max-width: 100%; max-height: 86vh; }

@@ -6,7 +6,6 @@ import { usePermissionStore } from '../stores/permission'
 import { useAuthStore } from '../stores/auth'
 import { deleteConversation as apiDelete } from '../api/sessions'
 import type { ConversationMeta } from '../api/sessions'
-import DirPickerModal from './DirPickerModal.vue'
 
 const router = useRouter()
 const agent = useMultiAgentStore()
@@ -15,8 +14,6 @@ const auth = useAuthStore()
 const searchQuery = ref('')
 const editingId = ref<string | null>(null)
 const editingTitle = ref('')
-const showDirMenu = ref(false)
-const showDirPicker = ref(false)
 
 onMounted(() => {
   // 双保险：鉴权启用但未登录时不发会话/工作区请求（登录页不会挂载本组件，防止时序异常）
@@ -45,20 +42,8 @@ const directoryGroups = computed(() => {
 
 // 新建对话（可选绑定工作目录，目录成为会话 cwd）
 function handleNewChat(dir?: string) {
-  showDirMenu.value = false
-  agent.newChat()
-  if (dir !== undefined) agent.setSessionDirectory(dir)
+  agent.newChat(dir)
   router.push({ name: 'MultiAgent' })
-}
-
-function pickCustomDir() {
-  showDirMenu.value = false
-  showDirPicker.value = true
-}
-
-function handleDirPicked(path: string) {
-  showDirPicker.value = false
-  handleNewChat(path)
 }
 
 function selectConversation(id: string) { agent.loadConversation(id); router.push({ name: 'MultiAgentConversation', params: { id } }) }
@@ -72,18 +57,10 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
   <div class="chat-history">
     <div class="history-header">
       <div class="new-chat-wrap">
-        <button class="new-chat-btn" @click="showDirMenu = !showDirMenu" title="新建对话（可选择工作目录）">
+        <button class="new-chat-btn" @click="handleNewChat()" title="新建对话">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
           新建多智能体对话
         </button>
-        <div v-if="showDirMenu" class="dir-menu" @click.stop>
-          <div class="dir-menu-title">在哪个目录下创建对话？</div>
-          <button class="dir-menu-item" @click="handleNewChat('')">📦 默认（backend/）</button>
-          <template v-for="w in perm.workspaces" :key="w">
-            <button class="dir-menu-item" :title="w" @click="handleNewChat(w)">📁 {{ w }}</button>
-          </template>
-          <button class="dir-menu-item pick" @click="pickCustomDir">⋯ 选择其他目录…</button>
-        </div>
       </div>
     </div>
     <div class="search-box">
@@ -122,7 +99,6 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
         </div>
       </div>
     </div>
-    <DirPickerModal :show="showDirPicker" @close="showDirPicker = false" @select="handleDirPicked" />
   </div>
 </template>
 

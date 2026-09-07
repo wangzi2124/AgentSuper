@@ -204,7 +204,7 @@ class SupervisorAgent(SupervisorAgentDecompose):
 
         segments = []
         for i, r in enumerate(results):
-            agent_label = {"rag": "知识库", "web_search": "网络搜索", "code": "代码分析"}.get(r["agent"], r["agent"])
+            agent_label = {"build": "主 Agent", "explore": "代码探索", "plan": "规划"}.get(r["agent"], r["agent"])
             # [token 优化 v4] 子 Agent 结果超长时截断，避免多结果汇总输入膨胀
             # （完整答案已由单 Agent 路由直接返回给用户；汇总仅需其要点）
             answer = r.get("answer", "")

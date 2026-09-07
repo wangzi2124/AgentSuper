@@ -95,7 +95,8 @@ class RAGAgentTools(RAGAgentBase):
     async def _tool_task(self, args: dict, depth: int = 0, event_queue=None, directory: str = "", conversation_id: str = "") -> str:
         """[opencode task tool] 把聚焦子任务委派给子 Agent 并取回最终结果。
 
-        - subagent_type 白名单排除 rag（= 自身）与 supervisor（编排者非执行者），防自递归
+        - subagent_type 白名单为 explore/plan（build 自身已含全部能力，supervisor 是
+          编排者，均不需也不应委派），防自递归
         - 嵌套深度受 settings.subagent_depth 限制（默认 1 = 主 Agent 只能再委派一层，对齐 opencode）
         - 子 Agent 以全新上下文执行（对齐 opencode task 工具 "fresh context" 语义），
           事件队列仅当来自 multi-agent 流时才透传（单 Agent 流不推子 Agent 面板事件）；
@@ -119,8 +120,8 @@ class RAGAgentTools(RAGAgentBase):
                 f"Increase SUBAGENT_DEPTH (default 1) to allow nested sub-agents."
             )
 
-        # 工具密集型子 Agent 使用更长等待，避免长任务被误判超时（对齐 supervisor._timeout_for）
-        timeout = settings.sub_agent_timeout_extended if subagent_type == "code" else settings.sub_agent_timeout
+        # 子 Agent 超时（explore/plan 均不属重工具型，用标准等待）
+        timeout = settings.sub_agent_timeout
         sub_thread_id = f"task:{uuid.uuid4().hex[:8]}"
         reply = await bus.send_and_wait(
             AgentMessage(

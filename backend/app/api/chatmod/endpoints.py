@@ -137,10 +137,15 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
 
     try:
         # 通过 Supervisor 发送请求
+        # 如果指定了 agent_mode（plan/explore），直接发送到对应 agent
+        target_agent = "supervisor"
+        if body.agent_mode in ("plan", "explore"):
+            target_agent = body.agent_mode
+
         reply = await agent_bus.send_and_wait(
             AgentMessage(
                 source="user",
-                target="supervisor",
+                target=target_agent,
                 type="request",
                 action="chat",
                 payload={
@@ -276,10 +281,15 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     })
 
                     # 通过 Supervisor 发送请求（_event_queue 经 payload 透传到子 Agent）
+                    # 如果指定了 agent_mode（plan/explore），直接发送到对应 agent
+                    target_agent = "supervisor"
+                    if body.agent_mode in ("plan", "explore"):
+                        target_agent = body.agent_mode
+
                     reply = await agent_bus.send_and_wait(
                         AgentMessage(
                             source="user",
-                            target="supervisor",
+                            target=target_agent,
                             type="request",
                             action="chat",
                             payload={

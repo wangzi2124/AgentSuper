@@ -26,30 +26,8 @@
 .stream-badge.running { background: rgba(34,197,94,0.12); color: #22c55e; animation: pulse-badge 1.5s ease-in-out infinite; }
 @keyframes pulse-badge { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-/* 新建对话目录选择 */
+/* 新建对话 */
 .new-chat-wrap { position: relative; flex: 1; }
-.dir-menu {
-position: absolute;
-top: calc(100% + 6px);
-left: 0;
-right: 0;
-z-index: 200;
-background: var(--surface, #ffffff);
-border: 1px solid var(--border);
-border-radius: 8px;
-box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-padding: 6px;
-max-height: 60vh;
-overflow-y: auto;
-}
-.dir-menu-title { font-size: 11px; color: var(--text-secondary); padding: 6px 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
-.dir-menu-item {
-display: block; width: 100%; text-align: left; padding: 8px 10px;
-border: none; border-radius: 6px; background: transparent; color: var(--text);
-font-size: 13px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.dir-menu-item:hover { background: rgba(255, 255, 255, 0.08); }
-.dir-menu-item.pick { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px; color: var(--primary); }
 
 /* 目录分组 */
 .group-label {

@@ -68,6 +68,7 @@ class ChatRequest(BaseModel):
     # [B4] 客户端消息幂等 id：前端自动/手动重试复用同一 id，
     # 服务端按 (user_id, session_id, client_msg_id) 去重，避免断网重试产生重复轮次。
     client_msg_id: Optional[str] = None
+    agent_mode: Optional[str] = None  # Agent 模式：None=supervisor路由, "plan"=规划, "explore"=探索
 
 
 class ChatResponse(BaseModel):

@@ -80,7 +80,7 @@ class SupervisorAgentCore(SupervisorAgentBase):
                 # 安全护栏：只路由到白名单 Agent，防止 LLM 返回 "supervisor" 造成自我递归超时
                 subtasks = [st for st in subtasks if st.get("agent") in self.ROUTABLE_AGENTS]
                 if not subtasks:
-                    subtasks = [{"agent": "rag", "question": question}]
+                    subtasks = [{"agent": "build", "question": question}]
 
                 if len(subtasks) > 1:
                     logger.info(
@@ -92,7 +92,7 @@ class SupervisorAgentCore(SupervisorAgentBase):
                     yield result
                 else:
                     # 只有一个子任务 → 走简单路由
-                    target_agent = subtasks[0]["agent"] if subtasks else "rag"
+                    target_agent = subtasks[0]["agent"] if subtasks else "build"
                     logger.info(
                         "Supervisor routing to '%s' (thread=%s)",
                         target_agent, msg.thread_id,

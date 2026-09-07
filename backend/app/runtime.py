@@ -23,8 +23,8 @@ from app.storage.file_store import FileStore
 from app.agent.bus import AgentBus
 from app.agent.memory import MemoryManager
 from app.agent.rag_wrapper import RAGAgentWrapper
-from app.agent.web_search_agent import WebSearchAgent
-from app.agent.code_agent import CodeAgent
+from app.agent.explore_agent import ExploreAgent
+from app.agent.plan_agent import PlanAgent
 from app.agent.supervisor import SupervisorAgent
 
 logger = logging.getLogger(__name__)
@@ -170,14 +170,17 @@ def _do_init(app):
     # [opencode task tool] 主 Agent 注入总线引用，供其自主委派子 Agent
     agent.task_bus = agent_bus
 
-    rag_wrapper = RAGAgentWrapper(agent, agent_id="rag", heartbeat=agent_bus.touch)
-    agent_bus.register(rag_wrapper)
+    # ── 多 Agent 系统（对齐 opencode：rag/code/web_search 合并为单一 build agent）──
+    # build = 默认主 Agent（共享 RAGAgent：知识库检索 + 代码/文件 + 内建 tool_web_search），
+    # explore/plan 为只读探索/规划两个聚焦子 Agent，supervisor 只在这些之间编排。
+    build_agent = RAGAgentWrapper(agent, agent_id="build", heartbeat=agent_bus.touch)
+    agent_bus.register(build_agent)
 
-    web_search = WebSearchAgent(memory=shared_memory, agent_id="web_search")
-    agent_bus.register(web_search)
+    explore_agent = ExploreAgent(memory=shared_memory, agent_id="explore")
+    agent_bus.register(explore_agent)
 
-    code_agent = CodeAgent(inner=agent, memory=shared_memory, agent_id="code")
-    agent_bus.register(code_agent)
+    plan_agent = PlanAgent(memory=shared_memory, agent_id="plan")
+    agent_bus.register(plan_agent)
 
     supervisor = SupervisorAgent(agent_bus, memory=shared_memory)
     agent_bus.register(supervisor)

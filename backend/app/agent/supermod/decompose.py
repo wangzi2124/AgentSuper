@@ -47,73 +47,44 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
         """[B6] 判断是否为简短的寒暄/闲聊（用于 ≤24 字符快速路径）。"""
         return any(k in q for k in self._GREETING_KEYWORDS)
     async def _decompose(self, question: str) -> list[dict]:
-        """将复杂问题拆解成多个子任务。
+        """将请求路由到合适的 Agent。
 
-        返回格式: [{"agent": "rag", "question": "..."}, ...]
+        [opencode build 合并] rag/code/web_search 已合并为单一 build agent
+        （知识库 + 代码/文件 + 内建 web 搜索），故不再按 kb/code/web 关键词拆分；
+        除明确的"只读探索"意图走 explore 外，其余统一由 build 处理。
+        返回格式: [{"agent": "build" | "explore" | "plan", "question": "..."}]
         """
         q = question.strip().lower()
 
         # ── 快速路径: 关键词 + 可用 Agent 判断 ──
         available_agents = [a for a in self._bus.list_agents() if a in self.ROUTABLE_AGENTS]
 
-        kb_keywords = [
-            "文档", "小说", "角色", "对话", "章节", "故事", "内容", "知识库",
-            "人物", "情节", "书中", "记载", "来源", "character", "dialogue",
-            "novel", "chapter", "story",
-            # [token 优化] 扩充
-            "摘要", "总结", "作者", "主角", "配角", "人物关系", "出场", "设定",
-            "世界观", "结局", "大意", "简介", "summary", "author", "plot",
+        # 明确的"只读探索代码库"意图 → explore（其余代码/文档/网络问题都由 build 覆盖）
+        explore_keywords = [
+            "代码库", "目录结构", "项目结构", "源码结构", "文件结构", "工作区结构",
+            "哪个文件", "文件在哪", "这个项目", "源代码在哪", "函数定义在哪", "类定义在哪",
+            "仓库结构", "整个项目", "有哪些文件", "项目里",
+            "structure of", "where is the file", "files in",
         ]
-        code_keywords = [
-            "代码", "编程", "函数", "bug", "debug", "程序", "算法",
-            "python", "javascript", "typescript", "前端", "后端",
-            "code", "function", "programming",
-            # [token 优化] 扩充
-            "脚本", "接口", "api", "报错", "异常", "重构", "依赖", "配置",
-            "测试", "部署", "数据库", "sql", "react", "vue", "node", "docker", "git",
-        ]
-        web_keywords = [
-            "新闻", "最新", "天气", "搜索", "查找", "实时",
-            "news", "weather", "search", "latest", "today",
-            # [token 优化] 扩充
-            "热搜", "公告", "发布", "汇率", "股价", "比赛", "比分", "排行榜",
-            "政策", "法规", "通知", "announcement", "release",
-        ]
+        needs_explore = any(kw in q for kw in explore_keywords) and "explore" in available_agents
 
-        needs_kb = any(kw in q for kw in kb_keywords) and "rag" in available_agents
-        needs_code = any(kw in q for kw in code_keywords) and "code" in available_agents
-        needs_web = any(kw in q for kw in web_keywords) and "web_search" in available_agents
+        if needs_explore:
+            return [{"agent": "explore", "question": question}]
 
-        # 如果关键词匹配到多个，尝试 LLM 分解
-        if (needs_kb and needs_code) or (needs_kb and needs_web) or (needs_code and needs_web):
-            return await self._llm_decompose(question, available_agents)
+        # ── [B6] 简短寒暄直接走 build 免 LLM ──
+        if len(q) <= 24 and self._is_greeting(q):
+            return [{"agent": "build", "question": question}]
 
-        # 单一明确意图
-        if needs_code:
-            return [{"agent": "code", "question": question}]
-        if needs_web:
-            return [{"agent": "web_search", "question": question}]
-        if needs_kb:
-            return [{"agent": "rag", "question": question}]
-
-        # ── [B6] 简短问题(≤24字符)：寒暄直接走 rag 免 LLM；
-        #        非寒暄且零关键词命中则强制 LLM 分解，避免简单但明确的
-        #        请求(如"帮我写个爬虫")被盲目路由到 rag。──
-        if len(q) <= 24:
-            if self._is_greeting(q):
-                return [{"agent": "rag", "question": question}]
-            return await self._llm_decompose(question, available_agents)
-
-        # ── 默认: 尝试 LLM 分解 ──
-        return await self._llm_decompose(question, available_agents)
+        # ── 其余情况：build 全能力覆盖，直接路由，不再逐请求 LLM 拆分 ──
+        return [{"agent": "build", "question": question}]
     async def _llm_decompose(self, question: str, available: list[str]) -> list[dict]:
         """使用 LLM 判断如何分解任务。
 
         - 输出先做 JSON 解析 + schema 校验（agent 必须在白名单且可用、question 非空）
         - 解析/校验失败时带错误信息与格式样例做一次 few-shot 修复重试
-        - 仍失败才回退 rag（记录原因，便于排查路由漂移）
+        - 仍失败才回退 build（记录原因，便于排查路由漂移）
         """
-        routable = [a for a in available if a in self.ROUTABLE_AGENTS] or ["rag"]
+        routable = [a for a in available if a in self.ROUTABLE_AGENTS] or ["build"]
 
         async def _request(messages: list[dict]) -> tuple[str, dict]:
             response = await litellm.acompletion(
@@ -137,7 +108,7 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
 
         start = tmod.time()
         attempts = []
-        for attempt in range(2):  # [token 优化] 首次 + 1 次 few-shot 修复重试，仍失败才回退 rag
+        for attempt in range(2):  # [token 优化] 首次 + 1 次 few-shot 修复重试，仍失败才回退 build
             try:
                 if attempt == 0:
                     messages = [
@@ -160,8 +131,8 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
                                 f"{attempts[-1]}\n\n"
                                 "请严格按照以下 JSON 数组格式重新输出（不要 markdown 代码块标记），"
                                 "且 agent 字段只能取 " + ", ".join(routable) + "：\n"
-                                '[\n  {"agent": "rag", "question": "第一个子任务的问题描述"},\n'
-                                '  {"agent": "web_search", "question": "第二个子任务的问题描述"}\n]\n'
+                                '[\n  {"agent": "build", "question": "第一个子任务的问题描述"},\n'
+                                '  {"agent": "explore", "question": "第二个子任务的问题描述"}\n]\n'
                             ),
                         },
                     ]
@@ -185,10 +156,10 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
                 attempts.append(f"{type(e).__name__}: {e}")
 
         logger.warning(
-            "LLM decomposition failed after %d attempt(s): %s; falling back to rag",
+            "LLM decomposition failed after %d attempt(s): %s; falling back to build",
             len(attempts), attempts[-1] if attempts else "unknown",
         )
-        return [{"agent": "rag", "question": question}]
+        return [{"agent": "build", "question": question}]
     @staticmethod
     def _validate_subtasks(data, routable: list[str]) -> list[dict]:
         """校验并规范化 LLM 分解输出，返回合法子任务列表（白名单过滤 + 最多 3 个）。"""
