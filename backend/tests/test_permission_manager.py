@@ -224,9 +224,10 @@ def test_check_workspace_protection(tmp_path):
     mgr = _mgr(tmp_path)
     ws = tmp_path / "workspace"
     assert mgr.check(str(ws / "app.py"), "read") == "allow"
-    assert mgr.check(str(ws / "app" / "x.py"), "execute") == "deny"
-    assert mgr.check(str(ws / ".env"), "read") == "deny"
-    assert mgr.check(str(ws / ".git" / "HEAD"), "read") == "deny"
+    # 受保护源码/密钥/.git：读/写/执行均走 ask（弹窗审批）而非直接放行
+    assert mgr.check(str(ws / "app" / "x.py"), "execute") == "ask"
+    assert mgr.check(str(ws / ".env"), "read") == "ask"
+    assert mgr.check(str(ws / ".git" / "HEAD"), "read") == "ask"
 
 
 def test_check_classify_external_default_allow(tmp_path):

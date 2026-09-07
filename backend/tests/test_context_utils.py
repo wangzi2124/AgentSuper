@@ -313,7 +313,8 @@ class TestBoundToolOutput:
 
     def test_tight_limits_grep(self, monkeypatch):
         monkeypatch.setattr(tool_output, "_write_truncated", lambda text: "")
-        out = tool_output.bound_tool_output("a" * 20_000, tool_name="tool_grep")
+        # max_tokens=0 关闭 [C5] token 减半封顶，让行/字节紧限（tool_grep: 100 行 / 16KB）生效
+        out = tool_output.bound_tool_output("a" * 20_000, tool_name="tool_grep", max_tokens=0)
         assert "16384/20000 bytes" in out
 
     def test_saved_hint_and_continuation(self, monkeypatch):

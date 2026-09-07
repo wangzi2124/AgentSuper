@@ -294,7 +294,8 @@ class _CoordAgent:
         return SimpleNamespace(choices=[SimpleNamespace(
             message=SimpleNamespace(content=self.plan_text))])
 
-    async def invoke(self, question, use_vector_db=False, directory="", conversation_id=""):
+    async def invoke(self, question, use_vector_db=False, directory="", conversation_id="",
+                     event_queue=None, on_activity=None, model=None, task_depth=0):
         self.invoke_calls.append((question, directory, conversation_id))
         return {"answer": self.answers[len(self.invoke_calls) - 1],
                 "sources": [], "steps": [], "tokens": {"input": 10, "output": 5}}
@@ -367,7 +368,7 @@ async def test_code_agent_wires_coordinator_when_enabled(monkeypatch):
     inner = build_agent()
     coordinator_calls = []
 
-    async def fake_run(self, question, directory="", conversation_id=""):
+    async def fake_run(self, question, directory="", conversation_id="", **kwargs):
         coordinator_calls.append((question, directory, conversation_id))
         return {"answer": "RELAY", "sources": [], "steps": [], "tokens": {}}
     monkeypatch.setattr("app.agent.long_task.LongTaskCoordinator.run", fake_run)
@@ -438,8 +439,8 @@ async def test_generate_freezes_tool_defs_for_cache(monkeypatch, tmp_path):
     orig = agent._build_tool_defs
     seen = []
 
-    def frozen_build(question="", used=None):
-        d = orig(question, used)
+    def frozen_build(question="", used=None, conversation_id=""):
+        d = orig(question, used, conversation_id)
         seen.append(d)
         return d
     monkeypatch.setattr(agent, "_build_tool_defs", frozen_build)
@@ -480,6 +481,8 @@ async def test_generate_long_task_small_step_wiring(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "max_context_tokens", 10_000)
     monkeypatch.setattr(settings, "context_reserve_tokens", 1_000)
     monkeypatch.setattr(settings, "context_safety_ratio", 0.5)
+    # .env 里 MAX_TOOL_ROUNDS=4 会提前收尾 → 放宽到 8，让第 4、6 轮都能触发摘要
+    monkeypatch.setattr(settings, "max_tool_rounds", 8)
     for n in ("record_model_call", "trace", "trace_messages"):
         monkeypatch.setattr(gen_mod, n, lambda *a, **k: None)
 

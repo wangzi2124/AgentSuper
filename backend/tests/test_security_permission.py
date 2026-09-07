@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """S1 敏感文件访问控制 / S2 管理端点鉴权（权限管理器）安全用例。
 
-覆盖 PermissionManager 的判定语义：
-  - .env / *.db / *.sqlite* / permissions.json → 读/写均拒绝（_is_critical_read）
-  - 任意层级含 .git 的路径 → 读/写均拒绝（_is_git_path）
-  - app / plugins / skills / config / main.py 等源码 → 写入/执行拒绝（_is_critical_write）
+覆盖 PermissionManager 的判定语义（对齐当前审批桥设计）：
+  - .env / *.db / *.sqlite* / permissions.json → 读返回 ask（弹窗审批），写/执行 deny
+  - 任意层级含 .git 的路径 → 读返回 ask（弹窗审批），写/执行 deny（_is_git_path）
+  - app / plugins / skills / config / main.py 等源码 → 写/执行返回 ask（弹窗审批，用户可放行）
   - 工作区内普通文件 → 读/写放行；工作区外默认 external → ask
+说明：ask 表示需要前端 PermissionDialog 审批（allowed 后临时放行）；deny 表示无条件拒绝。
 运行：pytest tests/test_security_permission.py
 """
 import os
@@ -44,11 +45,13 @@ def _mgr(tmp_path) -> PermissionManager:
     )
 
 
-def test_critical_files_deny_read(tmp_path):
+def test_critical_files_read_requires_approval(tmp_path):
     mgr = _mgr(tmp_path)
     ws = tmp_path / "workspace"
+    # 密钥/数据库文件：读需审批（ask），写/执行无条件拒绝（deny）
     for name in (".env", ".env.local", "secrets.env", "data.db", "cache.sqlite", "vecdb.sqlite3", "permissions.json"):
-        assert mgr.check(str(ws / name), "read") == "deny", name
+        assert mgr.check(str(ws / name), "read") == "ask", name
+        assert mgr.check(str(ws / name), "write") == "deny", name
 
 
 def test_critical_files_deny_write(tmp_path):
@@ -58,22 +61,23 @@ def test_critical_files_deny_write(tmp_path):
     assert mgr.check(str(ws / "data" / "session.db"), "write") == "deny"
 
 
-def test_git_path_always_deny(tmp_path):
+def test_git_path_read_ask_write_deny(tmp_path):
     mgr = _mgr(tmp_path)
     ws = tmp_path / "workspace"
-    # 任意层级含 .git（目录或文件）即拒绝，与读写操作无关
-    assert mgr.check(str(ws / "repo" / ".git" / "config"), "read") == "deny"
+    # 任意层级含 .git（目录或文件）：读需审批，写/执行拒绝，与操作无关路径形状
+    assert mgr.check(str(ws / "repo" / ".git" / "config"), "read") == "ask"
     assert mgr.check(str(ws / "x" / ".git" / "HEAD"), "write") == "deny"
-    # worktree 内的 .git 同样拒绝（worktree 判定在前，.git 硬保护在后）
+    # worktree 内的 .git 同样受保护（worktree 判定在前，.git 硬保护在后）
     repo = tmp_path / "repo"
-    assert mgr.check(str(repo / ".git" / "config"), "read") == "deny"
+    assert mgr.check(str(repo / ".git" / "config"), "read") == "ask"
 
 
-def test_source_paths_deny_write(tmp_path):
+def test_source_paths_write_requires_approval(tmp_path):
     mgr = _mgr(tmp_path)
     ws = tmp_path / "workspace"
+    # 源码路径写/执行：默认 ask（弹窗审批；allow_source_writes=True 时直接放行）
     for p in ("app/api/chat.py", "plugins/x.py", "skills/s.md", "config.py", "main.py"):
-        assert mgr.check(str(ws / p), "write") == "deny", p
+        assert mgr.check(str(ws / p), "write") == "ask", p
     # 源码路径的读不拦截（读源码本身无 RCE 风险）
     assert mgr.check(str(ws / "app" / "api" / "chat.py"), "read") == "allow"
 
@@ -114,7 +118,7 @@ def test_worktree_inside_temp_not_hijacked(tmp_path):
         project_worktree=str(repo_path), external_default="ask",
     )
     assert mgr.classify_path(str(repo_path)) == "workspace"
-    assert mgr.check(str(repo_path / ".git" / "config"), "read") == "deny"
+    assert mgr.check(str(repo_path / ".git" / "config"), "read") == "ask"
 
 
 def test_external_path_default_ask(tmp_path):
