@@ -29,6 +29,29 @@ def test_trim_small_unchanged():
     assert st._trim_messages(msgs) is msgs
 
 
+# ── strip_tool_call_markup ─────────────────────────────────────────────────
+
+def test_strip_tool_call_markup_clean_passthrough():
+    assert st.strip_tool_call_markup("正常回答") == "正常回答"
+    assert st.strip_tool_call_markup("") == ""
+
+
+def test_strip_tool_call_markup_fullwidth_bars():
+    dirty = "<｜｜tool_calls>\n<｜｜invoke name=\"tool_read_file\">\n" \
+            "<｜｜parameter name=\"path\" value=\"x\"</｜｜parameter>\n<｜｜/invoke｜>\n" \
+            "<｜｜tool_results>\n<｜｜designate obj=\"x\"|>ok</｜｜/designate｜>\n补一句总结"
+    cleaned = st.strip_tool_call_markup(dirty)
+    assert "tool_calls" not in cleaned and "invoke" not in cleaned
+    assert "补一句总结" in cleaned
+
+
+def test_strip_tool_call_markup_ascii_bars_and_pure_block():
+    a = "<|tool_calls|>\n<|call|>1</|call|>\n<|tool_results|>\n后文"
+    assert st.strip_tool_call_markup(a) == "\n后文"
+    pure = "<|tool_calls|>\n<|call|>1</|call|>"
+    assert st.strip_tool_call_markup(pure) == ""
+
+
 def test_trim_large_keeps_head_and_recent(monkeypatch):
     monkeypatch.setattr(st, "estimate_tokens", lambda s: (len(s) or 1) * 5)
     msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "user"}]
@@ -159,12 +182,14 @@ async def test_run_tool_generic_error(monkeypatch):
 
 # ── tool_loop_chat ─────────────────────────────────────────────────────────
 
-def _resp(content=None, tool_calls=None, usage=None):
+def _resp(content=None, tool_calls=None, usage=None, reasoning=None):
     tcs = [
         SimpleNamespace(id=f"c{i}", function=SimpleNamespace(name=n, arguments=a))
         for i, (n, a) in enumerate(tool_calls or [])
     ]
     msg = SimpleNamespace(content=content, tool_calls=tcs or None)
+    if reasoning is not None:
+        msg.reasoning_content = reasoning
     return SimpleNamespace(
         choices=[SimpleNamespace(message=msg)],
         usage=usage or SimpleNamespace(prompt_tokens=1, completion_tokens=1),
@@ -278,6 +303,28 @@ async def test_loop_chat_max_rounds_forced_summary(monkeypatch, fake_acompletion
 
 
 @pytest.mark.asyncio
+async def test_loop_chat_max_rounds_strips_tool_call_markup(monkeypatch, fake_acompletion):
+    """回归：MAX_STEPS 强制收尾返回的 content 是 Hermes 工具调用块时须被剥净。"""
+    from app.config import settings
+    monkeypatch.setattr(settings, "max_tool_rounds", 2)
+    script = [
+        _resp(tool_calls=[("tool_probe", '{"a":"1"}')]),
+        _resp(tool_calls=[("tool_probe", '{"a":"1"}')]),
+        _resp(content="<|tool_calls|>\n<|call|>1</|call|>\n<|tool_results|>\n收尾摘要"),
+    ]
+    calls = fake_acompletion(script)
+
+    async def fake_run(name, args, event_queue=None):
+        return "R"
+    monkeypatch.setattr(st, "run_tool", fake_run)
+    out = await st.tool_loop_chat("sys", "user")
+    assert out.strip() == "收尾摘要"
+    assert "tool_calls" not in out
+    # 实际返回的仍是强制收尾的 MAX_STEPS prompt（内容单独存在）
+    assert "MAXIMUM STEPS REACHED" in calls[-1]["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_loop_chat_tool_error_isolated(monkeypatch, fake_acompletion):
     """回归：run_tool 抛异常被 gather 捕获为 Exception 时隔离，不拖垮整轮
     （修复前在 (tc_id, result) 解包处抛 TypeError）。"""
@@ -306,3 +353,68 @@ async def test_loop_chat_directory_workspace_set_reset(fake_acompletion):
 async def test_loop_chat_empty_answer(fake_acompletion):
     fake_acompletion([_resp(content="   ")])
     assert await st.tool_loop_chat("sys", "user") == "(无回答)"
+
+
+@pytest.mark.asyncio
+async def test_loop_chat_reasoning_content_fallback(fake_acompletion):
+    """deepseek-v4-flash 把回答写进 reasoning_content、content 为空时的回退（真实数据回归）。"""
+    fake_acompletion([_resp(content="   ", reasoning="这是 reasoning 里的正史")])
+    assert await st.tool_loop_chat("sys", "user") == "这是 reasoning 里的正史"
+
+
+@pytest.mark.asyncio
+async def test_loop_chat_reasoning_content_after_markup(fake_acompletion):
+    """content 为 Hermes 工具调用块＋reasoning 有正文 → 剥块后回退到 reasoning。"""
+    dirty = "<|tool_calls|>\n<|call|>1</|call|>\n<|tool_results|>\n"
+    fake_acompletion([_resp(content=dirty, reasoning="剥块后的正文")])
+    assert await st.tool_loop_chat("sys", "user") == "剥块后的正文"
+
+
+# ── tool_loop_chat: 规则集 allowlist（对齐 opencode permission ruleset）─────────
+
+@pytest.mark.asyncio
+async def test_loop_chat_allowlist_filters_schemas(fake_acompletion):
+    """allowlist 只暴露规则集内工具：写/执行工具不进 LLM 的 tools 列表。"""
+    calls = fake_acompletion([_resp(content="done")])
+    await st.tool_loop_chat("sys", "user", allowlist=st._READONLY_TOOL_NAMES)
+    exposed = [t["function"]["name"] for t in calls[0]["tools"]]
+    assert exposed == list(st._READONLY_TOOL_NAMES)
+    assert "tool_write_file" not in exposed
+    assert "tool_execute" not in exposed
+
+
+@pytest.mark.asyncio
+async def test_loop_chat_empty_allowlist_no_tools(fake_acompletion):
+    """空 allowlist → 无工具可用（纯 LLM，对应 plan 规格）。"""
+    calls = fake_acompletion([_resp(content="done")])
+    await st.tool_loop_chat("sys", "user", allowlist=())
+    assert "tools" not in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_loop_chat_allowlist_hard_deny_at_runtime(monkeypatch, fake_acompletion):
+    """即使 LLM 绕开 schema 直接调非 allowlist 工具，运行时也硬拒绝（不执行）。"""
+    calls = fake_acompletion([
+        _resp(tool_calls=[("tool_write_file", '{"path":"x","content":"y"}')]),
+        _resp(content="final"),
+    ])
+    executed = []
+
+    async def fake_run(name, args, event_queue=None):
+        executed.append((name, args))
+        return "EXECUTED"
+    monkeypatch.setattr(st, "run_tool", fake_run)
+    out = await st.tool_loop_chat("sys", "user", allowlist=st._READONLY_TOOL_NAMES)
+    assert out == "final"
+    assert executed == []  # 硬拒绝，未执行
+    tool_msg = [m for m in calls[1]["messages"] if m.get("role") == "tool"]
+    assert tool_msg and "not allowed by this agent's tool ruleset" in tool_msg[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_loop_chat_allowlist_default_full_set(fake_acompletion):
+    """allowlist=None → 全量工具（build/web_search 等未被规则的子 Agent）。"""
+    calls = fake_acompletion([_resp(content="done")])
+    await st.tool_loop_chat("sys", "user")
+    exposed = [t["function"]["name"] for t in calls[0]["tools"]]
+    assert set(exposed) == set(st._ALL_TOOL_NAMES)

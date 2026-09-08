@@ -13,6 +13,7 @@
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__))))
@@ -88,6 +89,24 @@ async def test_explore_chat_action(monkeypatch, tmp_path):
     assert replies[0].payload["answer"] == "探索结果：找到 3 个文件"
     # 记忆已写入
     assert any(k == "explore_last_q" for k, _, _ in mm.sets)
+
+
+@pytest.mark.asyncio
+async def test_explore_passes_allowlist_from_spec(monkeypatch):
+    """工具 allowlist 由规格注册表驱动：explore 只把只读工具集传给 tool_loop_chat。"""
+    from app.agent.agent_specs import get_agent_spec
+
+    seen = {}
+
+    async def fake_tool_loop(**kwargs):
+        seen.update(kwargs)
+        return "答案"
+    monkeypatch.setattr("app.agent.explore_agent.tool_loop_chat", fake_tool_loop)
+    agent = ExploreAgent()
+    await _collect(agent, _msg("explore", payload={"question": "q"}))
+    assert "allowlist" in seen
+    assert tuple(seen["allowlist"]) == get_agent_spec("explore").tools
+    assert "readonly" not in seen  # 散落的布尔已移除
 
 
 @pytest.mark.asyncio
@@ -214,6 +233,46 @@ async def test_plan_chat_emits_events(monkeypatch):
     assert start["agent_id"] == "plan"
     assert start["agent_name"] == "规划模式"
     assert start["agent_avatar"] == "📋"
+
+
+@pytest.mark.asyncio
+async def test_plan_generate_reasoning_content_fallback(monkeypatch):
+    """deepseek-v4-flash 把计划写进 reasoning_content、content 为空时的回退（真实数据回归）。"""
+    import app.agent.plan_agent as pa
+
+    msg = SimpleNamespace(content="", reasoning_content="这是 reasoning 里的计划正文")
+    resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=msg)],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+    )
+
+    async def fake_acompletion(**kw):
+        return resp
+
+    monkeypatch.setattr(pa.litellm, "acompletion", fake_acompletion)
+    agent = PlanAgent()
+    out = await agent._generate_plan("设计一个实施方案", [])
+    assert out == "这是 reasoning 里的计划正文"
+
+
+@pytest.mark.asyncio
+async def test_plan_generate_content_preferred(monkeypatch):
+    """content 非空时优先取 content，不被 reasoning_content 覆盖。"""
+    import app.agent.plan_agent as pa
+
+    msg = SimpleNamespace(content="## 实施计划\n正式内容", reasoning_content="思考过程")
+    resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=msg)],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+    )
+
+    async def fake_acompletion(**kw):
+        return resp
+
+    monkeypatch.setattr(pa.litellm, "acompletion", fake_acompletion)
+    agent = PlanAgent()
+    out = await agent._generate_plan("q", [])
+    assert out == "## 实施计划\n正式内容"
 
 
 @pytest.mark.asyncio

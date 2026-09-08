@@ -15,7 +15,7 @@ import asyncio
 import inspect
 import logging
 import time as tmod
-from typing import Optional
+from typing import Optional, Tuple
 
 import litellm
 
@@ -30,6 +30,33 @@ from app.tools import file_tools as fs
 from app.utils.json_repair import parse_tool_args
 
 logger = logging.getLogger(__name__)
+
+
+def strip_tool_call_markup(text: str) -> str:
+    """剥离子 Agent 最终回答里模型误写（Hermes 风格）的工具调用块。
+
+    deepseek/Hermes 系模型在 tool_choice=auto 循环中偶发把 <|tool_calls|> 块
+    原样写进 message.content，导致最终答案变成一坨工具调用标记而非正文。
+    仅当内容以工具块起始时才剥除（含到 <tool_results> 标记为止，后面的正常
+    总结保留）；整条都是工具块则返回空串（由调用方回退占位文案）。
+    """
+    if not text:
+        return text
+    out = text
+    while True:
+        rest = out.lstrip("\n")
+        if not (
+            rest.startswith("<|tool_calls|>") or rest.startswith("<｜｜tool_calls>")
+        ):
+            return out
+        closer = next(
+            (c for c in ("<|tool_results|>", "<｜｜tool_results>") if c in rest),
+            None,
+        )
+        if closer is None:
+            return ""
+        idx = rest.index(closer) + len(closer)
+        out = rest[idx:]
 
 # 子 Agent 工具循环最大轮数（对齐主 Agent MAX_TOOL_ROUNDS 语义，config.max_tool_rounds）
 def _sub_agent_max_rounds() -> int:
@@ -97,11 +124,19 @@ def _trim_messages(messages: list[dict]) -> list[dict]:
     return trimmed
 
 
-_AVAILABLE_TOOLS = (
+# ── 工具集分类:对齐 opencode explore subagent 的 permission ruleset ──
+# opencode agent.ts 里 explore 的权限是 "*": deny + 只读 allowlist(grep/glob/list/read/...),
+# 在工具注册层裁剪 —— 写工具根本不会暴露给 LLM。这里在 schema 层做等价裁剪;
+# 每个 Agent 的 allowlist 由 agent_specs.py 声明式注册表驱动(sub_tools 只提供
+# "按 allowlist 裁剪工具"的机制,不关心具体哪个 Agent 是只读的)。
+# 不在 allowlist 内的工具名运行时还会做硬拒绝兜底(即使用例绕过 tools 列表)。
+_READONLY_TOOL_NAMES = (
     "tool_ls",
     "tool_read_file",
     "tool_glob",
     "tool_grep",
+)
+_WRITE_TOOL_NAMES = (
     "tool_write_file",
     "tool_append_file",
     "tool_edit_file",
@@ -110,6 +145,7 @@ _AVAILABLE_TOOLS = (
     "tool_execute",
     "tool_apply_patch",
 )
+_ALL_TOOL_NAMES = _READONLY_TOOL_NAMES + _WRITE_TOOL_NAMES
 
 _TOOL_SCHEMAS = [
     {
@@ -274,6 +310,12 @@ _TOOL_SCHEMAS = [
 ]
 
 
+def _tool_schemas(names: tuple[str, ...]) -> list[dict]:
+    """按工具名过滤 schema，保留定义顺序；未知名自动忽略。"""
+    by_name = {s["function"]["name"]: s for s in _TOOL_SCHEMAS}
+    return [by_name[n] for n in names if n in by_name]
+
+
 def _coerce_args(fn, args: dict) -> dict:
     """过滤掉 LLM 可能多传、而函数签名不接受的参数，避免 TypeError。"""
     params = set(inspect.signature(fn).parameters)
@@ -330,6 +372,7 @@ async def tool_loop_chat(
     api_base: Optional[str] = None,
     history: Optional[list[dict]] = None,
     directory: str = "",
+    allowlist: Optional[Tuple[str, ...]] = None,
 ) -> str:
     """子 Agent 的 LLM 工具循环：允许读写文件/搜索/执行白名单命令，最后返回文本回答。
 
@@ -339,13 +382,20 @@ async def tool_loop_chat(
       - 达到轮数上限的最后一次调用禁用工具并注入收尾提示，强制结构化总结
       - history 注入为前置对话；directory 作为本请求文件作用域（会话工作目录）
 
-    每轮工具调用前先请求一次模型；模型返回工具调用则执行并回填结果，返回纯文本
-    则结束。达到最大轮数后强制做一次无工具收尾调用。
+    allowlist（对齐 opencode agent.ts permission ruleset，由 agent_specs.py 驱动）：
+      - None → 全量子 Agent 工具（默认）
+      - 元组 → 工具 schema 裁剪为该 allowlist，不在其中的工具不暴露给 LLM
+      - 运行时对非 allowlist 工具名做硬拒绝兜底（返回错误文本，不执行）
     """
     model = model or settings.llm_model
     api_key = api_key or settings.llm_api_key
     api_base = api_base or settings.llm_api_base
     max_rounds = _sub_agent_max_rounds()
+    # allowlist=None → 默认全量工具（不裁剪、不设运行时硬拒绝，保持既有开放行为）；
+    # 显式传入 allowlist 时才按规则裁剪 schema + 运行时硬拒绝（对齐 opencode ruleset）。
+    allowlist_defined = allowlist is not None
+    allowed_names = _ALL_TOOL_NAMES if not allowlist_defined else tuple(allowlist)
+    tool_schema_set = _tool_schemas(allowed_names)
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
@@ -370,8 +420,9 @@ async def tool_loop_chat(
             "temperature": 0.2,
             "cache_prompt": True
         }
-        if with_tools:
-            kwargs["tools"] = _TOOL_SCHEMAS
+        # 空 allowlist（如 plan 纯 LLM 规格）不挂 tools 字段，退化为普通对话
+        if with_tools and tool_schema_set:
+            kwargs["tools"] = tool_schema_set
             kwargs["tool_choice"] = "auto"
         return kwargs
 
@@ -382,6 +433,13 @@ async def tool_loop_chat(
         if args is None:
             args = {}
             logger.warning("Sub-agent malformed tool args for %s", name)
+
+        # [opencode 对齐] 权限规则集:显式为非 allowlist 工具时即使被绕过也硬拒绝
+        if allowlist_defined and name not in allowed_names:
+            return tc.id, (
+                f"Error: tool '{name}' is not allowed by this agent's tool ruleset "
+                "(permission '*': deny, only allowed tools can run)."
+            )
 
         step_id = f"tool_{rnd}_{tc.id[:8]}"
         emit(event_queue, {
@@ -417,8 +475,11 @@ async def tool_loop_chat(
             msg = response.choices[0].message
             tool_calls = getattr(msg, "tool_calls", None) or []
             content = (msg.content or "").strip()
+            # [真实数据回归] deepseek-v4-flash 等 reasoning 模型偶发把正史写进
+            # reasoning_content、content 为空；最终回答做回退，循环内存储仍用 content
+            reasoning = (getattr(msg, "reasoning_content", None) or "").strip()
             if not tool_calls:
-                return content or "(无回答)"
+                return strip_tool_call_markup(content) or reasoning or "(无回答)"
 
             # 记录本轮 assistant 消息（含全部工具调用）
             messages.append({
@@ -468,7 +529,7 @@ async def tool_loop_chat(
         # 达到最大轮数：注入收尾提示并禁用工具强制总结（对齐 MAX_STEPS 语义）
         messages.append({"role": "user", "content": MAX_STEPS_PROMPT})
         response = await litellm.acompletion(**_llm_call(False, max_tokens=2048))
-        return (response.choices[0].message.content or "").strip()
+        return strip_tool_call_markup((response.choices[0].message.content or "").strip())
     finally:
         if ws_token is not None:
             reset_session_workspace(ws_token)

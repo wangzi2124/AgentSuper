@@ -106,6 +106,19 @@ async def test_decompose_explore_intent(agent, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_decompose_plan_intent(agent, monkeypatch):
+    """规划/出方案意图走 plan（真实数据回归：'设计一个实施方案'曾漏配关键词→错投 build）。"""
+    monkeypatch.setattr(agent, "_llm_decompose", lambda q, a: (_ for _ in ()).throw(AssertionError("不应调用 LLM")))
+    for q in (
+        "请为『给 /api/monitor/stats 增加实时推送能力』设计一个实施方案",
+        "给上传功能做一个方案",
+        "先出一个方案，后续再讨论",
+        "请制定项目的实施计划",
+    ):
+        assert await agent._decompose(q) == [{"agent": "plan", "question": q}], q
+
+
+@pytest.mark.asyncio
 async def test_decompose_no_llm_split_anymore(agent, monkeypatch):
     """build 已合并全部能力，默认不再逐请求 LLM 拆子 Agent。"""
     called = []
@@ -390,3 +403,117 @@ async def test_synthesize_llm_and_fallback(agent, monkeypatch):
     monkeypatch.setattr(par.litellm, "acompletion", boom)
     out2 = await agent._synthesize("q", [{"agent": "build", "original_question": "a", "answer": "ans"}])
     assert "以下是多个来源的信息汇总" in out2
+
+
+# ── plan→build 顺序交接（opencode build-switch 语义）──────────────────────────
+
+def test_should_handoff_to_build(agent):
+    assert agent._should_handoff_to_build("先做一个实施方案，然后执行") is True
+    assert agent._should_handoff_to_build("请先规划再实现登录功能") is True
+    assert agent._should_handoff_to_build("make a plan and then execute it") is True
+    assert agent._should_handoff_to_build("请给我一个设计方案") is False
+    assert agent._should_handoff_to_build("你好") is False
+
+
+def _plan_like(target, answer="## 实施计划\n### 步骤1: 创建文件", plan_path="/x/plan.md"):
+    return AgentMessage(source="supervisor", target="user", type="response", action="chat",
+                        payload={"answer": answer, "plan_path": plan_path,
+                                 "routed_to": target, "sources": [], "steps": [],
+                                 "tokens": {"input": 1, "output": 1}},
+                        thread_id="t1")
+
+
+@pytest.mark.asyncio
+async def test_handle_plan_then_build_handoff(agent, monkeypatch):
+    """规划+执行意图 → plan 产出计划后自动交给 build 执行，合并为单条回复。"""
+    calls = []
+
+    async def fake_route(target, payload, tid):
+        calls.append((target, payload["question"]))
+        if target == "plan":
+            yield _plan_like("plan")
+        else:
+            yield AgentMessage(source="supervisor", target="user", type="response", action="chat",
+                               payload={"answer": "已执行步骤1", "routed_to": "build",
+                                        "sources": [], "steps": [], "tokens": {"input": 2, "output": 2}},
+                               thread_id=tid)
+
+    async def fake_decompose(q):
+        return [{"agent": "plan", "question": q}]
+    monkeypatch.setattr(agent, "_decompose", fake_decompose)
+    monkeypatch.setattr(agent, "_route_to", fake_route)
+
+    replies = await _collect(agent, _msg(payload={"question": "先做一个实施方案，然后执行"}))
+    assert len(replies) == 1
+    r = replies[0]
+    assert r.type == "response"
+    assert r.payload["routed_to"] == "plan→build"
+    assert r.payload["plan_path"] == "/x/plan.md"
+    assert "## 实施计划" in r.payload["answer"]
+    assert "## 执行结果" in r.payload["answer"]
+    assert "已执行步骤1" in r.payload["answer"]
+    # 顺序：先 plan 后 build；build 收到的是计划执行指令（含计划文本）
+    assert [t for t, _ in calls] == ["plan", "build"]
+    assert "步骤1" in calls[1][1]
+
+
+@pytest.mark.asyncio
+async def test_handle_plan_no_handoff_without_execution_intent(agent, monkeypatch):
+    """只请求规划（无执行意图）→ 仅返回计划，不触发 build。"""
+    async def fake_route(target, payload, tid):
+        assert target == "plan"
+        yield _plan_like("plan")
+    async def fake_decompose(q):
+        return [{"agent": "plan", "question": q}]
+    monkeypatch.setattr(agent, "_decompose", fake_decompose)
+    monkeypatch.setattr(agent, "_route_to", fake_route)
+
+    replies = await _collect(agent, _msg(payload={"question": "请给我一个设计方案"}))
+    assert len(replies) == 1
+    assert replies[0].type == "response"
+    assert replies[0].payload["routed_to"] == "plan"
+
+
+@pytest.mark.asyncio
+async def test_handle_plan_build_handoff_build_error_keeps_plan(agent, monkeypatch):
+    """build 执行出错时：仍返回计划文本，并透传 build 错误信息。"""
+    async def fake_route(target, payload, tid):
+        if target == "plan":
+            yield _plan_like("plan")
+        else:
+            yield AgentMessage(source="supervisor", target="user", type="error", action="chat",
+                               payload={"error": "执行失败", "error_type": "sub_agent_error",
+                                        "completed_steps": ["s1"]},
+                               thread_id=tid)
+    async def fake_decompose(q):
+        return [{"agent": "plan", "question": q}]
+    monkeypatch.setattr(agent, "_decompose", fake_decompose)
+    monkeypatch.setattr(agent, "_route_to", fake_route)
+
+    replies = await _collect(agent, _msg(payload={"question": "先做计划，然后执行"}))
+    assert len(replies) == 1
+    r = replies[0]
+    assert r.type == "error"
+    assert r.payload["error"] == "执行失败"
+    assert r.payload["plan_path"] == "/x/plan.md"
+    assert "## 实施计划" in r.payload["answer"]
+    assert "执行结果（出错）" in r.payload["answer"]
+
+
+@pytest.mark.asyncio
+async def test_handle_plan_error_propagates(agent, monkeypatch):
+    """plan 自身出错时不触发 build，直接透传 error。"""
+    async def fake_route(target, payload, tid):
+        yield AgentMessage(source="supervisor", target="user", type="error", action="chat",
+                           payload={"error": "plan 挂了", "error_type": "sub_agent_error",
+                                    "completed_steps": []},
+                           thread_id=tid)
+    async def fake_decompose(q):
+        return [{"agent": "plan", "question": q}]
+    monkeypatch.setattr(agent, "_decompose", fake_decompose)
+    monkeypatch.setattr(agent, "_route_to", fake_route)
+
+    replies = await _collect(agent, _msg(payload={"question": "先规划，再执行"}))
+    assert len(replies) == 1
+    assert replies[0].type == "error"
+    assert "plan 挂了" in replies[0].payload["error"]

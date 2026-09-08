@@ -7,8 +7,10 @@
   - "chat":  分析需求并输出结构化计划
 """
 
+import asyncio
 import logging
 import time as tmod
+from pathlib import Path
 from typing import AsyncIterator, Optional
 
 import litellm
@@ -21,6 +23,18 @@ from app.monitor import record_model_call
 from app.prompt_log import log_prompt
 
 logger = logging.getLogger(__name__)
+
+
+def _plan_path(conversation_id: str) -> Path:
+    """计划文件路径：<data>/plans/<conversation_id>/plan.md（对齐 opencode data/plans/*.md）。
+
+    conversation_id 中的非法路径字符会被替换，防止目录穿越。
+    """
+    from app.storage.paths import global_paths
+    safe_id = "".join(c if c.isalnum() or c in "-_." else "_" for c in (conversation_id or "")) or "session"
+    plans_dir = global_paths()["data"] / "plans" / safe_id
+    plans_dir.mkdir(parents=True, exist_ok=True)
+    return plans_dir / "plan.md"
 
 PLAN_SYSTEM_PROMPT = """你是一个专业的项目规划助手。你的任务是分析用户需求，生成结构化实施计划。
 
@@ -109,6 +123,17 @@ class PlanAgent(BaseAgent):
 
                 answer = await self._generate_plan(question, history)
 
+                # [opencode 对齐] 计划落盘为会话级产物：<data>/plans/<conv>/plan.md
+                # 供后续 build 阶段复读执行（对齐 opencode plan-mode 写计划文件 + build-switch）
+                plan_path = _plan_path(conv_id)
+                try:
+                    await asyncio.to_thread(plan_path.write_text, answer or "", encoding="utf-8")
+                    if answer:
+                        answer = answer + f"\n\n> 计划文件已保存: {plan_path}（后续可直接引用该文件执行）"
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Failed to persist plan file: %s", e)
+                    plan_path = None
+
                 emit(event_queue, {
                     "type": "agent_step",
                     "agent_id": self._id,
@@ -139,7 +164,10 @@ class PlanAgent(BaseAgent):
                 yield AgentMessage(
                     source=self._id, target=msg.source,
                     type="response", action="chat",
-                    payload={"answer": answer, "sources": [], "steps": []},
+                    payload={
+                        "answer": answer, "sources": [], "steps": [],
+                        "plan_path": str(plan_path) if plan_path else "",
+                    },
                     thread_id=msg.thread_id,
                 )
 
@@ -198,4 +226,10 @@ class PlanAgent(BaseAgent):
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
         record_model_call(self._model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
 
-        return response.choices[0].message.content.strip()
+        msg = response.choices[0].message
+        # [真实数据回归] deepseek-v4-flash 等 reasoning 模型偶发把正史写进
+        # reasoning_content、content 为空（finish_reason=length）；做回退拼接。
+        text = (msg.content or "").strip() or (
+            getattr(msg, "reasoning_content", None) or ""
+        ).strip()
+        return text

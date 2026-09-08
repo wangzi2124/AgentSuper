@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import type { MultiAgentSSEEvent } from '@/types'
+import type { MultiAgentSSEEvent, FileContent, VoiceMessageData } from '@/types'
 
 const mocks = vi.hoisted(() => ({
   sendStream: vi.fn(),
@@ -40,6 +40,7 @@ vi.mock('@/api/errors', () => ({
 }))
 
 import { useMultiAgentStore } from '@/stores/multiAgent'
+import { usePermissionStore } from '@/stores/permission'
 
 let uid = 0
 let rngSpy: any
@@ -274,5 +275,126 @@ describe('会话加载', () => {
     const ids = store.messages.map(m => m.id)
     expect(ids).toContain('m0')
     expect(ids).toContain('local')
+  })
+})
+
+describe('send 请求载荷（对齐后端 ChatRequest）', () => {
+  it('use_vector_db / directory / agent_mode / files / voice / client_msg_id 一并透传', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'done', conversation_id: 'server-1', answer: 'ok' }))
+    })
+    const store = useMultiAgentStore()
+    store.useVectorDb = true
+    store.agentMode = 'plan'
+    store.setSessionDirectory('E:/proj')
+    const file: FileContent = { filename: 'a.pdf', data: 'base64', mime_type: 'application/pdf' }
+    const voice: VoiceMessageData = { id: 'v1', url: '/audio/1.wav', duration: 2, waveform: [] }
+    await store.send('做一个实施方案', undefined, [file], voice)
+    const req = mocks.sendStream.mock.calls[0][0] as any
+    expect(req.message).toBe('做一个实施方案')
+    expect(req.conversation_id).toBeUndefined() // 新会话首条
+    expect(req.use_vector_db).toBe(true)
+    expect(req.directory).toBe('E:/proj')
+    expect(req.agent_mode).toBe('plan')
+    expect(req.client_msg_id).toBeTruthy() // 幂等 id 一定生成
+    expect(req.files).toEqual([file])
+    expect(req.voice).toEqual(voice)
+  })
+
+  it('默认 agent_mode 不传（交由 supervisor 意图路由）；explore 直连传 explore', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'done', conversation_id: 's', answer: 'x' }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('hi')
+    expect((mocks.sendStream.mock.calls[0][0] as any).agent_mode).toBeUndefined()
+    store.agentMode = 'explore'
+    await store.send('hi2')
+    expect((mocks.sendStream.mock.calls[1][0] as any).agent_mode).toBe('explore')
+  })
+
+  it('已有服务器会话：conversation_id 随请求透传', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'done', conversation_id: 'c1', answer: 'a' }))
+    })
+    const store = useMultiAgentStore()
+    store.activeSessionId = 's1'
+    store.sessions['s1'] = {
+      messages: [], conversationId: 'c1', conversationTitle: '', loading: false, abortController: null,
+      streamPhase: 'idle', queuePosition: null, deletedIds: [],
+    }
+    await store.send('hi')
+    expect((mocks.sendStream.mock.calls[0][0] as any).conversation_id).toBe('c1')
+  })
+})
+
+describe('permission_request 事件 → 权限 store 转发', () => {
+  it('入队 pendingRequests（含 path/operation/tool 信息）', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'permission_request', request_id: 'pr1', path: 'E:\\x\\f.txt', operation: 'write', tool_name: 'tool_write_file', tool_args: { path: 'E:\\x\\f.txt' } }))
+      onEvent(ev({ type: 'permission_request', request_id: 'pr1', path: 'E:\\x\\f.txt', operation: 'write', tool_name: 'tool_write_file', tool_args: { path: 'E:\\x\\f.txt' } }))
+      onEvent(ev({ type: 'done', conversation_id: 's1', answer: 'ok' }))
+    })
+    const store = useMultiAgentStore()
+    const perm = usePermissionStore()
+    await store.send('hi')
+    expect(perm.pendingRequests).toHaveLength(1) // 同 request_id 去重
+    expect(perm.pendingRequests[0].id).toBe('pr1')
+    expect(perm.pendingRequests[0].tool_name).toBe('tool_write_file')
+    expect(perm.pendingRequests[0].operation).toBe('write')
+  })
+})
+
+describe('手动重试（S2 幂等）', () => {
+  it('manualRetry 复用原 clientMsgId + 附件，先裁旧消息再重发', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'done', conversation_id: 'c1', answer: 'ans' }))
+    })
+    const file: FileContent = { filename: 'a.pdf', data: 'base64', mime_type: 'application/pdf' }
+    const store = useMultiAgentStore()
+    store.activeSessionId = 's1'
+    store.sessions['s1'] = {
+      messages: [
+        { id: 'm0', role: 'user', content: '原问题', clientMsgId: 'cm-1', files: [file], agents: [], timestamp: new Date() },
+        { id: 'm1', role: 'assistant', content: '服务器错误（500）', isError: true, agents: [], timestamp: new Date() },
+      ],
+      conversationId: 'c1', conversationTitle: '', loading: false, abortController: null,
+      streamPhase: 'idle', queuePosition: null, deletedIds: [],
+    }
+    await store.manualRetry('m1')
+    expect(mocks.sendStream).toHaveBeenCalledTimes(1) // 只重发一次
+    const req = mocks.sendStream.mock.calls[0][0] as any
+    expect(req.client_msg_id).toBe('cm-1') // 服务端幂等去重
+    expect(req.files).toEqual([file])
+    expect(req.message).toBe('原问题')
+    // 旧 user/error 不复位，避免重试后重复消息
+    expect(store.messages.map(m => m.id)).not.toContain('m0')
+    expect(store.messages).toHaveLength(2)
+    expect(store.messages[1].content).toBe('ans')
+  })
+})
+
+describe('自动重试上限（S8 独立计数）', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('可重试错误最多自动重试 2 次后停止，且 clientMsgId 全程幂等复用', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'error', error: 'rate', retryable: true, status_code: 429 }))
+    })
+    const store = useMultiAgentStore()
+    expect(await store.send('hi')).toBe(false)
+    expect(store.retryCountdown).toBe(5)
+    await vi.advanceTimersByTimeAsync(5000) // 第 1 次自动重试
+    await vi.advanceTimersByTimeAsync(5000) // 第 2 次自动重试 → 达 2 次上限
+    await vi.advanceTimersByTimeAsync(5000) // 不应再重试
+    expect(mocks.sendStream).toHaveBeenCalledTimes(3) // 原始 + 2 次
+    expect(store.retryCountdown).toBe(0)
+    const ids = mocks.sendStream.mock.calls.map(c => (c[0] as any).client_msg_id)
+    expect(new Set(ids).size).toBe(1) // 三次同一幂等 id
+    // 重试不累积重复消息：仅剩最后一轮的 user + error
+    expect(store.messages).toHaveLength(2)
+    expect(store.messages[1].isError).toBe(true)
+    expect(store.streamPhase).toBe('idle')
   })
 })

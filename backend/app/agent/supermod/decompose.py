@@ -51,7 +51,7 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
 
         [opencode build 合并] rag/code/web_search 已合并为单一 build agent
         （知识库 + 代码/文件 + 内建 web 搜索），故不再按 kb/code/web 关键词拆分；
-        除明确的"只读探索"意图走 explore 外，其余统一由 build 处理。
+        除明确的"只读探索"意图走 explore、"规划/出方案"意图走 plan 外，其余统一由 build 处理。
         返回格式: [{"agent": "build" | "explore" | "plan", "question": "..."}]
         """
         q = question.strip().lower()
@@ -70,6 +70,22 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
 
         if needs_explore:
             return [{"agent": "explore", "question": question}]
+
+        # 明确的"规划/出方案"意图 → plan（对齐 opencode plan_enter：复杂任务先规划再执行）。
+        # 注意优先级低于 explore：复合意图（先看结构再规划）优先满足探索诉求。
+        plan_keywords = [
+            "先规划", "先计划", "做计划", "制定计划", "修改计划", "生成计划", "计划一下",
+            "实施计划", "实施方案", "设计方案", "设计一个方案", "规划方案", "方案设计", "拿出方案",
+            "给出方案", "出一个方案", "给个方案", "给一个方案", "做一个方案", "做方案", "写方案",
+            "写个计划", "创建计划", "任务拆解", "拆解任务", "开发计划", "需要规划",
+            "implementation plan", "provide a plan", "plan for", "design doc",
+        ]
+        needs_plan = (
+            any(kw in q for kw in plan_keywords) or bool(re.search(r"\bplan\b|\bplanning\b", q))
+        ) and "plan" in available_agents
+
+        if needs_plan:
+            return [{"agent": "plan", "question": question}]
 
         # ── [B6] 简短寒暄直接走 build 免 LLM ──
         if len(q) <= 24 and self._is_greeting(q):

@@ -30,6 +30,8 @@ from app.agent.base import BaseAgent, AgentMessage
 
 from app.agent.bus import AgentBus
 
+from app.agent.agent_specs import iter_agent_specs
+
 from app.agent.memory import MemoryManager
 
 from app.config import settings
@@ -54,9 +56,11 @@ class SupervisorAgentBase(BaseAgent):
         self._model = settings.llm_model
         self._api_key = settings.llm_api_key
         self._api_base = settings.llm_api_base
-        # 使用更长超时的子 Agent（工具密集型）：build（原 code）默认即需长超时，
-        # 再加 env 配置的扩展名单。
-        self._extended_timeout_agents = {"build"}
+        # 使用更长超时的子 Agent（工具密集型）：由规格注册表的 extended_timeout 驱动
+        #（默认 build），再加上 env 配置的扩展名单。
+        self._extended_timeout_agents = {
+            s.name for s in iter_agent_specs() if s.extended_timeout
+        }
         self._extended_timeout_agents.update(
             a.strip() for a in (settings.extended_timeout_agents or "").split(",") if a.strip()
         )
@@ -102,5 +106,22 @@ class SupervisorAgentBase(BaseAgent):
         "谢谢", "感谢", "辛苦了", "再见", "拜拜", "麻烦你", "请问", "你好呀",
         "hola", "yo", "hi there", "good morning", "good afternoon", "good evening",
     )
+
+    # [opencode 对齐] plan→build 顺序交接（build-switch 语义的无审批版）：
+    # 仅当用户问题同时带「规划」与「执行」意图（先规划再执行/按计划执行等）时，
+    # supervisor 在 plan 产出计划文件后自动把计划交给 build 执行，而不仅是返回计划文本。
+    _PLAN_HANDOFF_KEYWORDS = (
+        "先规划再执行", "先规划后执行", "先做计划再执行", "先制定计划再执行",
+        "先计划再执行", "规划并执行", "计划并执行", "规划后执行", "计划后执行",
+        "然后执行", "然后实现", "再执行", "再实现", "并执行计划", "按计划执行",
+        "按此计划", "执行这个计划", "执行该计划", "根据计划", "执行计划",
+        "plan and execute", "plan then execute", "plan then implement",
+        "then execute", "then implement", "execute the plan", "implement the plan",
+    )
+
+    def _should_handoff_to_build(self, question: str) -> bool:
+        """判断是否需要对命中 plan 的路由追加 plan→build 顺序交接。"""
+        q = (question or "").lower()
+        return any(k in q for k in self._PLAN_HANDOFF_KEYWORDS)
 
 __all__ = ['SupervisorAgentBase']

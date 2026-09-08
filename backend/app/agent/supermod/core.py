@@ -97,8 +97,14 @@ class SupervisorAgentCore(SupervisorAgentBase):
                         "Supervisor routing to '%s' (thread=%s)",
                         target_agent, msg.thread_id,
                     )
-                    async for reply in self._route_to(target_agent, payload, msg.thread_id):
-                        yield reply
+                    if target_agent == "plan" and self._should_handoff_to_build(question):
+                        # [opencode 对齐] plan→build 顺序交接：plan 产出计划文件后
+                        # supervisor 直接把计划交给 build 执行（对应 build-switch 语义）
+                        async for reply in self._route_plan_then_build(payload, msg.thread_id):
+                            yield reply
+                    else:
+                        async for reply in self._route_to(target_agent, payload, msg.thread_id):
+                            yield reply
             finally:
                 if beat is not None:
                     beat.cancel()
@@ -214,5 +220,122 @@ class SupervisorAgentCore(SupervisorAgentBase):
                 },
                 thread_id=original_thread_id,
             )
+
+    async def _collect_route(
+        self,
+        target_agent: str,
+        payload: dict,
+        original_thread_id: str,
+    ) -> Optional[AgentMessage]:
+        """路由到目标 Agent 并返回唯一回复消息（供顺序交接复用）。
+
+        `_route_to` 恰好 yield 一条消息（response/error），收集后返回；
+        无产出时返回 None。
+        """
+        reply = None
+        async for m in self._route_to(target_agent, payload, original_thread_id):
+            reply = m
+        return reply
+
+    async def _route_plan_then_build(
+        self,
+        payload: dict,
+        original_thread_id: str,
+    ) -> AsyncIterator[AgentMessage]:
+        """[opencode 对齐] plan→build 顺序交接（build-switch 语义的无审批版）。
+
+        当请求同时命中「规划」与「执行」意图时：
+          1. 先路由 plan：产出实施计划并落盘 <data>/plans/<conv>/plan.md；
+          2. 把计划文本（+ 计划文件路径）合成为 build 的 user 消息，再路由 build 执行；
+          3. 合并为单条回复（计划 + 执行结果），保持与顶层 send_and_wait 的单回复契约。
+        """
+        plan_reply = await self._collect_route("plan", payload, original_thread_id)
+        if plan_reply is None:
+            yield AgentMessage(
+                source=self._id, target="user",
+                type="error", action="chat",
+                payload={"error": "plan agent did not reply", "error_type": "sub_agent_error"},
+                thread_id=original_thread_id,
+            )
+            return
+        if plan_reply.type == "error":
+            yield plan_reply
+            return
+
+        plan_answer = str(plan_reply.payload.get("answer", ""))
+        plan_path = plan_reply.payload.get("plan_path", "")
+        build_question = (
+            "用户请求先规划再执行。plan agent 已产出以下实施计划"
+            + (f"（计划文件: {plan_path}）" if plan_path else "")
+            + "，请按计划逐步执行并报告完成情况：\n\n"
+            + plan_answer
+        )
+        build_payload = dict(payload)
+        build_payload["question"] = build_question
+        build_reply = await self._collect_route("build", build_payload, original_thread_id)
+        if build_reply is None:
+            build_reply = AgentMessage(
+                source=self._id, target="user",
+                type="error", action="chat",
+                payload={"error": "build agent did not reply", "error_type": "sub_agent_error"},
+                thread_id=original_thread_id,
+            )
+        yield self._merge_plan_build_reply(plan_reply, build_reply)
+
+    @staticmethod
+    def _merge_plan_build_reply(
+        plan_reply: AgentMessage,
+        build_reply: AgentMessage,
+    ) -> AgentMessage:
+        """把 plan 与 build 两条子 Agent 回复合并为单条回复。
+
+        build 成功时返回 response，answer = 计划 + ## 执行结果；
+        build 失败时仍保留计划文本，返回 error 型消息且 answer 携带完整计划，便于用户跟进。
+        plan_path/sources/steps/tokens 一并合并。
+        """
+        plan_payload = plan_reply.payload or {}
+        build_payload = build_reply.payload or {}
+        plan_answer = str(plan_payload.get("answer", ""))
+        plan_path = plan_payload.get("plan_path", "")
+        sources = list(plan_payload.get("sources") or []) + list(build_payload.get("sources") or [])
+        steps = list(plan_payload.get("steps") or []) + list(build_payload.get("steps") or [])
+        tokens = build_payload.get("tokens") or plan_payload.get("tokens") or {"input": 0, "output": 0}
+
+        if build_reply.type == "error":
+            answer = (
+                f"## 实施计划\n\n{plan_answer}\n\n"
+                f"## 执行结果（出错）\n{build_payload.get('error', 'build 执行出错')}"
+            )
+            return AgentMessage(
+                source="supervisor", target=build_reply.target or "user",
+                type="error", action="chat",
+                payload={
+                    "error": build_payload.get("error", "build 执行出错"),
+                    "error_type": build_payload.get("error_type", "sub_agent_error"),
+                    "completed_steps": build_payload.get("completed_steps", []),
+                    "answer": answer,
+                    "routed_to": "plan→build",
+                    "plan_path": plan_path,
+                    "tokens": tokens,
+                    "sources": sources,
+                    "steps": steps,
+                },
+                thread_id=build_reply.thread_id or plan_reply.thread_id,
+            )
+
+        answer = f"## 实施计划\n\n{plan_answer}\n\n## 执行结果\n{build_payload.get('answer', '')}"
+        return AgentMessage(
+            source="supervisor", target="user",
+            type="response", action="chat",
+            payload={
+                "answer": answer,
+                "sources": sources,
+                "steps": steps,
+                "tokens": tokens,
+                "plan_path": plan_path,
+                "routed_to": f"plan→{build_payload.get('routed_to', 'build')}",
+            },
+            thread_id=build_reply.thread_id or plan_reply.thread_id,
+        )
 
 __all__ = ['SupervisorAgentCore']
