@@ -94,6 +94,7 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
                 messages=messages,
                 max_tokens=1024,
                 temperature=0.1,
+                cache_prompt=True,
             )
             usage = getattr(response, "usage", None)
             usage_dict = {

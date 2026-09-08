@@ -170,8 +170,8 @@ class PlanAgent(BaseAgent):
         messages = [
             {"role": "system", "content": PLAN_SYSTEM_PROMPT},
         ]
-        # 添加历史对话（最多 6 轮）
-        for h in history[-12:]:
+        # 添加历史对话（最多 4 轮；规划任务通常无需很多上文，且 tool_task 委派时 history 为空）
+        for h in history[-8:]:
             if not isinstance(h, dict):
                 continue
             role = h.get("role")
@@ -188,8 +188,9 @@ class PlanAgent(BaseAgent):
             api_key=self._api_key,
             api_base=self._api_base,
             messages=messages,
-            max_tokens=4096,
+            max_tokens=2048,
             temperature=0.3,
+            cache_prompt=True,
         )
         dur = (tmod.time() - start) * 1000
         usage = getattr(response, "usage", None)

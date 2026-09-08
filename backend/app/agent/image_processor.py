@@ -248,7 +248,7 @@ async def caption_image(data_b64: str, mime_type: str = "", filename: str = "") 
             kwargs["api_key"] = api_key
         if api_base:
             kwargs["api_base"] = api_base
-        resp = await litellm.acompletion(**kwargs)
+        resp = await litellm.acompletion(**kwargs,cache_prompt=True)
         content = (resp.choices[0].message.content or "").strip()
         if content:
             _caption_cache[fp] = content

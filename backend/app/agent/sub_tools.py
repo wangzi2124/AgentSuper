@@ -21,7 +21,7 @@ import litellm
 
 from app.agent.stream_events import emit, step_event
 from app.config import settings
-from app.context.token_counter import estimate_tokens
+from app.context.token_counter import estimate_tokens, sanitize_tool_messages
 from app.context.tool_output import bound_tool_output
 from app.monitor import record_model_call
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
@@ -84,9 +84,16 @@ def _trim_messages(messages: list[dict]) -> list[dict]:
         i -= 1
     recent.reverse()
     trimmed = head + recent
-    # 极端兜底:仍超限则去掉 tool 消息(此时已不依赖 tool_call 配对)
+    # 极端兜底:仍超限则去掉 tool 消息，并用 sanitize_tool_messages 修复被拆断的
+    # tool_call 配对 —— 否则残留的带 tool_calls 的 assistant 消息没有对应
+    # role="tool" 响应，DeepSeek/OpenAI 会直接拒绝该轮请求。
+    # (assistant-with-tool_calls 若无响应会被 Pass 2 整轮丢弃)
     if _size(trimmed) > _SUB_CTX_MAX_TOKENS:
-        trimmed = [m for m in trimmed if m.get("role") != "tool"]
+        trimmed = [
+            m for m in trimmed
+            if m.get("role") != "tool"
+            and not (m.get("role") == "assistant" and m.get("tool_calls"))
+        ]
     return trimmed
 
 

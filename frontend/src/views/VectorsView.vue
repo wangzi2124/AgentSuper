@@ -95,10 +95,27 @@ async function handleRepair() {
   </div>
   <div class="page-content">
     <div class="toolbar">
+      <div class="toolbar-search">
+        <select v-model="selectedDocId" @change="onFilterChange" class="filter-select">
+          <option value="">全部文档</option>
+          <option v-for="doc in ds.documents" :key="doc.id" :value="doc.id">{{ doc.filename }} ({{ doc.chunk_count }} chunks)</option>
+        </select>
+        <div class="search-box">
+          <input
+            v-model="searchText"
+            type="text"
+            placeholder="搜索分块内容..."
+            class="search-input"
+            @keyup.enter="onSearch"
+          />
+          <button class="btn btn-primary btn-sm" @click="onSearch">搜索</button>
+          <button v-if="vs.searchQuery" class="btn btn-sm" @click="searchText = ''; onSearch()">清除</button>
+        </div>
+      </div>
       <div class="toolbar-actions">
         <template v-if="vs.config">
           <span class="ttl-info">
-            TTL: {{ vs.config.ttl_days > 0 ? vs.config.ttl_days + ' 天' : '未启用' }}
+            <!-- TTL: {{ vs.config.ttl_days > 0 ? vs.config.ttl_days + ' 天' : '未启用' }} -->
             <template v-if="vs.config.ttl_days > 0">· 每 {{ vs.config.cleanup_interval_hours }}h 检查</template>
           </span>
           <button v-if="vs.config.ttl_days > 0" class="btn btn-sm" @click="handleClearExpired">清理过期</button>
@@ -109,24 +126,6 @@ async function handleRepair() {
           >自愈重建 ({{ vs.config!.pending_repair }})</button>
         </template>
         <button class="btn btn-sm btn-danger" @click="handleClearAll">清空向量库</button>
-      </div>
-    </div>
-
-    <div class="filter-row">
-      <select v-model="selectedDocId" @change="onFilterChange" class="filter-select">
-        <option value="">全部文档</option>
-        <option v-for="doc in ds.documents" :key="doc.id" :value="doc.id">{{ doc.filename }} ({{ doc.chunk_count }} chunks)</option>
-      </select>
-      <div class="search-box">
-        <input
-          v-model="searchText"
-          type="text"
-          placeholder="搜索分块内容..."
-          class="search-input"
-          @keyup.enter="onSearch"
-        />
-        <button class="btn btn-primary btn-sm" @click="onSearch">搜索</button>
-        <button v-if="vs.searchQuery" class="btn btn-sm" @click="searchText = ''; onSearch()">清除</button>
       </div>
     </div>
 
@@ -191,17 +190,17 @@ async function handleRepair() {
 </template>
 
 <style scoped>
-.toolbar { margin-bottom: 16px; }
-.toolbar-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.toolbar-search { display: flex; gap: 12px; flex-wrap: wrap; flex: 1; min-width: 260px; }
+.toolbar-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 .ttl-info { font-size: 12px; color: var(--text-secondary); }
 .btn-sm { padding: 7px 14px; font-size: 12px; }
 .btn-repair { border-color: var(--warning); color: var(--warning); background: var(--warning-soft); }
 .btn-repair:hover { background: color-mix(in srgb, var(--warning) 12%, var(--surface)); color: var(--warning); }
 
-.filter-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .filter-select {
   flex: 1;
-  min-width: 180px;
+  max-width: 240px;
   padding: 9px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -212,7 +211,7 @@ async function handleRepair() {
   transition: border-color 0.15s;
 }
 .filter-select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
-.search-box { display: flex; gap: 6px; flex: 2; min-width: 220px; }
+.search-box { display: flex; gap: 6px; flex: 1 1 280px; min-width: 220px; }
 .search-input {
   flex: 1;
   padding: 9px 14px;
