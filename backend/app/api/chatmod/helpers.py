@@ -113,10 +113,10 @@ def reset_summarizer():
     _summarizer_model = None
 
 def _generate_title(messages: list[dict]) -> str:
-    """根据用户第一条消息生成对话标题。
+    """根据用户第一条消息生成对话标题（规则截取，确定性回退）。
 
     B8: 清洗控制字符 + html.escape 防注入，字节安全截断。
-    说明：标题生成保持确定性/离线可用（规则截取，不在请求路径触发外部 LLM）。
+    说明：作为 LLM 标题生成的失败回退，保持确定性/离线可用。
     """
     import html
     import re
@@ -129,6 +129,55 @@ def _generate_title(messages: list[dict]) -> str:
             text = html.escape(text)
             return text[:20] + ("..." if len(text) > 20 else "")
     return "新对话"
+
+
+async def _generate_title_llm(messages: list[dict]) -> str:
+    """用 LLM 生成对话标题（对齐设计文档 Phase 4）。
+
+    prompt 要求 10 字以内概括主题；temperature=0.5 / max_tokens=30。
+    失败（无 key / 异常 / 空结果）回退到规则截取 _generate_title，
+    保证标题永远可用。
+    """
+    import html
+    import re
+
+    import litellm
+
+    user_text = ""
+    for msg in messages:
+        if msg.get("role") == "user":
+            user_text = str(msg.get("content", "") or "")
+            if user_text:
+                break
+    if not user_text:
+        return _generate_title(messages)
+    if not settings.llm_api_key:
+        return _generate_title(messages)
+
+    llm_messages = [
+        {"role": "system", "content": "用 10 个字以内概括对话主题，只输出标题，不要引号或标点。"},
+        # 首条消息通常较短，直接注入；不携带历史（标题只反映会话起点主题）
+        {"role": "user", "content": user_text[:2000]},
+    ]
+    try:
+        response = await litellm.acompletion(
+            model=settings.llm_model,
+            api_key=settings.llm_api_key,
+            api_base=settings.llm_api_base,
+            messages=llm_messages,
+            max_tokens=30,
+            temperature=0.5,
+            cache_prompt=True,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        text = text.strip("\"'“”‘’。,.，、;；!！?？ ")
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+        text = re.sub(r"\s+", " ", text)
+        text = html.escape(text)
+        return text[:30] or _generate_title(messages)
+    except Exception as e:
+        logger.warning("LLM title generation failed, falling back to rules: %s", e)
+        return _generate_title(messages)
 
 def _truncate_history(history: list[dict], max_tokens: int = MAX_HISTORY_TOKENS) -> list[dict]:
     """截断对话历史以控制token数量。确保至少保留最近一条消息。"""

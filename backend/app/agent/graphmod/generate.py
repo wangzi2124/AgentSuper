@@ -83,6 +83,7 @@ from .constants import DOOM_LOOP_PROMPT
 from .constants import MAX_STEPS_PROMPT
 from .constants import _DEDUP_READONLY_TOOLS
 from .constants import _normalize_finish_reason
+from .task_registry import get_task_registry as _get_task_registry
 from .state import AgentState
 from .state import _ZERO_USAGE
 from .state import _attachment_parts
@@ -286,6 +287,14 @@ class RAGAgentGenerate(RAGAgentTools):
             msg.tool_calls or finish_reason == "tool-calls"
         ) and rounds < max_tool_rounds:
             rounds += 1
+
+            # [opencode background] 每轮吸收本会话已完成的后台任务结果（合成 assistant 消息）
+            bg_results = _get_task_registry().drain_background_results(state.get("conversation_id", ""))
+            if bg_results:
+                messages.append({
+                    "role": "assistant",
+                    "content": "后台任务已完成，请把结果纳入你的回答（无需再委派）：\n" + "\n\n".join(bg_results),
+                })
 
             # Compaction: compress old messages when context grows large
             # （先回溯清理旧工具输出，再判断是否触发压缩）

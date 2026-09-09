@@ -1,4 +1,4 @@
-"""Agent 消息总线。
+﻿"""Agent 消息总线。
 
 负责 Agent 的注册、消息路由、事件循环管理。
 支持点对点发送、广播、以及 send_and_wait（发送并等待回复）模式。
@@ -37,6 +37,9 @@ class AgentBus:
         # 处理进度：子 Agent 最近完成/进行中的步骤描述（最多保留 8 条），
         # 供 supervisor 在子 Agent 超时时回传"已完成步骤"上下文。
         self._agent_progress: dict[str, list[str]] = {}
+        # [opencode abort 级联] thread_id → 正在处理该消息的 handler task。
+        # run_agent 每处理一条消息都会登记；abort(thread_id) 取消它即可中断在途子任务。
+        self._active_handlers: dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # 注册 / 发现
@@ -150,7 +153,12 @@ class AgentBus:
         self._pending[msg.thread_id] = fut
         # [A3] Future 完成后兜底移除 _pending 项：无论走 send() 直投 / 超时 / 取消 / GC，
         # 都保证 thread_id → Future 不会残留在 _pending 中（若 send() 已弹出则为空操作）。
+        # [opencode abort 级联] 等待方自身被取消（父任务 abort）时，级联取消被等待的
+        # 子线程 handler task —— 等待方取消不止"不再等"，还真正中断在途子任务。
         fut.add_done_callback(lambda _f, tid=msg.thread_id: self._pending.pop(tid, None))
+        fut.add_done_callback(
+            lambda _f, tid=msg.thread_id: (self.abort_work(tid) if _f.cancelled() else None)
+        )
         await self.send(msg)
         try:
             deadline = loop.time() + timeout
@@ -179,6 +187,12 @@ class AgentBus:
                     return fut.result()
         except asyncio.TimeoutError:
             self._pending.pop(msg.thread_id, None)
+            raise
+        except asyncio.CancelledError:
+            # [opencode abort 级联] 等待方自身被取消（父任务 abort/中断）→
+            # 级联取消被等待线程的实际执行 handler，使子任务真正停跑。
+            self._pending.pop(msg.thread_id, None)
+            self.abort_work(msg.thread_id)
             raise
         except BaseException:
             self._pending.pop(msg.thread_id, None)
@@ -211,6 +225,32 @@ class AgentBus:
             return True
         return False
 
+    def abort_work(self, thread_id: str) -> bool:
+        """取消指定 thread 上正在实际执行的 handler task（级联取消的工作侧）。
+
+        对齐 opencode `ops.cancel`：取消等待（cancel_pending）只停"等"，真正中断
+        在途子任务需要取消 run_agent 正在跑该消息的 handler task。
+        """
+        handler = self._active_handlers.get(thread_id)
+        if handler is not None and not handler.done():
+            logger.warning("Aborting in-flight handler (thread=%s)", thread_id)
+            handler.cancel()
+            return True
+        return False
+
+    def abort(self, thread_id: str) -> int:
+        """级联取消一个 thread：先停等待方，再中断执行方。
+
+        Returns:
+            实际取消的数量（等待 future + handler task，0-2）。
+        """
+        cancelled = 0
+        if self.cancel_pending(thread_id):
+            cancelled += 1
+        if self.abort_work(thread_id):
+            cancelled += 1
+        return cancelled
+
     # ------------------------------------------------------------------
     # Agent 事件循环管理
     # ------------------------------------------------------------------
@@ -242,32 +282,22 @@ class AgentBus:
                 while True:
                     msg = await queue.get()
                     self.touch(agent_id)
+                    # [opencode abort 级联] 每条消息的实现在独立 handler task 中运行，
+                    # 供 abort_work(thread_id) 精确中断在途子任务。
+                    handler = asyncio.create_task(self._dispatch(msg, agent_id))
+                    self._active_handlers[msg.thread_id] = handler
                     try:
-                        async for reply in agent.handle_message(msg):
-                            self.touch(agent_id)
-                            await self.send(reply)
-                    except Exception as e:
-                        logger.error(
-                            "Agent '%s' error handling %s/%s: %s",
-                            agent_id, msg.action, msg.type, e, exc_info=True,
-                        )
-                        # 如果有等待者，投递结构化错误消息而非裸异常，
-                        # 让调用方拿到 error payload（含已完成步骤等上下文）。
-                        if msg.thread_id in self._pending:
-                            fut = self._pending.pop(msg.thread_id)
-                            if not fut.done():
-                                fut.set_result(AgentMessage(
-                                    source=agent_id,
-                                    target=msg.source,
-                                    type="error",
-                                    action=msg.action,
-                                    payload={
-                                        "error": str(e),
-                                        "error_type": "sub_agent_error",
-                                        "completed_steps": self.agent_progress(agent_id),
-                                    },
-                                    thread_id=msg.thread_id,
-                                ))
+                        await handler
+                    except asyncio.CancelledError:
+                        task = asyncio.current_task()
+                        # 分支：handler 被 abort_work 单独取消（当前任务未被取消），
+                        # 吞掉 CancelledError 继续处理下一条消息。
+                        if task is not None and task.cancelling() == 0:
+                            logger.info("Aborted handler for thread=%s on %s", msg.thread_id, agent_id)
+                        else:
+                            raise
+                    finally:
+                        self._active_handlers.pop(msg.thread_id, None)
             except asyncio.CancelledError:
                 logger.info("⏹ Agent event loop cancelled: %s", agent_id)
                 break
@@ -288,6 +318,43 @@ class AgentBus:
                     break
 
         self._running.discard(agent_id)
+
+    async def _dispatch(self, msg: AgentMessage, agent_id: str) -> None:
+        """把一条消息交给 agent 处理并路由其回复；错误以结构化消息交付。
+
+        独立协程（由 run_agent create_task），便于 abort_work 单独取消。
+        """
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            return
+        try:
+            async for reply in agent.handle_message(msg):
+                self.touch(agent_id)
+                await self.send(reply)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(
+                "Agent '%s' error handling %s/%s: %s",
+                agent_id, msg.action, msg.type, e, exc_info=True,
+            )
+            # 如果有等待者，投递结构化错误消息而非裸异常，
+            # 让调用方拿到 error payload（含已完成步骤等上下文）。
+            if msg.thread_id in self._pending:
+                fut = self._pending.pop(msg.thread_id)
+                if not fut.done():
+                    fut.set_result(AgentMessage(
+                        source=agent_id,
+                        target=msg.source,
+                        type="error",
+                        action=msg.action,
+                        payload={
+                            "error": str(e),
+                            "error_type": "sub_agent_error",
+                            "completed_steps": self.agent_progress(agent_id),
+                        },
+                        thread_id=msg.thread_id,
+                    ))
 
     def start_all(self):
         """启动所有已注册 Agent 的事件循环（非阻塞，返回 task 列表）。"""

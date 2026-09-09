@@ -79,8 +79,13 @@ from .base import RAGAgentBase
 from .constants import _TASK_TOOL_SUBAGENTS
 from .constants import _is_multi_agent_queue
 from .constants import _permission_denied_msg
+from .task_permission import resolve as _resolve_task_permission
+from .task_registry import get_task_registry as _get_task_registry
 from .state import AgentState
 logger = logging.getLogger(__name__)
+# [opencode background] 模块级后台委派任务表（thread_id → Task），进程级存活，
+# 不随单次 LLM 工具循环结束；每个 sub_thread_id 只注册一个后台任务。
+_background_tasks: dict[str, asyncio.Task] = {}
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgentTools(RAGAgentBase):
     def _task_tool_placeholder(self, description: str = "", prompt: str = "", subagent_type: str = "web_search") -> str:
@@ -103,13 +108,25 @@ class RAGAgentTools(RAGAgentBase):
           会话工作目录（directory）透传给子 Agent，文件工具落在会话目录而非 git worktree
         - conversation_id 透传外层会话 id，保证子 Agent 与主 Agent 落在同一记忆 namespace
           （否则子 Agent 记忆读写落在全局 namespace，与主 Agent 会话隔离记忆互不可见）
+        - [opencode task 授权] 委派权限由 settings.task_permission_rules（permission.task）约束：
+          allow 直接放行 / ask 走 permission_request 审批 / deny 拒绝（并已从 enum 移除）
+        - [opencode task_id resume] 传 task_id 时复用同一子会话（线程 + 对话线索），
+          不传则新建 task:uuid thread（对齐 opencode task_id ?? create）
+        - [opencode background] background=true 立即返回 running 包装，后台 send_and_wait，
+          完成后以合成 assistant 消息注入父会话（generate 循环每轮吸收）
         """
+        # [opencode task 授权] 权限检查（先于一切副作用）
         prompt = str(args.get("prompt") or "").strip()
         subagent_type = str(args.get("subagent_type") or "").strip()
+        task_id = str(args.get("task_id") or "").strip() or None
+        background = bool(args.get("background"))
         if not prompt:
             return "Error: 'prompt' is required for tool_task."
         if subagent_type not in _TASK_TOOL_SUBAGENTS:
             return f"Error: unknown subagent_type '{subagent_type}'. Valid: {sorted(_TASK_TOOL_SUBAGENTS)}."
+        permission = _resolve_task_permission(settings.task_permission_rules, subagent_type)
+        if permission == "deny":
+            return f"Error: subagent_type '{subagent_type}' is disabled by permission rules."
         bus = getattr(self, "task_bus", None)
         if bus is None:
             return "Error: sub-agent bus is unavailable (tool_task disabled)."
@@ -120,34 +137,84 @@ class RAGAgentTools(RAGAgentBase):
                 f"Increase SUBAGENT_DEPTH (default 1) to allow nested sub-agents."
             )
 
-        # 子 Agent 超时（explore/plan 均不属重工具型，用标准等待）
-        timeout = settings.sub_agent_timeout
-        sub_thread_id = f"task:{uuid.uuid4().hex[:8]}"
-        reply = await bus.send_and_wait(
-            AgentMessage(
-                source="user",
-                target=subagent_type,
-                type="request",
-                action="chat",
-                payload={
-                    "question": prompt,
-                    "model": self.model,
-                    "history": [],
-                    "use_vector_db": False,
-                    "files": [],
-                    "conversation_id": conversation_id,
-                    "directory": directory,
-                    "_task_depth": depth + 1,
-                    "_event_queue": event_queue,
-                },
-                thread_id=sub_thread_id,
-            ),
-            timeout=timeout,
-        )
-        if reply.type == "response":
-            return reply.payload.get("answer", "") or "(no answer)"
-        err = reply.payload.get("error", "sub-agent failed")
-        return f"Error: sub-agent '{subagent_type}' failed: {err}"
+        # [opencode task 授权] ask → 复用 permission_request 审批桥（有队列才能审批）
+        if permission == "ask":
+            mgr = get_perm_mgr()
+            req = mgr.create_request(subagent_type, "task", "tool_task", args)
+            if event_queue is not None:
+                event_queue.put_nowait({
+                    "type": "permission_request",
+                    "request_id": req.id,
+                    "path": subagent_type,
+                    "operation": "task",
+                    "tool_name": "tool_task",
+                    "tool_args": args,
+                })
+            else:
+                return f"Error: delegation to '{subagent_type}' requires approval but no consent channel exists (denied)."
+            decision = await mgr.await_decision(req.id)
+            if decision != "allowed":
+                return f"Error: delegation to sub-agent '{subagent_type}' was not approved (decision={decision})."
+
+        # [opencode task_id resume] 稳定 thread + 对话线索复用
+        sub_thread_id = task_id or f"task:{uuid.uuid4().hex[:8]}"
+        history = _get_task_registry().get_history(sub_thread_id) if task_id else []
+        reg = _get_task_registry()
+
+        async def _run_task() -> str:
+            """发送委派请求并等待子 Agent 回复，返回渲染包装文本。"""
+            reply = await bus.send_and_wait(
+                AgentMessage(
+                    source="user",
+                    target=subagent_type,
+                    type="request",
+                    action="chat",
+                    payload={
+                        "question": prompt,
+                        "model": self.model,
+                        "history": history,
+                        "use_vector_db": False,
+                        "files": [],
+                        "conversation_id": conversation_id,
+                        "directory": directory,
+                        "_task_depth": depth + 1,
+                        "_event_queue": event_queue,
+                    },
+                    thread_id=sub_thread_id,
+                ),
+                timeout=settings.sub_agent_timeout,
+            )
+            if reply.type == "response":
+                answer = reply.payload.get("answer", "") or "(no answer)"
+            else:
+                answer = (reply.payload.get("error", "sub-agent failed") or "sub-agent failed")
+                return f'<task id="{sub_thread_id}" state="error"><task_error>{answer}</task_error></task>'
+            await reg.record(sub_thread_id, subagent_type, prompt, answer, conversation_id)
+            return f'<task id="{sub_thread_id}" state="completed"><task_result>{answer}</task_result></task>'
+
+        # [opencode background] 后台委派：立即返回 running，完成后注入父会话
+        if background:
+            async def _background():
+                try:
+                    result = await _run_task()
+                except asyncio.CancelledError:
+                    result = f'<task id="{sub_thread_id}" state="error"><task_error>cancelled</task_error></task>'
+                except Exception as e:  # noqa: BLE001
+                    result = f'<task id="{sub_thread_id}" state="error"><task_error>{e}</task_error></task>'
+                reg.push_background_result(conversation_id, result)
+                _background_tasks.pop(sub_thread_id, None)
+            _background_tasks[sub_thread_id] = asyncio.create_task(_background())
+            return (
+                f'<task id="{sub_thread_id}" state="running">'
+                "<task_result>后台任务已启动，完成后会自动通知你。</task_result></task>"
+            )
+
+        # 前台委派（默认）
+        return await _run_task()
+
+    async def _drain_background(self, conversation_id: str) -> list:
+        """取出（并清空）某会话已完成的所有后台任务结果（generate 循环每轮吸收）。"""
+        return _get_task_registry().drain_background_results(conversation_id)
     async def _tool_memory(self, name: str, args: dict, state: AgentState | None) -> str:
         """[opencode memory] 主 Agent 记忆读写：set/get/search。
 

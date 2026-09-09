@@ -20,3 +20,5 @@ reportlab
 openpyxl
 python-docx
 python-pptx
+Pillow
+pytesseract

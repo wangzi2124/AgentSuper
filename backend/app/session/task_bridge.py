@@ -39,12 +39,17 @@ def thread_for(child_session_id: str) -> Optional[str]:
 
 
 def cancel(child_session_id: str) -> bool:
-    """取消单个子会话对应的 AgentBus 任务（有未完成 future 才算取消）。"""
+    """取消单个子会话对应的 AgentBus 任务（级联到在途 handler）。
+
+    [opencode abort 级联] 升级为 `AgentBus.abort`：不仅取消等待 future
+    （cancel_pending），还真正取消 run_agent 正在执行该 thread 的
+    handler task，使子任务中断而非只是"没人等了"。
+    """
     thread_id = _threads.pop(child_session_id, None)
     if thread_id is None or _bus is None:
         return False
     try:
-        return _bus.cancel_pending(thread_id)
+        return bool(_bus.abort(thread_id))
     except Exception as exc:  # noqa: BLE001
         logger.warning("task_bridge: cancel child %s failed: %s", child_session_id, exc)
         return False

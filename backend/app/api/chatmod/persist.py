@@ -45,6 +45,7 @@ from app.agent.stream_events import AgentEventCollector
 # ── 跨子模块依赖（自动生成）──
 
 from .helpers import _generate_title
+from .helpers import _generate_title_llm
 from .helpers import _get_session_service
 from .helpers import _get_summarizer
 from .helpers import _msg_type_to_role
@@ -103,6 +104,16 @@ async def _enrich_image_files(files: list | None) -> list:
                 pass
         enriched.append(f)
     return enriched
+
+
+async def _refresh_title_llm(service, user_id: str, session_id: str, question: str) -> None:
+    """后台异步用 LLM 刷新会话标题（对齐设计 Phase 4，失败回退规则标题）。"""
+    try:
+        title = await _generate_title_llm([{"role": "user", "content": question}])
+        if title:
+            service.update(user_id, session_id, title=title)
+    except Exception:
+        logger.exception("failed to refresh session title via LLM")
 
 
 def _session_history_for(service, user_id: str, session_id: str, limit: int = 200) -> list[dict]:
@@ -210,6 +221,12 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
                 user_msg_id = user_msg.id
                 if session_repo.latest_seq(session_id) == 1:
                     service.update(user_id, session_id, title=_generate_title([{"role": "user", "content": question}]))
+                    # [设计 Phase 4 · D3] 首条消息同步落规则标题（保证立即有标题），
+                    # 再后台异步用 LLM 生成更聚焦的标题覆盖（失败回退=规则标题，永不卡请求路径）。
+                    try:
+                        asyncio.get_running_loop().create_task(_refresh_title_llm(service, user_id, session_id, question))
+                    except Exception:
+                        logger.exception("failed to schedule LLM title refresh")
             # 新写入或 user 命中但缺 assistant：追加 assistant 轮次
             assistant_msg = service.append_message(user_id, session_id, "assistant", {
                 "role": "assistant", "content": answer, "sources": sources, "steps": steps,

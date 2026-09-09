@@ -222,6 +222,87 @@ async def test_cancel_pending():
     assert bus.cancel_pending("nope") is False
 
 
+# ── abort 级联取消（opencode abort 对齐）─────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_abort_cancels_waiting_and_inflight_handler():
+    bus = AgentBus()
+    loop = asyncio.get_running_loop()
+    # 手工伪造：等待 future + 在途 handler task 同时存在
+    fut = loop.create_future()
+    bus._pending["t1"] = fut
+
+    started = asyncio.Event()
+    released = asyncio.Event()
+
+    async def slow_handler(msg):
+        started.set()
+        await asyncio.sleep(5)
+
+    htask = asyncio.create_task(slow_handler(AgentMessage(source="a", target="b", type="request", action="chat", thread_id="t1")))
+    bus._active_handlers["t1"] = htask
+    await started.wait()
+
+    assert bus.abort("t1") == 2
+    assert fut.cancelled()
+    await asyncio.sleep(0)  # 让 CancelledError 实际注入 handler 协程
+    assert htask.cancelled()
+    with pytest.raises(asyncio.CancelledError):
+        await htask
+
+
+@pytest.mark.asyncio
+async def test_abort_returns_zero_when_nothing_to_cancel():
+    bus = AgentBus()
+    assert bus.abort("nope") == 0
+
+
+@pytest.mark.asyncio
+async def test_abort_work_only_cancels_handler():
+    bus = AgentBus()
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    bus._pending["t1"] = fut
+    assert bus.abort_work("t1") is False  # 无 handler → False
+    assert bus.abort("t1") == 1  # 只有等待被取消
+    assert fut.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_abort_inflight_via_run_agent_and_loop_survives():
+    """abort_work 中断在途 handler 后，事件循环仍存活并处理下一条消息。"""
+    bus = AgentBus()
+    loop = asyncio.get_running_loop()
+    release = asyncio.Event()
+
+    async def blocking():
+        await asyncio.sleep(30)
+
+    async def handler(msg):
+        if msg.action == "hold":
+            await blocking()
+            yield AgentMessage(source="a", target=msg.source, type="response", action="chat",
+                               payload={"ok": True}, thread_id=msg.thread_id)
+        else:
+            yield AgentMessage(source="a", target=msg.source, type="response", action="chat",
+                               payload={"ok": 2}, thread_id=msg.thread_id)
+
+    bus.register(FakeAgent("a", handler=handler))
+    t = asyncio.create_task(bus.run_agent("a"))
+    # 先发一个会被卡住的请求
+    hold_task = asyncio.create_task(bus.send_and_wait(_req(target="a", thread="hold", action="hold"), timeout=5))
+    await asyncio.sleep(0.1)
+    # 中断在途 handler（等待 + 执行同步取消 → 等待方收到 CancelledError）
+    assert bus.abort("hold") == 2
+    with pytest.raises(asyncio.CancelledError):
+        await hold_task
+    # 事件循环仍活：第二个请求正常处理
+    resp = await bus.send_and_wait(_req(target="a", thread="t2"), timeout=5)
+    assert resp.payload == {"ok": 2}
+    t.cancel()
+    await t
+
+
 # ── run_agent / start_all / stop_all ───────────────────────────────────────
 
 @pytest.mark.asyncio

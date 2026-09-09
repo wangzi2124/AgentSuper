@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "vue-tsc -b",
+    "check": "vue-tsc -b && vitest run"
   },
   "dependencies": {
     "@tanstack/vue-virtual": "^3.13.31",

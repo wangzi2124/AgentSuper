@@ -164,6 +164,10 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
             timeout=settings.supervisor_timeout,
         )
     except asyncio.CancelledError:
+        # [opencode abort 级联] 客户端断开 → 除登记清理外，中断 supervisor 在途 handler
+        abort = getattr(agent_bus, "abort", None)
+        if abort is not None:
+            abort(thread_id)
         task_bridge.unregister(child_id)
         service.update(user_id, child_id, status="interrupted")
         raise HTTPException(status_code=499, detail="Request cancelled")
@@ -395,6 +399,10 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
             # 排队/获取信号量期间被取消：CancelledError 在 sem.acquire() 挂起点
             # 抛出，不经过内部取消分支（try 在其之后）。在此统一清理，避免
             # 残留 zombie 子会话 / task_bridge 映射，并归还排队计数。
+            # [opencode abort 级联] 同时中断 supervisor 在途 handler（若已发出）。
+            abort = getattr(agent_bus, "abort", None)
+            if abort is not None:
+                abort(thread_id)
             if queued_position is not None:
                 _queue_counter = max(0, _queue_counter - 1)
             try:

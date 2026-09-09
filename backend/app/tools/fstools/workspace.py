@@ -94,18 +94,38 @@ def _workspace() -> Path:
     except Exception:
         return _WORKSPACE_FALLBACK
 
-def _resolve(path_str: str) -> Path:
-    """将路径字符串解析为绝对路径，相对路径基于当前会话工作目录解析。
+def _default_workspace() -> Path:
+    """相对路径的回退基准目录。
 
-    [会话目录] 本会话绑定了工作目录（opencode ctx.directory）时，相对路径
-    以该目录为基准；否则回退到项目 worktree（git 仓库根）。
+    优先使用用户会话绑定的工作目录（opencode ctx.directory）；否则若通过前端「工作目录」
+    面板配置了额外工作目录（data/runtime_workspaces.json），取第一个作为默认基准；
+    都没有时才回退到项目 worktree（git 仓库根）。
+    """
+    from app.permission import get_manager as get_perm_mgr
+    base = current_session_workspace()
+    if base:
+        return Path(base)
+    try:
+        extras = get_perm_mgr().extra_workspaces
+    except Exception:
+        extras = []
+    if extras:
+        return extras[0]
+    return _workspace()
+
+def _resolve(path_str: str) -> Path:
+    """将路径字符串解析为绝对路径，相对路径基于默认工作目录解析。
+
+    [默认目录] 本会话绑定了工作目录（opencode ctx.directory）时，相对路径以该目录为
+    基准；否则取前端「工作目录」面板配置的第一个额外工作目录
+    （data/runtime_workspaces.json）；都没有时才回退到项目 worktree（git 仓库根）。
 
     [Windows] 末尾反斜杠会被去掉——".git\\" 在 PowerShell 模式中非法
     （\\ 是转义字符，尾部无后续字符则报错）。
     """
     p = Path(path_str)
     if not p.is_absolute():
-        base = current_session_workspace() or str(_workspace())
+        base = current_session_workspace() or str(_default_workspace())
         p = Path(base) / p
     resolved = p.resolve()
     # Windows 下 Path.resolve() 可能保留尾部反斜杠（如 "E:\\x\\.git\\"）

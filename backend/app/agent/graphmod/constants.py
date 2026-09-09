@@ -198,7 +198,9 @@ _TASK_TOOL_SCHEMA = {
             "autonomously and return its final result. Use this tool when a piece of the request "
             "is independent and benefits from a dedicated context (e.g. read-only codebase "
             "exploration, or producing a structured implementation plan). You continue working "
-            "while it runs, and may launch multiple sub-agents. Do NOT delegate work you can do directly yourself."
+            "while it runs, and may launch multiple sub-agents. Do NOT delegate work you can do directly yourself. "
+            "A completed task returns a <task id=\"...\" state=\"completed\"> wrapper — pass that id back "
+            "as task_id to continue (resume) the same sub-agent conversation instead of a fresh one."
         ),
         "parameters": {
             "type": "object",
@@ -206,13 +208,26 @@ _TASK_TOOL_SCHEMA = {
                 "description": {"type": "string", "description": "A short (3-5 words) description of the task"},
                 "prompt": {
                     "type": "string",
-                    "description": "The detailed task for the sub-agent. It starts with fresh context — "
-                    "include all file paths and background needed. Say clearly what to return.",
+                    "description": "The detailed task for the sub-agent. It starts with fresh context (or resumes "
+                    "a previous sub-agent conversation when task_id is given) — include all file paths and "
+                    "background needed. Say clearly what to return.",
                 },
                 "subagent_type": {
                     "type": "string",
                     "enum": list(_TASK_TOOL_SUBAGENTS),
                     "description": "explore for read-only codebase exploration; plan for structured planning.",
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "Only set to resume a previous sub-agent task: pass the id from a prior "
+                    "tool_task result wrapper (<task id=\"...\">) to continue the same sub-agent conversation "
+                    "instead of starting fresh.",
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "true launches the sub-agent asynchronously and returns immediately with a "
+                    "<task id=\"...\" state=\"running\"> wrapper; you will be notified when it completes. "
+                    "false (default) waits for the result before continuing.",
                 },
             },
             "required": ["description", "prompt", "subagent_type"],

@@ -80,6 +80,8 @@ from app.prompt_log import log_prompt  # [prompt log v1]
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
 # ── 跨子模块依赖（自动生成）──
 from .constants import _TASK_TOOL_SCHEMA
+from .constants import _TASK_TOOL_SUBAGENTS
+from .task_permission import allowed_subagent_types as _allowed_subagent_types
 from .state import AgentState
 from .state import _ZERO_USAGE
 logger = logging.getLogger(__name__)
@@ -494,7 +496,27 @@ class RAGAgentBase:
             names = [t.name for t in self.tools if t.name in wanted]
 
         # 解析为 schema；工具已被热更新移除的名字跳过
-        return [by_name[n].to_openai_tool() for n in names if n in by_name]
+        defs = [by_name[n].to_openai_tool() for n in names if n in by_name]
+        # [opencode task 授权] tool_task 按权限规则裁剪 subagent_type 枚举：
+        # deny 的子 Agent 类型不出现在 schema 中（模型选不到），全部 deny 时整工具摘除。
+        filtered: list[dict] = []
+        for d in defs:
+            if d.get("function", {}).get("name") == "tool_task":
+                params = d["function"].get("parameters", {})
+                props = params.get("properties", {})
+                if "subagent_type" in props:
+                    allowed = _allowed_subagent_types(_TASK_TOOL_SUBAGENTS, settings.task_permission_rules)
+                    if not allowed:
+                        continue  # 权限规则全部 deny → 摘除 tool_task
+                    props["subagent_type"]["enum"] = sorted(allowed)
+                    props["subagent_type"]["description"] = (
+                        f"子 Agent 类型（受管理员权限约束，可选：{sorted(allowed)}）: "
+                        "explore=只读探索代码/文件; plan=纯规划出方案"
+                    )
+                filtered.append(d)
+            else:
+                filtered.append(d)
+        return filtered
     def _remember_conversation_tools(self, conversation_id: str, used_names: set | str) -> None:
         """把本请求实际用到的工具名并入会话挂载缓存（只增不减，尾部追加）。
 

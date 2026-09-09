@@ -103,7 +103,10 @@ async def test_tool_task_success_explore():
     eq = asyncio.Queue()
     r = await agent._tool_task({"prompt": "p", "subagent_type": "explore"}, depth=0,
                                event_queue=eq, directory="/wd", conversation_id="cid")
-    assert r == "42"
+    # [opencode task] 返回 <task id=... state="completed"> 包装（外层解析以取回最终结果）
+    assert r.startswith('<task id="task:')
+    assert 'state="completed"' in r
+    assert "<task_result>42</task_result>" in r
     msg, timeout = bus.calls[0]
     assert timeout == settings.sub_agent_timeout
     assert msg.payload["conversation_id"] == "cid"

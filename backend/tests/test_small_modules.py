@@ -100,7 +100,7 @@ def test_task_bridge_cancel_no_bus():
 
 
 def test_task_bridge_cancel_success():
-    task_bridge._bus = SimpleNamespace(cancel_pending=lambda tid: True)
+    task_bridge._bus = SimpleNamespace(abort=lambda tid: 1)
     task_bridge._threads.clear()
     task_bridge.register("child1", "thread-1")
     assert task_bridge.cancel("child1") is True
@@ -109,14 +109,14 @@ def test_task_bridge_cancel_success():
 def test_task_bridge_cancel_bus_failure_logs():
     def boom(tid):
         raise RuntimeError("bus down")
-    task_bridge._bus = SimpleNamespace(cancel_pending=boom)
+    task_bridge._bus = SimpleNamespace(abort=boom)
     task_bridge._threads.clear()
     task_bridge.register("child1", "thread-1")
     assert task_bridge.cancel("child1") is False
 
 
 def test_task_bridge_cancel_children_aggregate():
-    task_bridge._bus = SimpleNamespace(cancel_pending=lambda tid: True)
+    task_bridge._bus = SimpleNamespace(abort=lambda tid: 1)
     task_bridge._threads.clear()
     task_bridge.register("c1", "t1")
     task_bridge.register("c2", "t2")

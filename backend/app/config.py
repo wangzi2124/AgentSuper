@@ -193,7 +193,10 @@ class Settings(BaseSettings):
     # 使用 extended 超时的子 Agent 列表（逗号分隔）
     extended_timeout_agents: str = "code"
     # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth，默认 1 = 主 Agent 只能再委派一层）
-    subagent_depth: int = 1
+    subagent_depth: int = 4
+    # [opencode task 授权] 委派规则（对齐 permission.task）：如 {"*":"allow","plan":"ask"}。
+    # 空 = 白名单内全部 allow（保持现状）；deny 的子类型从 tool_task enum 移除，ask 走审批。
+    task_permission_rules: dict = {}
     # [token 优化 v15] 并行分解的子任务使用 fresh context（不转发整份 history）。
     # 并行子问题由 LLM 分解时已自含全部必要信息；history 仅对"单路由连续对话"
     # 有意义。清空 history 可避免 N 个并行子 Agent 各自重复 prefill ≤16K 历史。
