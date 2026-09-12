@@ -555,8 +555,8 @@ class RAGAgentGenerate(RAGAgentTools):
             from app.utils.json_repair import strip_json_envelope
             msg.content = strip_json_envelope(msg.content)
         if not (msg.content or "").strip():
-            # Last resort: LLM still returned empty, use a summary
-            msg.content = "任务已完成，请查看结果。"
+            # Last resort: LLM still returned empty (or an empty JSON like {}), use a notice
+            msg.content = "（模型未返回内容，请重试或更换模型。）"
 
         # P4: finish_reason 收尾语义（对齐 opencode prompt.ts:1301-1308 / processor.ts）
         # length → 输出被截断，答案不完整，追加提示不静默

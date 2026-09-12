@@ -669,7 +669,15 @@ async def test_generate_content_filter(gen_env):
 async def test_generate_empty_content_default(gen_env):
     agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="")])
     out = await agent._generate(make_state())
-    assert out["answer"] == "任务已完成，请查看结果。"
+    assert out["answer"] == "（模型未返回内容，请重试或更换模型。）"
+
+
+@pytest.mark.asyncio
+async def test_generate_empty_json_object_default(gen_env):
+    """弱模型（qwen2.5:3b）偶发返回空 JSON 对象 {} → 归一化为兜底文案，不展示 {}。"""
+    agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="{}")])
+    out = await agent._generate(make_state())
+    assert out["answer"] == "（模型未返回内容，请重试或更换模型。）"
 
 
 @pytest.mark.asyncio

@@ -95,13 +95,19 @@ def strip_json_envelope(text: str | None) -> str:
     if not text:
         return text
     s = _strip_code_fence(text.strip())
+    # 空回答形态：{} / [] / null → 归一化为空串，交由调用方兜底文案处理
+    if s.lower() in ("{}", "[]", "null"):
+        return ""
     if not (s.startswith("{") and s.endswith("}")):
         return text
     obj = parse_json_value(s)
     if not isinstance(obj, dict):
         return text
     inner = _extract_envelope_text(obj)
-    return inner if inner is not None else text
+    if inner is not None:
+        return inner
+    # 空对象 {} → 视为空回答
+    return "" if not obj else text
 
 
 def _strip_code_fence(text: str) -> str:

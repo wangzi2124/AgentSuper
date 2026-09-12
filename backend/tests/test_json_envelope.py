@@ -50,3 +50,11 @@ def test_empty_content_unchanged():
 def test_none_and_empty():
     assert strip_json_envelope(None) is None
     assert strip_json_envelope("") == ""
+
+
+def test_empty_json_forms_normalized_to_empty():
+    # 弱模型偶发返回空 JSON 对象/数组/null → 归一化为空串（交由兜底文案）
+    assert strip_json_envelope("{}") == ""
+    assert strip_json_envelope("[]") == ""
+    assert strip_json_envelope("null") == ""
+    assert strip_json_envelope("  {}  ") == ""
