@@ -20,6 +20,7 @@ import {
   mergeServerAndCache,
 } from '../api/session-cache'
 import { interruptSession, revertSession, deleteSessionMessage, updateSession as apiUpdateSession } from '../api/sessions'
+import { loadModelCache, saveModelCache } from '../api/model-cache'
 import { classifyNetworkError } from '../api/errors'
 import { usePermissionStore } from './permission'
 
@@ -108,6 +109,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   async function loadModels(force = false) {
     if (modelsLoaded && !force) return
     modelsLoaded = true
+    // 启动时先取本地快照（上次从后端拉取并保存的默认配置），后端不可达时兜底展示
+    const cache = loadModelCache()
     try {
       const res = await fetchModels()
       models.value = res.models || []
@@ -115,6 +118,15 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       smallModelId.value = res.small_model || ''
       imageCaptionModelId.value = res.image_caption_model || ''
       voiceModelSize.value = res.voice_model_size || ''
+      // 后端成功 → 保存到前端缓存，作为下次启动/离线兜底
+      saveModelCache({
+        savedAt: Date.now(),
+        models: models.value,
+        default_model: defaultModelId.value,
+        small_model: smallModelId.value,
+        image_caption_model: imageCaptionModelId.value,
+        voice_model_size: voiceModelSize.value,
+      })
       if (defaultModelId.value && models.value.length && !models.value.some(m => m.id === selectedModel.value)) {
         selectedModel.value = defaultModelId.value
       }
@@ -124,6 +136,17 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       }
     } catch (e) {
       console.error('Failed to load model catalog:', e)
+      // 后端不可达：回退本地快照，尽量保持选择器可用
+      if (cache && cache.models.length) {
+        models.value = cache.models
+        defaultModelId.value = cache.default_model || ''
+        smallModelId.value = cache.small_model || ''
+        imageCaptionModelId.value = cache.image_caption_model || ''
+        voiceModelSize.value = cache.voice_model_size || ''
+        if (defaultModelId.value && !models.value.some(m => m.id === selectedModel.value)) {
+          selectedModel.value = defaultModelId.value
+        }
+      }
     }
   }
   const useVectorDb = ref(false)

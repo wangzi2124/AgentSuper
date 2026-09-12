@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   saveCache: vi.fn(),
   loadCache: vi.fn(),
   deleteCache: vi.fn(),
+  fetchModels: vi.fn(),
   mergeServerAndCache: (s: any[], c: any[], d?: string[]) =>
     [...(s || []), ...(c || [])].filter(m => !m?.live && !(d || []).includes(m?.id)),
 }))
@@ -31,7 +32,7 @@ vi.mock('@/api/sessions', () => ({
   updateSession: vi.fn(),
 }))
 vi.mock('@/api/models', () => ({
-  fetchModels: vi.fn().mockResolvedValue({ models: [], default_model: '', small_model: null }),
+  fetchModels: mocks.fetchModels,
   modelsToOptions: (models: any[]) => (models || []).map(m => ({ value: m.id, label: m.name, desc: m.description || '' })),
 }))
 vi.mock('@/api/session-cache', () => ({
@@ -46,6 +47,7 @@ vi.mock('@/api/errors', () => ({
 
 import { useMultiAgentStore } from '@/stores/multiAgent'
 import { usePermissionStore } from '@/stores/permission'
+import { loadModelCache, saveModelCache } from '@/api/model-cache'
 
 let uid = 0
 let rngSpy: any
@@ -59,6 +61,9 @@ beforeEach(() => {
   mocks.saveCache.mockResolvedValue(undefined)
   mocks.loadCache.mockResolvedValue(null)
   mocks.deleteCache.mockResolvedValue(undefined)
+  mocks.fetchModels.mockReset()
+  mocks.fetchModels.mockResolvedValue({ models: [], default_model: '', small_model: null, image_caption_model: null, voice_model_size: null })
+  localStorage.clear()
   rngSpy = vi.spyOn(crypto, 'randomUUID').mockImplementation(() => `id-${uid++}`)
 })
 afterEach(() => {
@@ -401,5 +406,64 @@ describe('自动重试上限（S8 独立计数）', () => {
     expect(store.messages).toHaveLength(2)
     expect(store.messages[1].isError).toBe(true)
     expect(store.streamPhase).toBe('idle')
+  })
+})
+
+describe('model config 前端缓存（启动加载 + 离线兜底）', () => {
+  const cachedConfig = {
+    savedAt: Date.now(),
+    models: [
+      {
+        id: 'deepseek/deepseek-v4-flash',
+        provider: 'deepseek',
+        family: 'deepseek',
+        name: 'V4 Flash',
+        description: 'd',
+        capabilities: { tool_use: true, vision: false, reasoning: true },
+        context_length: 128000,
+        cost: { input_per_1m: 0, output_per_1m: 0, cache_read_per_1m: 0, cache_write_per_1m: 0 },
+      },
+    ],
+    default_model: 'deepseek/deepseek-v4-flash',
+    small_model: 'ollama/qwen2.5:3b',
+    image_caption_model: 'ollama/llava:latest',
+    voice_model_size: '0.6B',
+  }
+
+  it('后端成功时写入缓存，可回读', async () => {
+    mocks.fetchModels.mockResolvedValue({
+      models: cachedConfig.models,
+      default_model: cachedConfig.default_model,
+      small_model: cachedConfig.small_model,
+      image_caption_model: cachedConfig.image_caption_model,
+      voice_model_size: cachedConfig.voice_model_size,
+    })
+    const store = useMultiAgentStore()
+    await store.loadModels()
+    expect(store.defaultModelId).toBe('deepseek/deepseek-v4-flash')
+    const cached = loadModelCache()
+    expect(cached).not.toBeNull()
+    expect(cached!.models[0].id).toBe('deepseek/deepseek-v4-flash')
+    expect(cached!.default_model).toBe('deepseek/deepseek-v4-flash')
+  })
+
+  it('后端不可达时回退本地快照（含默认回退）', async () => {
+    saveModelCache(cachedConfig)
+    mocks.fetchModels.mockRejectedValue(new Error('backend down'))
+    const store = useMultiAgentStore()
+    await store.loadModels()
+    expect(store.models).toHaveLength(1)
+    expect(store.models[0].id).toBe('deepseek/deepseek-v4-flash')
+    expect(store.defaultModelId).toBe('deepseek/deepseek-v4-flash')
+    expect(store.smallModelId).toBe('ollama/qwen2.5:3b')
+    expect(store.voiceModelSize).toBe('0.6B')
+    expect(store.selectedModel).toBe('deepseek/deepseek-v4-flash')
+  })
+
+  it('无缓存/非法缓存时 loadModelCache 返回 null', () => {
+    localStorage.setItem('agentsuper:model-config-cache:v1', '{not-json')
+    expect(loadModelCache()).toBeNull()
+    localStorage.setItem('agentsuper:model-config-cache:v1', JSON.stringify({ foo: 1 }))
+    expect(loadModelCache()).toBeNull()
   })
 })

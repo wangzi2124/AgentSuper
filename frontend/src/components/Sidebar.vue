@@ -13,6 +13,14 @@ const auth = useAuthStore()
 
 const sidebarOpen = ref(false)
 
+// 桌面收起（仅图标模式），记忆到 localStorage；移动端仍走抽屉，不受影响
+const sidebarCollapsed = ref(false)
+try { sidebarCollapsed.value = localStorage.getItem('agentsuper:sidebar-collapsed') === '1' } catch { /* ignore */ }
+function toggleCollapsed() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  try { localStorage.setItem('agentsuper:sidebar-collapsed', sidebarCollapsed.value ? '1' : '0') } catch { /* ignore */ }
+}
+
 const navItems = [
   { path: '/multi-agent', label: '多智能体', icon: '🤖' },
   { path: '/documents', label: '文档管理', icon: '📄' },
@@ -131,7 +139,7 @@ function handleLogout() {
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <div v-if="sidebarOpen" class="sidebar-overlay" @click="sidebarOpen = false"></div>
-  <aside class="sidebar" :class="{ open: sidebarOpen }">
+  <aside class="sidebar" :class="{ open: sidebarOpen, collapsed: sidebarCollapsed }">
     <!-- Brand Header -->
     <div class="sidebar-header">
       <div class="brand-row">
@@ -146,6 +154,9 @@ function handleLogout() {
           <h1>AgentSuper</h1>
           <p>RAG · 多智能体</p>
         </div>
+        <button class="sidebar-collapse" :title="sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'" @click="toggleCollapsed">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
       </div>
     </div>
 
@@ -157,9 +168,10 @@ function handleLogout() {
         :to="item.path"
         class="nav-item"
         :class="{ active: route.path === item.path }"
+        :title="item.label"
       >
         <span class="nav-icon">{{ item.icon }}</span>
-        {{ item.label }}
+        <span class="nav-label">{{ item.label }}</span>
       </router-link>
     </nav>
 

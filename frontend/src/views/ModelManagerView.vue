@@ -139,12 +139,17 @@ function capOf(m: ModelInfo) {
 <template>
   <div class="page-header">
     <h2>模型管理</h2>
-    <p>前端配置自定义模型/服务商，持久化到 {{ mm.config?.source_path || 'data/model_catalog.json' }}，无需改后端 .env</p>
+    <p>前端配置自定义模型/服务商，持久化到 {{ mm.config?.source_path || 'data/model_catalog.db' }}，无需改后端 .env
+      （旧 model_catalog.json 首启自动导入后仅作迁移备份）</p>
   </div>
 
   <div class="page-content">
-    <div v-if="mm.notice" class="mm-notice">{{ mm.notice }}</div>
-    <div v-if="mm.error" class="mm-error">{{ mm.error }}</div>
+    <Transition name="toast">
+      <div v-if="mm.notice" class="mm-toast mm-toast--ok">{{ mm.notice }}</div>
+    </Transition>
+    <Transition name="toast">
+      <div v-if="mm.error" class="mm-toast mm-toast--err">{{ mm.error }}</div>
+    </Transition>
 
     <div v-if="mm.loading" class="loading-wrap"><span class="spinner"></span></div>
     <div v-else class="mm-wrap">
@@ -195,7 +200,10 @@ function capOf(m: ModelInfo) {
             </span>
           </label>
           <div class="mm-defaults-save">
-            <button class="btn btn-primary" :disabled="mm.saving || defaultsSaving" @click="saveDefaults">保存</button>
+            <button class="btn btn-primary mm-save-btn" :disabled="mm.saving || defaultsSaving" @click="saveDefaults">
+              <span v-if="defaultsSaving" class="spinner-mm"></span>
+              {{ defaultsSaving ? '保存中…' : '保存' }}
+            </button>
           </div>
         </div>
         <p class="hint mm-defaults-hint">轻量模型用于内部轻任务（子任务分类/会话标题等）；图片解析模型用于图像描述（可选全部 Provider 模型，如 ollama/llava）；语音模型为 Qwen3-TTS 合成规格（0.6B/1.7B）。不指定则跟随后端 .env；改动保存后聊天框立即跟随。</p>
@@ -205,6 +213,7 @@ function capOf(m: ModelInfo) {
       <section class="card mm-block">
         <div class="form-title">
           模型服务商 Provider
+          <span v-if="mm.refreshing" class="spinner-mm mm-refresh-spin" title="刷新中"></span>
           <button class="btn btn-primary mm-title-action" @click="openProviderForm()">+ 新增 Provider</button>
         </div>
         <p class="hint">provider 的 api_base 指向 OpenAI 兼容服务（vLLM / LM Studio / 私服）；保存后自动探测其模型并注册。</p>
@@ -217,13 +226,16 @@ function capOf(m: ModelInfo) {
             <span>{{ p.models?.length ?? 0 }}</span>
             <span>
               <label class="switch">
-                <input type="checkbox" :checked="p.enabled" @change="toggleProvider(p)" />
+                <input type="checkbox" :checked="p.enabled" :disabled="!!mm.busyId" @change="toggleProvider(p)" />
                 <span class="slider"></span>
               </label>
             </span>
             <span class="mm-ops">
-              <button class="btn btn-sm" @click="openProviderForm(p)">编辑</button>
-              <button class="btn btn-sm btn-danger" @click="delProvider(p)">删除</button>
+              <button class="btn btn-sm" :disabled="mm.busyId === p.provider" @click="openProviderForm(p)">编辑</button>
+              <button class="btn btn-sm btn-danger" :disabled="mm.busyId === p.provider || !!mm.busyId" @click="delProvider(p)">
+                <span v-if="mm.busyId === p.provider" class="spinner-mm"></span>
+                {{ mm.busyId === p.provider ? '删除中…' : '删除' }}
+              </button>
             </span>
           </div>
         </div>
@@ -233,6 +245,7 @@ function capOf(m: ModelInfo) {
       <section class="card mm-block">
         <div class="form-title">
           模型列表
+          <span v-if="mm.refreshing" class="spinner-mm mm-refresh-spin" title="刷新中"></span>
           <button class="btn btn-primary mm-title-action" @click="openModelForm()">+ 自定义模型</button>
         </div>
         <p class="hint">自定义 <code>provider/model</code>：若该 provider 未配置，调用回落后端 .env 的 api_base/key。</p>
@@ -245,8 +258,11 @@ function capOf(m: ModelInfo) {
             <span class="mm-num">{{ fmtCost(m.cost?.input_per_1m) }} / {{ fmtCost(m.cost?.output_per_1m) }}</span>
             <span class="mm-cap">{{ capOf(m) }}</span>
             <span class="mm-ops">
-              <button class="btn btn-sm" @click="openModelForm(m)">编辑</button>
-              <button class="btn btn-sm btn-danger" @click="delModel(m)">删除</button>
+              <button class="btn btn-sm" :disabled="mm.busyId === m.id || !!mm.busyId" @click="openModelForm(m)">编辑</button>
+              <button class="btn btn-sm btn-danger" :disabled="mm.busyId === m.id || !!mm.busyId" @click="delModel(m)">
+                <span v-if="mm.busyId === m.id" class="spinner-mm"></span>
+                {{ mm.busyId === m.id ? '删除中…' : '删除' }}
+              </button>
             </span>
           </div>
         </div>
@@ -276,8 +292,11 @@ function capOf(m: ModelInfo) {
       </div>
       <div class="form-footer">
         <label><input v-model="providerForm.enabled" type="checkbox" /> 启用（默认开启探测）</label>
-        <button class="btn" @click="showProviderForm = false">取消</button>
-        <button class="btn btn-primary" @click="submitProvider">保存</button>
+        <button class="btn" :disabled="mm.saving" @click="showProviderForm = false">取消</button>
+        <button class="btn btn-primary mm-save-btn" :disabled="mm.saving" @click="submitProvider">
+          <span v-if="mm.saving" class="spinner-mm"></span>
+          {{ mm.saving ? '保存中…' : '保存' }}
+        </button>
       </div>
     </div>
   </div>
@@ -319,8 +338,11 @@ function capOf(m: ModelInfo) {
         <label class="mm-check"><input v-model="modelForm.reasoning" type="checkbox" /> 推理模型</label>
       </div>
       <div class="form-footer">
-        <button class="btn" @click="showModelForm = false">取消</button>
-        <button class="btn btn-primary" @click="submitModel">保存</button>
+        <button class="btn" :disabled="mm.saving" @click="showModelForm = false">取消</button>
+        <button class="btn btn-primary mm-save-btn" :disabled="mm.saving" @click="submitModel">
+          <span v-if="mm.saving" class="spinner-mm"></span>
+          {{ mm.saving ? '保存中…' : '保存' }}
+        </button>
       </div>
     </div>
   </div>
@@ -332,8 +354,31 @@ function capOf(m: ModelInfo) {
 .mm-block { padding: 18px; }
 .mm-block .form-title { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .form-title.small { margin-top: 8px; }
-.mm-notice { padding: 10px 14px; border-radius: var(--radius); background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); font-size: 13px; margin-bottom: 14px; }
-.mm-error { padding: 10px 14px; border-radius: var(--radius); background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); font-size: 13px; margin-bottom: 14px; }
+/* ── 操作结果 toast（固定右上，覆盖弹窗遮罩） ── */
+.mm-toast {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 9999;
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: var(--shadow-lg, 0 10px 40px rgba(0, 0, 0, 0.25));
+}
+.mm-toast--ok {
+  background: color-mix(in srgb, var(--primary) 14%, var(--surface));
+  color: var(--primary);
+  border: 1px solid color-mix(in srgb, var(--primary) 32%, transparent);
+}
+.mm-toast--err {
+  background: color-mix(in srgb, var(--danger) 14%, var(--surface));
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
+}
+.toast-enter-active, .toast-leave-active { transition: opacity 0.25s var(--ease), transform 0.25s var(--ease); }
+.toast-enter-from { opacity: 0; transform: translateY(-10px); }
+.toast-leave-to { opacity: 0; transform: translateY(-6px); }
 .mm-field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 180px; }
 .mm-field > span { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
 .mm-field.mm-wide { flex: 2; }
@@ -344,6 +389,17 @@ function capOf(m: ModelInfo) {
 .mm-pill-caption { font-size: 12px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
 .mm-defaults-hint { margin: 8px 0 0; }
 .mm-title-action { margin-left: auto; }
+.mm-save-btn { display: inline-flex; align-items: center; gap: 6px; }
+.mm-save-btn:disabled { cursor: not-allowed; }
+.spinner-mm {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+.mm-refresh-spin { margin-left: 8px; }
 
 /* ── 弹窗表单控件：与应用其余页面统一（CustomToolsView .ctrl 同款） ── */
 .ctrl {

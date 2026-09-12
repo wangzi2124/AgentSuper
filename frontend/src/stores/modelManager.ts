@@ -12,16 +12,22 @@ import {
   type ModelOption,
 } from '../api/models'
 import { useMultiAgentStore } from './multiAgent'
+import { loadModelCache, saveModelCache } from '../api/model-cache'
 
 // 模型管理 store：前端配置自定义模型 / Provider / 默认与轻量模型。
-// 写操作直落后端 data/model_catalog.json 并即时刷新多 Agent 选择器。
+// 写操作直落后端 data/model_catalog.db（SQLite，旧 JSON 首启自动导入后仅作备份）并即时刷新多 Agent 选择器。
 export const useModelManagerStore = defineStore('modelManager', () => {
   const config = ref<ModelManagerConfig | null>(null)
   const loading = ref(false)
   const saving = ref(false)
+  // 写后静默刷新期间的轻量"刷新中"指示（列表区小 spinner，不整页闪）
+  const refreshing = ref(false)
+  // 正在执行删除/更新的行 id（Provider 用 name），驱动该行按钮 loading
+  const busyId = ref<string | null>(null)
   const error = ref('')
   const notice = ref('')
   let _noticeTimer: ReturnType<typeof setTimeout> | null = null
+  let _errorTimer: ReturnType<typeof setTimeout> | null = null
 
   function setNotice(msg: string) {
     notice.value = msg
@@ -29,82 +35,128 @@ export const useModelManagerStore = defineStore('modelManager', () => {
     _noticeTimer = setTimeout(() => { notice.value = '' }, 3500)
   }
 
-  async function load(showError = true) {
-    loading.value = true
+  function setError(msg: string) {
+    error.value = msg
+    if (_errorTimer) clearTimeout(_errorTimer)
+    _errorTimer = setTimeout(() => { error.value = '' }, 6000)
+  }
+
+  async function load(showError = true, showLoading = true) {
+    if (showLoading) loading.value = true
     error.value = ''
     try {
       config.value = await fetchModelsConfig()
+      // 成功后同步本地快照（含 providers/source_path），供离线/重启兜底
+      saveModelCache({
+        savedAt: Date.now(),
+        models: config.value.models,
+        default_model: config.value.default_model || '',
+        small_model: config.value.small_model || '',
+        image_caption_model: config.value.image_caption_model || '',
+        voice_model_size: config.value.voice_model_size || '',
+        providers: config.value.providers,
+        source_path: config.value.source_path,
+      })
     } catch (e: any) {
-      if (showError) error.value = e.message || String(e)
+      // 后端不可达：回退本地快照，页面仍可展示（写操作会各自报错）
+      const cached = loadModelCache()
+      if (cached && cached.models.length) {
+        config.value = {
+          models: cached.models,
+          providers: cached.providers || [],
+          default_model: cached.default_model || null,
+          small_model: cached.small_model || null,
+          image_caption_model: cached.image_caption_model || null,
+          voice_model_size: cached.voice_model_size || null,
+          source_path: cached.source_path || '',
+        }
+      } else if (showError && showLoading) {
+        error.value = e.message || String(e)
+      }
     } finally {
-      loading.value = false
+      if (showLoading) loading.value = false
     }
   }
 
-  // 所有写操作成功后：刷新本页配置 + 强制刷新多 Agent 选择器
+  // 所有写操作成功后：后台静默刷新本页配置 + 强制刷新多 Agent 选择器
+  // （不触发整页 loading，避免保存/删除时整个页面闪烁成全屏 spinner；
+  //   用 refreshing 在列表区给轻量"刷新中"提示）
   async function _afterChange() {
-    const multi = useMultiAgentStore()
-    await Promise.allSettled([load(false), multi.loadModels(true)])
+    refreshing.value = true
+    try {
+      const multi = useMultiAgentStore()
+      await Promise.allSettled([load(false, false), multi.loadModels(true)])
+    } finally {
+      refreshing.value = false
+    }
   }
 
   async function addOrUpdateModel(entry: Partial<ModelInfo> & { id: string }) {
     saving.value = true
+    busyId.value = entry.id
     try {
+      const isEdit = (config.value?.models || []).some(m => m.id === entry.id)
       await saveCustomModel(entry)
       await _afterChange()
-      const action = config.value?.models.some(m => m.id === entry.id) ? '更新' : '添加'
-      setNotice(`${action}模型成功：${entry.id}`)
+      setNotice(`${isEdit ? '保存成功（已更新模型）' : '保存成功（新增模型）'}：${entry.id}`)
       return true
     } catch (e: any) {
-      error.value = e.message || String(e)
+      setError(e.message || String(e))
       return false
     } finally {
       saving.value = false
+      busyId.value = null
     }
   }
 
   async function removeModel(mid: string) {
     saving.value = true
+    busyId.value = mid
     try {
       await deleteCustomModel(mid)
       await _afterChange()
-      setNotice(`已删除模型：${mid}`)
+      setNotice(`删除成功：${mid}`)
       return true
     } catch (e: any) {
-      error.value = e.message || String(e)
+      setError(e.message || String(e))
       return false
     } finally {
       saving.value = false
+      busyId.value = null
     }
   }
 
   async function updateProvider(name: string, data: Partial<{ label: string; api_base: string; api_key: string; enabled: boolean }>) {
     saving.value = true
+    busyId.value = name
     try {
       await saveProvider(name, data)
       await _afterChange()
-      setNotice(`已保存 Provider：${name}`)
+      setNotice(`保存成功（${name} Provider）`)
       return true
     } catch (e: any) {
-      error.value = e.message || String(e)
+      setError(e.message || String(e))
       return false
     } finally {
       saving.value = false
+      busyId.value = null
     }
   }
 
   async function removeProvider(name: string) {
     saving.value = true
+    busyId.value = name
     try {
       await deleteProvider(name)
       await _afterChange()
-      setNotice(`已删除 Provider：${name}`)
+      setNotice(`删除成功（${name} Provider）`)
       return true
     } catch (e: any) {
-      error.value = e.message || String(e)
+      setError(e.message || String(e))
       return false
     } finally {
       saving.value = false
+      busyId.value = null
     }
   }
 
@@ -123,10 +175,10 @@ export const useModelManagerStore = defineStore('modelManager', () => {
       if (default_model && multi.modelOptions.some(m => m.value === default_model)) {
         multi.selectedModel = default_model
       }
-      setNotice('默认/轻量/图片/语音模型已保存')
+      setNotice('保存成功（默认/轻量/图片/语音模型）')
       return true
     } catch (e: any) {
-      error.value = e.message || String(e)
+      setError(e.message || String(e))
       return false
     } finally {
       saving.value = false
@@ -153,7 +205,7 @@ export const useModelManagerStore = defineStore('modelManager', () => {
   )
 
   return {
-    config, loading, saving, error, notice,
+    config, loading, saving, refreshing, busyId, error, notice,
     load, addOrUpdateModel, removeModel, updateProvider, removeProvider, setDefaults,
     emptyModel, modelOptions,
   }

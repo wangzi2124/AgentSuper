@@ -55,7 +55,7 @@ export async function fetchModels(): Promise<ModelCatalogResponse> {
   return apiRequest<ModelCatalogResponse>('/api/models', { method: 'GET' }, true)
 }
 
-// ===== 模型管理（前端可配置，持久化到后端 data/model_catalog.json）=====
+// ===== 模型管理（前端可配置，持久化到后端 data/model_catalog.db）=====
 
 export interface ProviderInfo {
   provider: string

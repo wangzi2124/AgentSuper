@@ -38,6 +38,10 @@ async def lifespan(app: FastAPI):
         )
     # Session 管理（session.db）：建表（多 Agent 直写落库，无单 Agent executor）
     init_db()
+    # 模型目录（model_catalog.db）：建表 + 首次从旧 model_catalog.json 导入
+    from app.models import catalog_db
+
+    catalog_db.init()
     app.state.session_service = SessionService()
     # 启动 Agent Bus 事件循环（需要在主事件循环中调用 asyncio.create_task）
     agent_bus = getattr(app.state, "agent_bus", None)

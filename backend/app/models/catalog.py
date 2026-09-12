@@ -4,9 +4,10 @@
 provider.ts ConfigProvider.Info.models 汇总可用模型，价格走各 provider usage 换算）。
 
 - 内置目录：覆盖前端 SUPPORTED_MODELS 全部条目（价格未知记 0，可覆盖）。
-- 用户覆盖：`data/model_catalog.json`（不存在则忽略）——
-  `{"overrides": {<id>: {fields…}}, "extra": [{完整条目…}], "default_model": "…"}`。
-  overrides 按 id 深合并（可改价格/能力/上下文，或新增本地/私有模型）。
+- 用户覆盖：`data/model_catalog.db`（SQLite，见 catalog_db.py）——
+  `{"overrides": {<id>: {fields…}}, "extra": [{完整条目…}], "default_model": "…"}` 同构数据。
+  overrides 按 id 深合并（可改价格/能力/上下文，或新增本地/私有模型）；
+  旧 `data/model_catalog.json` 在首次启动自动导入后仅作迁移备份，不再写入。
 - 计价：`resolve_cost()` 按目录单价换算（每 1M tokens USD）：非缓存输入按输入价、
   cache_read 按命中价、cache_write 按写入价、输出按输出价；无价格单位记 0。
 
@@ -170,29 +171,27 @@ _ZERO_COST = {
 
 
 def catalog_path() -> Path:
-    from app.storage.paths import global_paths
-    return global_paths()["data"] / "model_catalog.json"
+    """旧 model_catalog.json 覆盖文件（迁移备份，DB 生效后不再写入）。"""
+    from app.models.catalog_db import catalog_json_path
+    return catalog_json_path()
+
+
+def catalog_db_path() -> Path:
+    """模型目录数据库路径（当前单一事实来源）。"""
+    from app.models.catalog_db import catalog_db_path as _dbp
+    return _dbp()
 
 
 def load_config() -> dict[str, Any]:
-    """读取 model_catalog.json 原始配置（不存在/损坏返回空 dict）。"""
-    p = catalog_path()
-    if not p.exists():
-        return {}
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, IOError):
-        return {}
+    """读取模型配置（DB 为单一事实来源；语义与原 JSON 一致）。"""
+    from app.models.catalog_db import load_config as _load
+    return _load()
 
 
 def save_config(cfg: dict[str, Any]) -> None:
-    """原子写回 model_catalog.json（保留未涉及的既有字段）。"""
-    p = catalog_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(p)
+    """整体写回模型配置到数据库。"""
+    from app.models.catalog_db import save_config as _save
+    _save(cfg)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -206,34 +205,38 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
-def build_catalog() -> list[dict[str, Any]]:
-    """内置目录 + model_catalog.json 覆盖（overrides 深合并 / extra 追加）。"""
+def build_catalog(cfg: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    """内置目录 + 数据库覆盖（overrides 深合并 / extra 追加）。
+
+    cfg 可注入内存配置（未落库前的自愈校验用），默认自 DB 读取。
+    """
     entries = [_deep_merge(dict(e), {}) for e in _BUILTIN_CATALOG]
     by_id: dict[str, dict] = {e["id"]: e for e in entries}
-    p = catalog_path()
-    if p.exists():
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            data = {}
-        for mid, patch in (data.get("overrides") or {}).items():
-            if mid not in by_id:
-                base = {"id": mid, "provider": mid.split("/", 1)[0],
-                        "family": mid, "name": mid, "description": "",
-                        "capabilities": {"tool_use": True, "vision": False, "reasoning": False},
-                        "cost": dict(_ZERO_COST)}
-                by_id[mid] = base
-            by_id[mid] = _deep_merge(by_id[mid], dict(patch))
-        for extra in data.get("extra") or []:
-            if extra.get("id") and extra["id"] not in by_id:
-                extra.setdefault("cost", dict(_ZERO_COST))
-                extra.setdefault("capabilities", {"tool_use": True, "vision": False, "reasoning": False})
-                by_id[extra["id"]] = extra
+    data = cfg if cfg is not None else load_config()
+    for mid, patch in (data.get("overrides") or {}).items():
+        if mid not in by_id:
+            base = {"id": mid, "provider": mid.split("/", 1)[0],
+                    "family": mid, "name": mid, "description": "",
+                    "capabilities": {"tool_use": True, "vision": False, "reasoning": False},
+                    "cost": dict(_ZERO_COST)}
+            by_id[mid] = base
+        by_id[mid] = _deep_merge(by_id[mid], dict(patch))
+    for extra in data.get("extra") or []:
+        if extra.get("id") and extra["id"] not in by_id:
+            extra.setdefault("cost", dict(_ZERO_COST))
+            extra.setdefault("capabilities", {"tool_use": True, "vision": False, "reasoning": False})
+            by_id[extra["id"]] = extra
     return list(by_id.values())
 
 
-_catalog_cache: Optional[list[dict[str, Any]]] = None
+_catalog_cache: dict[str, list[dict[str, Any]]] = {}
 _catalog_lock = threading.Lock()
+
+
+def _cache_key() -> str:
+    """按数据目录键隔离缓存：AGENTSUPER_DATA 切换（测试/多实例）不会串陈旧目录。"""
+    from app.models.catalog_db import _data_dir
+    return str(_data_dir())
 
 # ── Ollama 本地模型探测 ───────────────────────────────────────────────────
 # 目录是「声明式」的（内置 + 覆盖文件），但真实环境里 ollama 装了哪些模型是运行时事实。
@@ -301,18 +304,21 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
 
 
 def get_catalog(force_reload: bool = False) -> list[dict[str, Any]]:
-    """目录快照（线程安全缓存；force_reload=True 重新读覆盖文件 + 重探测 ollama/自定义 provider）。"""
-    global _catalog_cache
-    if _catalog_cache is None or force_reload:
+    """目录快照（按数据目录键的线程安全缓存；force_reload=True 重新读库 + 重探测）。"""
+    key = _cache_key()
+    cached = _catalog_cache.get(key)
+    if cached is None or force_reload:
         with _catalog_lock:
-            if _catalog_cache is None or force_reload:
+            cached = _catalog_cache.get(key)
+            if cached is None or force_reload:
                 static = build_catalog()
                 known = {e["id"] for e in static}
                 probe = probe_ollama_models(known, force=force_reload)
                 known |= {e["id"] for e in probe}
                 probe = probe + probe_configured_providers(known, force=force_reload)
-                _catalog_cache = static + probe
-    return _catalog_cache
+                cached = static + probe
+                _catalog_cache[key] = cached
+    return cached
 
 
 def reload_catalog() -> None:
@@ -339,7 +345,7 @@ def read_providers() -> dict[str, dict[str, Any]]:
 
 
 def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
-    """新增/更新一个 provider（前端模型管理写回 model_catalog.json）。"""
+    """新增/更新一个 provider（前端模型管理写回 model_catalog.db）。"""
     cfg = load_config()
     providers = dict(cfg.get("providers") or {})
     entry = dict(providers.get(name) or {})
@@ -364,6 +370,7 @@ def remove_provider(name: str) -> bool:
         return False
     del providers[name]
     cfg["providers"] = providers
+    _clear_invalid_defaults(cfg)
     save_config(cfg)
     reload_catalog()
     return True
@@ -380,12 +387,15 @@ def upsert_custom_model(entry: dict[str, Any]) -> dict[str, Any]:
         overrides = dict(cfg.get("overrides") or {})
         overrides[mid] = _deep_merge(overrides.get(mid, {}), _strip_unknown_fields(dict(entry)))
         cfg["overrides"] = overrides
+        # 同一 id 若此前存于 extra（探测模型首次添加进 extra、二次编辑升级为 override）
+        # 必须从 extra 移除，否则写库时 id 在 overrides 与 extra 各一份 → UNIQUE(id) 冲突 500
+        cfg["extra"] = [e for e in (cfg.get("extra") or []) if (e.get("id") if isinstance(e, dict) else None) != mid]
     else:
         entry.setdefault("cost", dict(_ZERO_COST))
         entry.setdefault("capabilities", {"tool_use": True, "vision": False, "reasoning": False})
         entry.setdefault("context_length", 32768)
         entry.setdefault("limits", {"max_output_tokens": 8192})
-        extra = [e for e in (cfg.get("extra") or []) if e.get("id") != mid]
+        extra = [e for e in (cfg.get("extra") or []) if (e.get("id") if isinstance(e, dict) else None) != mid]
         extra.append(entry)
         cfg["extra"] = extra
     save_config(cfg)
@@ -407,14 +417,28 @@ def remove_custom_model(mid: str) -> bool:
         cfg["extra"] = extra
         changed = True
     if changed:
+        _clear_invalid_defaults(cfg)
         save_config(cfg)
         reload_catalog()
     return changed
 
 
+def _clear_invalid_defaults(cfg: dict[str, Any]) -> None:
+    """删除模型/Provider 后清掉指向已不存在条目的默认位（DB 自愈）。
+
+    只按声明式目录（builtin + overrides + extra）判断；探测类（ollama/自定义 provider
+    运行时注册）的 id 不在其列，由 getter 的运行时守卫兜底，避免误清。
+    """
+    ids = {e["id"] for e in build_catalog(cfg)}
+    for key in ("default_model", "small_model", "image_caption_model"):
+        v = cfg.get(key)
+        if v and str(v) not in ids:
+            cfg[key] = None
+
+
 def set_defaults(default_model: Optional[str] = None, small_model: Optional[str] = None,
                  image_caption_model: Optional[str] = None, voice_model_size: Optional[str] = None) -> dict[str, Any]:
-    """设置默认模型 / 轻量模型 / 图片解析模型 / 语音模型规格（写回 model_catalog.json）。"""
+    """设置默认模型 / 轻量模型 / 图片解析模型 / 语音模型规格（写回 model_catalog.db）。"""
     cfg = load_config()
     if default_model is not None:
         cfg["default_model"] = default_model or None
@@ -584,29 +608,28 @@ def model_ref_dict(model_id: Optional[str]) -> Optional[dict[str, Any]]:
 
 
 def default_model() -> str:
-    """默认模型：覆盖文件/内置 default 标记优先，其次 settings.llm_model，最后目录首个。"""
+    """默认模型：数据库(默认为模型管理面板配置)优先，其次 settings.llm_model，最后目录首个。"""
     from app.config import settings
-    p = catalog_path()
-    if p.exists():
-        try:
-            dm = json.loads(p.read_text(encoding="utf-8")).get("default_model")
-            if dm:
-                return str(dm)
-        except (json.JSONDecodeError, IOError):
-            pass
-    if settings.llm_model:
-        return settings.llm_model
+    dm = load_config().get("default_model")
+    if dm and _id_in_catalog(str(dm)):
+        return str(dm)
+    if settings.llm_model and _id_in_catalog(str(settings.llm_model)):
+        return str(settings.llm_model)
     for e in get_catalog():
         if e.get("default"):
             return e["id"]
-    return get_catalog()[0]["id"]
+    return get_catalog()[0]["id"] if get_catalog() else ""
+
+
+def _id_in_catalog(mid: str) -> bool:
+    return any(e["id"] == mid for e in get_catalog())
 
 
 def small_model() -> Optional[str]:
     """轻量模型：model_catalog.json 的 small_model（前端可配置）；未设置回退默认模型。"""
     cfg = load_config()
     sm = cfg.get("small_model")
-    if sm:
+    if sm and _id_in_catalog(str(sm)):
         return str(sm)
     return default_model()
 
@@ -615,7 +638,9 @@ def image_caption_model() -> Optional[str]:
     """图片解析模型：model_catalog.json 的 image_caption_model（模型管理可配）；未配置返回 None。"""
     cfg = load_config()
     v = cfg.get("image_caption_model")
-    return str(v) if v else None
+    if v and _id_in_catalog(str(v)):
+        return str(v)
+    return None
 
 
 def voice_model_size() -> Optional[str]:

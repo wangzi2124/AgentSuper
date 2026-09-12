@@ -3,8 +3,10 @@
 - `GET /api/models`：目录快照与默认/轻量模型（前端选择器）。
 - `GET /api/models/config`：完整配置（目录 + providers + defaults），模型管理面板。
 - `POST /api/models/estimate-tokens`：按 DeepSeek V4 官方 tokenizer 估算上下文 token。
-- 写操作（custom/providers/defaults）持久化到 data/model_catalog.json 并即时生效，
-  模型配置不再依赖后端 .env（保留其作首启动兜底）。
+- 写操作（custom/providers/defaults）持久化到 data/model_catalog.db（SQLite）并即时生效；
+  旧 data/model_catalog.json 在首次启动自动导入后仅作备份，不再写入。
+- 迁移：`GET /api/models/export` 导出当前配置（与旧 JSON 同构），
+  `POST /api/models/import` 导入配置（跨机器迁移用）。
 """
 
 from fastapi import APIRouter, Depends, Request
@@ -39,7 +41,7 @@ async def get_models_config():
         "small_model": catalog.small_model(),
         "image_caption_model": catalog.image_caption_model(),
         "voice_model_size": catalog.voice_model_size(),
-        "source_path": str(catalog.catalog_path()),
+        "source_path": str(catalog.catalog_db_path()),
     })
 
 
@@ -111,7 +113,7 @@ async def put_defaults(req: Request):
 
 @router.post("/models/reload")
 async def reload_models():
-    """重新读取 model_catalog.json 覆盖文件 + 重探测（不重启即可生效）。"""
+    """重新读取配置（DB）+ 重探测（不重启即可生效）。"""
     catalog.reload_catalog()
     return ok({
         "models": catalog.get_catalog(),
@@ -120,3 +122,23 @@ async def reload_models():
         "image_caption_model": catalog.image_caption_model(),
         "voice_model_size": catalog.voice_model_size(),
     })
+
+
+@router.get("/models/export")
+async def export_models():
+    """导出当前模型配置（与旧 model_catalog.json 同构，跨机器迁移载体）。"""
+    from app.models import catalog_db
+    return ok(catalog_db.export_config())
+
+
+@router.post("/models/import", dependencies=[Depends(require_admin)])
+async def import_models(req: Request):
+    """导入模型配置（覆盖写库；body 为与旧 model_catalog.json 同构的对象）。"""
+    from app.models import catalog_db
+    body = await req.json()
+    try:
+        result = catalog_db.import_config(body)
+    except ValueError as e:
+        return fail(str(e))
+    catalog.reload_catalog()
+    return ok({**result, "models": catalog.get_catalog()})
