@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useModelManagerStore } from '../stores/modelManager'
 import type { ModelInfo, ProviderInfo } from '../api/models'
 
@@ -26,6 +26,28 @@ function syncSelectors() {
 }
 
 const modelList = computed(() => mm.config?.models || [])
+
+// ── 模型列表：名称/ID 检索 + 分页 ──
+const modelQuery = ref('')
+const page = ref(1)
+const pageSize = ref(10)
+
+const filteredModels = computed(() => {
+  const q = modelQuery.value.trim().toLowerCase()
+  if (!q) return modelList.value
+  return modelList.value.filter(m =>
+    (m.name || '').toLowerCase().includes(q) || m.id.toLowerCase().includes(q)
+  )
+})
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredModels.value.length / pageSize.value)))
+const pagedModels = computed(() => {
+  const start = (page.value - 1) * pageSize.value
+  return filteredModels.value.slice(start, start + pageSize.value)
+})
+watch(modelQuery, () => { page.value = 1 })
+watch(pageSize, () => { page.value = 1 })
+watch(totalPages, (tp) => { if (page.value > tp) page.value = tp })
+function gotoPage(n: number) { page.value = Math.min(Math.max(1, n), totalPages.value) }
 
 // ── 默认/轻量模型 ──
 const defaultsSaving = ref(false)
@@ -249,9 +271,16 @@ function capOf(m: ModelInfo) {
           <button class="btn btn-primary mm-title-action" @click="openModelForm()">+ 自定义模型</button>
         </div>
         <p class="hint">自定义 <code>provider/model</code>：若该 provider 未配置，调用回落后端 .env 的 api_base/key。</p>
+        <div class="mm-list-toolbar">
+          <label class="mm-search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input v-model="modelQuery" placeholder="按名称 / ID 检索模型…" />
+          </label>
+          <span class="mm-count">共 {{ filteredModels.length }} 个模型</span>
+        </div>
         <div class="mm-table">
           <div class="mm-th"><span>名称</span><span>模型 ID</span><span class="mm-num">上下文</span><span class="mm-num">输入 / 输出价格</span><span>能力</span><span class="mm-ops">操作</span></div>
-          <div v-for="m in modelList" :key="m.id" class="mm-tr">
+          <div v-for="m in pagedModels" :key="m.id" class="mm-tr">
             <span class="mm-main">{{ m.name || m.id }}</span>
             <span class="mm-mono mm-id">{{ m.id }}</span>
             <span class="mm-num">{{ m.context_length.toLocaleString() }}</span>
@@ -265,6 +294,19 @@ function capOf(m: ModelInfo) {
               </button>
             </span>
           </div>
+          <div v-if="!filteredModels.length" class="empty-tip">{{ modelQuery ? '未找到匹配的模型' : '暂无模型' }}</div>
+        </div>
+        <div v-if="filteredModels.length" class="mm-pager">
+          <span class="mm-pager-info">第 {{ page }} / {{ totalPages }} 页</span>
+          <label class="mm-pagesize">每页
+            <select v-model.number="pageSize">
+              <option :value="10">10</option>
+              <option :value="20">20</option>
+              <option :value="50">50</option>
+            </select>
+          </label>
+          <button class="btn btn-sm" :disabled="page <= 1" @click="gotoPage(page - 1)">上一页</button>
+          <button class="btn btn-sm" :disabled="page >= totalPages" @click="gotoPage(page + 1)">下一页</button>
         </div>
       </section>
     </div>
@@ -495,6 +537,22 @@ function capOf(m: ModelInfo) {
 .mm-num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .mm-cap { color: var(--text-secondary); }
 .mm-ops { display: flex; gap: 6px; justify-content: flex-end; }
+
+/* ── 模型列表：检索 + 分页 ── */
+.mm-list-toolbar { display: flex; align-items: center; gap: 12px; margin: 6px 0 4px; flex-wrap: wrap; }
+.mm-search {
+  display: flex; align-items: center; gap: 6px; flex: 1; max-width: 320px;
+  padding: 7px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); color: var(--text-secondary);
+  transition: all var(--duration) var(--ease);
+}
+.mm-search:focus-within { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+.mm-search input { flex: 1; border: none; background: transparent; color: var(--text); font-size: 13px; outline: none; }
+.mm-count { font-size: 12px; color: var(--text-secondary); }
+.mm-pager { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.mm-pager-info { font-size: 12px; color: var(--text-secondary); margin-right: auto; }
+.mm-pagesize { font-size: 12px; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 6px; }
+.mm-pagesize select { padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font-size: 12px; }
 .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; z-index: 200; overflow-y: auto; }
 .dialog { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg, 14px); padding: 20px; max-width: 520px; width: 100%; box-shadow: var(--shadow-lg, 0 10px 40px rgba(0,0,0,0.25)); display: flex; flex-direction: column; gap: 12px; }
 .dialog.wide { max-width: 720px; }
