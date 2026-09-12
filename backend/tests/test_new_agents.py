@@ -192,7 +192,7 @@ async def test_plan_chat_action(monkeypatch, tmp_path):
     mm = FakeMemory(tmp_path)
     agent = PlanAgent(memory=mm)
 
-    async def fake_gen_plan(question, history):
+    async def fake_gen_plan(question, history, **kwargs):
         return "## 实施计划\n### 步骤 1: 创建文件\n..."
     monkeypatch.setattr(agent, "_generate_plan", fake_gen_plan)
 
@@ -212,7 +212,7 @@ async def test_plan_chat_action(monkeypatch, tmp_path):
 async def test_plan_chat_emits_events(monkeypatch):
     agent = PlanAgent()
 
-    async def fake_gen_plan(question, history):
+    async def fake_gen_plan(question, history, **kwargs):
         return "计划"
     monkeypatch.setattr(agent, "_generate_plan", fake_gen_plan)
 
@@ -288,7 +288,7 @@ async def test_plan_unknown_action():
 async def test_plan_exception_emits_error(monkeypatch):
     agent = PlanAgent()
 
-    async def boom(question, history):
+    async def boom(question, history, **kwargs):
         raise RuntimeError("LLM timeout")
     monkeypatch.setattr(agent, "_generate_plan", boom)
 
@@ -304,6 +304,47 @@ async def test_plan_exception_emits_error(monkeypatch):
     while not q.empty():
         events.append(q.get_nowait())
     assert any(e["type"] == "agent_error" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_plan_agent_delegates_via_tool_loop(monkeypatch):
+    """plan 有 bus 时走工具循环：把 bus + task_subagents(explore) + allowlist(tool_task) 传入。"""
+    import app.agent.plan_agent as pa
+    seen = {}
+
+    async def fake_loop(**kw):
+        seen.update(kw)
+        return "## 实施计划\n### 步骤 1"
+    monkeypatch.setattr(pa, "tool_loop_chat", fake_loop)
+
+    bus = object()
+    agent = PlanAgent(bus=bus)
+    out = await agent._generate_plan("q", [], event_queue=None, conv_id="cid", directory="/wd")
+    assert out.startswith("## 实施计划")
+    assert seen["bus"] is bus
+    assert seen["task_subagents"] == ("explore",)
+    assert seen["allowlist"] == ("tool_task",)
+    assert seen["conversation_id"] == "cid"
+    assert seen["directory"] == "/wd"
+
+
+@pytest.mark.asyncio
+async def test_plan_agent_no_bus_uses_pure_llm(monkeypatch):
+    """无 bus（单测/降级）→ 仍走纯 LLM 路径，不调用 tool_loop_chat。"""
+    import app.agent.plan_agent as pa
+
+    async def boom_loop(**kw):
+        raise AssertionError("无 bus 不应走工具循环")
+    monkeypatch.setattr(pa, "tool_loop_chat", boom_loop)
+
+    async def fake_acompletion(**kw):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="纯 LLM 计划"))],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+    monkeypatch.setattr(pa.litellm, "acompletion", fake_acompletion)
+    agent = PlanAgent()
+    assert await agent._generate_plan("q", []) == "纯 LLM 计划"
 
 
 # ── stream_events：新 agent 的 label/avatar ──────────────────────────────
@@ -331,16 +372,17 @@ def test_new_agents_in_labels_and_avatars():
 
 def test_decompose_prompt_includes_new_agents():
     from app.agent.supermod.constants import DECOMPOSE_SYSTEM_PROMPT
-    assert "explore" in DECOMPOSE_SYSTEM_PROMPT
+    # 顶层只有 build/plan 两个命令；explore 是委派目标，不在路由提示词里
+    assert "explore" not in DECOMPOSE_SYSTEM_PROMPT
     assert "plan" in DECOMPOSE_SYSTEM_PROMPT
-    assert "代码探索" in DECOMPOSE_SYSTEM_PROMPT
     assert "规划" in DECOMPOSE_SYSTEM_PROMPT
 
 
 def test_routable_agents_includes_new():
     from app.agent.supermod.base import SupervisorAgentBase
-    assert SupervisorAgentBase.ROUTABLE_AGENTS == {"build", "explore", "plan"}
-    assert "explore" in SupervisorAgentBase.ROUTABLE_AGENTS
+    # 对齐 opencode：顶层命令只有 build/plan，explore 由委派进入
+    assert SupervisorAgentBase.ROUTABLE_AGENTS == {"build", "plan"}
+    assert "explore" not in SupervisorAgentBase.ROUTABLE_AGENTS
     assert "plan" in SupervisorAgentBase.ROUTABLE_AGENTS
 
 

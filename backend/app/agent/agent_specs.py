@@ -9,9 +9,11 @@ allowlist，写工具根本不会出现在 LLM 的 tools 列表里，提示词�
 `readonly` 布尔等特判。想让某个 Agent 拥有哪套工具，改这里的规则即可：
 
 - build   : 主 Agent，走自身 graph 工具（RAGAgentWrapper），不裁剪（tools=None）。
-- explore : 只读探索子 Agent，工具 = 只读 allowlist（ls/read/glob/grep）。
-- plan    : 规划子 Agent，纯 LLM 不执行工具（tools=()），产物落盘
+- plan    : 规划主 Agent（primary，与 build 同为顶层命令），可经 tool_task 委派 explore
+            做只读代码库探索（对齐 opencode plan-mode Phase 1），产物落盘
             <data>/plans/<conv>/plan.md，供后续 build 阶段复读执行。
+- explore : 只读探索子 Agent（subagent，非顶层命令，仅作委派目标），工具 = 只读 allowlist
+            （ls/read/glob/grep）。对齐 opencode：顶层只有 build/plan 两个命令，explore 由委派进入。
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ class AgentSpec:
     mode: str
     tools: Optional[Tuple[str, ...]]
     extended_timeout: bool = False
+    task_subagents: Tuple[str, ...] = ()
 
 
 _AGENT_SPECS: dict[str, AgentSpec] = {
@@ -58,9 +61,10 @@ _AGENT_SPECS: dict[str, AgentSpec] = {
     ),
     "plan": AgentSpec(
         name="plan",
-        description="规划子 Agent：纯 LLM 输出结构化实施计划，不执行工具，产物落盘 <data>/plans/<conv>/plan.md。",
-        mode="subagent",
-        tools=(),
+        description="规划主 Agent（primary）：可委派 explore 只读探索后产出结构化实施计划，产物落盘 <data>/plans/<conv>/plan.md。",
+        mode="primary",
+        tools=("tool_task",),
+        task_subagents=("explore",),
     ),
 }
 

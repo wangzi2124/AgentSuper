@@ -31,11 +31,11 @@ function pickModel(value: string) {
   modelMenuOpen.value = false
 }
 
-// [Agent 选择] 对齐 opencode agent modes：build（默认，知识库+代码+联网合并）/ 规划 / 探索
+// [Agent 选择] 对齐 opencode agent modes：顶层只有 build（默认）/ 规划两个命令，
+// explore 等 subagent 由委派进入，不再作为用户可选模式
 const AGENT_OPTIONS = [
   { value: 'default' as const, icon: '🤖', label: '智能助手', desc: '统一主 Agent（知识库检索 + 代码/文件 + 联网搜索）' },
   { value: 'plan' as const, icon: '📋', label: '规划', desc: '生成结构化实施计划，不执行操作' },
-  { value: 'explore' as const, icon: '🔍', label: '探索', desc: '只读探索代码库结构和内容' },
 ]
 const agentMenuOpen = ref(false)
 const currentAgent = computed(

@@ -153,8 +153,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   // 当前/新建会话绑定的工作目录（opencode ctx.directory）。首条消息发送时
   // 随请求 directory 创建会话；已有会话在 loadConversation 时同步为服务器值。
   const sessionDirectory = ref('')
-  // Agent 模式选择（对齐 opencode agent modes）：default=supervisor路由, plan=规划, explore=探索
-  const agentMode = ref<'default' | 'plan' | 'explore'>('default')
+  // Agent 模式选择（对齐 opencode agent modes）：顶层命令只有 default(build)/plan；explore 由委派进入
+  const agentMode = ref<'default' | 'plan'>('default')
 
   // --- 重试机制 ---
   const AUTO_RETRY_DELAY = 5 // 秒

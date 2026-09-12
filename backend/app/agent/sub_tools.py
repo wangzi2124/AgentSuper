@@ -146,6 +146,8 @@ _WRITE_TOOL_NAMES = (
     "tool_apply_patch",
 )
 _ALL_TOOL_NAMES = _READONLY_TOOL_NAMES + _WRITE_TOOL_NAMES
+# 委派工具（不属只读/写文件工具；仅显式 allowlist + bus 时暴露，如 plan→explore）
+_TASK_TOOL_NAMES = ("tool_task",)
 
 _TOOL_SCHEMAS = [
     {
@@ -307,6 +309,31 @@ _TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_task",
+            "description": (
+                "把一个聚焦、独立的只读探索子任务委派给子 Agent（subagent_type: 'explore'）并取回其最终结果。"
+                "子 Agent 在自己的会话与权限规则集（只读）下运行；当你需要了解代码库结构、"
+                "定位文件/接口/实现以产出更准确的计划时使用。可并行发起多个 tool_task 调用；"
+                "不要委派你能直接完成的工作。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "子任务简述（<10 词）"},
+                    "prompt": {"type": "string", "description": "交给子 Agent 的任务（作为 user 消息）"},
+                    "subagent_type": {
+                        "type": "string",
+                        "enum": ["explore"],
+                        "description": "要委派的子 Agent 类型（只读探索）",
+                    },
+                },
+                "required": ["prompt", "subagent_type"],
+            },
+        },
+    },
 ]
 
 
@@ -362,6 +389,78 @@ async def run_tool(name: str, args: dict, event_queue=None) -> str:
         return f"Error executing {name}: {e}"
 
 
+async def _run_task_tool(
+    args: dict,
+    bus,
+    allowed_subagents: Tuple[str, ...],
+    event_queue=None,
+    source: str = "sub_agent",
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_base: Optional[str] = None,
+    directory: str = "",
+    conversation_id: str = "",
+    depth: int = 0,
+) -> str:
+    """[opencode task 对齐] 子 Agent 委派：spawn 子会话 → 取回末文本 → 包 <task> 信封。
+
+    - subagent_type 必须在 allowed_subagents 白名单内（如 plan 仅可委派 explore）；
+    - 深度守卫：沿 settings.subagent_depth 限制嵌套；
+    - 无 bus / 未授权 / 超时 / 子 Agent 出错 → 返回错误信封文本（供 LLM 自纠），不抛异常。
+    """
+    import uuid as _uuid
+
+    prompt = str(args.get("prompt") or "").strip()
+    subagent_type = str(args.get("subagent_type") or "").strip()
+    if not prompt:
+        return "Error: 'prompt' is required for tool_task."
+    if subagent_type not in allowed_subagents:
+        return f"Error: subagent_type '{subagent_type}' is not allowed. Valid: {sorted(allowed_subagents)}."
+    if bus is None:
+        return "Error: sub-agent bus is unavailable (tool_task disabled)."
+    try:
+        max_depth = max(1, int(settings.subagent_depth or 1))
+    except (TypeError, ValueError):
+        max_depth = 1
+    if depth >= max_depth:
+        return f"Error: sub-agent depth limit reached ({max_depth})."
+
+    from app.agent.base import AgentMessage as _AgentMessage
+
+    sub_thread_id = f"task:{_uuid.uuid4().hex[:8]}"
+    try:
+        reply = await bus.send_and_wait(
+            _AgentMessage(
+                source=source,
+                target=subagent_type,
+                type="request",
+                action="chat",
+                payload={
+                    "question": prompt,
+                    "model": model,
+                    "use_vector_db": False,
+                    "files": [],
+                    "conversation_id": conversation_id,
+                    "directory": directory,
+                    "_task_depth": depth + 1,
+                    "_event_queue": event_queue,
+                },
+                thread_id=sub_thread_id,
+            ),
+            timeout=settings.sub_agent_timeout,
+        )
+    except asyncio.TimeoutError:
+        return f'<task id="{sub_thread_id}" state="error"><task_error>sub-agent timed out</task_error></task>'
+    except Exception as e:  # noqa: BLE001
+        return f'<task id="{sub_thread_id}" state="error"><task_error>{e}</task_error></task>'
+
+    if reply.type == "response":
+        answer = str((reply.payload or {}).get("answer", "") or "(no answer)")
+        return f'<task id="{sub_thread_id}" state="completed"><task_result>{answer}</task_result></task>'
+    err = str((reply.payload or {}).get("error", "sub-agent failed"))
+    return f'<task id="{sub_thread_id}" state="error"><task_error>{err}</task_error></task>'
+
+
 async def tool_loop_chat(
     system_prompt: str,
     user_message: str,
@@ -373,6 +472,9 @@ async def tool_loop_chat(
     history: Optional[list[dict]] = None,
     directory: str = "",
     allowlist: Optional[Tuple[str, ...]] = None,
+    conversation_id: str = "",
+    bus=None,
+    task_subagents: Optional[Tuple[str, ...]] = None,
 ) -> str:
     """子 Agent 的 LLM 工具循环：允许读写文件/搜索/执行白名单命令，最后返回文本回答。
 
@@ -398,7 +500,11 @@ async def tool_loop_chat(
     # allowlist=None → 默认全量工具（不裁剪、不设运行时硬拒绝，保持既有开放行为）；
     # 显式传入 allowlist 时才按规则裁剪 schema + 运行时硬拒绝（对齐 opencode ruleset）。
     allowlist_defined = allowlist is not None
-    allowed_names = _ALL_TOOL_NAMES if not allowlist_defined else tuple(allowlist)
+    allowed_names = list(_ALL_TOOL_NAMES if not allowlist_defined else tuple(allowlist))
+    # [opencode task 对齐] plan 等可显式委派 explore：暴露 tool_task（需 bus + 委派白名单）
+    if bus is not None and task_subagents and "tool_task" not in allowed_names:
+        allowed_names.append("tool_task")
+    allowed_names = tuple(allowed_names)
     tool_schema_set = _tool_schemas(allowed_names)
 
     messages: list[dict] = [
@@ -451,7 +557,16 @@ async def tool_loop_chat(
             "agent_id": agent_id,
             "step": step_event(step_id, name, "running", tool_name=name, tool_args=args),
         })
-        result = await run_tool(name, args, event_queue)
+        result = None
+        if name == "tool_task":
+            result = await _run_task_tool(
+                args, bus, task_subagents or (), event_queue=event_queue,
+                source=agent_id or "sub_agent", model=model, api_key=api_key,
+                api_base=api_base, directory=directory,
+                conversation_id=conversation_id,
+            )
+        else:
+            result = await run_tool(name, args, event_queue)
         emit(event_queue, {
             "type": "agent_step",
             "agent_id": agent_id,

@@ -18,6 +18,8 @@ import litellm
 from app.agent.base import BaseAgent, AgentMessage
 from app.agent.memory import MemoryManager
 from app.agent.stream_events import agent_meta, emit, step_event
+from app.agent.agent_specs import get_agent_spec_or_none
+from app.agent.sub_tools import tool_loop_chat
 from app.config import settings
 from app.monitor import record_model_call
 from app.prompt_log import log_prompt
@@ -39,10 +41,15 @@ def _plan_path(conversation_id: str) -> Path:
 PLAN_SYSTEM_PROMPT = """你是一个专业的项目规划助手。你的任务是分析用户需求，生成结构化实施计划。
 
 核心原则:
-- 不执行任何操作，只输出计划
+- 不执行任何变更操作（只读探索除外），只输出计划
 - 计划必须具体、可执行
 - 每步包含明确的文件/工具/预期结果
 - 识别潜在风险和依赖关系
+
+可选（对齐 opencode plan-mode Phase 1）:
+- 规划前如需了解代码库，可用 tool_task 委派 explore 子 Agent 做只读探索，
+  收集真实文件路径/接口/实现事实（可并行发起多个 tool_task 调用）；
+- 基于探索结果产出更贴合真实代码库的计划。
 
 输出格式（Markdown）:
 
@@ -81,9 +88,11 @@ class PlanAgent(BaseAgent):
         self,
         memory: Optional[MemoryManager] = None,
         agent_id: str = "plan",
+        bus=None,
     ):
         self._id = agent_id
         self._memory = memory
+        self._bus = bus
         self._model = settings.llm_model
         self._api_key = settings.llm_api_key
         self._api_base = settings.llm_api_base
@@ -124,7 +133,11 @@ class PlanAgent(BaseAgent):
                     "step": step_event("plan", "生成实施计划", "running"),
                 })
 
-                answer = await self._generate_plan(question, history)
+                answer = await self._generate_plan(
+                    question, history,
+                    event_queue=event_queue, conv_id=conv_id,
+                    directory=payload.get("directory", ""),
+                )
 
                 # [opencode 对齐] 计划落盘为会话级产物：<data>/plans/<conv>/plan.md
                 # 供后续 build 阶段复读执行（对齐 opencode plan-mode 写计划文件 + build-switch）
@@ -196,8 +209,39 @@ class PlanAgent(BaseAgent):
                 thread_id=msg.thread_id,
             )
 
-    async def _generate_plan(self, question: str, history: list[dict]) -> str:
-        """调用 LLM 生成结构化计划。"""
+    async def _generate_plan(
+        self,
+        question: str,
+        history: list[dict],
+        event_queue=None,
+        conv_id: str = "",
+        directory: str = "",
+    ) -> str:
+        """生成结构化计划。
+
+        有 bus 时走工具循环：plan 可经 tool_task 委派 explore 做只读代码库探索
+        （对齐 opencode plan-mode Phase 1），探索结果并入上下文后再产出计划；
+        无 bus（单测/降级）时退化为纯 LLM 生成。
+        """
+        if self._bus is not None:
+            spec = get_agent_spec_or_none(self._id)
+            return await tool_loop_chat(
+                system_prompt=PLAN_SYSTEM_PROMPT,
+                user_message=question,
+                event_queue=event_queue,
+                agent_id=self._id,
+                model=self._model,
+                api_key=self._api_key,
+                api_base=self._api_base,
+                history=history,
+                directory=directory,
+                conversation_id=conv_id,
+                allowlist=(spec.tools if spec else ("tool_task",)),
+                bus=self._bus,
+                task_subagents=(spec.task_subagents if spec else ("explore",)),
+            )
+
+        # ── 无 bus：纯 LLM 生成计划（原路径）──
         messages = [
             {"role": "system", "content": PLAN_SYSTEM_PROMPT},
         ]

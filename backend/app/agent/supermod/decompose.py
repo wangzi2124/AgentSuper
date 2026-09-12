@@ -52,28 +52,16 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
 
         [opencode build 合并] rag/code/web_search 已合并为单一 build agent
         （知识库 + 代码/文件 + 内建 web 搜索），故不再按 kb/code/web 关键词拆分；
-        除明确的"只读探索"意图走 explore、"规划/出方案"意图走 plan 外，其余统一由 build 处理。
-        返回格式: [{"agent": "build" | "explore" | "plan", "question": "..."}]
+        顶层只有 build/plan 两个命令（对齐 opencode）：明确的"规划/出方案"意图走 plan，
+        其余统一由 build 处理（探索代码库等由 build 的 tool_task 委派 explore 子 Agent）。
+        返回格式: [{"agent": "build" | "plan", "question": "..."}]
         """
         q = question.strip().lower()
 
         # ── 快速路径: 关键词 + 可用 Agent 判断 ──
         available_agents = [a for a in self._bus.list_agents() if a in self.ROUTABLE_AGENTS]
 
-        # 明确的"只读探索代码库"意图 → explore（其余代码/文档/网络问题都由 build 覆盖）
-        explore_keywords = [
-            "代码库", "目录结构", "项目结构", "源码结构", "文件结构", "工作区结构",
-            "哪个文件", "文件在哪", "这个项目", "源代码在哪", "函数定义在哪", "类定义在哪",
-            "仓库结构", "整个项目", "有哪些文件", "项目里",
-            "structure of", "where is the file", "files in",
-        ]
-        needs_explore = any(kw in q for kw in explore_keywords) and "explore" in available_agents
-
-        if needs_explore:
-            return [{"agent": "explore", "question": question}]
-
         # 明确的"规划/出方案"意图 → plan（对齐 opencode plan_enter：复杂任务先规划再执行）。
-        # 注意优先级低于 explore：复合意图（先看结构再规划）优先满足探索诉求。
         plan_keywords = [
             "先规划", "先计划", "做计划", "制定计划", "修改计划", "生成计划", "计划一下",
             "实施计划", "实施方案", "设计方案", "设计一个方案", "规划方案", "方案设计", "拿出方案",

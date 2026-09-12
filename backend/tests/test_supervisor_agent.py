@@ -71,7 +71,7 @@ def test_mro_chain_and_method_placement():
               "_llm_decompose", "_validate_subtasks", "_execute_parallel", "_synthesize"):
         assert callable(getattr(SupervisorAgent, m)), m
     # 类属性经 MRO 可达（rag/code/web_search 已合并为 build）
-    assert SupervisorAgent.ROUTABLE_AGENTS == {"build", "explore", "plan"}
+    assert SupervisorAgent.ROUTABLE_AGENTS == {"build", "plan"}
     assert len(SupervisorAgent._GREETING_KEYWORDS)  # 非空
 
 

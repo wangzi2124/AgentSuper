@@ -179,7 +179,7 @@ def _do_init(app):
     explore_agent = ExploreAgent(memory=shared_memory, agent_id="explore")
     agent_bus.register(explore_agent)
 
-    plan_agent = PlanAgent(memory=shared_memory, agent_id="plan")
+    plan_agent = PlanAgent(memory=shared_memory, agent_id="plan", bus=agent_bus)
     agent_bus.register(plan_agent)
 
     supervisor = SupervisorAgent(agent_bus, memory=shared_memory)

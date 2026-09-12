@@ -79,8 +79,12 @@ async def _drive(spv: _TestSupervisor) -> list:
     return [r async for r in spv.handle_message(msg)]
 
 
-async def _run(subtasks, agents: dict, timeout_override=None):
-    """起总线+子 Agent 循环 → 驱动 supervisor bootstrap 一个请求 → 清理。"""
+async def _run(subtasks, agents: dict, timeout_override=None, direct=False):
+    """起总线+子 Agent 循环 → 驱动 supervisor bootstrap 一个请求 → 清理。
+
+    direct=True 时直接调 `_execute_parallel`（绕过 handle_message 的顶层白名单过滤，
+    以便用任意 agent 名测并发机制本身）。
+    """
     bus = AgentBus()
     for a in agents.values():
         bus.register(a)
@@ -88,7 +92,11 @@ async def _run(subtasks, agents: dict, timeout_override=None):
     spv = _TestSupervisor(bus, subtasks=subtasks, timeout_override=timeout_override)
     try:
         start = time.perf_counter()
-        replies = await _drive(spv)
+        if direct:
+            reply = await spv._execute_parallel(subtasks, {"question": "q"}, "t-main")
+            replies = [reply]
+        else:
+            replies = await _drive(spv)
         return spv, agents, replies, time.perf_counter() - start
     finally:
         bus.stop_all()
@@ -138,7 +146,7 @@ async def test_supervisor_parallel_fanout():
     }
     spv, _, replies, elapsed = await _run(
         [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
-         {"agent": "plan", "question": "Q3"}], agents)
+         {"agent": "plan", "question": "Q3"}], agents, direct=True)
 
     reply = replies[0]
     assert reply.type == "response"
@@ -177,7 +185,7 @@ async def test_partial_failure_note():
     }
     spv, _, replies, _ = await _run(
         [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
-         {"agent": "plan", "question": "Q3"}], agents)
+         {"agent": "plan", "question": "Q3"}], agents, direct=True)
 
     reply = replies[0]
     assert reply.payload["routed_to"] == "build+explore"
@@ -195,7 +203,7 @@ async def test_graded_timeout_no_hang():
     }
     _, _, replies, elapsed = await _run(
         [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
-         {"agent": "plan", "question": "Q3"}], agents, timeout_override=0.4)
+         {"agent": "plan", "question": "Q3"}], agents, timeout_override=0.4, direct=True)
 
     reply = replies[0]
     assert reply.type == "response"

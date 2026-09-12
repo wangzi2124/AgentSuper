@@ -44,11 +44,11 @@ logger = logging.getLogger(__name__)
 class SupervisorAgentBase(BaseAgent):
 
     # 可路由的 Agent 白名单（对齐 opencode primary/subagent 分层）：
-    #   build   = 默认主 Agent（知识库 + 代码/文件 + 内建 web 搜索，合并原 rag/code/web_search）
-    #   explore = 只读探索子 Agent
-    #   plan    = 规划子 Agent（纯 LLM，不执行工具）
+    #   build = 默认主 Agent（知识库 + 代码/文件 + 内建 web 搜索，合并原 rag/code/web_search）
+    #   plan  = 规划主 Agent（纯 LLM，不执行工具）
+    # explore 等为 subagent，**不作顶层命令**，只由 build 的 tool_task 委派进入。
     # 排除 supervisor 自身，防止 LLM 返回 "supervisor" 造成自我递归。
-    ROUTABLE_AGENTS = {"build", "explore", "plan"}
+    ROUTABLE_AGENTS = {"build", "plan"}
     def __init__(self, bus: AgentBus, memory: Optional[MemoryManager] = None):
         self._bus = bus
         self._memory = memory

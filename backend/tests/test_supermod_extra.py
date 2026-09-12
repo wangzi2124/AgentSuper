@@ -97,12 +97,13 @@ async def test_decompose_keyword_single(agent, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_decompose_explore_intent(agent, monkeypatch):
+async def test_decompose_explore_intent_goes_build(agent, monkeypatch):
+    """顶层只有 build/plan：探索意图不再路由 explore（explore 由 build 委派），统一走 build。"""
     monkeypatch.setattr(agent, "_llm_decompose", lambda q, a: (_ for _ in ()).throw(AssertionError("不应调用 LLM")))
     assert await agent._decompose("帮我看看这个项目的目录结构") == \
-        [{"agent": "explore", "question": "帮我看看这个项目的目录结构"}]
+        [{"agent": "build", "question": "帮我看看这个项目的目录结构"}]
     assert await agent._decompose("后端代码库有哪些文件") == \
-        [{"agent": "explore", "question": "后端代码库有哪些文件"}]
+        [{"agent": "build", "question": "后端代码库有哪些文件"}]
 
 
 @pytest.mark.asyncio
@@ -157,12 +158,12 @@ async def test_llm_decompose_valid(agent, monkeypatch):
         return SimpleNamespace(
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
             choices=[SimpleNamespace(message=SimpleNamespace(
-                content='[{"agent": "build", "question": "q1"}, {"agent": "explore", "question": "q2"}]'))],
+                content='[{"agent": "build", "question": "q1"}, {"agent": "plan", "question": "q2"}]'))],
         )
     monkeypatch.setattr(dec.litellm, "acompletion", fake_acompletion)
     agent._usage = {"input": 0, "output": 0}
-    out = await agent._llm_decompose("问题", ["build", "explore", "plan"])
-    assert [s["agent"] for s in out] == ["build", "explore"]
+    out = await agent._llm_decompose("问题", ["build", "plan"])
+    assert [s["agent"] for s in out] == ["build", "plan"]
     assert agent._usage["input"] == 10 and agent._usage["output"] == 5
 
 
@@ -239,13 +240,13 @@ async def test_handle_single_route(agent, monkeypatch):
 async def test_handle_multi_parallel(agent, monkeypatch):
     async def fake_parallel(subtasks, payload, tid):
         return AgentMessage(source="supervisor", target="user", type="response", action="chat",
-                            payload={"answer": "P", "routed_to": "build+explore"}, thread_id=tid)
+                            payload={"answer": "P", "routed_to": "build+plan"}, thread_id=tid)
     async def fake_decompose(q):
-        return [{"agent": "build", "question": "a"}, {"agent": "explore", "question": "b"}]
+        return [{"agent": "build", "question": "a"}, {"agent": "plan", "question": "b"}]
     monkeypatch.setattr(agent, "_decompose", fake_decompose)
     monkeypatch.setattr(agent, "_execute_parallel", fake_parallel)
     replies = await _collect(agent, _msg(payload={"question": "q"}))
-    assert replies[0].payload["routed_to"] == "build+explore"
+    assert replies[0].payload["routed_to"] == "build+plan"
 
 
 @pytest.mark.asyncio

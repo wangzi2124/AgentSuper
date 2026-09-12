@@ -418,3 +418,94 @@ async def test_loop_chat_allowlist_default_full_set(fake_acompletion):
     await st.tool_loop_chat("sys", "user")
     exposed = [t["function"]["name"] for t in calls[0]["tools"]]
     assert set(exposed) == set(st._ALL_TOOL_NAMES)
+
+
+# ── tool_task 委派（对齐 opencode task：plan → explore）────────────────────────
+
+class _FakeBus:
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+
+    async def send_and_wait(self, msg, timeout=None):
+        self.calls.append(msg)
+        return self.reply
+
+
+@pytest.mark.asyncio
+async def test_run_task_tool_rejects_disallowed_subagent():
+    """subagent_type 不在白名单（如 plan 只允许 explore）→ 拒绝，不发送。"""
+    class B:
+        async def send_and_wait(self, msg, timeout=None):
+            raise AssertionError("不应发送")
+    r = await st._run_task_tool({"prompt": "p", "subagent_type": "build"}, B(), ("explore",))
+    assert "not allowed" in r
+
+
+@pytest.mark.asyncio
+async def test_run_task_tool_no_bus():
+    r = await st._run_task_tool({"prompt": "p", "subagent_type": "explore"}, None, ("explore",))
+    assert "bus is unavailable" in r
+
+
+@pytest.mark.asyncio
+async def test_run_task_tool_success_envelope():
+    from app.agent.base import AgentMessage
+    bus = _FakeBus(AgentMessage(source="explore", target="plan", type="response", action="chat",
+                                payload={"answer": "代码库事实：核心在 app/agent/supermod/core.py"},
+                                thread_id="t"))
+    r = await st._run_task_tool(
+        {"prompt": "探索代码库", "subagent_type": "explore"}, bus, ("explore",),
+        source="plan", conversation_id="cid", directory="/wd",
+    )
+    assert 'state="completed"' in r and "代码库事实" in r
+    sent = bus.calls[0]
+    assert sent.target == "explore" and sent.source == "plan"
+    assert sent.payload["question"] == "探索代码库"
+    assert sent.payload["conversation_id"] == "cid"
+    assert sent.payload["directory"] == "/wd"
+
+
+@pytest.mark.asyncio
+async def test_run_task_tool_error_envelope():
+    from app.agent.base import AgentMessage
+    bus = _FakeBus(AgentMessage(source="explore", target="plan", type="error", action="chat",
+                                payload={"error": "explore 挂了"}, thread_id="t"))
+    r = await st._run_task_tool({"prompt": "p", "subagent_type": "explore"}, bus, ("explore",))
+    assert 'state="error"' in r and "explore 挂了" in r
+
+
+@pytest.mark.asyncio
+async def test_loop_chat_exposes_tool_task_with_delegation(fake_acompletion):
+    """plan 规格：allowlist=(tool_task,) + bus + task_subagents → 暴露 tool_task schema。"""
+    calls = fake_acompletion([_resp(content="done")])
+    await st.tool_loop_chat("sys", "user", allowlist=("tool_task",), bus=object(),
+                            task_subagents=("explore",))
+    exposed = [t["function"]["name"] for t in calls[0]["tools"]]
+    assert exposed == ["tool_task"]
+
+
+@pytest.mark.asyncio
+async def test_loop_chat_dispatches_tool_task(monkeypatch, fake_acompletion):
+    """LLM 调 tool_task → 走 _run_task_tool 委派 handler（不走 run_tool 文件工具）。"""
+    fake_acompletion([
+        _resp(tool_calls=[("tool_task", '{"prompt":"p","subagent_type":"explore"}')]),
+        _resp(content="final"),
+    ])
+    seen = {}
+
+    async def fake_task(args, bus, allowed, **kw):
+        seen["args"] = args
+        seen["allowed"] = allowed
+        return "<task id=\"x\" state=\"completed\"><task_result>ok</task_result></task>"
+    monkeypatch.setattr(st, "_run_task_tool", fake_task)
+
+    async def boom_run(*a, **k):
+        raise AssertionError("不应走 run_tool")
+    monkeypatch.setattr(st, "run_tool", boom_run)
+
+    out = await st.tool_loop_chat("sys", "user", allowlist=("tool_task",), bus=object(),
+                                  task_subagents=("explore",))
+    assert out == "final"
+    assert seen["args"]["subagent_type"] == "explore"
+    assert seen["allowed"] == ("explore",)

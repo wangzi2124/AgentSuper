@@ -4,7 +4,7 @@
 验证 agent_specs 声明式规格驱动工具 allowlist（对齐 opencode agent.ts 权限规则集）：
   - build/explore/plan 三个规格齐全，字段语义正确
   - explore.tools == 只读工具集（"*": deny + 只读 allowlist 的可编程来源）
-  - plan.tools == ()（纯 LLM，无工具）
+  - plan.tools == ("tool_task",) + task_subagents == ("explore",)（可委派 explore 探索）
   - build.mode == primary / tools is None / extended_timeout True
   - get_agent_spec 未知名称抛 KeyError、_or_none 返回 None
 
@@ -45,10 +45,11 @@ def test_explore_spec_readonly_allowlist():
     assert set(spec.tools) & set(_WRITE_TOOL_NAMES) == set()
 
 
-def test_plan_spec_no_tools():
+def test_plan_spec_delegates_explore():
     spec = get_agent_spec("plan")
-    assert spec.mode == "subagent"
-    assert spec.tools == ()
+    assert spec.mode == "primary"
+    assert spec.tools == ("tool_task",)  # 唯一工具：委派 explore
+    assert spec.task_subagents == ("explore",)
     assert spec.extended_timeout is False
 
 
