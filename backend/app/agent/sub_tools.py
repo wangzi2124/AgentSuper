@@ -343,11 +343,39 @@ def _tool_schemas(names: tuple[str, ...]) -> list[dict]:
     return [by_name[n] for n in names if n in by_name]
 
 
+_PARAM_ALIASES = {
+    "file_path": "path",
+    "filepath": "path",
+    "file_name": "path",
+    "filename": "path",
+    "file": "path",
+    "dir": "path",
+    "directory": "path",
+    "folder": "path",
+    "cmd": "command",
+    "command_line": "command",
+    "text": "content",
+    "data": "content",
+    "work_dir": "workdir",
+}
+
+
 def _coerce_args(fn, args: dict) -> dict:
-    """过滤掉 LLM 可能多传、而函数签名不接受的参数，避免 TypeError。"""
+    """过滤掉 LLM 可能多传、而函数签名不接受的参数，避免 TypeError。
+
+    同时把弱模型常见的参数别名（如 file_path → path）映射到实际签名参数名。
+    """
     params = set(inspect.signature(fn).parameters)
     params.discard("self")
-    return {k: v for k, v in args.items() if k in params}
+    out: dict = {}
+    for k, v in args.items():
+        if k in params:
+            out[k] = v
+            continue
+        target = _PARAM_ALIASES.get(k)
+        if target and target in params and target not in out:
+            out[target] = v
+    return out
 
 
 def _permission_denied_msg(operation: str, path: str) -> str:

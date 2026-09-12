@@ -86,6 +86,44 @@ logger = logging.getLogger(__name__)
 # [opencode background] 模块级后台委派任务表（thread_id → Task），进程级存活，
 # 不随单次 LLM 工具循环结束；每个 sub_thread_id 只注册一个后台任务。
 _background_tasks: dict[str, asyncio.Task] = {}
+
+# [弱模型鲁棒性] 常见参数别名 → 函数实际签名参数名。弱模型常把 `path` 写成 `file_path`
+# （实测 qwen2.5-coder 写文件传 file_path → `unexpected keyword argument 'file_path'`，
+# 重试 4 次死循环）。仅当目标参数存在且未提供时才映射，避免误改。
+_PARAM_ALIASES = {
+    "file_path": "path",
+    "filepath": "path",
+    "file_name": "path",
+    "filename": "path",
+    "file": "path",
+    "dir": "path",
+    "directory": "path",
+    "folder": "path",
+    "cmd": "command",
+    "command_line": "command",
+    "text": "content",
+    "data": "content",
+    "work_dir": "workdir",
+}
+
+
+def _normalize_tool_args(fn, args: dict) -> dict:
+    """把弱模型常见的参数别名映射到函数实际参数名（只补不覆盖）。"""
+    if not isinstance(args, dict) or not args:
+        return args
+    try:
+        params = set(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):
+        return args
+    out = dict(args)
+    for k in list(out.keys()):
+        if k in params:
+            continue
+        target = _PARAM_ALIASES.get(k)
+        if target and target in params and target not in out:
+            out[target] = out.pop(k)
+    return out
+
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgentTools(RAGAgentBase):
     def _task_tool_placeholder(self, description: str = "", prompt: str = "", subagent_type: str = "web_search") -> str:
@@ -301,6 +339,7 @@ class RAGAgentTools(RAGAgentBase):
         """执行指定的工具函数，处理权限检查和错误。"""
         for t in self.tools:
             if t.name == name:
+                args = _normalize_tool_args(t.fn, args)
                 try:
                     # [opencode task tool] 主 Agent 自主委派子 Agent 的入口（注入任务深度 + 事件队列）
                     if name == "tool_task":
