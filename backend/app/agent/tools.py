@@ -317,6 +317,10 @@ def build_system_prompt_no_kb(
     parts.extend([
         "",
         "Instructions:",
+        "- WORKFLOW (call tool → execute → summarize): call tools to gather info / perform actions; "
+        "AFTER tool results come back, ALWAYS reply with a natural-language summary for the user. "
+        "Do NOT keep calling the same tool, do NOT output an empty JSON like {}, and do NOT print "
+        "tool-call JSON as text.",
         "- No knowledge base available; answer from your own knowledge; say so honestly if unsure.",
         "- Only call tools directly relevant to the request.",
         "- Docs: use docx/pdf/excel/pptx generator plugins, or tool_write_file for other formats.",

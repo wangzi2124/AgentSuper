@@ -94,10 +94,20 @@ from .state import _find_attachment
 # 导致空输出（{}）或乱调工具。这里给一份短提示，工具 schema 仍由 _build_tool_defs 提供。
 _WEAK_SYSTEM_PROMPT = (
     "你是 AgentSuper 的 AI 助手。请用简洁的中文直接回答用户问题。\n"
-    "- 需要时调用工具（文件读写/搜索/执行、技能 load_skill_*、插件脚本）完成任务；\n"
-    "- 不需要工具时直接用文字回答，不要输出空 JSON（如 {}）；\n"
-    "- 每次工具调用后都要给出文字总结。"
+    "工作方式（调工具→执行→总结）：\n"
+    "1. 需要读文件/搜索/执行命令/用技能或插件时，调用对应工具；\n"
+    "2. 工具返回结果后，必须用中文把结果总结给用户；\n"
+    "3. 不要重复调用同一个工具、不要输出空 JSON（如 {}）、不要把工具调用当成文本打印。"
 )
+
+
+def _is_valid_answer(text: str | None) -> bool:
+    """最终回答是否可用：非空，且不是自造 JSON / 工具调用标记等垃圾输出。"""
+    from app.utils.json_repair import is_unparsed_json_answer, is_tool_call_markup
+    t = (text or "").strip()
+    if not t:
+        return False
+    return not is_unparsed_json_answer(t) and not is_tool_call_markup(t)
 logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgentGenerate(RAGAgentTools):
@@ -571,16 +581,16 @@ class RAGAgentGenerate(RAGAgentTools):
         # [Ollama 本地模型兜底] 弱模型（qwen2.5-coder / mistral 等）常把整个回答包在
         # {"response":"..."} 或 {"role":"assistant","content":"..."} JSON 外壳里——
         # 统一解包提取纯文本，避免用户看到 JSON 原文。
-        from app.utils.json_repair import strip_json_envelope
+        from app.utils.json_repair import parse_answer_envelope
         if msg.content:
-            msg.content = strip_json_envelope(msg.content)
-        # [弱模型鲁棒性] 空回答（含 {}）自动重试：同模型 + 轻量提示重试一次；仍空则回退
-        # 默认强模型重跑一次；再空才显示兜底文案。
-        if settings.empty_answer_retry and not (msg.content or "").strip():
+            msg.content = parse_answer_envelope(msg.content)
+        # [弱模型鲁棒性] 空回答（含 {}）或「无法提取文本的自造 JSON」→ 自动重试/回退强模型；
+        # 再失败才显示兜底文案。
+        if settings.empty_answer_retry and not _is_valid_answer(msg.content):
             msg.content = await self._retry_empty_answer(messages, model, state)
-        if not (msg.content or "").strip():
-            # Last resort: LLM still returned empty (or an empty JSON like {}), use a notice
-            msg.content = "（模型未返回内容，请重试或更换模型。）"
+        if not _is_valid_answer(msg.content):
+            # Last resort: LLM returned empty / an unparseable JSON object
+            msg.content = "（模型未返回有效内容，请重试或更换模型。）"
 
         # P4: finish_reason 收尾语义（对齐 opencode prompt.ts:1301-1308 / processor.ts）
         # length → 输出被截断，答案不完整，追加提示不静默
@@ -614,7 +624,7 @@ class RAGAgentGenerate(RAGAgentTools):
         2) 仍空则回退到配置/前端默认模型，附一条简短的「请直接回答」提示。
         成功返回非空文本；全部失败返回 ""（由调用方显示兜底文案）。
         """
-        from app.utils.json_repair import strip_json_envelope
+        from app.utils.json_repair import parse_answer_envelope
 
         # 回退模型优先级：显式 env（EMPTY_ANSWER_FALLBACK_MODEL_NAME）→ 前端「模型管理」默认模型
         # （catalog.default_model()）→ .env 的 LLM_MODEL（self.model）。前端已配默认模型时无需 env。
@@ -640,8 +650,8 @@ class RAGAgentGenerate(RAGAgentTools):
             try:
                 msgs = list(messages) + ([{"role": "user", "content": nudge}] if nudge else [])
                 resp = await self._llm_call(m, msgs, None, state=state)
-                text = strip_json_envelope((resp.choices[0].message.content or "").strip())
-                if text and text.strip():
+                text = parse_answer_envelope((resp.choices[0].message.content or "").strip())
+                if _is_valid_answer(text):
                     logger.info("empty-answer recovered via model=%s", m)
                     return text
             except Exception as e:  # noqa: BLE001

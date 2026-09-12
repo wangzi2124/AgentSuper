@@ -669,7 +669,7 @@ async def test_generate_content_filter(gen_env):
 async def test_generate_empty_content_default(gen_env):
     agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="")])
     out = await agent._generate(make_state())
-    assert out["answer"] == "（模型未返回内容，请重试或更换模型。）"
+    assert out["answer"] == "（模型未返回有效内容，请重试或更换模型。）"
 
 
 @pytest.mark.asyncio
@@ -677,7 +677,7 @@ async def test_generate_empty_json_object_default(gen_env):
     """弱模型（qwen2.5:3b）偶发返回空 JSON 对象 {} → 归一化为兜底文案，不展示 {}。"""
     agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="{}")])
     out = await agent._generate(make_state())
-    assert out["answer"] == "（模型未返回内容，请重试或更换模型。）"
+    assert out["answer"] == "（模型未返回有效内容，请重试或更换模型。）"
 
 
 @pytest.mark.asyncio
@@ -711,6 +711,25 @@ async def test_generate_empty_answer_falls_back_to_default_model(gen_env, monkey
     state["model"] = "ollama/qwen2.5:3b"  # 弱模型 → 跳过同模型重试，直接回退
     out = await agent._generate(state)
     assert out["answer"] == "fallback answer"
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_unparsed_json_answer_falls_back(gen_env, monkeypatch):
+    """弱模型自造「无文本键的 JSON」→ 判定失败 → 回退默认模型（不把 JSON 展示给用户）。"""
+    monkeypatch.setattr(settings, "empty_answer_retry", True)
+    monkeypatch.setattr(settings, "empty_answer_fallback_model", True)
+    monkeypatch.setattr(settings, "empty_answer_fallback_model_name", "")
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
+    agent, llm = _setup_generate(gen_env, [
+        FakeLLM().response(content='{"type":"content","title":"x","bullets":[]}'),  # 自造 JSON
+        FakeLLM().response(content="正常回答"),  # 回退默认模型
+    ])
+    state = make_state()
+    state["model"] = "ollama/qwen2.5:3b"
+    out = await agent._generate(state)
+    assert out["answer"] == "正常回答"
     assert len(llm.calls) == 2
 
 

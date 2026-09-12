@@ -60,54 +60,67 @@ def parse_tool_args(raw: str | None) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-_ENVELOPE_TEXT_KEYS = ("content", "response", "answer", "text")
+# 有界文本键：弱模型偶发把最终回答包进这些键的 JSON 外壳，取到即解包（不做开放式猜测）
+_ANSWER_TEXT_KEYS = ("response", "content", "answer", "text")
 
 
-def _extract_envelope_text(obj: dict, depth: int = 0) -> str | None:
-    """从疑似「消息信封」的 dict 里取内层文本；非信封返回 None。"""
-    if depth > 3 or not isinstance(obj, dict):
-        return None
-    # 嵌套 message 对象（如 {"message": {"role": "assistant", "content": "..."}}）
-    msg = obj.get("message")
-    if isinstance(msg, dict):
-        inner = _extract_envelope_text(msg, depth + 1)
-        if inner is not None:
-            return inner
-    # 仅当看起来是信封（含 role 或单键）时才解包，避免误伤正常的多字段 JSON 回答
-    if "role" not in obj and len(obj) != 1:
-        return None
-    for k in _ENVELOPE_TEXT_KEYS:
-        v = obj.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    if isinstance(msg, str) and msg.strip():
-        return msg.strip()
-    return None
+def parse_answer_envelope(text: str | None) -> str:
+    """[有界清理] 弱模型偶发把最终回答包进 JSON 外壳。
 
+    实测形态：`{"response":"…"}`、`{"type":"response","response":"…"}`、
+    `{"type":"section_header","text":"…","bg_color":"…"}`。
 
-def strip_json_envelope(text: str | None) -> str:
-    """[弱模型兜底] 剥离「整条回答被包进 JSON 外壳」的情况。
+    只认固定几个文本键（response/content/answer/text）：
+    - 命中 → 返回该文本；
+    - `{}` / `[]` / `null`（空回答）→ 返回 ""（交由调用方重试/兜底）；
+    - 非 JSON / 无文本键 → 原样返回（不开放式猜格式）。
 
-    弱模型（mistral/qwen2.5-* 等）偶尔把回答吐成
-    `{"role": "assistant", "content": "..."}` 或 `{"response": "..."}`。
-    整体是 JSON 对象且能取到内层文本时返回该文本，否则原样返回。
+    注意：本函数不改变模型输出契约（不强制 JSON），因此不影响工具调用/委派。
     """
     if not text:
         return text
     s = _strip_code_fence(text.strip())
-    # 空回答形态：{} / [] / null → 归一化为空串，交由调用方兜底文案处理
     if s.lower() in ("{}", "[]", "null"):
         return ""
     if not (s.startswith("{") and s.endswith("}")):
         return text
-    obj = parse_json_value(s)
-    if not isinstance(obj, dict):
+    try:
+        obj = json.loads(s)
+    except (json.JSONDecodeError, ValueError):
         return text
-    inner = _extract_envelope_text(obj)
-    if inner is not None:
-        return inner
-    # 空对象 {} → 视为空回答
-    return "" if not obj else text
+    if isinstance(obj, dict):
+        for k in _ANSWER_TEXT_KEYS:
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return text
+
+
+def is_unparsed_json_answer(text: str | None) -> bool:
+    """是否为「看起来是 JSON、但提取不出正文」的回答。
+
+    在 `parse_answer_envelope` 之后调用：若文本（去代码围栏后）仍以 `{` 开头，说明没能
+    提取出正文——弱模型自造 schema（`{"type":"content",...}`）、把工具 schema 当文本打印
+    （`{"name":"tool_task","description":...}`）等都属于此。此时应视为**失败回答**
+    （触发重试/回退强模型），而不是把 JSON 直接展示给用户。
+    """
+    if not text:
+        return False
+    return _strip_code_fence(text.strip()).startswith("{")
+
+
+def is_tool_call_markup(text: str | None) -> bool:
+    """是否为「工具调用被当文本输出」的回答（Hermes / DeepSeek DSML 等标记）。
+
+    如 `<｜DSML｜tool_calls>…<｜DSML｜invoke name="read_file">`、`<|tool_calls|>`、
+    `<｜｜tool_calls>`。这类输出不是给用户的正文，应视为**失败回答**（触发回退强模型）。
+    """
+    if not text:
+        return False
+    low = text.lower()
+    if "dsml" in low:
+        return True
+    return "<|tool_calls|>" in text or "<｜｜tool_calls>" in text or "<｜dsml｜" in low
 
 
 def _strip_code_fence(text: str) -> str:

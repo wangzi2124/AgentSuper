@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""strip_json_envelope：剥离弱模型把整条回答包进 JSON 外壳的情况。
+"""parse_answer_envelope：弱模型 JSON 外壳的「有界清理」（只认固定文本键）。
 
 运行：pytest tests/test_json_envelope.py
 """
@@ -9,52 +9,66 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__))))
 
-from app.utils.json_repair import strip_json_envelope
+from app.utils.json_repair import parse_answer_envelope, is_unparsed_json_answer, is_tool_call_markup
 
 
-def test_role_content_envelope():
-    assert strip_json_envelope('{"role": "assistant", "content": "你好"}') == "你好"
+def test_response_key():
+    assert parse_answer_envelope('{"response": "你好"}') == "你好"
 
 
-def test_response_envelope():
-    assert strip_json_envelope('{"response": "hello"}') == "hello"
+def test_response_key_with_extra_meta():
+    assert parse_answer_envelope('{"type": "response", "response": "x"}') == "x"
 
 
-def test_single_content_envelope():
-    assert strip_json_envelope('{"content": "正文"}') == "正文"
+def test_text_key_with_extra_meta():
+    # qwen2.5:3b 实测自造形态
+    s = '{"type": "section_header", "text": "backend/main.py 5 行", "bg_color": "F5DEB3"}'
+    assert parse_answer_envelope(s) == "backend/main.py 5 行"
 
 
-def test_nested_message_envelope():
-    assert strip_json_envelope('{"message": {"role": "assistant", "content": "嵌套正文"}}') == "嵌套正文"
+def test_content_and_answer_keys():
+    assert parse_answer_envelope('{"content": "c"}') == "c"
+    assert parse_answer_envelope('{"answer": "a"}') == "a"
 
 
-def test_code_fenced_envelope():
-    assert strip_json_envelope('```json\n{"role":"assistant","content":"fenced"}\n```') == "fenced"
-
-
-def test_plain_text_unchanged():
-    assert strip_json_envelope("你好，有什么可以帮你？") == "你好，有什么可以帮你？"
-
-
-def test_multifield_non_envelope_unchanged():
-    # 多字段且无 role → 不当作信封，避免误伤正常 JSON 回答
-    s = '{"name": "a", "value": 1}'
-    assert strip_json_envelope(s) == s
-
-
-def test_empty_content_unchanged():
-    s = '{"role": "assistant", "content": ""}'
-    assert strip_json_envelope(s) == s
-
-
-def test_none_and_empty():
-    assert strip_json_envelope(None) is None
-    assert strip_json_envelope("") == ""
+def test_code_fenced():
+    assert parse_answer_envelope('```json\n{"response":"fenced"}\n```') == "fenced"
 
 
 def test_empty_json_forms_normalized_to_empty():
-    # 弱模型偶发返回空 JSON 对象/数组/null → 归一化为空串（交由兜底文案）
-    assert strip_json_envelope("{}") == ""
-    assert strip_json_envelope("[]") == ""
-    assert strip_json_envelope("null") == ""
-    assert strip_json_envelope("  {}  ") == ""
+    assert parse_answer_envelope("{}") == ""
+    assert parse_answer_envelope("[]") == ""
+    assert parse_answer_envelope("null") == ""
+    assert parse_answer_envelope("  {}  ") == ""
+
+
+def test_no_text_key_passthrough():
+    s = '{"name": "a", "value": 1}'
+    assert parse_answer_envelope(s) == s
+
+
+def test_plain_text_passthrough():
+    assert parse_answer_envelope("你好，有什么可以帮你？") == "你好，有什么可以帮你？"
+
+
+def test_none_and_empty():
+    assert parse_answer_envelope(None) is None
+    assert parse_answer_envelope("") == ""
+
+
+def test_is_unparsed_json_answer():
+    # 自造 schema（无标准文本键）→ 判定为失败回答
+    assert is_unparsed_json_answer('{"type": "content", "title": "x", "bullets": []}') is True
+    assert is_unparsed_json_answer('{"name": "a", "value": 1}') is True
+    # 普通文本 / 空 → 不是
+    assert is_unparsed_json_answer("你好") is False
+    assert is_unparsed_json_answer("") is False
+    assert is_unparsed_json_answer(None) is False
+
+
+def test_is_tool_call_markup():
+    assert is_tool_call_markup('<｜DSML｜tool_calls>\n<｜DSML｜invoke name="read_file">') is True
+    assert is_tool_call_markup('<|tool_calls|>\n<|call|>1</|call|>') is True
+    assert is_tool_call_markup("正常回答") is False
+    assert is_tool_call_markup("") is False
+    assert is_tool_call_markup(None) is False

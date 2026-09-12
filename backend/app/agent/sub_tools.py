@@ -598,9 +598,9 @@ async def tool_loop_chat(
             # reasoning_content、content 为空；最终回答做回退，循环内存储仍用 content
             reasoning = (getattr(msg, "reasoning_content", None) or "").strip()
             if not tool_calls:
-                from app.utils.json_repair import strip_json_envelope
+                from app.utils.json_repair import parse_answer_envelope
                 answer = strip_tool_call_markup(content) or reasoning
-                answer = strip_json_envelope(answer)
+                answer = parse_answer_envelope(answer)
                 return answer or "(无回答)"
 
             # 记录本轮 assistant 消息（含全部工具调用）
@@ -651,8 +651,8 @@ async def tool_loop_chat(
         # 达到最大轮数：注入收尾提示并禁用工具强制总结（对齐 MAX_STEPS 语义）
         messages.append({"role": "user", "content": MAX_STEPS_PROMPT})
         response = await litellm.acompletion(**_llm_call(False, max_tokens=2048))
-        from app.utils.json_repair import strip_json_envelope
-        return strip_json_envelope(
+        from app.utils.json_repair import parse_answer_envelope
+        return parse_answer_envelope(
             strip_tool_call_markup((response.choices[0].message.content or "").strip())
         )
     finally:
