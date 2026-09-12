@@ -42,8 +42,33 @@ def _fetch_url(url: str, timeout: int = 10) -> dict:
         return json.loads(resp.read())
 
 
+def _geocode_nominatim(city: str) -> dict:
+    """Nominatim (OSM) 地理编码：中文城市名解析准确（Open-Meteo 会把「大连」匹配到福建小村）。"""
+    url = (
+        "https://nominatim.openstreetmap.org/search?"
+        f"q={urllib.parse.quote(city)}&format=json&limit=1&accept-language=zh-CN"
+    )
+    data = _fetch_url(url)
+    if not data:
+        raise ValueError(f"Location not found: {city}")
+    r = data[0]
+    parts = [p.strip() for p in (r.get("display_name") or "").split(",") if p.strip()]
+    return {
+        "name": parts[0] if parts else city,
+        "country": parts[-1] if len(parts) >= 2 else "",
+        "admin1": parts[1] if len(parts) >= 2 else "",
+        "lat": float(r["lat"]),
+        "lon": float(r["lon"]),
+    }
+
+
 def _geocode_cn(city: str) -> dict:
-    """Geocode a Chinese city using Open-Meteo API."""
+    """Geocode a city. 中文名优先 Nominatim (OSM)（更准），失败再走 Open-Meteo。"""
+    if any("\u4e00" <= ch <= "\u9fff" for ch in (city or "")):
+        try:
+            return _geocode_nominatim(city)
+        except Exception:
+            pass
     url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=5&language=zh&format=json"
     data = _fetch_url(url)
     results = data.get("results", [])

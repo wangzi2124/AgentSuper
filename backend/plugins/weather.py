@@ -13,20 +13,56 @@ PLUGIN_VERSION = "0.1.0"
 PLUGIN_DESCRIPTION = "Get current weather and forecasts for any location"
 
 
-def _geocode(city: str) -> dict:
-    url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=5&language=en&format=json"
-    with urllib.request.urlopen(url, timeout=10) as resp:
+def _has_cjk(s: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in (s or ""))
+
+
+def _geocode_nominatim(city: str) -> dict:
+    """Nominatim (OSM) 地理编码：中文城市名解析准确（Open-Meteo 会把「大连」匹配到福建小村）。"""
+    url = (
+        "https://nominatim.openstreetmap.org/search?"
+        f"q={urllib.parse.quote(city)}&format=json&limit=1&accept-language=zh-CN"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "AgentSuper/1.0 (weather plugin)"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read())
-    results = data.get("results", [])
-    if not results:
+    if not data:
         raise ValueError(f"Location not found: {city}")
-    r = results[0]
+    r = data[0]
+    parts = [p.strip() for p in (r.get("display_name") or "").split(",") if p.strip()]
     return {
-        "name": r.get("name", city),
-        "country": r.get("country", ""),
-        "lat": r["latitude"],
-        "lon": r["longitude"],
+        "name": parts[0] if parts else city,
+        "country": parts[-1] if len(parts) >= 2 else "",
+        "lat": float(r["lat"]),
+        "lon": float(r["lon"]),
     }
+
+
+def _geocode(city: str) -> dict:
+    # 含中文的城市名 → 先用 Nominatim (OSM)，中文解析准确；失败再走 Open-Meteo。
+    # 英文名 → Open-Meteo language=en（结果最准，如 'New York'）；再兜底 language=zh。
+    if _has_cjk(city):
+        try:
+            return _geocode_nominatim(city)
+        except Exception:
+            pass
+    for lang in ("en", "zh"):
+        url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=5&language={lang}&format=json"
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                data = json.loads(resp.read())
+        except Exception:
+            continue
+        results = data.get("results", [])
+        if results:
+            r = results[0]
+            return {
+                "name": r.get("name", city),
+                "country": r.get("country", ""),
+                "lat": r["latitude"],
+                "lon": r["longitude"],
+            }
+    raise ValueError(f"Location not found: {city}")
 
 
 _WEATHER_CODES = {
@@ -52,7 +88,7 @@ def tool_get_weather(city: str, forecast_days: int = 0) -> str:
     """Get current weather or weather forecast for a city. Use this for ALL weather-related queries instead of internet_search.
 
     Parameters:
-    - city: city name (e.g. 'Beijing', 'London', 'New York')
+    - city: city name (Chinese or English, e.g. 'Beijing', '北京', '大连', 'London')
     - forecast_days: 0 = current only, 1-7 = include forecast for N days
     """
     try:
