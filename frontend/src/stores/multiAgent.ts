@@ -50,6 +50,15 @@ function appendAgentFinalText(agent: { parts?: AgentOutputPart[] }, fullText: st
     agent.parts = [{ seq: 0, kind: 'text', text: fullText }]
     return
   }
+  // 清掉流式期间残留的占位/垃圾文本段（{} / [] / 空白）——弱模型会先吐 {}，
+  // 最终答案已由 agent_done 权威给出，这里避免最终答案旁还挂着一个 {}。
+  agent.parts = agent.parts.filter(
+    p => !(p.kind === 'text' && ['', '{}', '[]'].includes((p.text || '').trim()))
+  )
+  if (agent.parts.length === 0) {
+    agent.parts = [{ seq: 0, kind: 'text', text: fullText }]
+    return
+  }
   const last = agent.parts[agent.parts.length - 1]
   if (last && last.kind === 'text') {
     last.text = fullText

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import type { FileContent, VoiceMessageData, MultiAgentMessage } from '../types'
 import { usePermissionStore } from '../stores/permission'
+import { useAuthStore } from '../stores/auth'
 import { useThemeStore, BG_VARIANTS } from '../stores/theme'
   import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
 import { synthesize, speakNative, stopNative } from '../api/voice'
@@ -18,6 +19,7 @@ const route = useRoute()
 const router = useRouter()
 const agent = useMultiAgentStore()
 const perm = usePermissionStore()
+const auth = useAuthStore()
 const theme = useThemeStore()
 const parentRef = ref<HTMLElement>()
 const chatInputRef = ref<any>()
@@ -28,6 +30,10 @@ const showSettings = ref(false)
 const showWsPanel = ref(false)
 const wsInput = ref('')
 const wsError = ref('')
+
+function isImgAvatar(v: string): boolean {
+  return !!v && (v.startsWith('data:') || v.startsWith('http'))
+}
 const wsBusy = ref(false)
 const showDirPicker = ref(false)
 // [F8] 聊天图片点击放大预览（当前预览图的 data URL；空串 = 未预览）
@@ -589,7 +595,11 @@ async function handleCopy(messageId: string, text: string) {
         <div v-for="(msg, idx) in messages" :key="msg.id" class="message-wrapper">
           <div class="chat-message" :class="[msg.role, { 'is-error': msg.isError }]">
             <div class="avatar" :class="msg.role">
-              <span v-if="msg.role === 'user'">👤</span>
+              <template v-if="msg.role === 'user'">
+                <img v-if="isImgAvatar(auth.avatar)" class="avatar-img" :src="auth.avatar" alt="avatar" />
+                <span v-else-if="auth.avatar">{{ auth.avatar }}</span>
+                <span v-else>👤</span>
+              </template>
               <span v-else-if="msg.isError">⚠️</span>
               <span v-else>🤖</span>
             </div>

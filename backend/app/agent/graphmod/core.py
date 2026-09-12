@@ -410,8 +410,14 @@ class RAGAgent(RAGAgentGenerate):
                             continue
                         if circum.count("{") > circum.count("}"):
                             continue
-                    if state is not None and pending_text:
-                        self._push_stream_event(state, {"type": "text_delta", "delta": "".join(pending_text)})
+                    pending_str = "".join(pending_text)
+                    if pending_str.strip() in ("{}", "[]", ""):
+                        # 纯空 JSON / 空白（弱模型占位或垃圾输出）不推给前端，
+                        # 避免先闪现 {} 再被最终答案替换（前端 parts 会残留该段）。
+                        pending_text.clear()
+                        continue
+                    if state is not None:
+                        self._push_stream_event(state, {"type": "text_delta", "delta": pending_str})
                     pending_text.clear()
                 for tc in (getattr(delta, "tool_calls", None) or []):
                     idx = getattr(tc, "index", None) or 0
@@ -462,7 +468,9 @@ class RAGAgent(RAGAgentGenerate):
         # 流式期间被暂缓的候选文本：最终未被识别为工具调用时补推，避免丢字。
         # 已转换为 tool_call / 已抽取内嵌回复的场合，其原文（JSON）不再外泄。
         if state is not None and pending_text and not converted:
-            self._push_stream_event(state, {"type": "text_delta", "delta": "".join(pending_text)})
+            pending_str = "".join(pending_text)
+            if pending_str.strip() not in ("{}", "[]"):
+                self._push_stream_event(state, {"type": "text_delta", "delta": pending_str})
 
         dur = (tmod.time() - start) * 1000
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
