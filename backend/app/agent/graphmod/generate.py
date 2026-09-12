@@ -95,9 +95,13 @@ from .state import _find_attachment
 _WEAK_SYSTEM_PROMPT = (
     "你是 AgentSuper 的 AI 助手。请用简洁的中文直接回答用户问题。\n"
     "工作方式（调工具→执行→总结）：\n"
-    "1. 需要读文件/搜索/执行命令/用技能或插件时，调用对应工具；\n"
-    "2. 工具返回结果后，必须用中文把结果总结给用户；\n"
-    "3. 不要重复调用同一个工具、不要输出空 JSON（如 {}）、不要把工具调用当成文本打印。"
+    "1. 需要信息/操作时**调用工具**，不要凭记忆猜。常用工具：\n"
+    "   读文件=tool_read_file(path)；列目录=tool_ls(path)；找文件=tool_glob(pattern)；\n"
+    "   搜内容=tool_grep(pattern)；写/追加/改文件=tool_write_file/tool_append_file/tool_edit_file；\n"
+    "   执行命令=tool_execute(command)。\n"
+    "   要读文件内容就用 tool_read_file，不要用 tool_memory_get 等记忆工具代替。\n"
+    "2. 工具返回结果后，用中文把结果总结给用户；\n"
+    "3. 不要重复调用同一工具、不要输出空 JSON（如 {}）、不要把工具调用当成文本打印。"
 )
 
 
@@ -108,6 +112,34 @@ def _is_valid_answer(text: str | None) -> bool:
     if not t:
         return False
     return not is_unparsed_json_answer(t) and not is_tool_call_markup(t)
+
+
+def _build_tool_transcript(messages: list[dict], question: str, max_chars: int = 12000) -> str:
+    """[两段式] 把工具循环记录压成给强模型收尾用的紧凑 transcript。
+
+    只保留「用户问题 + 每轮 [工具调用]/[工具结果]」，丢弃弱模型自己的（不可靠）收尾文本，
+    使强模型能基于**真实工具结果**独立写出最终回答。超长时按整体截断。
+    """
+    results: dict[str, str] = {}
+    for m in messages:
+        if m.get("role") == "tool":
+            results[m.get("tool_call_id", "")] = str(m.get("content", ""))
+    lines: list[str] = [f"用户问题：{question}", ""]
+    for m in messages:
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        for tc in m["tool_calls"]:
+            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+            name = fn.get("name", "")
+            args = fn.get("arguments", "")
+            lines.append(f"[工具调用] {name}({args})")
+            res = results.get(tc.get("id", ""), "")
+            lines.append(f"[工具结果] {res}")
+            lines.append("")
+    text = "\n".join(lines).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n…（记录过长已截断）"
+    return text
 logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgentGenerate(RAGAgentTools):
@@ -170,6 +202,33 @@ class RAGAgentGenerate(RAGAgentTools):
             return messages
 
     async def _generate(self, state: AgentState) -> dict:
+        """[两段式] 生成回答，并在弱模型收尾失败时用强模型**完整重跑**一次。
+
+        - 弱模型跑过工具轮 → `_generate_impl` 内先做两段式收尾（强模型基于工具记录总结）；
+        - 若最终回答仍无效（弱模型压根没调工具、吐 {} / 工具标记 / 自造 JSON）→ 用强模型
+          完整重跑 `_generate_impl`（含工具循环），而不是拿 `tools=None` 的残缺上下文去问
+          强模型（那会诱发强模型把工具调用当文本输出）。
+        """
+        out = await self._generate_impl(state)
+        if (
+            not _is_valid_answer(out.get("answer"))
+            and is_weak_model(out.get("model") or "")
+            and settings.empty_answer_retry
+            and settings.empty_answer_fallback_model
+            and not state.get("_weak_rerun")
+        ):
+            strong = self._resolve_fallback_model(out.get("model") or "")
+            if strong and strong != out.get("model"):
+                logger.info("weak answer invalid → full rerun via model=%s", strong)
+                state["_weak_rerun"] = True
+                state["model"] = strong
+                out = await self._generate_impl(state)
+        if not _is_valid_answer(out.get("answer")):
+            out["answer"] = "（模型未返回有效内容，请重试或更换模型。）"
+            out["messages"] = [AIMessage(content=out["answer"])]
+        return out
+
+    async def _generate_impl(self, state: AgentState) -> dict:
         """调用LLM生成回答，支持多轮工具调用。"""
         _gen_start = tmod.time()
         self._usage_accum = dict(_ZERO_USAGE)
@@ -584,13 +643,19 @@ class RAGAgentGenerate(RAGAgentTools):
         from app.utils.json_repair import parse_answer_envelope
         if msg.content:
             msg.content = parse_answer_envelope(msg.content)
-        # [弱模型鲁棒性] 空回答（含 {}）或「无法提取文本的自造 JSON」→ 自动重试/回退强模型；
-        # 再失败才显示兜底文案。
+        # [两段式] 弱模型：一旦跑过工具轮，其「工具→总结」不可靠（实测吐空 / {} / 工具标记），
+        # 不再赌它收尾——把工具记录交给强模型统一收尾（主动式，而非等它失败再回退）。
+        if settings.weak_model_two_stage and rounds > 0 and is_weak_model(model):
+            transcript = _build_tool_transcript(messages, state.get("question", ""))
+            if transcript:
+                summary = await self._summarize_tool_transcript(transcript, model, state)
+                if _is_valid_answer(summary):
+                    msg.content = summary
+                    logger.info("weak-model two-stage summary via model=%s", self._resolve_fallback_model(model))
+        # [弱模型鲁棒性] 强模型空回答 → 同模型纯重试一次；弱模型留空，交由 `_generate`
+        # 用强模型**完整重跑**（含工具循环）——避免拿 tools=None 的残缺上下文问强模型。
         if settings.empty_answer_retry and not _is_valid_answer(msg.content):
             msg.content = await self._retry_empty_answer(messages, model, state)
-        if not _is_valid_answer(msg.content):
-            # Last resort: LLM returned empty / an unparseable JSON object
-            msg.content = "（模型未返回有效内容，请重试或更换模型。）"
 
         # P4: finish_reason 收尾语义（对齐 opencode prompt.ts:1301-1308 / processor.ts）
         # length → 输出被截断，答案不完整，追加提示不静默
@@ -617,45 +682,58 @@ class RAGAgentGenerate(RAGAgentTools):
             "cost": round(float(getattr(self, "_cost_accum", 0.0)), 6),
         }
 
-    async def _retry_empty_answer(self, messages: list[dict], model: str, state) -> str:
-        """[弱模型鲁棒性] 空回答（含 {}）自动重试。
-
-        1) 同模型**纯重试**一次（不加元提示，避免弱模型复读「上一次没返回内容」）；
-        2) 仍空则回退到配置/前端默认模型，附一条简短的「请直接回答」提示。
-        成功返回非空文本；全部失败返回 ""（由调用方显示兜底文案）。
-        """
-        from app.utils.json_repair import parse_answer_envelope
-
-        # 回退模型优先级：显式 env（EMPTY_ANSWER_FALLBACK_MODEL_NAME）→ 前端「模型管理」默认模型
-        # （catalog.default_model()）→ .env 的 LLM_MODEL（self.model）。前端已配默认模型时无需 env。
+    def _resolve_fallback_model(self, model: str) -> str:
+        """回退模型优先级：显式 env（EMPTY_ANSWER_FALLBACK_MODEL_NAME）→ 前端「模型管理」默认
+        模型（catalog.default_model()）→ .env 的 LLM_MODEL（self.model）。"""
         try:
             from app.models.catalog import default_model as _catalog_default_model
             catalog_default = _catalog_default_model() or ""
         except Exception:  # noqa: BLE001
             catalog_default = ""
-        fallback = (
+        return (
             (settings.empty_answer_fallback_model_name or "").strip()
             or catalog_default
             or self.model
         )
-        candidates: list[tuple[str, str | None]] = []
-        # 强模型：同模型纯重试一次（偶发空输出）；弱模型直接回退（重试通常仍空，白等且易复读提示）
-        if not is_weak_model(model):
-            candidates.append((model, None))
-        if settings.empty_answer_fallback_model and fallback and fallback != model:
-            candidates.append((fallback, "请直接、简洁地用中文回答上面的用户问题。"))
-        if not candidates:
-            candidates.append((model, None))
-        for m, nudge in candidates:
-            try:
-                msgs = list(messages) + ([{"role": "user", "content": nudge}] if nudge else [])
-                resp = await self._llm_call(m, msgs, None, state=state)
-                text = parse_answer_envelope((resp.choices[0].message.content or "").strip())
-                if _is_valid_answer(text):
-                    logger.info("empty-answer recovered via model=%s", m)
-                    return text
-            except Exception as e:  # noqa: BLE001
-                logger.warning("empty-answer retry via %s failed: %s", m, e)
+
+    async def _summarize_tool_transcript(self, transcript: str, model: str, state) -> str:
+        """[两段式] 强模型收尾：基于工具记录写最终回答（tools=None，强制纯文本总结）。"""
+        from app.utils.json_repair import parse_answer_envelope
+        strong = self._resolve_fallback_model(model)
+        if not strong or strong == model:
+            return ""
+        prompt = (
+            "你是一个总结助手。下面是一个 Agent 为回答用户问题而执行的工具调用记录。\n"
+            "请**仅依据这些工具结果**，用中文直接、准确地回答用户的问题。\n"
+            "要求：输出自然语言正文；不要输出 JSON；不要输出工具调用格式；不要编造记录中没有的信息。\n\n"
+            f"{transcript}"
+        )
+        try:
+            resp = await self._llm_call(strong, [{"role": "user", "content": prompt}], None, state=state)
+            return parse_answer_envelope((resp.choices[0].message.content or "").strip())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("two-stage summarize via %s failed: %s", strong, e)
+            return ""
+
+    async def _retry_empty_answer(self, messages: list[dict], model: str, state) -> str:
+        """[弱模型鲁棒性] 空回答（含 {}）自动重试。
+
+        - **弱模型**：直接返回 ""，交由 `_generate` 用强模型**完整重跑**（含工具循环）。
+          （旧实现拿 tools=None 的残缺上下文问强模型，会诱发强模型把工具调用当文本输出。）
+        - **强模型**：同模型**纯重试**一次（偶发空输出），仍失败返回 ""。
+        """
+        from app.utils.json_repair import parse_answer_envelope
+
+        if is_weak_model(model):
+            return ""
+        try:
+            resp = await self._llm_call(model, list(messages), None, state=state)
+            text = parse_answer_envelope((resp.choices[0].message.content or "").strip())
+            if _is_valid_answer(text):
+                logger.info("empty-answer recovered via model=%s", model)
+                return text
+        except Exception as e:  # noqa: BLE001
+            logger.warning("empty-answer retry via %s failed: %s", model, e)
         return ""
 
 __all__ = ['RAGAgentGenerate']

@@ -466,11 +466,16 @@ class RAGAgentBase:
         by_name = {t.name: t for t in self.tools}
 
         # [弱模型鲁棒性] 弱模型始终挂载全部技能/插件（脚本）工具，使其能直接调用
-        mount_all_skills = settings.weak_model_mount_all_tools and is_weak_model(model or self.model)
+        weak_model = is_weak_model(model or self.model)
+        mount_all_skills = settings.weak_model_mount_all_tools and weak_model
 
         # 本轮"想要"的工具集：常驻 + 固定 + 已使用 + 意图命中（弱模型额外全挂技能/脚本）
         wanted: set[str] = set()
         for t in self.tools:
+            # [弱模型鲁棒性] 弱模型不做委派：实测 qwen2.5-coder 会把 tool_task 当救命稻草
+            # 反复调用（每次 spawn 子 Agent）→ 死循环 + 子 Agent 超时。直接不挂。
+            if weak_model and t.name == "tool_task":
+                continue
             if t.name in pinned:
                 wanted.add(t.name)
                 continue
@@ -517,6 +522,8 @@ class RAGAgentBase:
         # deny 的子 Agent 类型不出现在 schema 中（模型选不到），全部 deny 时整工具摘除。
         filtered: list[dict] = []
         for d in defs:
+            if weak_model and d.get("function", {}).get("name") == "tool_task":
+                continue  # 弱模型不挂委派工具（会话缓存可能残留，这里硬剔除）
             if d.get("function", {}).get("name") == "tool_task":
                 params = d["function"].get("parameters", {})
                 props = params.get("properties", {})

@@ -214,6 +214,9 @@ class Settings(BaseSettings):
     empty_answer_fallback_model: bool = True
     # 回退用的模型名（空 = 用 LLM_MODEL；若 LLM_MODEL 本身就是弱模型，建议显式指定强模型）
     empty_answer_fallback_model_name: str = ""
+    # [两段式] 弱模型：工具轮之后不信任其收尾总结，改为把工具调用记录交给强模型统一收尾
+    # （弱模型擅长「调工具」、不擅长「工具→总结」；开启后从根上避免 {} / 空 / 工具标记泄漏）
+    weak_model_two_stage: bool = True
 
     # ── 共享记忆持久化 ──
     # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失

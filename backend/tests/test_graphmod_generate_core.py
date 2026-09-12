@@ -666,18 +666,49 @@ async def test_generate_content_filter(gen_env):
 
 
 @pytest.mark.asyncio
-async def test_generate_empty_content_default(gen_env):
-    agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="")])
-    out = await agent._generate(make_state())
+async def test_generate_empty_content_default(gen_env, monkeypatch):
+    """弱模型空回答 → 用强模型**完整重跑**（含工具循环）恢复。"""
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
+    agent, llm = _setup_generate(gen_env, [
+        FakeLLM().response(content=""),           # 弱模型空
+        FakeLLM().response(content="强模型回答"),  # 强模型完整重跑
+    ])
+    state = make_state()
+    state["model"] = "ollama/qwen2.5:3b"
+    out = await agent._generate(state)
+    assert out["answer"] == "强模型回答"
+    assert llm.calls[1][0] == "deepseek/deepseek-v4-flash"
+
+
+@pytest.mark.asyncio
+async def test_generate_all_empty_last_resort(gen_env, monkeypatch):
+    """强模型重试也空 → 兜底文案（不再展示空 / {}）。"""
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
+    agent, llm = _setup_generate(gen_env, [
+        FakeLLM().response(content=""),
+        FakeLLM().response(content=""),
+    ])
+    state = make_state()
+    state["model"] = "deepseek/deepseek-v4-flash"
+    out = await agent._generate(state)
     assert out["answer"] == "（模型未返回有效内容，请重试或更换模型。）"
 
 
 @pytest.mark.asyncio
-async def test_generate_empty_json_object_default(gen_env):
-    """弱模型（qwen2.5:3b）偶发返回空 JSON 对象 {} → 归一化为兜底文案，不展示 {}。"""
-    agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="{}")])
-    out = await agent._generate(make_state())
-    assert out["answer"] == "（模型未返回有效内容，请重试或更换模型。）"
+async def test_generate_empty_json_object_default(gen_env, monkeypatch):
+    """弱模型偶发返回空 JSON 对象 {} → 判定失败 → 强模型完整重跑恢复（不展示 {}）。"""
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
+    agent, llm = _setup_generate(gen_env, [
+        FakeLLM().response(content="{}"),
+        FakeLLM().response(content="正常回答"),
+    ])
+    state = make_state()
+    state["model"] = "ollama/qwen2.5:3b"
+    out = await agent._generate(state)
+    assert out["answer"] == "正常回答"
 
 
 @pytest.mark.asyncio
@@ -715,6 +746,35 @@ async def test_generate_empty_answer_falls_back_to_default_model(gen_env, monkey
 
 
 @pytest.mark.asyncio
+async def test_generate_weak_model_two_stage_summary(gen_env, monkeypatch):
+    """[两段式] 弱模型跑完工具轮后，最终回答交给强模型基于工具记录收尾（不等它失败）。"""
+    monkeypatch.setattr(settings, "weak_model_two_stage", True)
+    monkeypatch.setattr(settings, "empty_answer_retry", True)
+    monkeypatch.setattr(settings, "empty_answer_fallback_model", True)
+    monkeypatch.setattr(settings, "empty_answer_fallback_model_name", "")
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
+
+    async def spy(name, args, state=None):
+        return "文件内容是 print(1)"
+    agent, llm = _setup_generate(gen_env, [
+        FakeLLM().response(tool_calls=[("tool_read_file", '{"path": "main.py"}')]),  # 弱模型调工具
+        FakeLLM().response(content="{}"),                                            # 弱模型收尾（垃圾）
+        FakeLLM().response(content="main.py 第一行是 print(1)。"),                    # 强模型两段式收尾
+    ], exec_spy=spy)
+    state = make_state()
+    state["model"] = "ollama/qwen2.5:3b"
+    out = await agent._generate(state)
+    assert out["answer"] == "main.py 第一行是 print(1)。"
+    assert len(llm.calls) == 3
+    strong_model, msgs, tool_defs = llm.calls[2]
+    assert strong_model == "deepseek/deepseek-v4-flash"
+    assert tool_defs is None
+    assert "tool_read_file" in msgs[-1]["content"]
+    assert "print(1)" in msgs[-1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_generate_unparsed_json_answer_falls_back(gen_env, monkeypatch):
     """弱模型自造「无文本键的 JSON」→ 判定失败 → 回退默认模型（不把 JSON 展示给用户）。"""
     monkeypatch.setattr(settings, "empty_answer_retry", True)
@@ -739,6 +799,38 @@ def test_is_weak_model():
     assert is_weak_model("ollama/mistral:latest") is True
     assert is_weak_model("deepseek/deepseek-v4-flash") is False
     assert is_weak_model("") is False
+
+
+def test_build_tool_transcript():
+    from app.agent.graphmod.generate import _build_tool_transcript
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "读取 main.py"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "tool_read_file", "arguments": '{"path": "main.py"}'}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "tool_name": "tool_read_file", "content": "print(1)"},
+        {"role": "assistant", "content": "{}"},
+    ]
+    t = _build_tool_transcript(messages, "读取 main.py")
+    assert "用户问题：读取 main.py" in t
+    assert "[工具调用] tool_read_file" in t
+    assert "[工具结果] print(1)" in t
+    # 弱模型自己的不可靠收尾（{}）不应进入 transcript
+    assert "{}" not in t
+
+
+def test_build_tool_transcript_truncates():
+    from app.agent.graphmod.generate import _build_tool_transcript
+    messages = [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "tool_x", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "tool_name": "tool_x", "content": "A" * 50000},
+    ]
+    t = _build_tool_transcript(messages, "q", max_chars=500)
+    assert len(t) <= 520
+    assert "已截断" in t
 
 
 @pytest.mark.asyncio

@@ -383,6 +383,17 @@ def test_build_tool_defs_pinned_and_used():
     assert "tool_grep" in names  # 已使用保留
 
 
+def test_build_tool_defs_weak_model_excludes_task_tool():
+    """[弱模型鲁棒性] 弱模型不挂 tool_task（避免反复委派 → 死循环/超时）。"""
+    from app.agent.tools import ToolDef
+    agent = build_agent()
+    agent.tools.append(ToolDef(name="tool_task", description="委派子 Agent", parameters={}, fn=lambda: ""))
+    weak = agent._build_tool_defs("", model="ollama/qwen2.5-coder:latest")
+    assert all(d.get("function", {}).get("name") != "tool_task" for d in weak)
+    strong = agent._build_tool_defs("", model="deepseek/deepseek-v4-flash")
+    assert any(d.get("function", {}).get("name") == "tool_task" for d in strong)
+
+
 def test_pinned_tool_names_exception():
     class BadStore:
         def pinned_tools(self):
