@@ -144,7 +144,10 @@ async def add_workspace(body: WorkspaceRequest, request: Request):
     if not Path(raw).is_absolute():
         raise HTTPException(status_code=400, detail="path must be an absolute path, e.g. F:\\tetris")
     mgr = get_manager()
-    resolved = mgr.add_workspace(raw)
+    try:
+        resolved = mgr.add_workspace(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     _rebuild_agent_prompt(request)
     return {"status": "ok", "path": str(resolved), "workspaces": mgr.list_workspaces()}
 

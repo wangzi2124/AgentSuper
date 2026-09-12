@@ -1,0 +1,24 @@
+# AgentSuper 同源部署（方案 A）—— Caddy 版（更简单，自动 HTTPS）
+#
+# 步骤：
+#   1) cd frontend && npm run build          # 产物 frontend/dist
+#   2) 把 dist 放到 /var/www/agentsuper/dist
+#   3) 后端：uvicorn main:app --host 127.0.0.1 --port 8000
+#   4) caddy run --config deploy/Caddyfile   # Caddy 自动申请/续期证书
+#
+# 只需把 app.example.com 换成你的域名（Caddy 会自动签发 HTTPS 证书）。
+
+app.example.com {
+    root * /var/www/agentsuper/dist
+    encode gzip
+
+    # /api 反代到后端；flush_interval -1 = 关闭缓冲，SSE 才能实时推送
+    @api path /api/*
+    reverse_proxy @api 127.0.0.1:8000 {
+        flush_interval -1
+    }
+
+    # SPA history 回退
+    try_files {path} /index.html
+    file_server
+}

@@ -388,12 +388,33 @@ class PermissionManager:
                 pass
         return self.external_default
 
+    def _is_program_source(self, p: Path) -> bool:
+        """路径是否属于本程序源码/仓库目录（backend/ 主工作区或 git worktree）。
+
+        这类路径不允许被加为可写工作区——否则即使 ALLOW_SOURCE_WRITES=false，
+        也能绕过源码保护直接改本程序代码。
+        """
+        bases = [self.workspace]
+        if self.project_worktree:
+            bases.append(Path(self.project_worktree))
+        rp = Path(p).resolve()
+        for base in bases:
+            try:
+                rp.relative_to(Path(base).resolve())
+                return True
+            except ValueError:
+                pass
+        return False
+
     def add_workspace(self, path_str: str) -> Path:
         """运行时新增可写工作区（免重启生效），目录不存在则自动创建。
 
-        返回解析后的绝对路径。
+        拒绝把本程序源码/仓库路径加为工作区（防止越权改自身代码）。
+        返回解析后的绝对路径；被拒时抛 ValueError。
         """
         p = Path(path_str).resolve()
+        if self._is_program_source(p):
+            raise ValueError("不能把本程序源码/仓库路径添加为工作目录")
         if p in self.extra_workspaces:
             return p
         self.extra_workspaces.append(p)

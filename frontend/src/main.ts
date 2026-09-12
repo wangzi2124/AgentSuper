@@ -4,8 +4,13 @@ import Vant from 'vant'
 import 'vant/lib/index.css'
 import App from './App.vue'
 import router from './router'
+import { installApiFetch } from './api/base'
 import './styles/global.css'
 import './styles/mobile.css'
+
+// [部署] 安装 API base / 管理员令牌支持（VITE_API_BASE / VITE_ADMIN_TOKEN，
+// 未配置时不改动全局 fetch）。必须在任何请求发出前执行。
+installApiFetch()
 
 // 启动：等待首屏路由守卫完成（登录态校验/重定向到 /login）后再挂载，
 // 避免未登录时 Sidebar/MultiAgentChatHistory 提前挂载、发出 401 鉴权请求
