@@ -440,8 +440,8 @@ async def test_generate_freezes_tool_defs_for_cache(monkeypatch, tmp_path):
     orig = agent._build_tool_defs
     seen = []
 
-    def frozen_build(question="", used=None, conversation_id=""):
-        d = orig(question, used, conversation_id)
+    def frozen_build(question="", used=None, conversation_id="", model=""):
+        d = orig(question, used, conversation_id, model)
         seen.append(d)
         return d
     monkeypatch.setattr(agent, "_build_tool_defs", frozen_build)

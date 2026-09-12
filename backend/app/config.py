@@ -202,6 +202,19 @@ class Settings(BaseSettings):
     # 有意义。清空 history 可避免 N 个并行子 Agent 各自重复 prefill ≤16K 历史。
     sub_task_fresh_history: bool = True
 
+    # ── 弱模型鲁棒性（本地/小参数模型）──
+    # 弱模型识别：逗号分隔的模型名（`ollama/` 前缀始终视为弱模型）
+    weak_models: str = ""
+    # 弱模型始终挂载全部技能/自定义工具脚本（不再仅按意图关键词挂载）
+    weak_model_mount_all_tools: bool = True
+    # 弱模型使用精简系统提示（更短、少工具说明，降低空输出/乱调工具）
+    weak_model_simple_prompt: bool = True
+    # 最终回答为空（含 `{}`）时自动重试：同模型重试一次，再回退默认模型
+    empty_answer_retry: bool = True
+    empty_answer_fallback_model: bool = True
+    # 回退用的模型名（空 = 用 LLM_MODEL；若 LLM_MODEL 本身就是弱模型，建议显式指定强模型）
+    empty_answer_fallback_model_name: str = ""
+
     # ── 共享记忆持久化 ──
     # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失
     memory_persist_path: str = "data/agent_memory.json"

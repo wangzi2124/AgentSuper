@@ -79,6 +79,7 @@ from app.prompt_log import log_prompt  # [prompt log v1]
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
 from .tools import RAGAgentTools
 # ── 跨子模块依赖（自动生成）──
+from .base import is_weak_model
 from .constants import DOOM_LOOP_PROMPT
 from .constants import MAX_STEPS_PROMPT
 from .constants import _DEDUP_READONLY_TOOLS
@@ -88,6 +89,15 @@ from .state import AgentState
 from .state import _ZERO_USAGE
 from .state import _attachment_parts
 from .state import _find_attachment
+
+# [弱模型鲁棒性] 精简系统提示：本地/小参数模型易被冗长提示与大量工具说明干扰，
+# 导致空输出（{}）或乱调工具。这里给一份短提示，工具 schema 仍由 _build_tool_defs 提供。
+_WEAK_SYSTEM_PROMPT = (
+    "你是 AgentSuper 的 AI 助手。请用简洁的中文直接回答用户问题。\n"
+    "- 需要时调用工具（文件读写/搜索/执行、技能 load_skill_*、插件脚本）完成任务；\n"
+    "- 不需要工具时直接用文字回答，不要输出空 JSON（如 {}）；\n"
+    "- 每次工具调用后都要给出文字总结。"
+)
 logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgentGenerate(RAGAgentTools):
@@ -175,7 +185,12 @@ class RAGAgentGenerate(RAGAgentTools):
             context_text = "\n\n".join(context_parts)
         # [token 优化 v2] system 保持完全稳定 → 最大化 DeepSeek 前缀缓存命中（命中按 0.1x 计费）
         # RAG 检索结果改放 user 消息前缀（见下方 user 消息构建），避免 system 每次变化导致缓存整体失效。
-        full_system_prompt = self.system_prompt
+        # [弱模型鲁棒性] 弱模型用精简系统提示（更短、少工具说明，降低空输出/乱调工具）
+        _model_hint = state.get("model") or self.model
+        _weak = is_weak_model(_model_hint)
+        full_system_prompt = (
+            _WEAK_SYSTEM_PROMPT if (settings.weak_model_simple_prompt and _weak) else self.system_prompt
+        )
         # [会话目录] 本会话绑定的工作目录追加为 system 末尾（同一目录内保持稳定）
         if state.get("_cwd"):
             full_system_prompt += (
@@ -188,7 +203,12 @@ class RAGAgentGenerate(RAGAgentTools):
         # [token 优化 v5] 按需挂载：首轮按问题关键词筛选工具 schema
         # [token 优化 v15] 传入 conversation_id → 会话级缓存：同会话内只增不减，
         # system+tools 前缀跨请求字节稳定 → DeepSeek 前缀缓存命中
-        tool_defs = self._build_tool_defs(state.get("question", ""), conversation_id=state.get("conversation_id", ""))
+        # [弱模型鲁棒性] 弱模型额外全挂技能/脚本工具（见 _build_tool_defs）
+        tool_defs = self._build_tool_defs(
+            state.get("question", ""),
+            conversation_id=state.get("conversation_id", ""),
+            model=_model_hint,
+        )
 
         messages = [
             {"role": "system", "content": full_system_prompt},
@@ -551,9 +571,13 @@ class RAGAgentGenerate(RAGAgentTools):
         # [Ollama 本地模型兜底] 弱模型（qwen2.5-coder / mistral 等）常把整个回答包在
         # {"response":"..."} 或 {"role":"assistant","content":"..."} JSON 外壳里——
         # 统一解包提取纯文本，避免用户看到 JSON 原文。
+        from app.utils.json_repair import strip_json_envelope
         if msg.content:
-            from app.utils.json_repair import strip_json_envelope
             msg.content = strip_json_envelope(msg.content)
+        # [弱模型鲁棒性] 空回答（含 {}）自动重试：同模型 + 轻量提示重试一次；仍空则回退
+        # 默认强模型重跑一次；再空才显示兜底文案。
+        if settings.empty_answer_retry and not (msg.content or "").strip():
+            msg.content = await self._retry_empty_answer(messages, model, state)
         if not (msg.content or "").strip():
             # Last resort: LLM still returned empty (or an empty JSON like {}), use a notice
             msg.content = "（模型未返回内容，请重试或更换模型。）"
@@ -582,5 +606,46 @@ class RAGAgentGenerate(RAGAgentTools):
             "tokens": dict(self._usage_accum),
             "cost": round(float(getattr(self, "_cost_accum", 0.0)), 6),
         }
+
+    async def _retry_empty_answer(self, messages: list[dict], model: str, state) -> str:
+        """[弱模型鲁棒性] 空回答（含 {}）自动重试。
+
+        1) 同模型**纯重试**一次（不加元提示，避免弱模型复读「上一次没返回内容」）；
+        2) 仍空则回退到配置/前端默认模型，附一条简短的「请直接回答」提示。
+        成功返回非空文本；全部失败返回 ""（由调用方显示兜底文案）。
+        """
+        from app.utils.json_repair import strip_json_envelope
+
+        # 回退模型优先级：显式 env（EMPTY_ANSWER_FALLBACK_MODEL_NAME）→ 前端「模型管理」默认模型
+        # （catalog.default_model()）→ .env 的 LLM_MODEL（self.model）。前端已配默认模型时无需 env。
+        try:
+            from app.models.catalog import default_model as _catalog_default_model
+            catalog_default = _catalog_default_model() or ""
+        except Exception:  # noqa: BLE001
+            catalog_default = ""
+        fallback = (
+            (settings.empty_answer_fallback_model_name or "").strip()
+            or catalog_default
+            or self.model
+        )
+        candidates: list[tuple[str, str | None]] = []
+        # 强模型：同模型纯重试一次（偶发空输出）；弱模型直接回退（重试通常仍空，白等且易复读提示）
+        if not is_weak_model(model):
+            candidates.append((model, None))
+        if settings.empty_answer_fallback_model and fallback and fallback != model:
+            candidates.append((fallback, "请直接、简洁地用中文回答上面的用户问题。"))
+        if not candidates:
+            candidates.append((model, None))
+        for m, nudge in candidates:
+            try:
+                msgs = list(messages) + ([{"role": "user", "content": nudge}] if nudge else [])
+                resp = await self._llm_call(m, msgs, None, state=state)
+                text = strip_json_envelope((resp.choices[0].message.content or "").strip())
+                if text and text.strip():
+                    logger.info("empty-answer recovered via model=%s", m)
+                    return text
+            except Exception as e:  # noqa: BLE001
+                logger.warning("empty-answer retry via %s failed: %s", m, e)
+        return ""
 
 __all__ = ['RAGAgentGenerate']

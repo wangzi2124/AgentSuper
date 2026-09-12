@@ -86,6 +86,16 @@ from .state import AgentState
 from .state import _ZERO_USAGE
 logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
+
+def is_weak_model(model: str) -> bool:
+    """判断是否为「弱模型」（本地/小参数）：`ollama/` 前缀，或 settings.weak_models 命中。"""
+    m = (model or "").lower()
+    if m.startswith("ollama/"):
+        return True
+    weak = [x.strip().lower() for x in (settings.weak_models or "").split(",") if x.strip()]
+    return any(m == w or m.endswith("/" + w) for w in weak)
+
+
 class RAGAgentBase:
     def __init__(
         self,
@@ -431,7 +441,7 @@ class RAGAgentBase:
             if t.name.startswith(prefixes):
                 return True
         return False
-    def _build_tool_defs(self, question: str = "", used_names: set | None = None, conversation_id: str = "") -> list[dict] | None:
+    def _build_tool_defs(self, question: str = "", used_names: set | None = None, conversation_id: str = "", model: str = "") -> list[dict] | None:
         """[token 优化 v5+v15] 按需挂载 OpenAI 工具定义，会话内只增不减。
 
         system prompt 只列常驻工具名 + 一行 skill 提示（[token 优化 v10]），技能清单与
@@ -455,7 +465,10 @@ class RAGAgentBase:
         pinned = self._pinned_tool_names()
         by_name = {t.name: t for t in self.tools}
 
-        # 本轮"想要"的工具集：常驻 + 固定 + 已使用 + 意图命中
+        # [弱模型鲁棒性] 弱模型始终挂载全部技能/插件（脚本）工具，使其能直接调用
+        mount_all_skills = settings.weak_model_mount_all_tools and is_weak_model(model or self.model)
+
+        # 本轮"想要"的工具集：常驻 + 固定 + 已使用 + 意图命中（弱模型额外全挂技能/脚本）
         wanted: set[str] = set()
         for t in self.tools:
             if t.name in pinned:
@@ -465,6 +478,9 @@ class RAGAgentBase:
                 wanted.add(t.name)
                 continue
             if t.name.startswith(self._CORE_TOOL_PREFIXES):
+                wanted.add(t.name)
+                continue
+            if mount_all_skills and (t.name.startswith("load_skill_") or t.name.startswith("plugin_")):
                 wanted.add(t.name)
                 continue
             if self._tool_matches_intent(t, q):

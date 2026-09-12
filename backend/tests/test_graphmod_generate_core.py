@@ -681,6 +681,48 @@ async def test_generate_empty_json_object_default(gen_env):
 
 
 @pytest.mark.asyncio
+async def test_generate_empty_answer_retry_recovers(gen_env, monkeypatch):
+    """[弱模型鲁棒性] 强模型空回答 → 同模型纯重试一次并恢复（不显示兜底）。"""
+    monkeypatch.setattr(settings, "empty_answer_retry", True)
+    agent, llm = _setup_generate(gen_env, [
+        FakeLLM().response(content="{}"),
+        FakeLLM().response(content="你好，我可以帮你。"),
+    ])
+    state = make_state()
+    state["model"] = "deepseek/deepseek-v4-flash"  # 强模型：走同模型重试
+    out = await agent._generate(state)
+    assert out["answer"] == "你好，我可以帮你。"
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_empty_answer_falls_back_to_default_model(gen_env, monkeypatch):
+    """[弱模型鲁棒性] 弱模型空回答 → 回退前端「模型管理」默认模型重跑。"""
+    monkeypatch.setattr(settings, "empty_answer_retry", True)
+    monkeypatch.setattr(settings, "empty_answer_fallback_model", True)
+    monkeypatch.setattr(settings, "empty_answer_fallback_model_name", "")
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
+    agent, llm = _setup_generate(gen_env, [
+        FakeLLM().response(content="{}"),              # 主调用（弱模型，空）
+        FakeLLM().response(content="fallback answer"),  # 回退默认模型
+    ])
+    state = make_state()
+    state["model"] = "ollama/qwen2.5:3b"  # 弱模型 → 跳过同模型重试，直接回退
+    out = await agent._generate(state)
+    assert out["answer"] == "fallback answer"
+    assert len(llm.calls) == 2
+
+
+def test_is_weak_model():
+    from app.agent.graphmod.base import is_weak_model
+    assert is_weak_model("ollama/qwen2.5:3b") is True
+    assert is_weak_model("ollama/mistral:latest") is True
+    assert is_weak_model("deepseek/deepseek-v4-flash") is False
+    assert is_weak_model("") is False
+
+
+@pytest.mark.asyncio
 async def test_generate_one_tool_round_then_stop(gen_env):
     exec_calls = []
 
