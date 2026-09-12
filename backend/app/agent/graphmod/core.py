@@ -120,21 +120,6 @@ _TCC_PATTERN = re.compile(
 _TCC_INNER_KEYS = ("message", "content", "text", "answer", "result", "response")
 
 
-def _find_closing_quote(s: str):
-    """s 以 \" 开头时返回闭合双引号后的下标；未闭合/不以引号开头返回 None。"""
-    if not s or not s.startswith('"'):
-        return None
-    i = 1
-    while i < len(s):
-        if s[i] == "\\":
-            i += 2
-            continue
-        if s[i] == '"':
-            return i + 1
-        i += 1
-    return None
-
-
 def _extract_tool_call_obj(content: str):
     """从内容中提取工具调用 JSON 对象（支持 <tool_call> 标记或整段裸 JSON）。
 
@@ -180,49 +165,16 @@ def _tcc_prefix_ok(text: str) -> bool:
     if not t.startswith("{"):
         return False
     rest = t[1:].lstrip()
-    key = '"name"'
-    for i in range(len(key)):
-        if i >= len(rest):
-            return True  # 键名还在流中
-        if rest[i] != key[i]:
-            return False
-    rest = rest[len(key):].lstrip()
-    if not rest:
-        return True
-    if not rest.startswith(":"):
-        return False
-    rest = rest[1:].lstrip()
-    if not rest:
-        return True
-    if not rest.startswith('"'):
-        return False
-    end = _find_closing_quote(rest)
-    if end is None:
-        return True  # 值字符串未闭合
-    rest = rest[end:].lstrip()
-    if not rest:
-        return True
-    if not rest.startswith(","):
-        return False
-    rest = rest[1:].lstrip()
-    ak = '"arguments"'
-    for i in range(len(ak)):
-        if i >= len(rest):
+    # 弱模型键名不精确：只要首个键是某个「名称键」（name/function/tool/action…，见
+    # _TCC_NAME_KEYS）或键名尚在流中，就认为仍可能是工具调用 JSON → 暂缓推送。
+    # 流末若未被识别为工具调用，_llm_call 会统一补推，不丢字。
+    for nk in _TCC_NAME_KEYS:
+        key = f'"{nk}"'
+        if rest.startswith(key):
             return True
-        if rest[i] != ak[i]:
-            return False
-    rest = rest[len(ak):].lstrip()
-    if not rest:
-        return True
-    if not rest.startswith(":"):
-        return False
-    rest = rest[1:].lstrip()
-    if not rest:
-        return True
-    if not rest.startswith("{"):
-        return False
-    # 已进入参数对象：外括号未收口时仍可能继续流；完整命中交给 _TCC_PATTERN
-    return t.count("{") > t.count("}")
+        if len(rest) < len(key) and key.startswith(rest):
+            return True  # 键名还在流中
+    return False
 
 
 def _parse_streamed_tool_call(content: str):

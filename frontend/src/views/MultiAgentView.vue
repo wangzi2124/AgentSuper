@@ -3,43 +3,26 @@ import { computed, nextTick, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import type { FileContent, VoiceMessageData, MultiAgentMessage } from '../types'
-import { usePermissionStore } from '../stores/permission'
 import { useAuthStore } from '../stores/auth'
-import { useThemeStore, BG_VARIANTS } from '../stores/theme'
-  import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
+  import { useChatSettingsStore } from '../stores/chatSettings'
 import { synthesize, speakNative, stopNative } from '../api/voice'
 import MultiAgentResponse from '../components/MultiAgentResponse.vue'
 import ChatInput from '../components/ChatInput.vue'
-import WeatherAlert from '../components/WeatherAlert.vue'
-import DirPickerModal from '../components/DirPickerModal.vue'
 import VoiceBubble from '../components/VoiceBubble.vue'
-import { estimateTokens } from '../api/models'
 
 const route = useRoute()
 const router = useRouter()
 const agent = useMultiAgentStore()
-const perm = usePermissionStore()
 const auth = useAuthStore()
-const theme = useThemeStore()
 const parentRef = ref<HTMLElement>()
 const chatInputRef = ref<any>()
 const isNearBottom = ref(true)
-const isWeatherEnabled = ref(false)
-const showWeather = ref(false)
-const showSettings = ref(false)
-const showWsPanel = ref(false)
-const wsInput = ref('')
-const wsError = ref('')
 
 function isImgAvatar(v: string): boolean {
   return !!v && (v.startsWith('data:') || v.startsWith('http'))
 }
-const wsBusy = ref(false)
-const showDirPicker = ref(false)
 // [F8] 聊天图片点击放大预览（当前预览图的 data URL；空串 = 未预览）
 const previewImage = ref('')
-const extraWorkspaces = computed(() => perm.workspaces.length > 1 ? perm.workspaces.slice(1) : [])
-const mainWorkspace = computed(() => perm.workspaces[0] || '')
 
 const messages = computed(() => agent.messages)
 
@@ -51,57 +34,6 @@ function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
   if (!el) return
   isNearBottom.value = true
   el.scrollTo({ top: el.scrollHeight, behavior })
-}
-
-async function checkWeatherPlugin() {
-  try {
-    const { addAuthHeaders } = await import('../api/fetch')
-    const response = await fetch('/api/plugins/weather-alert/status', { headers: await addAuthHeaders() })
-    if (response.ok) {
-      const data = await response.json()
-      isWeatherEnabled.value = data.enabled
-    }
-  } catch (e) {
-    console.error('Failed to check weather plugin status:', e)
-  }
-}
-
-function toggleWsPanel() {
-  showWsPanel.value = !showWsPanel.value
-  wsError.value = ''
-}
-
-async function handleAddWorkspace() {
-  const path = wsInput.value.trim()
-  if (!path) {
-    wsError.value = '请输入绝对路径，如 F:\\tetris'
-    return
-  }
-  wsBusy.value = true
-  wsError.value = ''
-  try {
-    await perm.addWorkspace(path)
-    wsInput.value = ''
-  } catch (e: any) {
-    wsError.value = e?.message || '添加失败'
-  } finally {
-    wsBusy.value = false
-  }
-}
-
-async function handleRemoveWorkspace(path: string) {
-  try {
-    await perm.removeWorkspace(path)
-  } catch (e: any) {
-    wsError.value = e?.message || '移除失败'
-  }
-}
-
-// 目录选择器选中后回填输入框
-function handleDirPick(path: string) {
-  wsInput.value = path
-  showDirPicker.value = false
-  wsError.value = ''
 }
 
 watch(() => messages.value.length, async () => {
@@ -164,8 +96,6 @@ function usageDetail(msg: MultiAgentMessage): string {
 onMounted(() => {
   const id = route.params.id as string
   if (id) agent.loadConversation(id)
-  checkWeatherPlugin()
-  perm.loadWorkspaces()
   window.addEventListener('keydown', onGlobalKeydown)
 })
 
@@ -250,16 +180,6 @@ function handleUndo(index: number) {
 function handleMessageDelete(messageId: string) {
   if (agent.loading) agent.cancel()
   agent.deleteMessage(messageId)
-}
-
-function handleClearConversation() {
-  if (!confirm('确定清空当前对话？此操作不可撤销。')) return
-  agent.deleteConversation()
-}
-
-function openWeather() {
-  showSettings.value = false
-  showWeather.value = true
 }
 
 // [TTS] AI 消息朗读
@@ -355,49 +275,6 @@ async function handleCopy(messageId: string, text: string) {
     agent.newChat()
     router.push({ name: 'MultiAgent' })
   }
-
-  // ── 上下文 token 估算条：Debounce 调后端官方 tokenizer（DeepSeek V4）估算当前会话 ──
-  const ctxEst = ref<{ tokens: number; chars: number; method: string } | null>(null)
-  const ctxEstBusy = ref(false)
-  let ctxTimer: ReturnType<typeof setTimeout> | null = null
-  const currentModel = computed(() => agent.models.find(m => m.id === agent.selectedModel) ?? null)
-  const smallCtxLabel = computed(() => {
-    if (!agent.smallModelInfo) return ''
-    const name = agent.smallModelInfo.name || agent.smallModelId
-    if (name === (currentModel.value?.name || agent.selectedModel)) return ''
-    return name
-  })
-  // [模型管理] 图片解析模型 / 语音模型徽标（与主/轻量模型独立配置）
-  const imageCtxLabel = computed(() => {
-    const name = (agent.imageCaptionModelInfo && (agent.imageCaptionModelInfo.name || agent.imageCaptionModelId)) || agent.imageCaptionModelId
-    if (!name) return ''
-    if (name === (currentModel.value?.name || agent.selectedModel)) return ''
-    return name
-  })
-  const voiceCtxLabel = computed(() => (agent.voiceModelSize || ''))
-  const ctxLimit = computed(() => currentModel.value?.context_length || 0)
-  const ctxPct = computed(() => {
-    if (!ctxLimit.value || !ctxEst.value) return 0
-    return Math.min(100, Math.round((ctxEst.value.tokens / ctxLimit.value) * 100))
-  })
-  async function refreshContextEst() {
-    if (!agent.messages.length) {
-      ctxEst.value = null
-      return
-    }
-    ctxEstBusy.value = true
-    try {
-      ctxEst.value = await estimateTokens({ messages: agent.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content || '' })) })
-    } catch { /* 静默失败不打扰 */ }
-    ctxEstBusy.value = false
-  }
-  watch(
-    () => agent.messages.map(m => m.id).join(','),
-    () => {
-      if (ctxTimer) clearTimeout(ctxTimer)
-      ctxTimer = setTimeout(refreshContextEst, 900)
-    },
-  )
 </script>
 
 <template>
@@ -415,139 +292,9 @@ async function handleCopy(messageId: string, text: string) {
         <div v-else-if="agent.loading" class="status-badge running">
           <span class="pulse-dot"></span> 运行中
         </div>
-        <button
-          class="icon-btn settings-toggle"
-          :class="{ active: showSettings }"
-          title="设置"
-          @click="showSettings = !showSettings"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        </button>
       </div>
     </div>
 
-    <!-- 设置抽屉：收纳所有次要功能 -->
-    <transition name="drawer-fade">
-      <div v-if="showSettings" class="settings-backdrop" @click.self="showSettings = false"></div>
-    </transition>
-    <transition name="drawer-slide">
-      <aside v-if="showSettings" class="settings-drawer">
-        <div class="drawer-head">
-          <span class="drawer-title">对话设置</span>
-          <button class="drawer-close" title="关闭" @click="showSettings = false">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-        </div>
-
-        <div class="drawer-body">
-          <!-- 外观 / 背景色 -->
-          <div class="drawer-section">
-            <div class="drawer-label">背景颜色</div>
-            <div class="bg-picker">
-              <button
-                v-for="v in BG_VARIANTS"
-                :key="v.value"
-                class="bg-swatch"
-                :title="v.label"
-                :class="{ active: theme.bgVariant === v.value }"
-                :style="{ '--sw': v.swatch, '--sw-glow': v.glowSwatch || v.swatch }"
-                @click="theme.setBg(v.value)"
-              >
-                <span class="bg-swatch-dot"></span>
-                <span class="bg-swatch-label">{{ v.label }}</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- 模型 -->
-          <div class="drawer-section">
-            <div class="drawer-label">模型</div>
-            <select v-model="agent.selectedModel" class="drawer-select" :disabled="agent.loading" @change="agent.persistSelectedModel()">
-              <option v-for="m in agent.modelOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
-            </select>
-          </div>
-
-          <!-- 会话工作目录 -->
-          <div class="drawer-section">
-            <div class="drawer-label">会话工作目录</div>
-            <div class="ws-row">
-              <button class="ws-pick-btn" title="选择目录" @click="showDirPicker = true">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-              </button>
-              <input v-model="wsInput" class="ws-input" placeholder="F:\tetris" @keyup.enter="handleAddWorkspace" />
-              <button class="ws-add" :disabled="wsBusy" @click="handleAddWorkspace">
-                {{ wsBusy ? '添加中...' : '添加' }}
-              </button>
-            </div>
-            <p v-if="wsError" class="ws-error">{{ wsError }}</p>
-            <div class="ws-list">
-              <div v-if="mainWorkspace" class="ws-item fixed" :title="mainWorkspace">
-                <span class="ws-dot"></span>
-                <span class="ws-path">{{ mainWorkspace }}</span>
-                <span class="ws-tag">主</span>
-              </div>
-              <div v-for="w in extraWorkspaces" :key="w" class="ws-item">
-                <span class="ws-dot"></span>
-                <span class="ws-path">{{ w }}</span>
-                <button class="ws-remove" title="移除" @click="handleRemoveWorkspace(w)">×</button>
-              </div>
-              <p v-if="extraWorkspaces.length === 0" class="ws-empty">
-                无额外工作区。添加后 Agent 可写该路径（无需重启）。
-              </p>
-            </div>
-            <p v-if="agent.sessionDirectory" class="drawer-session-dir" :title="agent.sessionDirectory">当前会话：{{ agent.sessionDirectory }}</p>
-          </div>
-
-          <!-- 开关 -->
-          <div class="drawer-section">
-            <div class="drawer-label">选项</div>
-            <div class="toggle-row">
-              <span class="toggle-row-label">知识库检索</span>
-              <label class="toggle">
-                <input type="checkbox" v-model="agent.useVectorDb" :disabled="agent.loading" />
-                <span class="toggle-slider"></span>
-              </label>
-            </div>
-            <div class="toggle-row">
-              <span class="toggle-row-label">自动朗读回复</span>
-              <label class="toggle">
-                <input type="checkbox" :checked="autoRead" :disabled="agent.loading" @change="chatSettings.autoRead = ($event.target as HTMLInputElement).checked" />
-                <span class="toggle-slider"></span>
-              </label>
-            </div>
-            <div class="toggle-row">
-              <span class="toggle-row-label">朗读语言</span>
-              <select v-model="chatSettings.ttsLang" class="drawer-select tts-lang-select" :disabled="agent.loading">
-                <option v-for="l in TTS_LANGUAGES" :key="l.value" :value="l.value">{{ l.label }}</option>
-              </select>
-            </div>
-          </div>
-
-          <!-- 工具 -->
-          <div v-if="isWeatherEnabled" class="drawer-section">
-            <div class="drawer-label">辅助工具</div>
-            <button class="drawer-row-btn" @click="openWeather">
-              <span class="drawer-row-icon">🌤️</span>
-              <span class="drawer-row-text">天气预警</span>
-              <span class="drawer-row-chevron">›</span>
-            </button>
-          </div>
-
-          <!-- 危险操作 -->
-          <div class="drawer-section">
-            <button
-              class="drawer-danger"
-              :disabled="agent.loading || messages.length === 0"
-              @click="handleClearConversation"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-              清空当前对话
-            </button>
-          </div>
-        </div>
-      </aside>
-    </transition>
-    <WeatherAlert v-if="isWeatherEnabled" :show="showWeather" @update:show="showWeather = $event" />
   <!-- @@CHAT_TABLIST@@ -->
   <!-- ── 会话标签条：吸顶在聊天框最上方（移动端展示，桌面端 display:none） ── -->
   <div class="chat-tablist">
@@ -565,21 +312,6 @@ async function handleCopy(messageId: string, text: string) {
       <van-icon name="plus" />
     </div>
   </div>
-
-    <div v-if="messages.length && ctxLimit" class="ctx-strip">
-      <div
-        class="ctx-bar"
-        :class="{ 'ctx-bar--busy': ctxEstBusy }"
-        :title="ctxEst ? `本次估算基于 ${ctxEst.method}` : '上下文 token 估算中…'"
-      >
-        <span class="ctx-fill" :style="{ width: ctxPct + '%' }"></span>
-      </div>
-      <span class="ctx-num">{{ ctxEst ? ctxEst.tokens.toLocaleString() : '···' }} / {{ ctxLimit.toLocaleString() }}</span>
-      <span v-if="smallCtxLabel" class="ctx-small" :title="'轻量模型：会话标题/子任务分类/摘要等内部轻任务，与主模型独立配置'">轻量 {{ smallCtxLabel }}</span>
-      <span v-if="imageCtxLabel" class="ctx-small ctx-small--image" :title="'图片解析模型：图像描述，与主对话模型独立配置'">🖼 {{ imageCtxLabel }}</span>
-      <span v-if="voiceCtxLabel" class="ctx-small ctx-small--voice" :title="'语音模型：Qwen3-TTS 合成规格，与主对话模型独立配置'">🎙 {{ voiceCtxLabel }}</span>
-      <span class="ctx-model">{{ currentModel?.name || agent.selectedModel }}</span>
-    </div>
 
     <div class="chat-body">
       <div v-if="messages.length === 0" class="empty-state">
@@ -691,8 +423,6 @@ async function handleCopy(messageId: string, text: string) {
     <div class="chat-footer">
       <ChatInput ref="chatInputRef" :loading="agent.loading" @send="handleSend" @cancel="handleCancel" />
     </div>
-
-    <DirPickerModal :show="showDirPicker" @close="showDirPicker = false" @select="handleDirPick" />
 
     <!-- [F8] 聊天图片放大预览遮罩 -->
     <div v-if="previewImage" class="image-preview-overlay" @click.self="previewImage = ''">

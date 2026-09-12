@@ -464,7 +464,7 @@ async def test_generate_freezes_tool_defs_for_cache(monkeypatch, tmp_path):
         return await llm(model, messages, tool_defs, state=state)
     agent._llm_call = snap_llm
 
-    await agent._generate(make_state(_cwd=str(tmp_path)))
+    await agent._generate(make_state(_cwd=str(tmp_path), model="deepseek/deepseek-v4-flash"))
     # 冻结：只有入口构建一次，循环不再重挂载 → 每轮 tools 参数为同一对象
     assert len(seen) == 1, f"tool_defs 应只构建一次，实际 {len(seen)} 次"
     assert all(td is td_by_call[0] for td in td_by_call[1:])

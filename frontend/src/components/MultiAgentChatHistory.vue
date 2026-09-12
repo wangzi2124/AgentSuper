@@ -6,6 +6,7 @@ import { usePermissionStore } from '../stores/permission'
 import { useAuthStore } from '../stores/auth'
 import { deleteConversation as apiDelete } from '../api/sessions'
 import type { ConversationMeta } from '../api/sessions'
+import { estimateTokens } from '../api/models'
 
 function fmtTokens(n?: number) {
   if (!n) return ''
@@ -15,6 +16,10 @@ function fmtCost(n?: number) {
   if (!n) return ''
   return n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`
 }
+function fmtTime(s?: string) {
+  if (!s) return ''
+  try { return new Date(s).toLocaleString() } catch { return s }
+}
 
 const router = useRouter()
 const agent = useMultiAgentStore()
@@ -23,6 +28,32 @@ const auth = useAuthStore()
 const searchQuery = ref('')
 const editingId = ref<string | null>(null)
 const editingTitle = ref('')
+// [ctx-strip 迁移] 会话用量浮层：鼠标悬浮历史项即显示（当前会话额外显示上下文占用）
+const hoveredId = ref<string | null>(null)
+const ctxEst = ref<{ tokens: number; chars: number; method: string } | null>(null)
+
+async function loadCtxEst() {
+  if (!agent.messages.length) { ctxEst.value = null; return }
+  try {
+    ctxEst.value = await estimateTokens({ messages: agent.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content || '' })) })
+  } catch { /* 静默失败 */ }
+}
+function ctxLimitFor(c: ConversationMeta): number {
+  const m = agent.models.find(mm => mm.id === (c.model?.id || agent.selectedModel))
+  return m?.context_length || 0
+}
+function ctxPctFor(c: ConversationMeta): number {
+  const lim = ctxLimitFor(c)
+  if (!lim || !ctxEst.value) return 0
+  return Math.min(100, Math.round((ctxEst.value.tokens / lim) * 100))
+}
+function showUsage(c: ConversationMeta) {
+  hoveredId.value = c.id
+  if (agent.conversationId === c.id) loadCtxEst()
+}
+function hideUsage() {
+  hoveredId.value = null
+}
 
 onMounted(() => {
   // 双保险：鉴权启用但未登录时不发会话/工作区请求（登录页不会挂载本组件，防止时序异常）
@@ -68,7 +99,7 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
     </div>
     <div class="history-list">
       <div v-if="sortedConversations.length === 0" class="empty-hint">{{ searchQuery ? '无匹配结果' : '暂无历史对话' }}</div>
-      <div v-for="c in sortedConversations" :key="c.id" class="history-item" :class="{ active: agent.conversationId === c.id }" @click="selectConversation(c.id)">
+      <div v-for="c in sortedConversations" :key="c.id" class="history-item" :class="{ active: agent.conversationId === c.id }" @click="selectConversation(c.id)" @mouseenter="showUsage(c)" @mouseleave="hideUsage()">
         <div class="item-content">
           <template v-if="editingId === c.id">
             <input v-model="editingTitle" class="rename-input" @keyup.enter="saveRename" @keyup.escape="cancelRename" @blur="saveRename" autofocus />
@@ -97,6 +128,19 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
           <button class="action-btn delete" @click="handleDelete($event, c.id)">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
           </button>
+        </div>
+        <div v-if="hoveredId === c.id" class="usage-pop">
+          <div class="up-row"><span>模型</span><b>{{ c.model?.id || agent.selectedModel || '—' }}</b></div>
+          <div class="up-row"><span>输入</span><b>{{ fmtTokens(c.tokens_input) || '0' }}</b></div>
+          <div class="up-row"><span>输出</span><b>{{ fmtTokens(c.tokens_output) || '0' }}</b></div>
+          <div v-if="c.tokens_reasoning" class="up-row"><span>推理</span><b>{{ fmtTokens(c.tokens_reasoning) }}</b></div>
+          <div v-if="c.tokens_cache_read || c.tokens_cache_write" class="up-row"><span>缓存</span><b>{{ fmtTokens(c.tokens_cache_read) || 0 }} / {{ fmtTokens(c.tokens_cache_write) || 0 }}</b></div>
+          <div class="up-row"><span>费用</span><b class="up-cost">{{ fmtCost(c.cost) || '—' }}</b></div>
+          <div class="up-row"><span>更新</span><b>{{ fmtTime(c.updated_at) }}</b></div>
+          <template v-if="agent.conversationId === c.id && ctxLimitFor(c)">
+            <div class="up-row up-ctx"><span>上下文</span><b>{{ ctxEst ? ctxEst.tokens.toLocaleString() : '···' }} / {{ ctxLimitFor(c).toLocaleString() }}</b></div>
+            <div class="up-bar"><span :style="{ width: ctxPctFor(c) + '%' }"></span></div>
+          </template>
         </div>
       </div>
     </div>

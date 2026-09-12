@@ -3,13 +3,16 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import MultiAgentChatHistory from './MultiAgentChatHistory.vue'
 import PermissionDialog from './PermissionDialog.vue'
+import SettingsPanel from './SettingsPanel.vue'
 import { useAuthStore } from '../stores/auth'
+import { useThemeStore, BG_VARIANTS } from '../stores/theme'
 import { fetchStats, fetchUsage, type UserUsage } from '../api/monitor'
 import type { MonitorStats } from '../types'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const theme = useThemeStore()
 
 const sidebarOpen = ref(false)
 
@@ -208,6 +211,12 @@ function handleLogout() {
 
       <!-- 资料编辑弹层（含监控信息：不再在侧栏单独显示） -->
       <div v-if="showUserCard && profileOpen" class="profile-panel">
+        <div class="pp-head">
+          <span class="pp-head-title">用户设置</span>
+          <button class="pp-close" title="关闭" @click="profileOpen = false">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
         <div class="pp-stats">
           <button class="pp-stat" type="button" title="我的累计输入 Token（跨会话）· 点击查看系统监控" @click="goMonitor">
             <span class="pp-stat-ico">↑</span>
@@ -258,6 +267,23 @@ function handleLogout() {
             </label>
           </div>
         </div>
+        <!-- [用户设置] 全局设置：背景颜色 / 模型（所有页面可用，原聊天页设置抽屉） -->
+        <div class="pp-sep"><span>偏好设置</span></div>
+        <div class="pp-field">
+          <span class="pp-label">背景颜色</span>
+          <div class="pp-bg-row">
+            <button
+              v-for="v in BG_VARIANTS"
+              :key="v.value"
+              class="pp-bg-swatch"
+              :class="{ on: theme.bgVariant === v.value }"
+              :title="v.label"
+              :style="{ '--sw': v.swatch, '--sw-glow': v.glowSwatch || v.swatch }"
+              @click="theme.setBg(v.value)"
+            ><span></span></button>
+          </div>
+        </div>
+        <SettingsPanel @close="profileOpen = false" />
         <div class="pp-actions">
           <button class="pp-btn" @click="resetAvatar">重置</button>
           <button class="pp-btn pp-btn-primary" @click="saveNick">保存</button>
@@ -307,6 +333,15 @@ function handleLogout() {
   border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg, 0 10px 40px rgba(0, 0, 0, 0.25));
   display: flex; flex-direction: column; gap: 10px;
 }
+.pp-head { display: flex; align-items: center; justify-content: space-between; margin: -2px 0 2px; }
+.pp-head-title { font-size: 14px; font-weight: 800; letter-spacing: -0.01em; color: var(--text); }
+.pp-close {
+  width: 26px; height: 26px; border: none; border-radius: 7px; background: transparent;
+  color: var(--text-secondary); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: all var(--duration, 0.18s) var(--ease, ease);
+}
+.pp-close:hover { background: var(--bg-subtle); color: var(--text); }
 .pp-field { display: flex; flex-direction: column; gap: 6px; }
 .pp-label { font-size: 11px; font-weight: 600; color: var(--text-secondary); }
 .pp-input {
@@ -378,4 +413,33 @@ function handleLogout() {
   transition: all var(--duration) var(--ease);
 }
 .pp-monitor-link:hover { background: color-mix(in srgb, var(--primary) 16%, var(--surface)); box-shadow: 0 4px 14px var(--primary-glow); }
+
+/* ── [用户设置] 偏好设置：分隔标题 + 背景色卡（美化） ── */
+.pp-sep { display: flex; align-items: center; gap: 8px; margin: 4px 0 -2px; }
+.pp-sep::before, .pp-sep::after {
+  content: ''; flex: 1; height: 1px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--primary) 30%, var(--border-subtle)), transparent);
+}
+.pp-sep > span { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; color: var(--text-secondary); white-space: nowrap; }
+.pp-bg-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.pp-bg-swatch {
+  position: relative; width: 32px; height: 32px; padding: 0; cursor: pointer;
+  border: 2px solid transparent; border-radius: 10px; background: var(--bg-subtle);
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: transform 0.18s var(--ease, ease), box-shadow 0.18s var(--ease, ease), border-color 0.18s var(--ease, ease);
+}
+.pp-bg-swatch > span {
+  width: 20px; height: 20px; border-radius: 7px; display: block;
+  background: radial-gradient(circle at 32% 26%, var(--sw-glow, var(--sw)), var(--sw) 78%);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18), 0 2px 6px rgba(0,0,0,0.28);
+}
+.pp-bg-swatch:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--primary) 35%, transparent); }
+.pp-bg-swatch.on { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary), 0 4px 14px var(--primary-glow); }
+.pp-bg-swatch.on::after {
+  content: '✓'; position: absolute; right: -4px; bottom: -4px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--primary); color: #fff; font-size: 9px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 6px var(--primary-glow);
+}
 </style>

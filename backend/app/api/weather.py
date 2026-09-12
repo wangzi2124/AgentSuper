@@ -103,20 +103,47 @@ def _weather_code_icon(code: int) -> str:
     return _WEATHER_ICONS.get(code, "🌡️")
 
 
-def _geocode_cn(city: str) -> dict:
-    url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=5&language=zh&format=json"
+def _geocode_nominatim(city: str) -> dict:
+    """Nominatim (OSM) 地理编码：中文城市名解析准确（Open-Meteo 会把「大连」匹配到福建小村）。"""
+    url = (
+        "https://nominatim.openstreetmap.org/search?"
+        f"q={urllib.parse.quote(city)}&format=json&limit=1&accept-language=zh-CN"
+    )
     data = _fetch_json(url)
-    results = data.get("results", [])
-    if not results:
+    if not data:
         raise ValueError(f"Location not found: {city}")
-    r = results[0]
+    r = data[0]
+    parts = [p.strip() for p in (r.get("display_name") or "").split(",") if p.strip()]
     return {
-        "name": r.get("name", city),
-        "country": r.get("country", ""),
-        "admin1": r.get("admin1", ""),
-        "lat": r["latitude"],
-        "lon": r["longitude"],
+        "name": parts[0] if parts else city,
+        "country": parts[-1] if len(parts) >= 2 else "",
+        "admin1": parts[1] if len(parts) >= 2 else "",
+        "lat": float(r["lat"]),
+        "lon": float(r["lon"]),
     }
+
+
+def _geocode_cn(city: str) -> dict:
+    # 中文名优先 Nominatim (OSM)（更准），失败再走 Open-Meteo；英文名先 en 再 zh。
+    if any("\u4e00" <= ch <= "\u9fff" for ch in (city or "")):
+        try:
+            return _geocode_nominatim(city)
+        except Exception:
+            pass
+    for lang in ("en", "zh"):
+        url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=5&language={lang}&format=json"
+        data = _fetch_json(url)
+        results = data.get("results", [])
+        if results:
+            r = results[0]
+            return {
+                "name": r.get("name", city),
+                "country": r.get("country", ""),
+                "admin1": r.get("admin1", ""),
+                "lat": r["latitude"],
+                "lon": r["longitude"],
+            }
+    raise ValueError(f"Location not found: {city}")
 
 
 def _fetch_weather(city: str) -> dict:

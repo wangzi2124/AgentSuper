@@ -18,8 +18,7 @@
 .item-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .meta-model { background: rgba(79,70,229,0.08); color: var(--primary); padding: 0 4px; border-radius: 3px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 .meta-cost { color: #22c55e; }
-.item-actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.15s; }
-.history-item:hover .item-actions { opacity: 1; }
+.item-actions { display: flex; gap: 2px; opacity: 1; }
 .action-btn { width: 24px; height: 24px; border: none; border-radius: 4px; background: transparent; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.1s; }
 .action-btn:hover { background: rgba(255,255,255,0.1); color: var(--text); }
 .action-btn.delete:hover { color: #ef4444; }
@@ -39,3 +38,22 @@ padding: 10px 12px 4px; overflow: hidden; text-overflow: ellipsis; white-space: 
 user-select: none;
 }
 .group + .group { margin-top: 4px; }
+
+/* [ctx-strip 迁移] 会话用量浮层：点击历史项上的 📊 展开 */
+.history-item { position: relative; }
+.usage-pop {
+position: absolute; top: 100%; right: 4px; z-index: 40;
+min-width: 200px; padding: 8px 10px; border-radius: 10px;
+background: var(--surface-elevated, var(--bg)); color: var(--text);
+border: 1px solid var(--border);
+box-shadow: 0 10px 28px rgba(0,0,0,0.22);
+font-size: 12px; line-height: 1.5;
+pointer-events: auto;
+}
+.up-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 1px 0; }
+.up-row > span { color: var(--text-secondary); flex-shrink: 0; }
+.up-row > b { font-weight: 600; max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.up-cost { color: #22c55e; }
+.up-ctx { border-top: 1px solid var(--border); margin-top: 5px; padding-top: 6px; }
+.up-bar { height: 4px; border-radius: 2px; background: var(--bg); overflow: hidden; margin-top: 4px; }
+.up-bar > span { display: block; height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--primary), var(--accent, var(--primary))); transition: width 0.3s; }
