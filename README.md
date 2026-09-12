@@ -324,6 +324,36 @@ npm run build          # 构建到 frontend/dist/
 npm run preview        # 本地预览构建产物
 ```
 
+### 前后端分开部署
+
+前端所有 API 调用都是相对路径 `/api/...`，两种部署方式：
+
+**方案 A：同源反向代理（推荐，前端零改动）**
+
+- `npm run build` 生成 `frontend/dist/`，交给 Nginx/Caddy；
+- `/api/*` 反代到后端（后端只监听 `127.0.0.1:8000`）；
+- 相对路径直接可用 → **无需改前端、无需配 CORS**；
+- ⚠️ SSE（`/api/chat/multi-agent/stream`）是 `text/event-stream`，反代必须**关闭缓冲**，否则前端收不到逐字流；
+- 现成配置：`deploy/nginx.conf`、`deploy/Caddyfile`。
+
+**方案 B：跨域（前端域名 ≠ 后端域名）**
+
+```ini
+# frontend/.env.production
+VITE_API_BASE=https://api.example.com        # 后端地址（去掉尾部斜杠）
+VITE_ADMIN_TOKEN=<与后端 ADMIN_TOKEN 一致>    # 后端配了 ADMIN_TOKEN 时必填
+```
+
+```ini
+# backend/.env
+CORS_ORIGINS=["https://app.example.com"]     # 允许的前端源（JSON 数组）
+ADMIN_TOKEN=<强随机>                          # 管理接口鉴权；不配则仅 localhost 可管理
+```
+
+- 前端 HTTPS → 后端也必须 HTTPS（否则浏览器拦截混合内容）；
+- 不配 `VITE_ADMIN_TOKEN` 而后端配了 `ADMIN_TOKEN` → 前端管理操作（工作目录/插件/技能/配置）会 **403**；
+- 前端实现见 `frontend/src/api/base.ts`，详细说明见 `frontend/README.md`。
+
 ---
 
 ## 配置说明
