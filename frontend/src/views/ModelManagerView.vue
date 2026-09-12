@@ -219,7 +219,7 @@ function capOf(m: ModelInfo) {
         <p class="hint">provider 的 api_base 指向 OpenAI 兼容服务（vLLM / LM Studio / 私服）；保存后自动探测其模型并注册。</p>
         <div v-if="!mm.config?.providers?.length" class="empty-tip">暂无自定义 Provider</div>
         <div class="mm-table provider-table">
-          <div class="mm-th"><span>名称</span><span>api_base</span><span>模型数</span><span>启用</span><span>操作</span></div>
+          <div class="mm-th"><span>名称</span><span>api_base</span><span>模型数</span><span>启用</span><span class="mm-ops">操作</span></div>
           <div v-for="p in mm.config?.providers" :key="p.provider" class="mm-tr">
             <span class="mm-main">{{ p.label || p.provider }}</span>
             <span class="mm-mono">{{ p.api_base }}</span>
@@ -250,7 +250,7 @@ function capOf(m: ModelInfo) {
         </div>
         <p class="hint">自定义 <code>provider/model</code>：若该 provider 未配置，调用回落后端 .env 的 api_base/key。</p>
         <div class="mm-table">
-          <div class="mm-th"><span>名称</span><span>模型 ID</span><span>上下文</span><span>输入 / 输出价格</span><span>能力</span><span>操作</span></div>
+          <div class="mm-th"><span>名称</span><span>模型 ID</span><span class="mm-num">上下文</span><span class="mm-num">输入 / 输出价格</span><span>能力</span><span class="mm-ops">操作</span></div>
           <div v-for="m in modelList" :key="m.id" class="mm-tr">
             <span class="mm-main">{{ m.name || m.id }}</span>
             <span class="mm-mono mm-id">{{ m.id }}</span>

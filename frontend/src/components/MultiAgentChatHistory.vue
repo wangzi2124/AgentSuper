@@ -31,22 +31,12 @@ onMounted(() => {
   perm.loadWorkspaces()
 })
 
-// 按目录分组对话列表（对齐 opencode 按 project/directory 分组）
-const directoryGroups = computed(() => {
+// 对话列表（按更新时间倒序；不再按目录分组显示路径地址）
+const sortedConversations = computed(() => {
   const filtered = agent.conversations.filter(c =>
     !searchQuery.value || c.title.toLowerCase().includes(searchQuery.value.toLowerCase())
   )
-  const map = new Map<string, ConversationMeta[]>()
-  for (const c of filtered) {
-    const key = c.directory || ''
-    if (!map.has(key)) map.set(key, [])
-    map.get(key)!.push(c)
-  }
-  return Array.from(map.entries()).map(([dir, items]) => ({
-    directory: dir,
-    label: dir || '默认目录',
-    items: [...items].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1)),
-  }))
+  return [...filtered].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
 })
 
 // 新建对话（可选绑定工作目录，目录成为会话 cwd）
@@ -77,39 +67,36 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
       <input v-model="searchQuery" placeholder="搜索..." />
     </div>
     <div class="history-list">
-      <div v-if="directoryGroups.length === 0" class="empty-hint">{{ searchQuery ? '无匹配结果' : '暂无历史对话' }}</div>
-      <div v-for="group in directoryGroups" :key="group.directory" class="group">
-        <div class="group-label" :title="group.directory">{{ group.label }}</div>
-        <div v-for="c in group.items" :key="c.id" class="history-item" :class="{ active: agent.conversationId === c.id }" @click="selectConversation(c.id)">
-          <div class="item-content">
-            <template v-if="editingId === c.id">
-              <input v-model="editingTitle" class="rename-input" @keyup.enter="saveRename" @keyup.escape="cancelRename" @blur="saveRename" autofocus />
-            </template>
-            <template v-else>
-              <div class="item-title-row">
-                <span class="item-title" @dblclick.stop="startRename(c)">{{ c.title }}</span>
-                <span v-if="agent.sessions[c.id]?.streamPhase === 'queued'" class="stream-badge queued">
-                  ⏳ 排队中 #{{ agent.sessions[c.id]?.queuePosition }}
-                </span>
-                <span v-else-if="agent.sessions[c.id]?.streamPhase === 'running'" class="stream-badge running">
-                  ● 运行中
-                </span>
-              </div>
-              <div class="item-meta" v-if="c.tokens_input || c.tokens_output || c.cost">
-                <span v-if="c.model" class="meta-model">{{ c.model.id }}</span>
-                <span v-if="c.tokens_input || c.tokens_output">{{ fmtTokens(c.tokens_input) }}→{{ fmtTokens(c.tokens_output) }}</span>
-                <span v-if="c.cost" class="meta-cost">{{ fmtCost(c.cost) }}</span>
-              </div>
-            </template>
-          </div>
-          <div class="item-actions">
-            <button class="action-btn" @click.stop="startRename(c)">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-            </button>
-            <button class="action-btn delete" @click="handleDelete($event, c.id)">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-            </button>
-          </div>
+      <div v-if="sortedConversations.length === 0" class="empty-hint">{{ searchQuery ? '无匹配结果' : '暂无历史对话' }}</div>
+      <div v-for="c in sortedConversations" :key="c.id" class="history-item" :class="{ active: agent.conversationId === c.id }" @click="selectConversation(c.id)">
+        <div class="item-content">
+          <template v-if="editingId === c.id">
+            <input v-model="editingTitle" class="rename-input" @keyup.enter="saveRename" @keyup.escape="cancelRename" @blur="saveRename" autofocus />
+          </template>
+          <template v-else>
+            <div class="item-title-row">
+              <span class="item-title" @dblclick.stop="startRename(c)">{{ c.title }}</span>
+              <span v-if="agent.sessions[c.id]?.streamPhase === 'queued'" class="stream-badge queued">
+                ⏳ 排队中 #{{ agent.sessions[c.id]?.queuePosition }}
+              </span>
+              <span v-else-if="agent.sessions[c.id]?.streamPhase === 'running'" class="stream-badge running">
+                ● 运行中
+              </span>
+            </div>
+            <div class="item-meta" v-if="c.tokens_input || c.tokens_output || c.cost">
+              <span v-if="c.model" class="meta-model">{{ c.model.id }}</span>
+              <span v-if="c.tokens_input || c.tokens_output">{{ fmtTokens(c.tokens_input) }}→{{ fmtTokens(c.tokens_output) }}</span>
+              <span v-if="c.cost" class="meta-cost">{{ fmtCost(c.cost) }}</span>
+            </div>
+          </template>
+        </div>
+        <div class="item-actions">
+          <button class="action-btn" @click.stop="startRename(c)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+          <button class="action-btn delete" @click="handleDelete($event, c.id)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
         </div>
       </div>
     </div>

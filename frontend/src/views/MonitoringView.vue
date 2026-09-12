@@ -76,47 +76,30 @@ const modelRows = computed<ModelRow[]>(() => {
     </div>
 
     <div v-if="stats" class="monitor-wrap">
-      <!-- HTTP Requests -->
-      <section class="monitor-section">
-        <div class="section-head">
-          <span class="section-dot"></span>
-          <h3>HTTP 请求</h3>
-        </div>
-        <div class="card stat-card">
-          <div class="stat-grid">
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.requests.total) }}</div>
-              <div class="stat-label">请求总数</div>
-            </div>
-          </div>
-          <div class="list-block">
-            <h4>按路径</h4>
-            <div class="list-table">
-              <div v-for="(count, path) in stats.requests.by_path" :key="path" class="list-row">
-                <span class="row-path">{{ path }}</span>
-                <span class="badge badge-count">{{ num(count) }}</span>
-              </div>
-            </div>
-          </div>
-          <div class="list-block">
-            <h4>按状态码</h4>
-            <div class="list-table">
-              <div v-for="(count, status) in stats.requests.by_status" :key="status" class="list-row">
-                <span class="row-path">{{ status }}</span>
-                <span class="badge badge-count">{{ num(count) }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Model Calls -->
+      <!-- Model Calls（置顶：LLM 调用为最重要的具体信息） -->
       <section class="monitor-section">
         <div class="section-head">
           <span class="section-dot"></span>
           <h3>LLM 调用</h3>
         </div>
         <div class="card stat-card">
+          <div v-if="modelRows.length" class="list-block">
+            <h4>按模型明细（Token / 成本）</h4>
+            <div class="model-table">
+              <div class="model-table-head">
+                <span>模型</span><span>调用</span><span>输入</span><span>输出</span><span>推理</span><span>缓存</span><span>成本</span>
+              </div>
+              <div v-for="row in modelRows" :key="row.model" class="model-table-row">
+                <span class="mt-model">{{ row.model }}</span>
+                <span class="mt-cell">{{ num(row.calls) }}</span>
+                <span class="mt-cell">{{ num(row.input) }}</span>
+                <span class="mt-cell">{{ num(row.output) }}</span>
+                <span class="mt-cell">{{ num(row.reasoning) }}</span>
+                <span class="mt-cell">{{ num(row.cacheRead) }}→{{ num(row.cacheWrite) }}</span>
+                <span class="mt-cell cost">{{ fmtCost(row.cost) }}</span>
+              </div>
+            </div>
+          </div>
           <div class="stat-grid stat-grid-4">
             <div class="stat-item">
               <div class="stat-value">{{ num(stats.model_calls.total) }}</div>
@@ -168,20 +151,37 @@ const modelRows = computed<ModelRow[]>(() => {
               </div>
             </div>
           </div>
-          <div v-if="modelRows.length" class="list-block">
-            <h4>按模型明细（Token / 成本）</h4>
-            <div class="model-table">
-              <div class="model-table-head">
-                <span>模型</span><span>调用</span><span>输入</span><span>输出</span><span>推理</span><span>缓存</span><span>成本</span>
+        </div>
+      </section>
+
+      <!-- HTTP Requests -->
+      <section class="monitor-section">
+        <div class="section-head">
+          <span class="section-dot"></span>
+          <h3>HTTP 请求</h3>
+        </div>
+        <div class="card stat-card">
+          <div class="stat-grid">
+            <div class="stat-item">
+              <div class="stat-value">{{ num(stats.requests.total) }}</div>
+              <div class="stat-label">请求总数</div>
+            </div>
+          </div>
+          <div class="list-block">
+            <h4>按路径</h4>
+            <div class="list-table">
+              <div v-for="(count, path) in stats.requests.by_path" :key="path" class="list-row">
+                <span class="row-path">{{ path }}</span>
+                <span class="badge badge-count">{{ num(count) }}</span>
               </div>
-              <div v-for="row in modelRows" :key="row.model" class="model-table-row">
-                <span class="mt-model">{{ row.model }}</span>
-                <span class="mt-cell">{{ num(row.calls) }}</span>
-                <span class="mt-cell">{{ num(row.input) }}</span>
-                <span class="mt-cell">{{ num(row.output) }}</span>
-                <span class="mt-cell">{{ num(row.reasoning) }}</span>
-                <span class="mt-cell">{{ num(row.cacheRead) }}→{{ num(row.cacheWrite) }}</span>
-                <span class="mt-cell cost">{{ fmtCost(row.cost) }}</span>
+            </div>
+          </div>
+          <div class="list-block">
+            <h4>按状态码</h4>
+            <div class="list-table">
+              <div v-for="(count, status) in stats.requests.by_status" :key="status" class="list-row">
+                <span class="row-path">{{ status }}</span>
+                <span class="badge badge-count">{{ num(count) }}</span>
               </div>
             </div>
           </div>

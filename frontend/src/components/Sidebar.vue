@@ -49,6 +49,11 @@ function fmt(n: number): string {
   return String(v)
 }
 
+function fmtCost(v?: number): string {
+  if (!v || v <= 0) return '免费'
+  return `$${v.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}`
+}
+
 function isImgAvatar(v: string): boolean {
   return !!v && (v.startsWith('data:') || v.startsWith('http'))
 }
@@ -182,7 +187,7 @@ function handleLogout() {
     <div class="sidebar-bottom">
       <PermissionDialog />
 
-      <!-- User Card：头像/昵称 + 个人 Token 用量 + 全局监控摘要 -->
+      <!-- User Card：头像/昵称（用量/监控信息已移入个人设置面板） -->
       <div v-if="showUserCard" class="user-card">
         <div class="user-avatar-wrap">
           <img v-if="isImgAvatar(auth.avatar)" class="user-avatar user-avatar-img" :src="auth.avatar" alt="avatar" />
@@ -201,24 +206,44 @@ function handleLogout() {
         </button>
       </div>
 
-      <!-- 用量 / 监控摘要 -->
-      <div v-if="showUserCard" class="user-stats">
-        <div class="us-row" title="我的 Token 用量（跨会话累计）">
-          <span class="us-k">Token</span>
-          <span class="us-v">
-            <template v-if="usage">↑{{ fmt(usage.tokens_input) }} · ↓{{ fmt(usage.tokens_output) }}<em class="us-sub">{{ usage.requests }} 轮</em></template>
-            <template v-else>{{ statsLoading ? '…' : '—' }}</template>
-          </span>
-        </div>
-        <div class="us-row" title="全局监控（点击查看系统监控）" @click="goMonitor">
-          <span class="us-k">监控</span>
-          <span v-if="stats" class="us-v">{{ fmt(stats.requests.total) }} 请求 · {{ fmt(stats.model_calls.total) }} 调用</span>
-          <span v-else class="us-v">{{ statsLoading ? '…' : '—' }}</span>
-        </div>
-      </div>
-
-      <!-- 资料编辑弹层 -->
+      <!-- 资料编辑弹层（含监控信息：不再在侧栏单独显示） -->
       <div v-if="showUserCard && profileOpen" class="profile-panel">
+        <div class="pp-stats">
+          <button class="pp-stat" type="button" title="我的累计输入 Token（跨会话）· 点击查看系统监控" @click="goMonitor">
+            <span class="pp-stat-ico">↑</span>
+            <span class="pp-stat-v">{{ usage ? fmt(usage.tokens_input) : (statsLoading ? '…' : '—') }}</span>
+            <span class="pp-stat-k">输入 Token</span>
+          </button>
+          <button class="pp-stat" type="button" title="我的累计输出 Token（跨会话）· 点击查看系统监控" @click="goMonitor">
+            <span class="pp-stat-ico">↓</span>
+            <span class="pp-stat-v">{{ usage ? fmt(usage.tokens_output) : (statsLoading ? '…' : '—') }}</span>
+            <span class="pp-stat-k">输出 Token</span>
+          </button>
+          <button class="pp-stat" type="button" title="我的累计对话轮数 · 点击查看系统监控" @click="goMonitor">
+            <span class="pp-stat-ico">💬</span>
+            <span class="pp-stat-v">{{ usage ? fmt(usage.requests) : (statsLoading ? '…' : '—') }}</span>
+            <span class="pp-stat-k">对话轮数</span>
+          </button>
+          <button class="pp-stat" type="button" title="系统累计 HTTP 请求数 · 点击查看系统监控" @click="goMonitor">
+            <span class="pp-stat-ico">📡</span>
+            <span class="pp-stat-v">{{ stats ? fmt(stats.requests.total) : (statsLoading ? '…' : '—') }}</span>
+            <span class="pp-stat-k">系统请求</span>
+          </button>
+          <button class="pp-stat" type="button" title="系统累计 LLM 调用数 · 点击查看系统监控" @click="goMonitor">
+            <span class="pp-stat-ico">🧠</span>
+            <span class="pp-stat-v">{{ stats ? fmt(stats.model_calls.total) : (statsLoading ? '…' : '—') }}</span>
+            <span class="pp-stat-k">LLM 调用</span>
+          </button>
+          <button class="pp-stat" type="button" title="系统累计 LLM 成本 · 点击查看系统监控" @click="goMonitor">
+            <span class="pp-stat-ico">💎</span>
+            <span class="pp-stat-v">{{ stats ? fmtCost(stats.total_cost) : (statsLoading ? '…' : '—') }}</span>
+            <span class="pp-stat-k">总成本</span>
+          </button>
+        </div>
+        <button class="pp-monitor-link" @click="goMonitor">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l3-3 3 3 5-6"/></svg>
+          查看完整系统监控
+        </button>
         <label class="pp-field">
           <span class="pp-label">昵称</span>
           <input v-model="nickDraft" class="pp-input" maxlength="30" placeholder="输入昵称" @keyup.enter="saveNick" />
@@ -272,8 +297,14 @@ function handleLogout() {
 .us-sub { font-style: normal; color: var(--text-secondary); margin-left: 4px; }
 
 .profile-panel {
-  margin: 4px 12px 8px; padding: 10px; border: 1px solid var(--border-subtle);
-  border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-sm);
+  position: absolute;
+  left: 10px; right: 10px; bottom: 10px;
+  z-index: 40;
+  margin: 0;
+  max-height: min(72vh, 560px);
+  overflow-y: auto;
+  padding: 10px; border: 1px solid var(--border-subtle);
+  border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg, 0 10px 40px rgba(0, 0, 0, 0.25));
   display: flex; flex-direction: column; gap: 10px;
 }
 .pp-field { display: flex; flex-direction: column; gap: 6px; }
@@ -299,4 +330,52 @@ function handleLogout() {
 }
 .pp-btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
 .pp-btn-primary:hover { filter: brightness(1.08); }
+
+/* ── 个人设置内的监控信息方块（酷炫方块） ── */
+.pp-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.pp-stat {
+  position: relative;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 8px 9px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border-subtle));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--primary) 12%, transparent), transparent 70%),
+    var(--bg-subtle);
+  overflow: hidden;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  appearance: none;
+  -webkit-appearance: none;
+  transition: transform 0.18s var(--ease), box-shadow 0.18s var(--ease), border-color 0.18s var(--ease);
+}
+.pp-stat::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at 100% 0, var(--primary-glow), transparent 60%);
+  opacity: 0.55; pointer-events: none;
+}
+.pp-stat:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  box-shadow: 0 6px 16px var(--primary-glow);
+}
+.pp-stat-ico { font-size: 12px; line-height: 1; color: var(--primary); opacity: 0.9; }
+.pp-stat-v {
+  font-size: 15px; font-weight: 800; letter-spacing: -0.02em;
+  color: var(--text); font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.pp-stat-k { font-size: 9.5px; font-weight: 600; color: var(--text-secondary); letter-spacing: 0.02em; }
+.pp-monitor-link {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 7px 10px; border-radius: 9px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--border-subtle));
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface));
+  color: var(--primary); font-size: 12px; font-weight: 600;
+  transition: all var(--duration) var(--ease);
+}
+.pp-monitor-link:hover { background: color-mix(in srgb, var(--primary) 16%, var(--surface)); box-shadow: 0 4px 14px var(--primary-glow); }
 </style>
