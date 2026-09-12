@@ -86,9 +86,10 @@ def test_tooldef_to_openai_tool():
 # ── create_skill_tools ─────────────────────────────────────────────────────
 
 class FakeSkill:
-    def __init__(self, name, description):
+    def __init__(self, name, description, disable_model_invocation=False):
         self.name = name
         self.description = description
+        self.disable_model_invocation = disable_model_invocation
 
 
 class FakeSkillLoader:
@@ -116,6 +117,37 @@ def test_create_skill_tools():
     assert "多个 空格 的 描述" in tools[0].description
     assert tools[1].description.endswith("…")
     assert tools[0].parameters["required"] == []
+
+
+def test_create_skill_tools_skips_model_invocation_disabled():
+    """[opencode 对齐] disable-model-invocation 的技能不生成 load_skill_* 工具（弱模型勿误调用）。"""
+    loader = FakeSkillLoader([
+        FakeSkill("to-spec", "user-only", disable_model_invocation=True),
+        FakeSkill("docx", "d"),
+    ])
+    tools = at.create_skill_tools(loader)
+    assert [t.name for t in tools] == ["load_skill_docx"]
+
+
+def test_skill_loader_parses_disable_model_invocation(tmp_path):
+    """SkillLoader 解析 frontmatter 的 disable-model-invocation 标志。"""
+    from app.skills.loader import SkillLoader
+    d = tmp_path / "skills"
+    (d / "user-only").mkdir(parents=True)
+    (d / "user-only" / "SKILL.md").write_text(
+        "---\nname: user-only\ndescription: x\ndisable-model-invocation: true\nenabled: true\n---\nbody\n",
+        encoding="utf-8",
+    )
+    (d / "normal").mkdir(parents=True)
+    (d / "normal" / "SKILL.md").write_text(
+        "---\nname: normal\ndescription: y\nenabled: true\n---\nbody\n",
+        encoding="utf-8",
+    )
+    loader = SkillLoader(str(d))
+    loader.load_all()
+    assert loader.get("user-only").disable_model_invocation is True
+    assert loader.get("normal").disable_model_invocation is False
+    assert loader.get("user-only").to_dict()["disable_model_invocation"] is True
 
 
 # ── create_filesystem_tools ────────────────────────────────────────────────

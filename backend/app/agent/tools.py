@@ -113,6 +113,10 @@ def create_skill_tools(skill_loader: SkillLoader) -> List[ToolDef]:
     """根据技能加载器创建技能工具列表。"""
     tools: List[ToolDef] = []
     for skill in skill_loader.get_enabled_skills():
+        # [opencode 对齐] disable-model-invocation：该技能仅由用户显式触发，
+        # 不生成 load_skill_* 工具（弱模型会误调用并胡言乱语，如 to-spec/setup-*）。
+        if getattr(skill, "disable_model_invocation", False):
+            continue
         content = skill_loader.get_skill_content(skill.name)
         name = f"load_skill_{skill.name.replace('-', '_').replace(' ', '_')}"
         # [token 优化 v3] 描述截断到 200 字符：40 个技能全启用时避免 schema 体积膨胀（完整描述仍在 SKILL.md）

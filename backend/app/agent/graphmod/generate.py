@@ -548,18 +548,12 @@ class RAGAgentGenerate(RAGAgentTools):
         elif _parse_streamed_tool_call(msg.content) is not None:
             # 纯工具声明 JSON 残留（无内嵌回复字段）→ 丢弃，交由下方兜底文案
             msg.content = ""
-        # [Ollama 本地模型兜底] qwen2.5-coder 等弱模型常把整个回答包在 {"response":"..."}
-        # JSON 外壳里——解包提取纯文本，避免用户看到 JSON 原文。
+        # [Ollama 本地模型兜底] 弱模型（qwen2.5-coder / mistral 等）常把整个回答包在
+        # {"response":"..."} 或 {"role":"assistant","content":"..."} JSON 外壳里——
+        # 统一解包提取纯文本，避免用户看到 JSON 原文。
         if msg.content:
-            try:
-                import json as _json
-                _obj = _json.loads(msg.content)
-                if isinstance(_obj, dict) and len(_obj) == 1 and "response" in _obj:
-                    _val = _obj["response"]
-                    if isinstance(_val, str) and _val.strip():
-                        msg.content = _val.strip()
-            except (ValueError, TypeError, KeyError):
-                pass
+            from app.utils.json_repair import strip_json_envelope
+            msg.content = strip_json_envelope(msg.content)
         if not (msg.content or "").strip():
             # Last resort: LLM still returned empty, use a summary
             msg.content = "任务已完成，请查看结果。"

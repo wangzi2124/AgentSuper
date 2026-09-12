@@ -9,11 +9,15 @@ logger = logging.getLogger(__name__)
 class Skill:
     """技能数据模型，封装技能的名称、描述、文件路径和启用状态。"""
 
-    def __init__(self, name: str, description: str, path: str, enabled: bool = True):
+    def __init__(self, name: str, description: str, path: str, enabled: bool = True,
+                 disable_model_invocation: bool = False):
         self.name = name
         self.description = description
         self.path = path
         self.enabled = enabled
+        # [opencode 对齐] disable-model-invocation: 该技能仅可由用户显式触发，
+        # 不暴露为模型的 load_skill_* 工具（避免弱模型误调用，如 to-spec/setup-*）。
+        self.disable_model_invocation = disable_model_invocation
 
     def to_dict(self) -> dict:
         """将技能信息序列化为字典格式。"""
@@ -22,6 +26,7 @@ class Skill:
             "description": self.description,
             "path": self.path,
             "enabled": self.enabled,
+            "disable_model_invocation": self.disable_model_invocation,
         }
 
 
@@ -72,6 +77,10 @@ class SkillLoader:
                 description=description,
                 path=str(path),
                 enabled=meta.get("enabled", True),
+                disable_model_invocation=bool(
+                    meta.get("disable-model-invocation",
+                             meta.get("disable_model_invocation", False))
+                ),
             )
         except Exception as e:
             logger.warning("Failed to load skill %s: %s", path.name, e)

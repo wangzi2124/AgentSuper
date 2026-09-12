@@ -60,6 +60,50 @@ def parse_tool_args(raw: str | None) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+_ENVELOPE_TEXT_KEYS = ("content", "response", "answer", "text")
+
+
+def _extract_envelope_text(obj: dict, depth: int = 0) -> str | None:
+    """从疑似「消息信封」的 dict 里取内层文本；非信封返回 None。"""
+    if depth > 3 or not isinstance(obj, dict):
+        return None
+    # 嵌套 message 对象（如 {"message": {"role": "assistant", "content": "..."}}）
+    msg = obj.get("message")
+    if isinstance(msg, dict):
+        inner = _extract_envelope_text(msg, depth + 1)
+        if inner is not None:
+            return inner
+    # 仅当看起来是信封（含 role 或单键）时才解包，避免误伤正常的多字段 JSON 回答
+    if "role" not in obj and len(obj) != 1:
+        return None
+    for k in _ENVELOPE_TEXT_KEYS:
+        v = obj.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    if isinstance(msg, str) and msg.strip():
+        return msg.strip()
+    return None
+
+
+def strip_json_envelope(text: str | None) -> str:
+    """[弱模型兜底] 剥离「整条回答被包进 JSON 外壳」的情况。
+
+    弱模型（mistral/qwen2.5-* 等）偶尔把回答吐成
+    `{"role": "assistant", "content": "..."}` 或 `{"response": "..."}`。
+    整体是 JSON 对象且能取到内层文本时返回该文本，否则原样返回。
+    """
+    if not text:
+        return text
+    s = _strip_code_fence(text.strip())
+    if not (s.startswith("{") and s.endswith("}")):
+        return text
+    obj = parse_json_value(s)
+    if not isinstance(obj, dict):
+        return text
+    inner = _extract_envelope_text(obj)
+    return inner if inner is not None else text
+
+
 def _strip_code_fence(text: str) -> str:
     """去掉 ```json ... ``` / ``` ... ``` 围栏及其前后散文。"""
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
