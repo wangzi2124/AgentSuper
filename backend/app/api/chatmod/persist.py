@@ -193,7 +193,8 @@ def _persist_multi_agent_parts(session_id: str, message_id: str, answer: str,
 async def _persist_multi_agent(service, user_id: str, session_id: str, child_id: str,
                                question: str, answer: str, sources: list, steps: list,
                                agents: list | None = None, model: str | None = None,
-                               tokens: dict | None = None, client_msg_id: str | None = None,
+                               tokens: dict | None = None, cost: float = 0.0,
+                               client_msg_id: str | None = None,
                                files: list | None = None,
                                voice: dict | None = None) -> tuple[str, str]:
     """主会话 + 子任务会话各追加 user/assistant 消息；新会话生成标题。
@@ -231,9 +232,10 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
             assistant_msg = service.append_message(user_id, session_id, "assistant", {
                 "role": "assistant", "content": answer, "sources": sources, "steps": steps,
                 "agents": agents or [], "parent_id": user_msg_id, "agent": "supervisor", "model": model,
-                "tokens": tokens or {},
+                "tokens": tokens or {}, "cost": round(float(cost), 6),
             })
             _persist_multi_agent_parts(session_id, assistant_msg.id, answer, agents)
+            _account_session_usage(session_id, tokens, cost)
             assistant_msg_id = assistant_msg.id
         else:
             # [B4] 完整轮次已落库 → 直接复用 id，不重复写入主会话
@@ -245,7 +247,7 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
     try:
         async with service.write_lock(child_id):
             _ensure_child_pair(service, user_id, child_id, question, answer, sources,
-                               steps, agents, model, tokens, client_msg_id)
+                               steps, agents, model, tokens, cost, client_msg_id)
     except Exception:
         logger.exception("Failed to persist child session %s (main %s), main already committed", child_id, session_id)
     return user_msg_id, assistant_msg_id
@@ -274,7 +276,7 @@ def _existing_pair(service, user_id: str, session_id: str,
 
 def _ensure_child_pair(service, user_id: str, session_id: str, question: str, answer: str,
                        sources: list, steps: list, agents: list | None, model: str | None,
-                       tokens: dict | None, client_msg_id: str | None) -> None:
+                       tokens: dict | None, cost: float = 0.0, client_msg_id: str | None = None) -> None:
     """[B4] 确保子任务会话存在与主会话一致的 user/assistant 对（幂等）。"""
     user_msg_id, existing_assistant_id = _existing_pair(service, user_id, session_id, client_msg_id)
     if existing_assistant_id:
@@ -287,10 +289,32 @@ def _ensure_child_pair(service, user_id: str, session_id: str, question: str, an
     child_assist = service.append_message(user_id, session_id, "assistant", {
         "role": "assistant", "content": answer, "sources": sources, "steps": steps,
         "agents": agents or [], "parent_id": user_msg_id, "agent": "supervisor", "model": model,
-        "tokens": tokens or {},
+        "tokens": tokens or {}, "cost": round(float(cost), 6),
     })
     _persist_multi_agent_parts(session_id, child_assist.id, answer, agents)
+    _account_session_usage(session_id, tokens, cost)
     service.update(user_id, session_id, status="idle")
+
+
+def _account_session_usage(session_id: str, tokens: dict | None, cost: float = 0.0) -> None:
+    """把本次 assistant 轮次的 token/成本累加到会话聚合列（sessions.tokens_*/cost）。
+
+    [token 统计] 五键口径：reasoning/cache_read/cache_write 单列入账；
+    幂等由上层 client_msg_id 去重保证（完整轮次复用时不重复入账）。
+    """
+    tokens = tokens or {}
+    try:
+        session_repo.add_session_usage(
+            session_id,
+            input_tokens=tokens.get("input", 0),
+            output_tokens=tokens.get("output", 0),
+            cost=float(cost),
+            cache_read=tokens.get("cache_read", 0),
+            cache_write=tokens.get("cache_write", 0),
+            reasoning=tokens.get("reasoning", 0),
+        )
+    except Exception:  # noqa: BLE001 —— 聚合失败不阻断消息已落库的主路径
+        logger.exception("add_session_usage failed for %s", session_id)
 
 async def _persist_interrupted_partial(service, user_id: str, session_id: str, child_id: str,
                                        question: str, answer: str, agents: list | None,

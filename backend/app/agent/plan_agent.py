@@ -87,6 +87,9 @@ class PlanAgent(BaseAgent):
         self._model = settings.llm_model
         self._api_key = settings.llm_api_key
         self._api_base = settings.llm_api_base
+        if self._model.startswith("ollama/"):
+            self._api_key = "ollama"
+            self._api_base = None
 
     @property
     def agent_id(self) -> str:

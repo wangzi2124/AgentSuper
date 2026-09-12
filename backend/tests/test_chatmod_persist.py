@@ -222,16 +222,18 @@ def test_ensure_child_pair_existing_assistant(service):
     svc.append_message("u1", "s1", "user", {"client_msg_id": "c1"})
     svc.append_message("u1", "s1", "assistant", {})
     before = len(svc._msgs["s1"])
-    p._ensure_child_pair(svc, "u1", "s1", "q", "a", [], [], None, None, None, "c1")
+    p._ensure_child_pair(svc, "u1", "s1", "q", "a", [], [], None, None, None, client_msg_id="c1")
     assert len(svc._msgs["s1"]) == before  # 幂等，不重复写
 
 
 def test_ensure_child_pair_creates(service, monkeypatch):
     svc, req = service
     svc.create("u1", session_id="s1")
-    p._ensure_child_pair(svc, "u1", "s1", "q", "a", [], [], None, None, None, "c1")
+    monkeypatch.setattr(p.session_repo, "add_session_usage", lambda *a, **k: None)
+    p._ensure_child_pair(svc, "u1", "s1", "q", "a", [], [], None, None, None, client_msg_id="c1")
     assert [m.type for m in svc._msgs["s1"]] == ["user", "assistant"]
     assert svc._msgs["s1"][0].data["client_msg_id"] == "c1"
+    assert svc._msgs["s1"][1].data.get("cost") == 0.0
     assert svc.updates and svc.updates[0][1].get("status") == "idle"
 
 
@@ -244,12 +246,14 @@ async def test_persist_multi_agent_full(service, monkeypatch):
     svc.create("u1", session_id="c1")
     monkeypatch.setattr(p.session_repo, "latest_seq", lambda sid: 1)
     monkeypatch.setattr(p, "_persist_multi_agent_parts", lambda *a, **k: None)
+    monkeypatch.setattr(p.session_repo, "add_session_usage", lambda *a, **k: None)
     u, a = await p._persist_multi_agent(svc, "u1", "s1", "c1", "q", "A", [], [],
                                         agents=[{"agent_id": "rag"}], model="m", tokens={"i": 1},
                                         client_msg_id="c1")
     assert u == "m1" and a == "m2"
     assert svc._msgs["s1"][0].type == "user"
     assert svc._msgs["s1"][1].data["role"] == "assistant"
+    assert svc._msgs["s1"][1].data.get("cost") == 0.0
     # 新会话（seq==1）→ 更新标题
     assert svc.updates[0][1].get("title") == "q"
     # 子会话已写 user/assistant
@@ -264,6 +268,7 @@ async def test_persist_multi_agent_idempotent_reuse(service, monkeypatch):
     svc.append_message("u1", "s1", "user", {"client_msg_id": "c1"})
     svc.append_message("u1", "s1", "assistant", {})
     monkeypatch.setattr(p, "_persist_multi_agent_parts", lambda *a, **k: None)
+    monkeypatch.setattr(p.session_repo, "add_session_usage", lambda *a, **k: None)
     u, a = await p._persist_multi_agent(svc, "u1", "s1", "c1", "q", "A", [], [],
                                         client_msg_id="c1")
     assert (u, a) == ("m1", "m2")  # 复用已落库 id
@@ -278,6 +283,7 @@ async def test_persist_multi_agent_child_failure_tolerated(service, monkeypatch)
     svc.create("u1", session_id="c1")
     monkeypatch.setattr(p.session_repo, "latest_seq", lambda sid: 1)
     monkeypatch.setattr(p, "_persist_multi_agent_parts", lambda *a, **k: None)
+    monkeypatch.setattr(p.session_repo, "add_session_usage", lambda *a, **k: None)
 
     def maybe_boom(user_id, session_id, **fields):
         if session_id == "c1":

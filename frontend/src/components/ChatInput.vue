@@ -2,7 +2,6 @@
 import { ref, computed, nextTick, onBeforeUnmount, watch } from 'vue'
 import type { FileContent, VoiceMessageData } from '../types'
 import { useMultiAgentStore } from '../stores/multiAgent'
-import { SUPPORTED_MODELS } from '../config/models'
 
 // 定义组件事件：发送消息（含可选附件）、取消请求
 const emit = defineEmits<{ send: [text: string, files: FileContent[], voice?: VoiceMessageData]; cancel: [] }>()
@@ -16,7 +15,7 @@ const agent = useMultiAgentStore()
 const modelMenuOpen = ref(false)
 const tipVisible = ref(false)
 const currentModel = computed(
-  () => SUPPORTED_MODELS.find(m => m.value === agent.selectedModel) ?? SUPPORTED_MODELS[0]
+  () => agent.modelOptions.find(m => m.value === agent.selectedModel) ?? agent.modelOptions[0]
 )
 const currentModelLabel = computed(() => currentModel.value.label)
 const currentModelDesc = computed(() => currentModel.value.desc)
@@ -28,6 +27,7 @@ function toggleModelMenu() {
 }
 function pickModel(value: string) {
   agent.selectedModel = value
+  agent.persistSelectedModel()
   modelMenuOpen.value = false
 }
 
@@ -865,7 +865,7 @@ const textareaRef = ref<HTMLTextAreaElement>()
           <div v-if="modelMenuOpen" class="model-menu-mask" @click="modelMenuOpen = false"></div>
           <div v-if="modelMenuOpen" class="model-menu">
             <button
-              v-for="m in SUPPORTED_MODELS"
+              v-for="m in agent.modelOptions"
               :key="m.value"
               type="button"
               class="model-menu-item"

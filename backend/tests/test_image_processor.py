@@ -104,6 +104,8 @@ def caption_on(monkeypatch):
     monkeypatch.setattr(settings, "image_caption_api_base", None)
     monkeypatch.setattr(settings, "image_caption_api_key", None)
     monkeypatch.setattr(settings, "image_caption_timeout", 5)
+    # [模型管理] catalog 优先：测试隔离，钉住 getter 为空（不读本机 data/model_catalog.json）
+    monkeypatch.setattr("app.models.catalog.image_caption_model", lambda: None)
 
 
 @pytest.mark.asyncio
@@ -157,7 +159,7 @@ def test_ocr_hook_disabled_by_default():
 
 @pytest.mark.asyncio
 async def test_caption_image_ollama_routing(caption_on, monkeypatch):
-    """[F8] Ollama 本地视觉模型配置：model/ollama 前缀 + api_base 透传 litellm。"""
+    """[F8] Ollama 本地视觉模型配置：model/ollama 前缀走 litellm 自动端点（不传 api_base）。"""
     import litellm as lm
     monkeypatch.setattr(settings, "image_caption_model", "ollama/llava")
     monkeypatch.setattr(settings, "image_caption_api_base", "http://localhost:11434")
@@ -173,8 +175,9 @@ async def test_caption_image_ollama_routing(caption_on, monkeypatch):
     cap = await ip.caption_image(_b64_1x1(), "image/png", "cat.png")
     assert cap == "猫"
     assert calls["model"] == "ollama/llava"
-    assert calls["api_base"] == "http://localhost:11434"
-    assert "api_key" not in calls  # Ollama 无需 key
+    # ollama 前缀由 litellm 识别端点，api_base 显式置空、api_key 固定 ollama
+    assert calls.get("api_base") is None
+    assert calls.get("api_key") == "ollama"
 
 
 # ── C 步：子 Agent 附件上下文（文档 + 图片 caption）────────────────────────

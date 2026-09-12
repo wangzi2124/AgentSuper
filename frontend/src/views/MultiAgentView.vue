@@ -2,8 +2,7 @@
 import { computed, nextTick, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
-import { SUPPORTED_MODELS } from '../config/models'
-import type { FileContent, VoiceMessageData } from '../types'
+import type { FileContent, VoiceMessageData, MultiAgentMessage } from '../types'
 import { usePermissionStore } from '../stores/permission'
 import { useThemeStore, BG_VARIANTS } from '../stores/theme'
   import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
@@ -13,6 +12,7 @@ import ChatInput from '../components/ChatInput.vue'
 import WeatherAlert from '../components/WeatherAlert.vue'
 import DirPickerModal from '../components/DirPickerModal.vue'
 import VoiceBubble from '../components/VoiceBubble.vue'
+import { estimateTokens } from '../api/models'
 
 const route = useRoute()
 const router = useRouter()
@@ -126,6 +126,34 @@ watch(() => {
     parentRef.value.scrollTo({ top: parentRef.value.scrollHeight, behavior: 'smooth' })
   }
 })
+
+// ── [模型目录] 消息头 usage 摘要（model · in→out · cost；hover 看明细）──
+function fmtTokens(n?: number) {
+  if (!n) return ''
+  return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}k` : `${n}`
+}
+function fmtCost(n?: number) {
+  if (!n || n <= 0) return ''
+  return n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`
+}
+function usageLabel(msg: MultiAgentMessage): string {
+  const t = msg.tokens || {}
+  const parts: string[] = []
+  if (msg.model) parts.push(msg.model)
+  if (t.input || t.output) parts.push(`${fmtTokens(t.input)}→${fmtTokens(t.output)}`)
+  const c = fmtCost(msg.cost)
+  if (c) parts.push(c)
+  return parts.join(' · ')
+}
+function usageDetail(msg: MultiAgentMessage): string {
+  const t = msg.tokens || {}
+  const lines = [`模型: ${msg.model || '-'}`]
+  if (t.input != null || t.output != null || t.reasoning != null || t.cache_read != null || t.cache_write != null) {
+    lines.push(`输入 ${fmtTokens(t.input)} · 输出 ${fmtTokens(t.output)} · 推理 ${fmtTokens(t.reasoning)} · 缓存读 ${fmtTokens(t.cache_read)} · 缓存写 ${fmtTokens(t.cache_write)}`)
+  }
+  lines.push(`成本: ${fmtCost(msg.cost) || '$0.00'}`)
+  return lines.join('\n')
+}
 
 onMounted(() => {
   const id = route.params.id as string
@@ -321,6 +349,49 @@ async function handleCopy(messageId: string, text: string) {
     agent.newChat()
     router.push({ name: 'MultiAgent' })
   }
+
+  // ── 上下文 token 估算条：Debounce 调后端官方 tokenizer（DeepSeek V4）估算当前会话 ──
+  const ctxEst = ref<{ tokens: number; chars: number; method: string } | null>(null)
+  const ctxEstBusy = ref(false)
+  let ctxTimer: ReturnType<typeof setTimeout> | null = null
+  const currentModel = computed(() => agent.models.find(m => m.id === agent.selectedModel) ?? null)
+  const smallCtxLabel = computed(() => {
+    if (!agent.smallModelInfo) return ''
+    const name = agent.smallModelInfo.name || agent.smallModelId
+    if (name === (currentModel.value?.name || agent.selectedModel)) return ''
+    return name
+  })
+  // [模型管理] 图片解析模型 / 语音模型徽标（与主/轻量模型独立配置）
+  const imageCtxLabel = computed(() => {
+    const name = (agent.imageCaptionModelInfo && (agent.imageCaptionModelInfo.name || agent.imageCaptionModelId)) || agent.imageCaptionModelId
+    if (!name) return ''
+    if (name === (currentModel.value?.name || agent.selectedModel)) return ''
+    return name
+  })
+  const voiceCtxLabel = computed(() => (agent.voiceModelSize || ''))
+  const ctxLimit = computed(() => currentModel.value?.context_length || 0)
+  const ctxPct = computed(() => {
+    if (!ctxLimit.value || !ctxEst.value) return 0
+    return Math.min(100, Math.round((ctxEst.value.tokens / ctxLimit.value) * 100))
+  })
+  async function refreshContextEst() {
+    if (!agent.messages.length) {
+      ctxEst.value = null
+      return
+    }
+    ctxEstBusy.value = true
+    try {
+      ctxEst.value = await estimateTokens({ messages: agent.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content || '' })) })
+    } catch { /* 静默失败不打扰 */ }
+    ctxEstBusy.value = false
+  }
+  watch(
+    () => agent.messages.map(m => m.id).join(','),
+    () => {
+      if (ctxTimer) clearTimeout(ctxTimer)
+      ctxTimer = setTimeout(refreshContextEst, 900)
+    },
+  )
 </script>
 
 <template>
@@ -385,8 +456,8 @@ async function handleCopy(messageId: string, text: string) {
           <!-- 模型 -->
           <div class="drawer-section">
             <div class="drawer-label">模型</div>
-            <select v-model="agent.selectedModel" class="drawer-select" :disabled="agent.loading">
-              <option v-for="m in SUPPORTED_MODELS" :key="m.value" :value="m.value">{{ m.label }}</option>
+            <select v-model="agent.selectedModel" class="drawer-select" :disabled="agent.loading" @change="agent.persistSelectedModel()">
+              <option v-for="m in agent.modelOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
             </select>
           </div>
 
@@ -489,6 +560,21 @@ async function handleCopy(messageId: string, text: string) {
     </div>
   </div>
 
+    <div v-if="messages.length && ctxLimit" class="ctx-strip">
+      <div
+        class="ctx-bar"
+        :class="{ 'ctx-bar--busy': ctxEstBusy }"
+        :title="ctxEst ? `本次估算基于 ${ctxEst.method}` : '上下文 token 估算中…'"
+      >
+        <span class="ctx-fill" :style="{ width: ctxPct + '%' }"></span>
+      </div>
+      <span class="ctx-num">{{ ctxEst ? ctxEst.tokens.toLocaleString() : '···' }} / {{ ctxLimit.toLocaleString() }}</span>
+      <span v-if="smallCtxLabel" class="ctx-small" :title="'轻量模型：会话标题/子任务分类/摘要等内部轻任务，与主模型独立配置'">轻量 {{ smallCtxLabel }}</span>
+      <span v-if="imageCtxLabel" class="ctx-small ctx-small--image" :title="'图片解析模型：图像描述，与主对话模型独立配置'">🖼 {{ imageCtxLabel }}</span>
+      <span v-if="voiceCtxLabel" class="ctx-small ctx-small--voice" :title="'语音模型：Qwen3-TTS 合成规格，与主对话模型独立配置'">🎙 {{ voiceCtxLabel }}</span>
+      <span class="ctx-model">{{ currentModel?.name || agent.selectedModel }}</span>
+    </div>
+
     <div class="chat-body">
       <div v-if="messages.length === 0" class="empty-state">
         <div class="empty-orb">
@@ -534,6 +620,11 @@ async function handleCopy(messageId: string, text: string) {
 
               <div class="message-footer">
                 <span class="time">{{ msg.timestamp.toLocaleTimeString() }}</span>
+                <span
+                  v-if="msg.role !== 'user' && (msg.model || (msg.tokens && (msg.tokens.input || msg.tokens.output)))"
+                  class="msg-usage"
+                  :title="usageDetail(msg)"
+                >{{ usageLabel(msg) }}</span>
                 <div class="message-actions">
                   <div class="btn-wrapper">
                     <button class="icon-btn" @click="handleCopy(msg.id, msg.content)" title="复制">

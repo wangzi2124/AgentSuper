@@ -12,13 +12,14 @@ import {
   type ConversationMeta,
 } from '../api/sessions'
 import { SUPPORTED_MODELS } from '../config/models'
+import { fetchModels, modelsToOptions, type ModelInfo, type ModelOption } from '../api/models'
 import {
   saveSessionToCache,
   loadSessionFromCache,
   deleteSessionFromCache,
   mergeServerAndCache,
 } from '../api/session-cache'
-import { interruptSession, revertSession, deleteSessionMessage } from '../api/sessions'
+import { interruptSession, revertSession, deleteSessionMessage, updateSession as apiUpdateSession } from '../api/sessions'
 import { classifyNetworkError } from '../api/errors'
 import { usePermissionStore } from './permission'
 
@@ -84,6 +85,47 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const conversations = ref<ConversationMeta[]>([])
   const routingStatus = ref<string>('')
   const selectedModel = ref<string>(SUPPORTED_MODELS[0].value)
+  // [模型目录] 选择器由后端 GET /api/models 动态驱动；SUPPORTED_MODELS 仅为离线兜底。
+  const models = ref<ModelInfo[]>([])
+  const defaultModelId = ref<string>('')
+  // [模型管理] 轻量模型（内部轻任务：子任务分类/会话标题/计划摘要）
+  const smallModelId = ref<string>('')
+  const smallModelInfo = computed<ModelInfo | null>(() =>
+    models.value.find(m => m.id === smallModelId.value) ?? null,
+  )
+  // [模型管理] 图片解析模型 / 语音模型规格（模型管理页可配，含全部 Provider）
+  const imageCaptionModelId = ref<string>('')
+  const voiceModelSize = ref<string>('')
+  const imageCaptionModelInfo = computed<ModelInfo | null>(() =>
+    models.value.find(m => m.id === imageCaptionModelId.value) ?? null,
+  )
+  const modelOptions = computed<ModelOption[]>(() =>
+    models.value.length
+      ? modelsToOptions(models.value)
+      : SUPPORTED_MODELS.map(m => ({ value: m.value, label: m.label, desc: m.desc })),
+  )
+  let modelsLoaded = false
+  async function loadModels(force = false) {
+    if (modelsLoaded && !force) return
+    modelsLoaded = true
+    try {
+      const res = await fetchModels()
+      models.value = res.models || []
+      defaultModelId.value = res.default_model || ''
+      smallModelId.value = res.small_model || ''
+      imageCaptionModelId.value = res.image_caption_model || ''
+      voiceModelSize.value = res.voice_model_size || ''
+      if (defaultModelId.value && models.value.length && !models.value.some(m => m.id === selectedModel.value)) {
+        selectedModel.value = defaultModelId.value
+      }
+      // 选中模型已不在目录（被删除）时回退默认/首项，避免无效模型继续发送
+      if (models.value.length && !models.value.some(m => m.id === selectedModel.value) && defaultModelId.value) {
+        selectedModel.value = defaultModelId.value
+      }
+    } catch (e) {
+      console.error('Failed to load model catalog:', e)
+    }
+  }
   const useVectorDb = ref(false)
   // 当前/新建会话绑定的工作目录（opencode ctx.directory）。首条消息发送时
   // 随请求 directory 创建会话；已有会话在 loadConversation 时同步为服务器值。
@@ -204,6 +246,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const queuePosition = computed(() => currentSession.value?.queuePosition ?? null)
 
   async function loadConversations() {
+    loadModels()
     try { conversations.value = await listConversations('multi-agent') }
     catch (e) { console.error('Failed to load conversations:', e) }
   }
@@ -220,6 +263,10 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       session.conversationTitle = detail.title
       // 同步会话绑定目录（服务器为准；无论空与非空都覆盖，避免残留上一会话的目录）
       sessionDirectory.value = detail.directory || ''
+      // [模型切换] 打开会话时同步为其模型（opencode 会话默认模型语义）；目录里没有则保持当前选择
+      if (detail.model?.id && modelOptions.value.some(m => m.value === detail.model!.id)) {
+        selectedModel.value = detail.model!.id
+      }
       const serverMessages: MultiAgentMessage[] = detail.messages.map(m => ({
         id: m.id,
         role: m.role as 'user' | 'assistant',
@@ -227,6 +274,9 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         agents: (m as any).agents || [],
         files: (m as any).files || [],
         voice: (m as any).voice,
+        model: (m as any).model,
+        tokens: (m as any).tokens,
+        cost: (m as any).cost,
         timestamp: new Date(),
       }))
       // 从 IndexedDB 加载本地缓存（SSE 中断时可能有未同步消息）
@@ -437,7 +487,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       return false
     }
     // [S6] 发送前校验模型/目录有效性，避免带无效 model 触发后端 404
-    if (!SUPPORTED_MODELS.some(m => m.value === selectedModel.value)) {
+    if (!modelOptions.value.some(m => m.value === selectedModel.value)) {
       setNotice(`当前模型不可用：${selectedModel.value}，请重新选择`)
       return false
     }
@@ -601,6 +651,10 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           if (event.title) { session.conversationTitle = event.title; loadConversations() }
           if (event.answer) assistantMsg.content = event.answer
           else if (event.content) assistantMsg.content = event.content
+          // [模型目录] 回填本轮 model/token 用量/成本
+          if (event.model) assistantMsg.model = event.model
+          if (event.tokens) assistantMsg.tokens = event.tokens
+          if (typeof event.cost === 'number' && event.cost > 0) assistantMsg.cost = event.cost
           // 回填服务器生成的消息 id，保证删除/撤销能命中真实消息
           if (event.assistant_msg_id) assistantMsg.id = event.assistant_msg_id
           if (event.user_msg_id) {
@@ -735,8 +789,21 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
   }
 
+  // [模型切换] 选择器变更 → PATCH 会话默认模型（opencode switchModel 持久化语义）
+  function persistSelectedModel() {
+    const s = activeSessionId.value ? sessions.value[activeSessionId.value] : undefined
+    const sessionId = s?.conversationId || activeSessionId.value
+    if (!s || !sessionId) return
+    const providerID = selectedModel.value.split('/')[0]
+    apiUpdateSession(sessionId, { model: { id: selectedModel.value, providerID } })
+      .then(() => loadConversations())
+      .catch(e => console.error('Failed to persist session model:', e))
+  }
+
   return {
     sessions, activeSessionId, conversations, routingStatus, selectedModel, useVectorDb,
+    models, modelOptions, defaultModelId, smallModelId, smallModelInfo, loadModels, persistSelectedModel,
+    imageCaptionModelId, imageCaptionModelInfo, voiceModelSize,
     sessionDirectory, setSessionDirectory, agentMode,
     messages, conversationId, conversationTitle, loading, streamPhase, queuePosition,
     retryCountdown, notice, setNotice,

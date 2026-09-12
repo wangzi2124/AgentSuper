@@ -28,6 +28,7 @@ from app.utils import json_repair
 @pytest.fixture(autouse=True)
 def deterministic_counter(monkeypatch):
     """Pin token estimator to the heuristic path so counts are deterministic."""
+    monkeypatch.setattr(token_counter, "_native_enabled", False)
     monkeypatch.setattr(token_counter, "_encoder", False)
     monkeypatch.setattr(token_counter, "_correction", 1.13)
     yield
@@ -137,6 +138,16 @@ class TestEstimateTokens:
         monkeypatch.setattr(token_counter, "_encoder", Enc())
         assert token_counter.estimate_tokens("abcd") == 1
 
+    def test_native_preferred_when_enabled(self, monkeypatch):
+        """[token 精确化] 开启 native 时官方 tokenizer 优先于 tiktoken/启发式。"""
+        monkeypatch.setattr(token_counter, "_native_enabled", True)
+        from app.models import deepseek_tokenizer
+
+        monkeypatch.setattr(deepseek_tokenizer, "count_tokens", lambda text: 7)
+        assert token_counter.estimate_tokens("anything") == 7
+        monkeypatch.setattr(deepseek_tokenizer, "count_tokens", lambda text: 0)
+        assert token_counter.estimate_tokens("abcd") == 1
+
 
 class TestMessageEstimates:
     def test_single_message_str(self):
@@ -156,6 +167,13 @@ class TestMessageEstimates:
     def test_messages_sum(self):
         msgs = [{"role": "user", "content": "abcd"}, {"role": "assistant", "content": "wxyz"}]
         assert token_counter.estimate_tokens_messages(msgs) == 10
+
+    def test_messages_native_preferred(self, monkeypatch):
+        monkeypatch.setattr(token_counter, "_native_enabled", True)
+        from app.models import deepseek_tokenizer
+
+        monkeypatch.setattr(deepseek_tokenizer, "count_messages_tokens", lambda msgs: 42)
+        assert token_counter.estimate_tokens_messages([{"role": "user", "content": "x"}]) == 42
 
     def test_count_alias(self):
         msgs = [{"role": "user", "content": "abcd"}]

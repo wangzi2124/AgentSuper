@@ -68,7 +68,6 @@ const mobileViews: Record<string, unknown> = {
   import { usePermissionStore } from '../stores/permission'
   import { useThemeStore, BG_VARIANTS } from '../stores/theme'
   import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
-  import { SUPPORTED_MODELS } from '../config/models'
 
   const agent = useMultiAgentStore()
   const perm = usePermissionStore()
@@ -119,9 +118,9 @@ const mobileViews: Record<string, unknown> = {
   const showModelPicker = ref(false)
   const formModel = ref(agent.selectedModel)
   const formDirectory = ref(agent.sessionDirectory)
-  const modelColumns = computed(() => SUPPORTED_MODELS.map(m => ({ text: m.label, value: m.value })))
+  const modelColumns = computed(() => agent.modelOptions.map(m => ({ text: m.label, value: m.value })))
   const formModelText = computed(
-    () => SUPPORTED_MODELS.find(m => m.value === formModel.value)?.label || formModel.value
+    () => agent.modelOptions.find(m => m.value === formModel.value)?.label || formModel.value
   )
 
   function openSettings() {
@@ -134,6 +133,7 @@ const mobileViews: Record<string, unknown> = {
     const opt = params?.selectedOptions?.[0]
     if (opt && opt.value) formModel.value = opt.value
     agent.selectedModel = formModel.value
+    agent.persistSelectedModel()
     showModelPicker.value = false
   }
 

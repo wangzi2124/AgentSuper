@@ -27,6 +27,7 @@ from app.context.budget import usable_context_tokens
 from app.middleware.summarization import HierarchicalSummarizationMiddleware
 
 from app.models.schemas import ChatRequest, Source, StepEvent, MultiAgentChatResponse
+from app.models.catalog import model_ref_dict
 
 from app.session import repository as session_repo
 
@@ -93,6 +94,32 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _sync_session_model(service, user_id: str, session_id: str, model) -> bool:
+    """[模型切换] 请求携带的 model 与会话当前 model 不同则持久化（对齐 opencode switchModel）。
+
+    返回是否发生了切换；流式路径据此推送 model_switched SSE 事件。
+    DB 的 ModelRef 规范为 {id, providerID, variant}（camelCase），而 SSE 事件使用
+    {id, provider, name}（model_ref_dict 格式，给前端渲染用）。
+    """
+    if not model:
+        return False
+    try:
+        info = service.get(user_id, session_id)
+    except Exception:
+        return False
+    current_id = getattr(info.model, "id", None)
+    if current_id == model:
+        return False
+    provider_id = model.split("/", 1)[0] if "/" in model else ""
+    new_ref = {"id": model, "providerID": provider_id, "variant": None}
+    try:
+        service.update(user_id, session_id, model=new_ref)
+    except Exception:
+        logger.exception("sync session model failed for %s", session_id)
+        return False
+    return True
+
+
 # --- 并发控制：限制同时运行的 Agent 任务数（可经 .env 的 MAX_CONCURRENT_AGENTS 调整）---
 
 MAX_CONCURRENT_AGENTS = settings.max_concurrent_agents
@@ -129,6 +156,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     agent_bus: AgentBus = request.app.state.agent_bus
     user_id = _get_user_id(request)
     service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id, body.directory)
+    _sync_session_model(service, user_id, session_id, body.model)
 
     compressed = await _build_compressed_history(service, user_id, session_id)
 
@@ -194,7 +222,8 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     # 落库：主会话 + 子任务会话
     user_msg_id, assistant_msg_id = await _persist_multi_agent(
         service, user_id, session_id, child_id, body.message, answer, sources, steps,
-        model=body.model, tokens=payload.get("tokens"), client_msg_id=body.client_msg_id,
+        model=body.model, tokens=payload.get("tokens"), cost=payload.get("cost") or 0.0,
+        client_msg_id=body.client_msg_id,
         files=[f.model_dump() for f in body.files],
         voice=body.voice.model_dump() if body.voice else None,
     )
@@ -244,6 +273,8 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     sem = _get_agent_semaphore()
     # 请求级事件收集器：子 Agent 的实时事件经此转发到 SSE + 记录副本（落库）
     collector = AgentEventCollector(event_queue)
+    if _sync_session_model(service, user_id, session_id, body.model):
+        await event_queue.put({"type": "model_switched", "model": model_ref_dict(body.model)})
 
     # 登记子任务会话（kind='task'）+ AgentBus thread
     child_id, thread_id = _begin_task_session(service, user_id, session_id, body.message)
@@ -339,7 +370,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     user_msg_id, assistant_msg_id = await _persist_multi_agent(
                         service, user_id, session_id, child_id, body.message, answer, sources, steps,
                         agents=agents, model=body.model, tokens=payload.get("tokens"),
-                        client_msg_id=body.client_msg_id,
+                        cost=payload.get("cost") or 0.0, client_msg_id=body.client_msg_id,
                         files=[f.model_dump() for f in body.files],
                         voice=body.voice.model_dump() if body.voice else None,
                     )
@@ -355,10 +386,12 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         "conversation_id": session_id,
                         "user_msg_id": user_msg_id,
                         "assistant_msg_id": assistant_msg_id,
+                        "model": body.model,
                         "steps": steps,
                         "routed_to": routed_to,
                         "agents": agents,
                         "tokens": payload.get("tokens") or {},
+                        "cost": payload.get("cost") or 0.0,
                     })
 
                 except asyncio.TimeoutError:

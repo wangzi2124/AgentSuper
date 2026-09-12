@@ -151,19 +151,31 @@ async def _generate_title_llm(messages: list[dict]) -> str:
                 break
     if not user_text:
         return _generate_title(messages)
-    if not settings.llm_api_key:
+    if not settings.llm_api_key and not settings.llm_api_base:
         return _generate_title(messages)
+
+    # [模型管理] 标题生成属内部轻量任务 → 用 small_model（含其 provider 凭证）；
+    # 未配置 small_model 时回落默认模型。
+    from app.models.catalog import provider_api, small_model
+    title_model = small_model() or settings.llm_model
+    _creds = provider_api(title_model)
 
     llm_messages = [
         {"role": "system", "content": "用 10 个字以内概括对话主题，只输出标题，不要引号或标点。"},
         # 首条消息通常较短，直接注入；不携带历史（标题只反映会话起点主题）
         {"role": "user", "content": user_text[:2000]},
     ]
+    # Ollama: 不传 api_base，让 litellm 自动识别 ollama/ 前缀使用正确的 /v1/chat/completions 端点
+    api_key = _creds["api_key"]
+    api_base = _creds["api_base"]
+    if _creds["is_ollama"]:
+        api_key = "ollama"
+        api_base = None
     try:
         response = await litellm.acompletion(
-            model=settings.llm_model,
-            api_key=settings.llm_api_key,
-            api_base=settings.llm_api_base,
+            model=title_model,
+            api_key=api_key,
+            api_base=api_base,
             messages=llm_messages,
             max_tokens=30,
             temperature=0.5,

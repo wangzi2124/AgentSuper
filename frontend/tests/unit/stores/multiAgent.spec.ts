@@ -28,6 +28,11 @@ vi.mock('@/api/sessions', () => ({
   interruptSession: vi.fn(),
   revertSession: mocks.revertSession,
   deleteSessionMessage: mocks.deleteSessionMessage,
+  updateSession: vi.fn(),
+}))
+vi.mock('@/api/models', () => ({
+  fetchModels: vi.fn().mockResolvedValue({ models: [], default_model: '', small_model: null }),
+  modelsToOptions: (models: any[]) => (models || []).map(m => ({ value: m.id, label: m.name, desc: m.description || '' })),
 }))
 vi.mock('@/api/session-cache', () => ({
   saveSessionToCache: mocks.saveCache,

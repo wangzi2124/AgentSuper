@@ -196,9 +196,16 @@ def ocr_image(data_b64: str, filename: str = "") -> str:
 
 def _caption_kwargs() -> tuple[str, Optional[str], Optional[str], str, int]:
     from app.config import settings
-    model = settings.image_caption_model or ""
+    # [模型管理] 图片解析模型在 model_catalog.json 配置（前端可选全部 Provider，含 ollama）；
+    # 未配置回落 IMAGE_CAPTION_MODEL。
+    from app.models.catalog import image_caption_model as catalog_image_caption_model
+    model = catalog_image_caption_model() or settings.image_caption_model or ""
     api_base = settings.image_caption_api_base or None
     api_key = settings.image_caption_api_key or None
+    # Ollama: 不传 api_base，让 litellm 自动识别 ollama/ 前缀使用正确的 /v1/chat/completions 端点
+    if model.startswith("ollama/"):
+        api_base = None
+        api_key = "ollama"
     prompt = settings.image_caption_prompt or DEFAULT_CAPTION_PROMPT
     timeout = max(5, int(settings.image_caption_timeout or 15))
     return model, api_base, api_key, prompt, timeout

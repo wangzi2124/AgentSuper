@@ -56,6 +56,9 @@ class SupervisorAgentBase(BaseAgent):
         self._model = settings.llm_model
         self._api_key = settings.llm_api_key
         self._api_base = settings.llm_api_base
+        if self._model.startswith("ollama/"):
+            self._api_key = "ollama"
+            self._api_base = None
         # 使用更长超时的子 Agent（工具密集型）：由规格注册表的 extended_timeout 驱动
         #（默认 build），再加上 env 配置的扩展名单。
         self._extended_timeout_agents = {

@@ -88,6 +88,7 @@ class RAGAgentWrapper(BaseAgent):
                         "steps": result.get("steps", []),
                         # [token 优化 v9] 透传子 Agent 真实 LLM 用量，供 supervisor 汇总落库
                         "tokens": result.get("tokens") or {},
+                        "cost": result.get("cost"),
                     },
                     thread_id=msg.thread_id,
                 )

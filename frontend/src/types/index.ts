@@ -209,11 +209,22 @@ export interface MonitorStats {
     by_model: Record<string, number>
     total_prompt_tokens: number
     total_completion_tokens: number
+    total_reasoning_tokens?: number
+    total_cache_read?: number
+    total_cache_write?: number
     total_duration_ms: number
     avg_duration_ms: number
     tool_rounds_total: number
     avg_tool_rounds: number
+    tool_calls_total?: number
+    prompt_tokens_by_model?: Record<string, number>
+    completion_tokens_by_model?: Record<string, number>
+    reasoning_tokens_by_model?: Record<string, number>
+    cache_read_by_model?: Record<string, number>
+    cache_write_by_model?: Record<string, number>
+    cost_by_model?: Record<string, number>
   }
+  total_cost?: number
 }
 
 // 聊天错误分类
@@ -275,7 +286,7 @@ export interface AgentStreamData {
 }
 
 export interface MultiAgentSSEEvent {
-  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'error' | 'queued' | 'text_delta'
+  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'error' | 'queued' | 'text_delta' | 'model_switched'
   agent_id: string
   agent_name?: string
   agent_avatar?: string
@@ -294,6 +305,9 @@ export interface MultiAgentSSEEvent {
   agents?: AgentStreamData[]
   user_msg_id?: string
   assistant_msg_id?: string
+  model?: string
+  tokens?: { input?: number; output?: number; cache_read?: number; cache_write?: number; reasoning?: number }
+  cost?: number
   request_id?: string
   path?: string
   operation?: string
@@ -328,6 +342,13 @@ export interface MultiAgentMessage {
   clientMsgId?: string
   /** [F8] 随消息发送的附件（用于回显/重试时按原样重发） */
   files?: FileContent[]
-  /** [语音消息] 真实音频气泡（回显/历史回放用） */
+/** [语音消息] 真实音频气泡（回显/历史回放用） */
   voice?: VoiceMessageData
+  /** [模型目录] 本次回复使用的模型 id（来自 assistant data.model） */
+  model?: string
+  /** [模型目录] 本次回复 token 用量快照（data.tokens） */
+  tokens?: { input?: number; output?: number; cache_read?: number; cache_write?: number; reasoning?: number }
+  /** [模型目录] 本次回复成本（USD，data.cost） */
+  cost?: number
 }
+

@@ -162,7 +162,8 @@ def test_handle_message_direct_route():
         assert len(replies) == 1
         assert replies[0].type == "response"
         assert replies[0].payload["routed_to"] == "build"
-        assert ag._usage == {"input": 0, "output": 0}
+        assert ag._usage == {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
+        assert ag._cost == 0.0
 
     asyncio.run(main())
 

@@ -41,6 +41,7 @@ from .decompose import SupervisorAgentDecompose
 # ── 跨子模块依赖（自动生成）──
 from .constants import SUB_RESULT_TRUNC
 from .constants import SYNTHESIS_SYSTEM_PROMPT
+from .core import _merge_usage
 logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 class SupervisorAgent(SupervisorAgentDecompose):
@@ -106,6 +107,7 @@ class SupervisorAgent(SupervisorAgentDecompose):
                     "sources": reply.payload.get("sources", []),
                     # [token 优化 v9] 透传子 Agent 用量，便于汇总
                     "tokens": reply.payload.get("tokens") or {},
+                    "cost": reply.payload.get("cost", 0) or 0,
                 }
             except asyncio.TimeoutError:
                 completed = self._bus.agent_progress(st["agent"])
@@ -140,9 +142,8 @@ class SupervisorAgent(SupervisorAgentDecompose):
         # [token 优化 v9] 各子 Agent 用量计入本次请求汇总
         if getattr(self, "_usage", None) is not None:
             for r in task_results:
-                _tk = r.get("tokens") or {}
-                self._usage["input"] += _tk.get("input", 0)
-                self._usage["output"] += _tk.get("output", 0)
+                _merge_usage(self._usage, r.get("tokens") or {})
+                self._cost = getattr(self, "_cost", 0.0) + float(r.get("cost", 0) or 0)
 
         for r in task_results:
             if r.get("error"):
@@ -167,6 +168,7 @@ class SupervisorAgent(SupervisorAgentDecompose):
                     "steps": [],
                     "routed_to": r["agent"],
                     "tokens": dict(getattr(self, "_usage", {"input": 0, "output": 0})),
+                    "cost": round(getattr(self, "_cost", 0.0), 6),
                 },
                 thread_id=original_thread_id,
             )
@@ -190,6 +192,7 @@ class SupervisorAgent(SupervisorAgentDecompose):
                     "steps": [],
                     "routed_to": "+".join(r["agent"] for r in results),
                     "tokens": dict(getattr(self, "_usage", {"input": 0, "output": 0})),
+                    "cost": round(getattr(self, "_cost", 0.0), 6),
                 },
                 thread_id=original_thread_id,
             )
@@ -236,8 +239,10 @@ class SupervisorAgent(SupervisorAgentDecompose):
             ct = getattr(usage, "completion_tokens", 0) if usage else 0
             # [token 优化 v9] 汇总调用的用量计入本次请求
             if getattr(self, "_usage", None) is not None:
-                self._usage["input"] += pt
-                self._usage["output"] += ct
+                _merge_usage(self._usage, {"input": pt, "output": ct})
+                from app.models.catalog import resolve_cost
+                self._cost = getattr(self, "_cost", 0.0) + resolve_cost(
+                    self._model, input_tokens=pt, output_tokens=ct)
             record_model_call(self._model, prompt_tokens=pt, completion_tokens=ct, duration_ms=dur)
             return response.choices[0].message.content.strip()
         except Exception as e:

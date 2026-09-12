@@ -148,6 +148,10 @@ class ContextCompactor:
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
+        # Ollama: 不传 api_base，让 litellm 自动识别 ollama/ 前缀使用正确的 /v1/chat/completions 端点
+        if model and model.startswith("ollama/"):
+            self.api_key = "ollama"
+            self.api_base = None
         self.threshold = threshold
         self.tail_turns = tail_turns
         self.preserve_recent_tokens = preserve_recent_tokens

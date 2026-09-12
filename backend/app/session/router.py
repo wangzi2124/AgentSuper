@@ -81,12 +81,18 @@ async def get_session(request: Request, ctx: SessionContext = Depends(resolve_se
 
 @router.patch("/{session_id}", response_model=SessionInfo)
 async def update_session(body: SessionUpdate, ctx: SessionContext = Depends(resolve_session_context)):
-    return ctx.service.update(
-        ctx.user_id, ctx.session_id,
-        title=body.title, agent=body.agent,
-        model=body.model.model_dump() if body.model else None,
-        archived=body.archived,
-    )
+    fields: dict = {}
+    if body.title is not None:
+        fields["title"] = body.title
+    if body.agent is not None:
+        fields["agent"] = body.agent
+    if body.model is not None:
+        fields["model"] = body.model.model_dump()
+    if body.archived is not None:
+        fields["archived"] = body.archived
+    if not fields:
+        return ctx.session
+    return ctx.service.update(ctx.user_id, ctx.session_id, **fields)
 
 
 @router.delete("/{session_id}", status_code=204)

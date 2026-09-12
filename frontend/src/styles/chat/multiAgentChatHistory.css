@@ -15,6 +15,9 @@
 .item-content { flex: 1; min-width: 0; }
 .item-title-row { display: flex; align-items: center; min-width: 0; }
 .item-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text); flex-shrink: 1; }
+.item-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meta-model { background: rgba(79,70,229,0.08); color: var(--primary); padding: 0 4px; border-radius: 3px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+.meta-cost { color: #22c55e; }
 .item-actions { display: flex; gap: 2px; opacity: 0; transition: opacity 0.15s; }
 .history-item:hover .item-actions { opacity: 1; }
 .action-btn { width: 24px; height: 24px; border: none; border-radius: 4px; background: transparent; color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.1s; }

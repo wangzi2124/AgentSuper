@@ -37,6 +37,7 @@ class SessionInfo(BaseModel):
     tokens_output: int = 0
     tokens_cache_read: int = 0
     tokens_cache_write: int = 0
+    tokens_reasoning: int = 0
     time_created: int = 0
     time_updated: int = 0
     time_compacted: Optional[int] = None

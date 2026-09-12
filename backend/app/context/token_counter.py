@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 _encoder = None
 _correction = None
 
+# [token 精确化] 官方 tokenizer 计数开关（测试可关闭以钉住 fallback 路径）
+_native_enabled = True
+
 
 def _estimate_correction() -> float:
     """cl100k_base → DeepSeek tokenizer 的估算校正系数。
@@ -86,11 +89,17 @@ def _get_encoder():
 def estimate_tokens(text: str) -> int:
     """Estimate token count for a string.
 
-    Uses tiktoken when available (accurate), falls back to len(text) // 4
-    heuristic (conservative for English, reasonable for Chinese).
+    优先 DeepSeek V4 官方 tokenizer（backend/data/models/deepseek-v4-tokenizer，
+    精确计数）；不可用时回落 tiktoken（cl100k_base + 校正系数），最后字符估算。
     """
     if not text:
         return 0
+    # [token 精确化] 官方 tokenizer 可用时直接用原生计数（无需校正系数）
+    if _native_enabled:
+        from app.models.deepseek_tokenizer import count_tokens as _native_count_tokens
+        n = _native_count_tokens(text)
+        if n > 0:
+            return max(1, n)
     enc = _get_encoder()
     corr = _estimate_correction()
     if enc and enc is not False:
@@ -124,8 +133,14 @@ def _estimate_single_message(msg: dict) -> int:
 def estimate_tokens_messages(messages: list[dict]) -> int:
     """Estimate total tokens across a list of messages.
 
-    Counts message content plus per-message overhead (role, formatting).
+    优先 DeepSeek chat_template 近似（官方 tokenizer）给出精确口径；否则按
+    消息内容 + per-message overhead（role、formatting）逐条估算。
     """
+    if _native_enabled:
+        from app.models.deepseek_tokenizer import count_messages_tokens as _native_messages
+        n = _native_messages(messages)
+        if n > 0:
+            return n
     return sum(_estimate_single_message(msg) for msg in messages)
 
 

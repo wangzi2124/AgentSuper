@@ -27,6 +27,7 @@ export interface SessionInfo {
   tokens_output: number
   tokens_cache_read: number
   tokens_cache_write: number
+  tokens_reasoning: number
   time_created: number
   time_updated: number
   time_compacted?: number | null
@@ -245,12 +246,19 @@ export interface ConversationMeta {
   id: string
   title: string
   directory?: string
+  model?: SessionModelRef | null
+  tokens_input?: number
+  tokens_output?: number
+  tokens_reasoning?: number
+  tokens_cache_read?: number
+  tokens_cache_write?: number
+  cost?: number
   created_at: string
   updated_at: string
 }
 
 export interface ConversationDetail extends ConversationMeta {
-  messages: Array<{ id: string; role: string; content: string; sources?: any[]; steps?: any[]; parts?: any[]; agents?: any[]; files?: any[]; voice?: any; seq?: number }>
+  messages: Array<{ id: string; role: string; content: string; sources?: any[]; steps?: any[]; parts?: any[]; agents?: any[]; files?: any[]; voice?: any; seq?: number; model?: string; tokens?: Record<string, number>; cost?: number }>
 }
 
 function _msgTypeToRole(msgType: string): string {
@@ -271,6 +279,13 @@ export async function listConversations(convType?: string): Promise<Conversation
     id: s.id,
     title: s.title || '新对话',
     directory: s.directory || '',
+    model: s.model || null,
+    tokens_input: s.tokens_input,
+    tokens_output: s.tokens_output,
+    tokens_reasoning: s.tokens_reasoning,
+    tokens_cache_read: s.tokens_cache_read,
+    tokens_cache_write: s.tokens_cache_write,
+    cost: s.cost,
     created_at: _fmtTime(s.time_created),
     updated_at: _fmtTime(s.time_updated),
   }))
@@ -289,6 +304,13 @@ export async function getConversation(conversationId: string, convType?: string)
     id: session.id,
     title: session.title || '新对话',
     directory: session.directory || '',
+    model: session.model || null,
+    tokens_input: session.tokens_input,
+    tokens_output: session.tokens_output,
+    tokens_reasoning: session.tokens_reasoning,
+    tokens_cache_read: session.tokens_cache_read,
+    tokens_cache_write: session.tokens_cache_write,
+    cost: session.cost,
     created_at: _fmtTime(session.time_created),
     updated_at: _fmtTime(session.time_updated),
     messages: messages.map(m => {
@@ -303,6 +325,9 @@ export async function getConversation(conversationId: string, convType?: string)
       if (m.data?.agents) msg.agents = m.data.agents as any[]
       if (m.data?.files) msg.files = m.data.files as any[]
       if (m.data?.voice) msg.voice = m.data.voice as any
+      if (m.data?.model) msg.model = m.data.model as string
+      if (m.data?.tokens) msg.tokens = m.data.tokens as Record<string, number>
+      if (m.data?.cost != null) msg.cost = m.data.cost as number
       if (m.parts?.length) msg.parts = m.parts as any[]
       return msg
     }),

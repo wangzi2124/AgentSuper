@@ -70,6 +70,9 @@ class CodeAgent(BaseAgent):
         self._model = settings.llm_model
         self._api_key = settings.llm_api_key
         self._api_base = settings.llm_api_base
+        if self._model.startswith("ollama/"):
+            self._api_key = "ollama"
+            self._api_base = None
 
     @property
     def agent_id(self) -> str:
@@ -176,6 +179,7 @@ class CodeAgent(BaseAgent):
                         "steps": result.get("steps", []),
                         # 透传主 Agent 真实 LLM 用量，供 supervisor 汇总落库
                         "tokens": result.get("tokens") or {},
+                        "cost": result.get("cost"),
                     },
                     thread_id=msg.thread_id,
                 )

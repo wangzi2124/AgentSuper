@@ -360,6 +360,16 @@ def build_system_prompt_no_kb(
         "",
         "IMPORTANT - Multi-step tasks: start with plan block '## 实施计划'; end with '## 完成情况' "
         "(已完成 / 未完成 / 下一步). At step limit, give this report without calling more tools.",
+        "",
+        # ── 本地模型工具调用格式（对原生 tool_calls 模型无影响，仅引导弱模型）──
+        "Tool-call format (for models without native function-calling support):",
+        "  When you need to call a tool, output EXACTLY this single line, with NO other text:",
+        '  <tool_call>{"name": "<tool_name>", "arguments": {"<param>": "<value>"}}</tool_call>',
+        "  - <tool_name> must match a listed tool name exactly (e.g. tool_ls, tool_write_file).",
+        "  - arguments is a JSON object with the tool's parameter names as keys.",
+        "  - Use the <tool_call> marker and the keys \"name\" and \"arguments\" exactly as shown.",
+        '  - Do NOT wrap tool calls in {"response": ...} or any other envelope.',
+        "  - For your final answer, output plain text directly — do NOT wrap in JSON.",
     ])
 
     return "\n".join(parts)

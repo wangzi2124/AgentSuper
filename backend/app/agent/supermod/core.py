@@ -39,6 +39,16 @@ from app.monitor import record_model_call
 from app.utils.json_repair import parse_json_value
 from .base import SupervisorAgentBase
 logger = logging.getLogger(__name__)
+
+_USAGE_KEYS = ("input", "output", "reasoning", "cache_read", "cache_write")
+
+
+def _merge_usage(acc: dict, other: dict) -> None:
+    """逐键求和 usage（五键口径），就地更新 acc（对齐 assistant 消息 data.tokens）。"""
+    for k in _USAGE_KEYS:
+        acc[k] = int(acc.get(k, 0)) + int(other.get(k, 0) or 0)
+
+
 # ── 类分块（verbatim，继承链切片）──
 class SupervisorAgentCore(SupervisorAgentBase):
 
@@ -67,7 +77,9 @@ class SupervisorAgentCore(SupervisorAgentBase):
             # [token 优化 v9] 本次请求的 LLM 用量汇总（分解 + 子 Agent + 汇总），
             # 随 response payload 落库，与单 Agent executor 口径对齐。
             # 注：bus 事件循环对每个 agent 串行处理消息，无并发写冲突。
-            self._usage = {"input": 0, "output": 0}
+            # [token 统计] 五键口径 + cost 一并汇总。
+            self._usage = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
+            self._cost = 0.0
 
             # [A2] Supervisor 自身心跳：整个处理（LLM 分解 / 等待子 Agent / 汇总）
             # 期间持续 touch，让上层（endpoint send_and_wait 的 grace 续期）能看见
@@ -150,9 +162,8 @@ class SupervisorAgentCore(SupervisorAgentBase):
             if reply.type == "response":
                 # [token 优化 v9] 子 Agent 用量计入本次请求汇总
                 if getattr(self, "_usage", None) is not None:
-                    _tk = reply.payload.get("tokens") or {}
-                    self._usage["input"] += _tk.get("input", 0)
-                    self._usage["output"] += _tk.get("output", 0)
+                    _merge_usage(self._usage, reply.payload.get("tokens") or {})
+                    self._cost = getattr(self, "_cost", 0.0) + float(reply.payload.get("cost", 0) or 0)
                 yield AgentMessage(
                     source=self._id,
                     target="user",  # 由 bus.send 路由回 original 的调用者
@@ -162,6 +173,7 @@ class SupervisorAgentCore(SupervisorAgentBase):
                         **reply.payload,
                         "routed_to": target_agent,
                         "tokens": dict(getattr(self, "_usage", {"input": 0, "output": 0})),
+                        "cost": round(getattr(self, "_cost", 0.0), 6),
                     },
                     thread_id=original_thread_id,  # 🔧 使用原始 thread_id 回复
                 )
@@ -299,7 +311,10 @@ class SupervisorAgentCore(SupervisorAgentBase):
         plan_path = plan_payload.get("plan_path", "")
         sources = list(plan_payload.get("sources") or []) + list(build_payload.get("sources") or [])
         steps = list(plan_payload.get("steps") or []) + list(build_payload.get("steps") or [])
-        tokens = build_payload.get("tokens") or plan_payload.get("tokens") or {"input": 0, "output": 0}
+        tokens = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
+        _merge_usage(tokens, plan_payload.get("tokens") or {})
+        _merge_usage(tokens, build_payload.get("tokens") or {})
+        cost = round(float(plan_payload.get("cost", 0) or 0) + float(build_payload.get("cost", 0) or 0), 6)
 
         if build_reply.type == "error":
             answer = (
@@ -317,6 +332,7 @@ class SupervisorAgentCore(SupervisorAgentBase):
                     "routed_to": "plan→build",
                     "plan_path": plan_path,
                     "tokens": tokens,
+                    "cost": cost,
                     "sources": sources,
                     "steps": steps,
                 },
@@ -332,6 +348,7 @@ class SupervisorAgentCore(SupervisorAgentBase):
                 "sources": sources,
                 "steps": steps,
                 "tokens": tokens,
+                "cost": cost,
                 "plan_path": plan_path,
                 "routed_to": f"plan→{build_payload.get('routed_to', 'build')}",
             },

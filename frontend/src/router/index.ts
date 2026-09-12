@@ -61,6 +61,11 @@ const router = createRouter({
       component: () => import('../views/MonitoringView.vue'),
     },
     {
+      path: '/model-manager',
+      name: 'ModelManager',
+      component: () => import('../views/ModelManagerView.vue'),
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',
       component: () => import('../views/NotFoundView.vue'),

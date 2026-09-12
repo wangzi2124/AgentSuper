@@ -88,6 +88,10 @@ class HierarchicalSummarizationMiddleware:
         self.chunk_pairs = chunk_pairs
         self.api_key = api_key
         self.api_base = api_base
+        # Ollama: 不传 api_base，让 litellm 自动识别 ollama/ 前缀使用正确的 /v1/chat/completions 端点
+        if model.startswith("ollama/"):
+            self.api_key = "ollama"
+            self.api_base = None
         self._cache: dict[str, str] = {}
         self._cache_size = cache_size
 

@@ -35,6 +35,15 @@ LANGUAGES = [
 MODEL_SIZES = ("0.6B", "1.7B")
 
 
+def _catalog_voice_size() -> "str | None":
+    """[模型管理] 语音模型规格（model_catalog.json）；未配置返回 None。"""
+    try:
+        from app.models.catalog import voice_model_size
+        return voice_model_size()
+    except Exception:  # noqa: BLE001 —— 目录异常不阻断语音
+        return None
+
+
 class _WhisperWorker:
     """常驻 Whisper 转写子进程（`clone.py transcribe-serve`），模型只加载一次。
 
@@ -277,7 +286,9 @@ class VoiceService:
         self.speaker = (speaker or settings.voice_tts_speaker)
         if self.speaker not in SPEAKERS:
             self.speaker = "Vivian"
-        self.model_size = (model_size or settings.voice_tts_model_size)
+        # [模型管理] 语音模型规格在 model_catalog.json 配置（0.6B/1.7B）；未配置回落
+        # VOICE_TTS_MODEL_SIZE（.env）。运行时改 catalog 也即时生效（synthesize 每次读取）。
+        self.model_size = (model_size or _catalog_voice_size() or settings.voice_tts_model_size)
         if self.model_size not in MODEL_SIZES:
             self.model_size = "1.7B"
         self.timeout = timeout or settings.voice_tts_timeout
@@ -460,7 +471,10 @@ class VoiceService:
         尺寸不同或 worker 不可用时退化为每次临时子进程。
         """
         spk = speaker if speaker in SPEAKERS else self.speaker
-        ms = model_size if model_size in MODEL_SIZES else self.model_size
+        # [模型管理] 每次调用读取 catalog 规格：改配置后无需重启即生效（与常驻 worker
+        # 尺寸不一致时自动走临时子进程路径，其余场景复用常驻模型）。
+        cur = _catalog_voice_size() or self.model_size
+        ms = model_size if model_size in MODEL_SIZES else cur
         self.output_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         outfile = self.output_dir / f"tts_{spk}_{ts}.wav"

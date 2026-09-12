@@ -20,6 +20,10 @@ import time as tmod
 
 import uuid
 
+import json
+
+import re
+
 from collections.abc import Sequence
 
 from pathlib import Path
@@ -82,6 +86,195 @@ from .state import AgentState
 from .state import _ZERO_USAGE
 from .state import _extract_cache_usage
 logger = logging.getLogger(__name__)
+
+
+def _reasoning_and_cost(model: str, usage, pt: int, ct: int, hit: int, miss: int) -> tuple[int, float]:
+    """提取本次调用的 reasoning tokens 并按模型目录单价估算成本（USD）。
+
+    [token 统计] 累加器放置处统一调用；价格未知的模型成本记 0（opencode 当前态）。
+    """
+    from app.models.catalog import resolve_cost
+    rt = 0
+    if usage is not None:
+        det = getattr(usage, "completion_tokens_details", None)
+        if det is not None:
+            rt = int(getattr(det, "reasoning_tokens", 0) or 0)
+        if not rt:
+            rt = int(getattr(usage, "reasoning_tokens", 0) or 0)
+    cost = resolve_cost(model, input_tokens=int(pt or 0), output_tokens=int(ct or 0),
+                        cache_read=int(hit or 0), cache_write=int(miss or 0))
+    return rt, cost
+
+# [Ollama 流式兼容] litellm 的 Ollama 流式处理器不会把工具调用转成标准 tool_calls
+# 增量，而是以 {"name": "<tool>", "arguments": {...}} 的 JSON 文本形式逐字流入
+# delta.content。以下常量/函数用于识别并重组这类工具调用。
+# 弱模型（qwen2.5-coder 等）常记不精确键名，放宽别名：name 键兼容 function/tool/
+# action，arguments 键兼容 parameters/args/params；并支持 <tool_call> 显式标记。
+_TCC_NAME_KEYS = ("name", "function", "tool", "tool_name", "action")
+_TCC_ARGS_KEYS = ("arguments", "parameters", "args", "params", "input")
+_TCC_MARKER_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+_TCC_PATTERN = re.compile(
+    r'^\s*\{\s*"name"\s*:\s*"([^"]*)"\s*,\s*"arguments"\s*:\s*(\{.*\})\s*\}\s*$', re.S
+)
+# 未知工具名时优先抽取的内嵌回复字段（qwen 常把答话放到 arguments.message/content）
+_TCC_INNER_KEYS = ("message", "content", "text", "answer", "result", "response")
+
+
+def _find_closing_quote(s: str):
+    """s 以 \" 开头时返回闭合双引号后的下标；未闭合/不以引号开头返回 None。"""
+    if not s or not s.startswith('"'):
+        return None
+    i = 1
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+            continue
+        if s[i] == '"':
+            return i + 1
+        i += 1
+    return None
+
+
+def _extract_tool_call_obj(content: str):
+    """从内容中提取工具调用 JSON 对象（支持 <tool_call> 标记或整段裸 JSON）。
+
+    兼容两种形状：
+      A. 扁平 {name/function/tool..., arguments/parameters...}
+      B. OpenAI tool_calls 消息 envelope {id, type, function: {name, arguments}}
+    返回规范化的 {"name", "arguments"} 或 None。
+    """
+    if not content:
+        return None
+    m = _TCC_MARKER_RE.search(content)
+    raw = (m.group(1) if m else content).strip()
+    if len(raw) < 2 or not (raw.startswith("{") and raw.endswith("}")):
+        return None
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    # B. OpenAI message envelope：function 是 {name, arguments} 对象而不是工具名
+    fn = obj.get("function")
+    if isinstance(fn, dict) and (fn.get("name") or fn.get("arguments")):
+        return {
+            "name": (fn.get("name") or "").strip(),
+            "arguments": fn.get("arguments") if isinstance(fn.get("arguments"), dict) else {},
+        }
+    return obj
+
+
+def _tcc_prefix_ok(text: str) -> bool:
+    """宽松判断 text 是否仍是 Ollama 流式工具调用 JSON 的合法前缀。
+
+    流式 token 切分无定式（"{\\"、\\"name\\"、\\"tools\\" 逐字节流出），逐个稳定键按
+    状态机推进：{name键 : 值, arguments键 : {…。任一处偏离骨架 → 判定为普通文本。
+    """
+    t = text.strip()
+    if not t:
+        return True
+    # <tool_call> 标记未收口 → 后续仍可能是工具调用
+    if t.startswith("<tool_call>"):
+        return "</tool_call>" not in t
+    if not t.startswith("{"):
+        return False
+    rest = t[1:].lstrip()
+    key = '"name"'
+    for i in range(len(key)):
+        if i >= len(rest):
+            return True  # 键名还在流中
+        if rest[i] != key[i]:
+            return False
+    rest = rest[len(key):].lstrip()
+    if not rest:
+        return True
+    if not rest.startswith(":"):
+        return False
+    rest = rest[1:].lstrip()
+    if not rest:
+        return True
+    if not rest.startswith('"'):
+        return False
+    end = _find_closing_quote(rest)
+    if end is None:
+        return True  # 值字符串未闭合
+    rest = rest[end:].lstrip()
+    if not rest:
+        return True
+    if not rest.startswith(","):
+        return False
+    rest = rest[1:].lstrip()
+    ak = '"arguments"'
+    for i in range(len(ak)):
+        if i >= len(rest):
+            return True
+        if rest[i] != ak[i]:
+            return False
+    rest = rest[len(ak):].lstrip()
+    if not rest:
+        return True
+    if not rest.startswith(":"):
+        return False
+    rest = rest[1:].lstrip()
+    if not rest:
+        return True
+    if not rest.startswith("{"):
+        return False
+    # 已进入参数对象：外括号未收口时仍可能继续流；完整命中交给 _TCC_PATTERN
+    return t.count("{") > t.count("}")
+
+
+def _parse_streamed_tool_call(content: str):
+    """识别 Ollama 流式注入 content 的工具调用 JSON 文本。
+
+    兼容 {"name": "tool_x", "arguments": {...}} 标准形、别名键
+    (function/tool + parameters/args) 以及 <tool_call>...</tool_call> 标记，
+    返回 {"name", "arguments"} 或 None。
+    """
+    obj = _extract_tool_call_obj(content)
+    if not obj:
+        return None
+    name = None
+    for k in _TCC_NAME_KEYS:
+        v = obj.get(k)
+        if isinstance(v, str) and v.strip():
+            name = v.strip()
+            break
+    if not name:
+        return None
+    args = None
+    for k in _TCC_ARGS_KEYS:
+        v = obj.get(k)
+        if isinstance(v, dict):
+            args = v
+            break
+    if args is None:
+        return None
+    return {"name": name, "arguments": args}
+
+
+def _sanitize_tool_call_content(content: str, mounted_names: set[str] | None = None):
+    """把可能残留的工具调用 JSON 文本清洗为可展示内容。
+
+    - 命中已挂载工具名的独立工具调用 JSON → 返回 None（这是应丢掉的工具声明，
+      由调用方决定不展示）；未挂载工具名 → 抽取 arguments 内嵌回复字段。
+    - 不匹配 → 原样返回。
+    """
+    if not content:
+        return content
+    call = _parse_streamed_tool_call(content)
+    if not call:
+        return content
+    if mounted_names and call["name"] in mounted_names:
+        return None
+    for k in _TCC_INNER_KEYS:
+        v = call["arguments"].get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgent(RAGAgentGenerate):
     def _push_stream_event(self, state: AgentState, event: dict):
@@ -109,10 +302,15 @@ class RAGAgent(RAGAgentGenerate):
         # 累加本次 invoke 的 token 用量（invoke 前重置），供 assistant 消息结算落库
         if not getattr(self, "_usage_accum", None):
             self._usage_accum = dict(_ZERO_USAGE)
+        if not getattr(self, "_cost_accum", None):
+            self._cost_accum = 0.0
+        rt, cost = _reasoning_and_cost(model, usage, int(pt or 0), int(ct or 0), hit, miss)
         self._usage_accum["input"] += int(pt or 0)
         self._usage_accum["output"] += int(ct or 0)
         self._usage_accum["cache_read"] += hit
         self._usage_accum["cache_write"] += miss
+        self._usage_accum["reasoning"] += rt
+        self._cost_accum += cost
         logger.info(
             "LLM call | model=%s pt=%d ct=%d cache_hit=%d cache_miss=%d dur=%.0fms",
             model, pt, ct, hit, miss, dur,
@@ -135,13 +333,20 @@ class RAGAgent(RAGAgentGenerate):
         log_prompt("graph.llm_call", messages, model=model, tool_count=len(tool_defs or []))  # [prompt log v1]
         # [C5] 记录本次调用的估算 token（供实际 usage 返回后自适应校准估算系数）
         self._last_call_estimate = estimate_tokens_messages(messages) + estimate_tools(tool_defs)
+        # 参照 settings.llm_api_base/key 作为兜底；注册过 providers 的自定义模型
+        # （前端模型管理写入 model_catalog.json）按 model 的 provider 解析 api_base/api_key。
+        from app.models.catalog import provider_api
+        _creds = provider_api(model)
+        _is_ollama = _creds["is_ollama"]
+        _api_key = _creds["api_key"]
+        _api_base = _creds["api_base"]
         try:
             stream = await litellm.acompletion(
                 model=model,
                 messages=messages,
                 tools=tool_defs,
-                api_key=self.api_key,
-                api_base=self.api_base,
+                api_key=_api_key,
+                api_base=_api_base,
                 temperature=0.1,
                 max_tokens=settings.llm_max_tokens,
                 timeout=500,
@@ -157,8 +362,8 @@ class RAGAgent(RAGAgentGenerate):
                     model=model,
                     messages=messages,
                     tools=tool_defs,
-                    api_key=self.api_key,
-                    api_base=self.api_base,
+                    api_key=_api_key,
+                    api_base=_api_base,
                     temperature=0.1,
                     max_tokens=settings.llm_max_tokens,
                     timeout=500,
@@ -173,6 +378,7 @@ class RAGAgent(RAGAgentGenerate):
             return self._assemble_response(model, response, start, state, push_text=True)
 
         text_chunks: list[str] = []
+        pending_text: list[str] = []
         tool_slots: dict[int, dict] = {}
         finish_reason = None
         usage = None
@@ -194,8 +400,19 @@ class RAGAgent(RAGAgentGenerate):
                 c = getattr(delta, "content", None)
                 if c:
                     text_chunks.append(c)
-                    if state is not None:
-                        self._push_stream_event(state, {"type": "text_delta", "delta": c})
+                    pending_text.append(c)
+                    # 仍可能属于 Ollama 流式工具调用 JSON 的文本 → 暂缓推送，
+                    # 避免把工具调用 JSON 闪给前端；流结束统一转换/补推。
+                    circum = "".join(text_chunks)
+                    if _TCC_PATTERN.match(circum) or _tcc_prefix_ok(circum) or circum.lstrip().startswith("{"):
+                        # 以 { 开头的待定文本在未收口（brace 未平衡）时仍可能是工具 JSON
+                        if _TCC_PATTERN.match(circum) or _tcc_prefix_ok(circum):
+                            continue
+                        if circum.count("{") > circum.count("}"):
+                            continue
+                    if state is not None and pending_text:
+                        self._push_stream_event(state, {"type": "text_delta", "delta": "".join(pending_text)})
+                    pending_text.clear()
                 for tc in (getattr(delta, "tool_calls", None) or []):
                     idx = getattr(tc, "index", None) or 0
                     slot = tool_slots.setdefault(
@@ -215,21 +432,69 @@ class RAGAgent(RAGAgentGenerate):
             logger.warning("LLM stream interrupted, using accumulated content", exc_info=True)
 
         content = "".join(text_chunks)
+
+        # [Ollama 流式兼容] 工具调用被 litellm 注入为 content 中的 JSON 文本而非标准
+        # tool_calls 增量（Ollama 原生把函数调用随 message 文本返回）。重组：
+        #   1) 名称命中已挂载工具 → 重建为标准 tool_call，由 _generate 正常执行；
+        #   2) 未知工具名 → 抽取模型内嵌回复字段（qwen 常把答话放进 arguments.message）。
+        converted = False
+        call = _parse_streamed_tool_call(content)
+        if call and not tool_slots:
+            mounted = {t.get("function", {}).get("name") for t in (tool_defs or [])}
+            if call["name"] in mounted:
+                tool_slots[0] = {
+                    "id": f"call_{uuid.uuid4().hex[:16]}",
+                    "type": "function",
+                    "function": {
+                        "name": call["name"],
+                        "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                    },
+                }
+                content = ""
+                converted = True
+            else:
+                for k in _TCC_INNER_KEYS:
+                    v = call["arguments"].get(k)
+                    if isinstance(v, str) and v.strip():
+                        content = v.strip()
+                        converted = True
+                        break
+        # 流式期间被暂缓的候选文本：最终未被识别为工具调用时补推，避免丢字。
+        # 已转换为 tool_call / 已抽取内嵌回复的场合，其原文（JSON）不再外泄。
+        if state is not None and pending_text and not converted:
+            self._push_stream_event(state, {"type": "text_delta", "delta": "".join(pending_text)})
+
         dur = (tmod.time() - start) * 1000
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
         hit, miss = _extract_cache_usage(usage, pt=int(pt or 0))
+        # [token 精确化] provider 未返回 usage（本地/私服代理）→ 用 DeepSeek V4
+        # 官方 tokenizer 原生计数补全，费用统计按此口径计费（不丢 token/成本数据）。
+        if not (int(pt or 0) or int(ct or 0)):
+            from app.context.token_counter import estimate_tokens_messages as _est_msgs
+            from app.models.deepseek_tokenizer import count_tokens as _native_tok
+            _ti = _est_msgs(messages)
+            _to = _native_tok(content)
+            if _ti and _to:
+                pt, ct, hit, miss = _ti, _to, 0, 0
+                trace("llm.native_usage", model=model, pt=pt, ct=ct)
         # [C5] 流式路径同样用实际 usage 自适应校准估算系数
         if int(pt or 0) > 0 and self._last_call_estimate:
             update_token_correction(self._last_call_estimate, int(pt))
         trace("llm.usage", where="invoke", model=model, pt=int(pt or 0), ct=int(ct or 0), cache_hit=hit, cache_miss=miss, duration_ms=dur)  # [token trace v7]
-        record_model_call(model, prompt_tokens=int(pt or 0), completion_tokens=int(ct or 0), duration_ms=dur)
         if not getattr(self, "_usage_accum", None):
             self._usage_accum = dict(_ZERO_USAGE)
+        if not getattr(self, "_cost_accum", None):
+            self._cost_accum = 0.0
+        rt, cost = _reasoning_and_cost(model, usage, int(pt or 0), int(ct or 0), hit, miss)
+        record_model_call(model, prompt_tokens=int(pt or 0), completion_tokens=int(ct or 0), duration_ms=dur,
+                            reasoning_tokens=rt, cache_read=hit, cache_write=miss, cost=cost)
         self._usage_accum["input"] += int(pt or 0)
         self._usage_accum["output"] += int(ct or 0)
         self._usage_accum["cache_read"] += hit
         self._usage_accum["cache_write"] += miss
+        self._usage_accum["reasoning"] += rt
+        self._cost_accum += cost
         logger.info(
             "LLM call | model=%s pt=%d ct=%d cache_hit=%d cache_miss=%d dur=%.0fms",
             model, int(pt or 0), int(ct or 0), hit, miss, dur,

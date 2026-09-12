@@ -390,6 +390,10 @@ async def tool_loop_chat(
     model = model or settings.llm_model
     api_key = api_key or settings.llm_api_key
     api_base = api_base or settings.llm_api_base
+    # Ollama: 不传 api_base，让 litellm 自动识别 ollama/ 前缀使用正确的 /v1/chat/completions 端点
+    if model.startswith("ollama/"):
+        api_key = "ollama"
+        api_base = None
     max_rounds = _sub_agent_max_rounds()
     # allowlist=None → 默认全量工具（不裁剪、不设运行时硬拒绝，保持既有开放行为）；
     # 显式传入 allowlist 时才按规则裁剪 schema + 运行时硬拒绝（对齐 opencode ruleset）。

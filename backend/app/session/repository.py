@@ -45,6 +45,7 @@ def _row_to_session(row: sqlite3.Row) -> SessionInfo:
         tokens_output=data["tokens_output"],
         tokens_cache_read=data["tokens_cache_read"],
         tokens_cache_write=data["tokens_cache_write"],
+        tokens_reasoning=data["tokens_reasoning"],
         time_created=data["time_created"],
         time_updated=data["time_updated"],
         time_compacted=data["time_compacted"],
@@ -335,14 +336,22 @@ def seq_of_message(session_id: str, message_id: str) -> Optional[int]:
         conn.close()
 
 
-def add_session_usage(session_id: str, input_tokens: int = 0, output_tokens: int = 0, cost: float = 0.0) -> None:
-    """累加会话级 token/费用（对齐 sessions 表成本结算列）。"""
+def add_session_usage(session_id: str, input_tokens: int = 0, output_tokens: int = 0,
+                      cost: float = 0.0, cache_read: int = 0, cache_write: int = 0,
+                      reasoning: int = 0) -> None:
+    """累加会话级 token/费用（对齐 sessions 表成本结算列）。
+
+    [token 统计] 扩展自 input/output/cost：补齐 cache_read/cache_write/reasoning，
+    与 assistant 消息 data.tokens 的五键口径一致。
+    """
     conn = _get_db()
     try:
         conn.execute(
             "UPDATE sessions SET tokens_input = tokens_input + ?, tokens_output = tokens_output + ?,"
-            " cost = cost + ?, time_updated = ? WHERE id = ?",
-            (int(input_tokens), int(output_tokens), float(cost), int(time.time() * 1000), session_id),
+            " tokens_cache_read = tokens_cache_read + ?, tokens_cache_write = tokens_cache_write + ?,"
+            " tokens_reasoning = tokens_reasoning + ?, cost = cost + ?, time_updated = ? WHERE id = ?",
+            (int(input_tokens), int(output_tokens), int(cache_read), int(cache_write),
+             int(reasoning), float(cost), int(time.time() * 1000), session_id),
         )
         conn.commit()
     finally:

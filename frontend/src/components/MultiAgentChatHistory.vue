@@ -7,6 +7,15 @@ import { useAuthStore } from '../stores/auth'
 import { deleteConversation as apiDelete } from '../api/sessions'
 import type { ConversationMeta } from '../api/sessions'
 
+function fmtTokens(n?: number) {
+  if (!n) return ''
+  return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}k` : `${n}`
+}
+function fmtCost(n?: number) {
+  if (!n) return ''
+  return n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`
+}
+
 const router = useRouter()
 const agent = useMultiAgentStore()
 const perm = usePermissionStore()
@@ -85,6 +94,11 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
                 <span v-else-if="agent.sessions[c.id]?.streamPhase === 'running'" class="stream-badge running">
                   ● 运行中
                 </span>
+              </div>
+              <div class="item-meta" v-if="c.tokens_input || c.tokens_output || c.cost">
+                <span v-if="c.model" class="meta-model">{{ c.model.id }}</span>
+                <span v-if="c.tokens_input || c.tokens_output">{{ fmtTokens(c.tokens_input) }}→{{ fmtTokens(c.tokens_output) }}</span>
+                <span v-if="c.cost" class="meta-cost">{{ fmtCost(c.cost) }}</span>
               </div>
             </template>
           </div>

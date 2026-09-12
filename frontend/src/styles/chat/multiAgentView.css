@@ -519,6 +519,7 @@ border: none;
 .message-footer { display: flex; align-items: center; justify-content: flex-start; gap: 4px; margin-top: 6px; font-size: 11px; }
 .user .message-footer { justify-content: flex-end; }
 .time { color: var(--text-muted); opacity: 0.85; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.msg-usage { color: var(--text-muted); opacity: 0.75; font-size: 10.5px; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help; }
 .message-actions { display: flex; gap: 4px; align-items: center; opacity: 0; transition: opacity 0.18s var(--ease); }
 .chat-message:hover .message-actions { opacity: 1; }
 .btn-wrapper { position: relative; display: inline-flex; }
@@ -641,3 +642,60 @@ transition: all var(--duration) var(--ease);
   transition: all 0.15s;
 }
 .image-preview-close:hover { background: rgba(255, 255, 255, 0.25); }
+
+/* ── §9.2 上下文 token 估算条（DeepSeek V4 官方 tokenizer 后端估算） ── */
+.ctx-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--surface-glass);
+  border-top: 1px solid var(--border);
+}
+.ctx-bar {
+  flex: 0 0 130px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.ctx-bar--busy .ctx-fill { animation: ctxPulse 1s ease-in-out infinite; }
+@keyframes ctxPulse { 0%,100% { opacity: 0.5 } 50% { opacity: 1 } }
+.ctx-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--primary), color-mix(in srgb, var(--primary) 55%, var(--warning)));
+  transition: width 0.4s var(--ease);
+}
+.ctx-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ctx-model {
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+  font-weight: 600;
+  color: var(--text);
+}
+.ctx-small {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 30%;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--primary-glow);
+  color: var(--primary);
+  font-weight: 600;
+}
+.ctx-small--image {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: color-mix(in srgb, var(--primary) 75%, black);
+}
+.ctx-small--voice {
+  background: color-mix(in srgb, #f59e0b 12%, transparent);
+  color: #b45309;
+}

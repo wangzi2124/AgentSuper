@@ -38,6 +38,7 @@ from app.monitor import record_model_call
 
 from app.utils.json_repair import parse_json_value
 from .core import SupervisorAgentCore
+from .core import _merge_usage
 # ── 跨子模块依赖（自动生成）──
 from .constants import DECOMPOSE_SYSTEM_PROMPT
 logger = logging.getLogger(__name__)
@@ -102,11 +103,20 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
         """
         routable = [a for a in available if a in self.ROUTABLE_AGENTS] or ["build"]
 
+        # [模型管理] 子任务 LLM 分类属内部轻量任务 → 用 small_model；
+        # 未配置 small_model 时回落本 Agent 的主模型。
+        from app.models.catalog import provider_api as _provider_api
+        from app.models.catalog import small_model as _small_model
+        clf_model = _small_model() or self._model
+        _creds = _provider_api(clf_model)
+        _ckey = "ollama" if _creds["is_ollama"] else _creds["api_key"]
+        _cbase = None if _creds["is_ollama"] else _creds["api_base"]
+
         async def _request(messages: list[dict]) -> tuple[str, dict]:
             response = await litellm.acompletion(
-                model=self._model,
-                api_key=self._api_key,
-                api_base=self._api_base,
+                model=clf_model,
+                api_key=_ckey,
+                api_base=_cbase,
                 messages=messages,
                 max_tokens=1024,
                 temperature=0.1,
@@ -119,8 +129,13 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
             }
             # [token 优化 v9] 分解调用的用量计入本次请求汇总
             if getattr(self, "_usage", None) is not None:
-                self._usage["input"] += usage_dict.get("prompt_tokens", 0)
-                self._usage["output"] += usage_dict.get("completion_tokens", 0)
+                _merge_usage(self._usage, {"input": usage_dict.get("prompt_tokens", 0),
+                                           "output": usage_dict.get("completion_tokens", 0)})
+                from app.models.catalog import resolve_cost
+                self._cost = getattr(self, "_cost", 0.0) + resolve_cost(
+                    clf_model,
+                    input_tokens=usage_dict.get("prompt_tokens", 0),
+                    output_tokens=usage_dict.get("completion_tokens", 0))
             return response.choices[0].message.content, usage_dict
 
         start = tmod.time()
@@ -157,7 +172,7 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
                 if attempt == 0:
                     dur = (tmod.time() - start) * 1000
                     record_model_call(
-                        self._model,
+                        clf_model,
                         prompt_tokens=usage.get("prompt_tokens", 0),
                         completion_tokens=usage.get("completion_tokens", 0),
                         duration_ms=dur,

@@ -22,6 +22,7 @@ const navItems = [
   { path: '/vectors', label: '向量库', icon: '🔢' },
   { path: '/generated', label: '生成文件', icon: '📝' },
   { path: '/monitoring', label: '系统监控', icon: '📊' },
+  { path: '/model-manager', label: '模型管理', icon: '🧬' },
 ]
 
 // ── 用户卡：本地未启用登录也展示（匿名本地用户），登录后展示账号 ──

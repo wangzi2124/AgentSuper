@@ -69,7 +69,8 @@ def test_set_and_update_correction(monkeypatch):
     assert tc.token_correction_factor() == before
 
 
-def test_estimate_scales_with_correction():
+def test_estimate_scales_with_correction(monkeypatch):
+    monkeypatch.setattr(tc, "_native_enabled", False)
     base = tc.estimate_tokens("hello world")
     tc.set_token_correction_factor(2.0)
     try:

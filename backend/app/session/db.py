@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   tokens_output INTEGER NOT NULL DEFAULT 0,
   tokens_cache_read INTEGER NOT NULL DEFAULT 0,
   tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+  tokens_reasoning INTEGER NOT NULL DEFAULT 0,
   time_created INTEGER NOT NULL,
   time_updated INTEGER NOT NULL,
   time_compacted INTEGER,
@@ -158,6 +159,14 @@ class _PooledConnection:
         conn.close()
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """幂等补列：老版本 session.db 缺列时 ALTER TABLE 增加（CREATE TABLE 已含新列则跳过）。"""
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        conn.commit()
+
+
 class _ConnectionPool:
     """session.db 连接池（WAL 模式，连接复用，避免每请求开关）。
 
@@ -199,6 +208,7 @@ class _ConnectionPool:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA busy_timeout = 10000")
         conn.executescript(_SCHEMA)
+        _ensure_column(conn, "sessions", "tokens_reasoning", "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
         return conn
 
@@ -217,6 +227,7 @@ def _get_db(path: Optional[Path] = None) -> sqlite3.Connection:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(_SCHEMA)
+        _ensure_column(conn, "sessions", "tokens_reasoning", "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
         return conn
     return _pool.acquire()

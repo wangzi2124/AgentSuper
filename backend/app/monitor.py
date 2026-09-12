@@ -24,9 +24,20 @@ _stats = {
     "model_calls_by_model": defaultdict(int),
     "total_prompt_tokens": 0,
     "total_completion_tokens": 0,
+    "total_reasoning_tokens": 0,
+    "total_cache_read": 0,
+    "total_cache_write": 0,
     "total_duration_ms": 0,
+    "total_cost": 0.0,
     "tool_rounds_total": 0,
     "tool_calls_total": 0,
+    # per-model 分解
+    "prompt_tokens_by_model": defaultdict(int),
+    "completion_tokens_by_model": defaultdict(int),
+    "reasoning_tokens_by_model": defaultdict(int),
+    "cache_read_by_model": defaultdict(int),
+    "cache_write_by_model": defaultdict(int),
+    "cost_by_model": defaultdict(float),
 }
 
 _STATS_FILE = Path(__file__).resolve().parents[1] / "data" / "monitor_stats.json"
@@ -43,9 +54,14 @@ def _load_persisted():
         if _STATS_FILE.exists():
             with open(_STATS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            for key in ("requests_by_path", "requests_by_status", "model_calls_by_model"):
+            for key in ("requests_by_path", "requests_by_status", "model_calls_by_model",
+                        "prompt_tokens_by_model", "completion_tokens_by_model",
+                        "reasoning_tokens_by_model", "cache_read_by_model", "cache_write_by_model"):
                 if key in data:
                     data[key] = defaultdict(int, data[key])
+            for key in ("cost_by_model",):
+                if key in data:
+                    data[key] = defaultdict(float, data[key])
             _stats.update(data)
             logger.info("Loaded persisted monitor stats from %s", _STATS_FILE)
     except Exception as e:
@@ -98,6 +114,10 @@ def record_model_call(
     duration_ms: float = 0,
     tool_rounds: int = 0,
     tool_calls: int = 0,
+    reasoning_tokens: int = 0,
+    cache_read: int = 0,
+    cache_write: int = 0,
+    cost: float = 0.0,
 ):
     from app.trace_log import trace as _tr  # [token trace v7]
     _tr("monitor.record_model_call", model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, duration_ms=duration_ms, tool_rounds=tool_rounds, tool_calls=tool_calls)
@@ -107,7 +127,17 @@ def record_model_call(
         _stats["model_calls_by_model"][model] += 1
         _stats["total_prompt_tokens"] += prompt_tokens
         _stats["total_completion_tokens"] += completion_tokens
+        _stats["total_reasoning_tokens"] += reasoning_tokens
+        _stats["total_cache_read"] += cache_read
+        _stats["total_cache_write"] += cache_write
         _stats["total_duration_ms"] += duration_ms
+        _stats["total_cost"] += float(cost)
+        _stats["prompt_tokens_by_model"][model] += prompt_tokens
+        _stats["completion_tokens_by_model"][model] += completion_tokens
+        _stats["reasoning_tokens_by_model"][model] += reasoning_tokens
+        _stats["cache_read_by_model"][model] += cache_read
+        _stats["cache_write_by_model"][model] += cache_write
+        _stats["cost_by_model"][model] += float(cost)
         _stats["tool_rounds_total"] += tool_rounds
         _stats["tool_calls_total"] += tool_calls
     _save_persisted()
@@ -128,13 +158,23 @@ def get_stats() -> dict:
                 "by_model": dict(_stats["model_calls_by_model"]),
                 "total_prompt_tokens": _stats["total_prompt_tokens"],
                 "total_completion_tokens": _stats["total_completion_tokens"],
+                "total_reasoning_tokens": _stats["total_reasoning_tokens"],
+                "total_cache_read": _stats["total_cache_read"],
+                "total_cache_write": _stats["total_cache_write"],
                 "total_duration_ms": _stats["total_duration_ms"],
                 "avg_duration_ms": round(_stats["total_duration_ms"] / calls, 1) if calls else 0,
                 "tool_rounds_total": _stats["tool_rounds_total"],
                 "avg_tool_rounds": round(_stats["tool_rounds_total"] / calls, 1) if calls else 0,
                 "tool_calls_total": _stats["tool_calls_total"],
                 "avg_tool_calls": round(_stats["tool_calls_total"] / calls, 1) if calls else 0,
+                "prompt_tokens_by_model": dict(_stats["prompt_tokens_by_model"]),
+                "completion_tokens_by_model": dict(_stats["completion_tokens_by_model"]),
+                "reasoning_tokens_by_model": dict(_stats["reasoning_tokens_by_model"]),
+                "cache_read_by_model": dict(_stats["cache_read_by_model"]),
+                "cache_write_by_model": dict(_stats["cache_write_by_model"]),
+                "cost_by_model": dict(_stats["cost_by_model"]),
             },
+            "total_cost": round(_stats["total_cost"], 6),
         }
 
 
@@ -150,9 +190,19 @@ def reset_stats():
             "model_calls_by_model": defaultdict(int),
             "total_prompt_tokens": 0,
             "total_completion_tokens": 0,
+            "total_reasoning_tokens": 0,
+            "total_cache_read": 0,
+            "total_cache_write": 0,
             "total_duration_ms": 0,
+            "total_cost": 0.0,
             "tool_rounds_total": 0,
             "tool_calls_total": 0,
+            "prompt_tokens_by_model": defaultdict(int),
+            "completion_tokens_by_model": defaultdict(int),
+            "reasoning_tokens_by_model": defaultdict(int),
+            "cache_read_by_model": defaultdict(int),
+            "cache_write_by_model": defaultdict(int),
+            "cost_by_model": defaultdict(float),
         }
     try:
         _STATS_FILE.unlink(missing_ok=True)
