@@ -476,14 +476,14 @@ function capOf(m: ModelInfo) {
   height: 30px;
   min-width: 150px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--text-secondary, #64748b) 8%, var(--surface));
+  background: color-mix(in srgb, var(--text-secondary, #64748b) 8%, var(--bg));
   border: 1px solid color-mix(in srgb, var(--text-secondary, #64748b) 16%, var(--border));
   transition: border-color 0.15s, background 0.15s;
 }
 .mm-pill:hover,
 .mm-pill:focus-within {
   border-color: var(--primary, #4f46e5);
-  background: color-mix(in srgb, var(--primary, #4f46e5) 6%, var(--surface));
+  background: color-mix(in srgb, var(--primary, #4f46e5) 6%, var(--bg));
 }
 .mm-pill-select {
   appearance: none;
@@ -562,4 +562,19 @@ function capOf(m: ModelInfo) {
 .slider::before { content: ''; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: 0.2s; }
 .switch input:checked + .slider { background: var(--primary); }
 .switch input:checked + .slider::before { transform: translateX(18px); }
+</style>
+
+<style>
+/* ── 模型选择下拉：原生弹层跟随主题 + 个人背景色 ──
+ * scoped 样式无法命中 <select> 展开时的 UA 弹层，这里用全局选择器补上
+ * color-scheme 与 option 配色，使弹层 (Chrome/Edge 深色下) 不再白底。 */
+html[data-theme='dark'] .mm-pill-select { color-scheme: dark; }
+html:not([data-theme='dark']) .mm-pill-select { color-scheme: light; }
+.mm-pill-select option {
+  background-color: var(--bg);
+  color: var(--text);
+}
+.mm-pill-select option:hover {
+  background-color: var(--bg-subtle);
+}
 </style>
