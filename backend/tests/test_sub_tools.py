@@ -214,7 +214,7 @@ def fake_acompletion(monkeypatch):
 @pytest.mark.asyncio
 async def test_loop_chat_direct_answer(fake_acompletion):
     calls = fake_acompletion([_resp(content="  你好  ")])
-    out = await st.tool_loop_chat("sys", "user")
+    out = await st.tool_loop_chat("sys", "user", model="deepseek/deepseek-v4-flash")
     assert out == "你好"
     assert calls[0]["temperature"] == 0.2
     # 首轮 rnd=1 < max_rounds → 挂载工具 schema
@@ -376,7 +376,8 @@ async def test_loop_chat_reasoning_content_after_markup(fake_acompletion):
 async def test_loop_chat_allowlist_filters_schemas(fake_acompletion):
     """allowlist 只暴露规则集内工具：写/执行工具不进 LLM 的 tools 列表。"""
     calls = fake_acompletion([_resp(content="done")])
-    await st.tool_loop_chat("sys", "user", allowlist=st._READONLY_TOOL_NAMES)
+    await st.tool_loop_chat("sys", "user", model="deepseek/deepseek-v4-flash",
+                            allowlist=st._READONLY_TOOL_NAMES)
     exposed = [t["function"]["name"] for t in calls[0]["tools"]]
     assert exposed == list(st._READONLY_TOOL_NAMES)
     assert "tool_write_file" not in exposed
@@ -415,7 +416,7 @@ async def test_loop_chat_allowlist_hard_deny_at_runtime(monkeypatch, fake_acompl
 async def test_loop_chat_allowlist_default_full_set(fake_acompletion):
     """allowlist=None → 全量工具（build/web_search 等未被规则的子 Agent）。"""
     calls = fake_acompletion([_resp(content="done")])
-    await st.tool_loop_chat("sys", "user")
+    await st.tool_loop_chat("sys", "user", model="deepseek/deepseek-v4-flash")
     exposed = [t["function"]["name"] for t in calls[0]["tools"]]
     assert set(exposed) == set(st._ALL_TOOL_NAMES)
 
@@ -479,7 +480,8 @@ async def test_run_task_tool_error_envelope():
 async def test_loop_chat_exposes_tool_task_with_delegation(fake_acompletion):
     """plan 规格：allowlist=(tool_task,) + bus + task_subagents → 暴露 tool_task schema。"""
     calls = fake_acompletion([_resp(content="done")])
-    await st.tool_loop_chat("sys", "user", allowlist=("tool_task",), bus=object(),
+    await st.tool_loop_chat("sys", "user", model="deepseek/deepseek-v4-flash",
+                            allowlist=("tool_task",), bus=object(),
                             task_subagents=("explore",))
     exposed = [t["function"]["name"] for t in calls[0]["tools"]]
     assert exposed == ["tool_task"]

@@ -465,19 +465,15 @@ class RAGAgentBase:
         pinned = self._pinned_tool_names()
         by_name = {t.name: t for t in self.tools}
 
-        # [弱模型鲁棒性] 弱模型始终挂载全部技能/插件（脚本）工具，使其能直接调用
+        # [弱模型] 不暴露任何工具：本地/小参数量模型工具调用不可靠（乱调 tool_task/
+        # memory 视为写文件/工具→总结失败），改为纯文本问答，全部工具 schema 不挂载。
         weak_model = is_weak_model(model or self.model)
-        mount_all_skills = settings.weak_model_mount_all_tools and weak_model
+        if weak_model:
+            return []
 
-        # 本轮"想要"的工具集：常驻 + 固定 + 已使用 + 意图命中（弱模型额外全挂技能/脚本）
+        # 本轮"想要"的工具集：常驻 + 固定 + 已使用 + 意图命中
         wanted: set[str] = set()
         for t in self.tools:
-            # [弱模型鲁棒性] 弱模型不挂：
-            #  - tool_task：会把委派当救命稻草反复调用（每次 spawn 子 Agent）→ 死循环 + 超时；
-            #  - tool_memory_*：与文件读写语义太近，实测 qwen2.5-coder 拿 memory_set 当「写文件」
-            #    （「D盘写 TEXT.txt」→ 调 tool_memory_set ×8），选错工具。
-            if weak_model and (t.name == "tool_task" or t.name.startswith("tool_memory")):
-                continue
             if t.name in pinned:
                 wanted.add(t.name)
                 continue
@@ -485,9 +481,6 @@ class RAGAgentBase:
                 wanted.add(t.name)
                 continue
             if t.name.startswith(self._CORE_TOOL_PREFIXES):
-                wanted.add(t.name)
-                continue
-            if mount_all_skills and (t.name.startswith("load_skill_") or t.name.startswith("plugin_")):
                 wanted.add(t.name)
                 continue
             if self._tool_matches_intent(t, q):
@@ -525,8 +518,6 @@ class RAGAgentBase:
         filtered: list[dict] = []
         for d in defs:
             _dname = d.get("function", {}).get("name", "")
-            if weak_model and (_dname == "tool_task" or _dname.startswith("tool_memory")):
-                continue  # 弱模型不挂委派/记忆工具（会话缓存可能残留，这里硬剔除）
             if _dname == "tool_task":
                 params = d["function"].get("parameters", {})
                 props = params.get("properties", {})

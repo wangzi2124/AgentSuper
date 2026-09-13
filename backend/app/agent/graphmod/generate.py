@@ -90,19 +90,15 @@ from .state import _ZERO_USAGE
 from .state import _attachment_parts
 from .state import _find_attachment
 
-# [弱模型鲁棒性] 精简系统提示：本地/小参数模型易被冗长提示与大量工具说明干扰，
-# 导致空输出（{}）或乱调工具。这里给一份短提示，工具 schema 仍由 _build_tool_defs 提供。
+# [弱模型鲁棒性] 精简系统提示：本地/小参数模型不挂任何工具（见 _build_tool_defs），
+# 纯文本问答，避免乱调工具导致空输出（{}）或死循环。
 _WEAK_SYSTEM_PROMPT = (
     "你是 AgentSuper 的 AI 助手。请用简洁的中文直接回答用户问题。\n"
-    "工作方式（调工具→执行→总结）：\n"
-    "1. 需要信息/操作时**调用工具**，不要凭记忆猜。常用工具：\n"
-    "   读文件=tool_read_file(path)；列目录=tool_ls(path)；找文件=tool_glob(pattern)；\n"
-    "   搜内容=tool_grep(pattern)；写/追加/改文件=tool_write_file/tool_append_file/tool_edit_file；\n"
-    "   执行命令=tool_execute(command)；查天气=plugin_weather_tool_get_weather(city)；\n"
-    "   技能=load_skill_<名称>()（需要文档/PDF/表格/绘图/写作等专门技能时，先调用它加载）。\n"
-    "   要读文件内容就用 tool_read_file，不要用 tool_memory_get 等记忆工具代替。\n"
-    "2. 工具返回结果后，用中文把结果总结给用户；\n"
-    "3. 不要重复调用同一工具、不要输出空 JSON（如 {}）、不要把工具调用当成文本打印。"
+    "你无法调用文件系统/工具，只能进行纯文本问答。若需要用户手动操作（如读写文件、"
+    "执行命令），请明确告诉用户怎么做。\n"
+    "回答要求："
+    "1. 直接给出答案，不要输出 JSON、工具调用标记或任何代码外壳；\n"
+    "2. 不要编造文件内容或系统状态，不确定就如实说明。"
 )
 
 # [弱模型] 关闭强模型兜底后，弱模型工具调用无效时的直接答复：提示用户手动切换更强模型。
@@ -283,7 +279,7 @@ class RAGAgentGenerate(RAGAgentTools):
         # [token 优化 v5] 按需挂载：首轮按问题关键词筛选工具 schema
         # [token 优化 v15] 传入 conversation_id → 会话级缓存：同会话内只增不减，
         # system+tools 前缀跨请求字节稳定 → DeepSeek 前缀缓存命中
-        # [弱模型鲁棒性] 弱模型额外全挂技能/脚本工具（见 _build_tool_defs）
+        # [弱模型] 弱模型不挂任何工具（_build_tool_defs 直接返回 []，纯文本问答）
         tool_defs = self._build_tool_defs(
             state.get("question", ""),
             conversation_id=state.get("conversation_id", ""),

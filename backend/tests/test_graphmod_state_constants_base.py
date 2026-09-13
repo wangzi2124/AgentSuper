@@ -360,7 +360,7 @@ def test_build_tool_defs_core_and_intent():
         name="plugin_pdf-generator_tool_create_pdf",
         description="生成 PDF", parameters={}, fn=lambda: "",
     ))
-    defs = agent._build_tool_defs("生成一个 pdf 报告")
+    defs = agent._build_tool_defs("生成一个 pdf 报告", model="deepseek/deepseek-v4-flash")
     names = {d.get("function", {}).get("name") for d in defs}
     assert "tool_read_file" in names  # 核心常驻
     assert "tool_write_file" in names
@@ -377,19 +377,19 @@ def test_build_tool_defs_pinned_and_used():
             return {pinned_name}
     agent = build_agent(custom_tools=PinnedStore())
     agent.tools.append(ToolDef(name=pinned_name, description="导出", parameters={}, fn=lambda: ""))
-    defs = agent._build_tool_defs("", used_names={"tool_grep"})
+    defs = agent._build_tool_defs("", used_names={"tool_grep"}, model="deepseek/deepseek-v4-flash")
     names = {d.get("function", {}).get("name") for d in defs}
     assert pinned_name in names  # pinned 无条件挂载
     assert "tool_grep" in names  # 已使用保留
 
 
 def test_build_tool_defs_weak_model_excludes_task_tool():
-    """[弱模型鲁棒性] 弱模型不挂 tool_task（避免反复委派 → 死循环/超时）。"""
+    """[弱模型] 弱模型不挂任何工具（全部 schema 移除，纯文本问答）。"""
     from app.agent.tools import ToolDef
     agent = build_agent()
     agent.tools.append(ToolDef(name="tool_task", description="委派子 Agent", parameters={}, fn=lambda: ""))
     weak = agent._build_tool_defs("", model="ollama/qwen2.5-coder:latest")
-    assert all(d.get("function", {}).get("name") != "tool_task" for d in weak)
+    assert weak == []  # 弱模型无任何工具
     strong = agent._build_tool_defs("", model="deepseek/deepseek-v4-flash")
     assert any(d.get("function", {}).get("name") == "tool_task" for d in strong)
 

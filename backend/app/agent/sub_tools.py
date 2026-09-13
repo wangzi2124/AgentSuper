@@ -544,6 +544,10 @@ async def tool_loop_chat(
     if _hint:
         raise RuntimeError(_hint)
     max_rounds = _sub_agent_max_rounds()
+    # [弱模型] 本地/小参数量模型工具调用不可靠 → 子 Agent 循环也不挂任何工具，
+    # 退化为单轮纯文本问答（首次无 tool_calls 即返回）。
+    from app.agent.graphmod.base import is_weak_model
+    weak_model = is_weak_model(model)
     # allowlist=None → 默认全量工具（不裁剪、不设运行时硬拒绝，保持既有开放行为）；
     # 显式传入 allowlist 时才按规则裁剪 schema + 运行时硬拒绝（对齐 opencode ruleset）。
     allowlist_defined = allowlist is not None
@@ -630,7 +634,7 @@ async def tool_loop_chat(
     try:
         for rnd in range(1, max_rounds + 1):
             messages[:] = _trim_messages(messages)  # 每轮前裁剪,防 context 无限膨胀
-            use_tools = rnd < max_rounds
+            use_tools = (rnd < max_rounds) and not weak_model
             start = tmod.time()
             response = await litellm.acompletion(**_llm_call(use_tools))
             usage = getattr(response, "usage", None)
