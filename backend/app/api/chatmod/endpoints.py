@@ -160,6 +160,13 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
 
     compressed = await _build_compressed_history(service, user_id, session_id)
 
+    # 请求级事件收集器：非流式路径无 SSE 消费端，但必须注入 _event_queue，
+    # 否则子 Agent 触发 NeedsPermission 时会因「无事件队列」直接拒绝（连弹窗/审批都没有）。
+    # 事件会记录在 collector 副本中供 agents_snapshot 落库；审批弹窗由外部客户端
+    # 轮询 GET /api/permission/pending 呈现（前端流式路径仍走 SSE permission_request）。
+    _event_queue: asyncio.Queue = asyncio.Queue()
+    collector = AgentEventCollector(_event_queue)
+
     # 登记子任务会话（kind='task'）+ AgentBus thread
     child_id, thread_id = _begin_task_session(service, user_id, session_id, body.message)
 
@@ -186,6 +193,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
                     "conversation_id": session_id,
                     "user_id": user_id,
                     "directory": session_dir,
+                    "_event_queue": collector,
                 },
                 thread_id=thread_id,
             ),

@@ -9,9 +9,9 @@ import {
   removeWorkspace as apiRemoveWorkspace,
 } from '../api/permission'
 
-// 审批超时兜底（与后端 permission_approval_timeout 默认 60s 对齐，仅在后端未下发 expires_at 时用）。
+// 审批超时兜底（与后端 permission_approval_timeout 默认 180s 对齐，仅在后端未下发 expires_at 时用）。
 // 正常流程以后端下发的 expires_at 为准，前端照此倒计时。
-const APPROVAL_TIMEOUT_SEC = 60
+const APPROVAL_TIMEOUT_SEC = 180
 // 提前量：后端达到截止时间后请求变为 stale（再次 respond → 404）。
 // 留出 2s 余量让前端的自动拒绝在截止前命中 pending，避免 404 与超时竞态。
 const SAFETY_MARGIN_SEC = 2

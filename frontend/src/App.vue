@@ -14,11 +14,14 @@ const route = useRoute()
 onMounted(() => {
   theme.init()
 })
-// 仅当鉴权放行（auth 未启用 或 已登录）时拉取待审批权限请求；
+// 仅当鉴权放行（auth 未启用 或 已登录）时轮询待审批权限请求；
 // 未登录（登录页）不发请求，避免控制台 401 噪音；登录成功后自动补拉
+// startPolling：SSE 路径靠 permission_request 事件即时弹出；此轮询作为兜底，
+// 使非流式调用（POST /api/chat/multi-agent）产生的 pending 请求也能弹出审批面板。
+// 无待处理请求时自动停止轮询。
 watch(
   () => !auth.enabled || auth.isLoggedIn,
-  (canFetch) => { if (canFetch) perm.pollPending() },
+  (canFetch) => { if (canFetch) perm.startPolling() },
   { immediate: true },
 )
 

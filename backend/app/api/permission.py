@@ -48,6 +48,7 @@ class PendingResponse(BaseModel):
     tool_name: str
     tool_args: dict
     created_at: str
+    expires_at: str
 
 
 @router.get("/permission/pending", tags=["Permission"])

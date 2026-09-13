@@ -167,8 +167,9 @@ class Settings(BaseSettings):
     # 可写工作目录由前端「工作目录」面板配置（运行时生效，持久化到 data/runtime_workspaces.json）。
     # external 路径（工作区/临时目录之外）的默认策略：ask | allow | deny
     external_path_default: str = "ask"
-    # 权限审批等待超时（秒），默认 60；超时视为拒绝
-    permission_approval_timeout: int = 60
+    # 权限审批等待超时（秒），默认 180；超时视为拒绝
+    # 60s 对人工审批偏紧（弹窗出现后要留给用户阅读与决策时间），配合前端倒计时自动拒绝
+    permission_approval_timeout: int = 180
     # 是否放行主工作区内受保护源码路径（app/、plugins/、skills/、config/、main.py 等）的写/执行。
     # 默认 false：这些路径硬保护，添加再多工作区也不能改；
     # 设为 true 后（如开发本系统自身时）允许 Agent 修改 backend 源码。
