@@ -670,6 +670,7 @@ async def test_generate_empty_content_default(gen_env, monkeypatch):
     """弱模型空回答 → 用强模型**完整重跑**（含工具循环）恢复。"""
     import app.models.catalog as catalog_mod
     monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
+    monkeypatch.setattr(settings, "weak_model_strong_fallback", True)
     agent, llm = _setup_generate(gen_env, [
         FakeLLM().response(content=""),           # 弱模型空
         FakeLLM().response(content="强模型回答"),  # 强模型完整重跑
@@ -701,6 +702,7 @@ async def test_generate_empty_json_object_default(gen_env, monkeypatch):
     """弱模型偶发返回空 JSON 对象 {} → 判定失败 → 强模型完整重跑恢复（不展示 {}）。"""
     import app.models.catalog as catalog_mod
     monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
+    monkeypatch.setattr(settings, "weak_model_strong_fallback", True)
     agent, llm = _setup_generate(gen_env, [
         FakeLLM().response(content="{}"),
         FakeLLM().response(content="正常回答"),
@@ -728,10 +730,11 @@ async def test_generate_empty_answer_retry_recovers(gen_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_generate_empty_answer_falls_back_to_default_model(gen_env, monkeypatch):
-    """[弱模型鲁棒性] 弱模型空回答 → 回退前端「模型管理」默认模型重跑。"""
+    """[弱模型鲁棒性] 弱模型空回答 → 回退前端「模型管理」默认模型重跑（需开启强模型兜底）。"""
     monkeypatch.setattr(settings, "empty_answer_retry", True)
     monkeypatch.setattr(settings, "empty_answer_fallback_model", True)
     monkeypatch.setattr(settings, "empty_answer_fallback_model_name", "")
+    monkeypatch.setattr(settings, "weak_model_strong_fallback", True)
     import app.models.catalog as catalog_mod
     monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
     agent, llm = _setup_generate(gen_env, [
@@ -747,8 +750,9 @@ async def test_generate_empty_answer_falls_back_to_default_model(gen_env, monkey
 
 @pytest.mark.asyncio
 async def test_generate_weak_model_two_stage_summary(gen_env, monkeypatch):
-    """[两段式] 弱模型跑完工具轮后，最终回答交给强模型基于工具记录收尾（不等它失败）。"""
+    """[两段式·强兜底] 弱模型跑完工具轮后，最终回答交给强模型基于工具记录收尾（不等它失败）。"""
     monkeypatch.setattr(settings, "weak_model_two_stage", True)
+    monkeypatch.setattr(settings, "weak_model_strong_fallback", True)
     monkeypatch.setattr(settings, "empty_answer_retry", True)
     monkeypatch.setattr(settings, "empty_answer_fallback_model", True)
     monkeypatch.setattr(settings, "empty_answer_fallback_model_name", "")
@@ -780,6 +784,7 @@ async def test_generate_unparsed_json_answer_falls_back(gen_env, monkeypatch):
     monkeypatch.setattr(settings, "empty_answer_retry", True)
     monkeypatch.setattr(settings, "empty_answer_fallback_model", True)
     monkeypatch.setattr(settings, "empty_answer_fallback_model_name", "")
+    monkeypatch.setattr(settings, "weak_model_strong_fallback", True)
     import app.models.catalog as catalog_mod
     monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
     agent, llm = _setup_generate(gen_env, [
@@ -791,6 +796,44 @@ async def test_generate_unparsed_json_answer_falls_back(gen_env, monkeypatch):
     out = await agent._generate(state)
     assert out["answer"] == "正常回答"
     assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_weak_model_invalid_hints_switch(gen_env, monkeypatch):
+    """[默认·不兜底] 弱模型空回答：不回退默认强模型，直接提示切换更强模型。"""
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
+    agent, llm = _setup_generate(gen_env, [
+        FakeLLM().response(content=""),  # 弱模型空
+    ])
+    state = make_state()
+    state["model"] = "ollama/qwen2.5:3b"
+    out = await agent._generate(state)
+    assert "切换" in out["answer"] and "更强" in out["answer"]
+    assert len(llm.calls) == 1
+    assert all(c[0] != "deepseek/deepseek-v4-flash" for c in llm.calls)
+
+
+@pytest.mark.asyncio
+async def test_generate_weak_model_tool_rounds_invalid_hints_switch(gen_env, monkeypatch):
+    """[默认·不兜底] 弱模型调用工具后收尾仍无效：跳过两段式强模型收尾，直接提示切换更强模型。"""
+    monkeypatch.setattr(settings, "weak_model_two_stage", True)  # 即使两段式开启，强兜底关闭则不触发
+    monkeypatch.setattr(settings, "empty_answer_retry", True)
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
+
+    async def spy(name, args, state=None):
+        return "文件内容是 print(1)"
+    agent, llm = _setup_generate(gen_env, [
+        FakeLLM().response(tool_calls=[("tool_read_file", '{"path": "main.py"}')]),  # 弱模型调工具
+        FakeLLM().response(content="{}"),                                            # 弱模型收尾（无效）
+    ], exec_spy=spy)
+    state = make_state()
+    state["model"] = "ollama/qwen2.5:3b"
+    out = await agent._generate(state)
+    assert "切换" in out["answer"] and "更强" in out["answer"]
+    assert len(llm.calls) == 2
+    assert all(c[0] != "deepseek/deepseek-v4-flash" for c in llm.calls)
 
 
 def test_is_weak_model():

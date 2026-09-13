@@ -218,6 +218,10 @@ class Settings(BaseSettings):
     # [两段式] 弱模型：工具轮之后不信任其收尾总结，改为把工具调用记录交给强模型统一收尾
     # （弱模型擅长「调工具」、不擅长「工具→总结」；开启后从根上避免 {} / 空 / 工具标记泄漏）
     weak_model_two_stage: bool = True
+    # 弱模型工具调用无效（空 / {} / 自造 JSON / 工具标记等）时是否回退默认强模型兜底
+    # （两段式强模型收尾 + _generate 完整重跑都受此开关控制）。
+    # False（默认）= 不用默认强模型悄悄兜底，直接返回提示让用户手动切换更强模型。
+    weak_model_strong_fallback: bool = False
 
     # ── 共享记忆持久化 ──
     # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失

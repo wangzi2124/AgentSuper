@@ -105,6 +105,12 @@ _WEAK_SYSTEM_PROMPT = (
     "3. 不要重复调用同一工具、不要输出空 JSON（如 {}）、不要把工具调用当成文本打印。"
 )
 
+# [弱模型] 关闭强模型兜底后，弱模型工具调用无效时的直接答复：提示用户手动切换更强模型。
+_WEAK_MODEL_SWITCH_HINT = (
+    "当前模型（弱模型）调用工具后未能返回有效回答，已按配置停用默认强模型兜底。\n"
+    "请在上方模型选择器中切换到更强的模型（如 deepseek-v4 等）后重新提问。"
+)
+
 
 def _is_valid_answer(text: str | None) -> bool:
     """最终回答是否可用：非空，且不是自造 JSON / 工具调用标记等垃圾输出。"""
@@ -216,6 +222,7 @@ class RAGAgentGenerate(RAGAgentTools):
             and is_weak_model(out.get("model") or "")
             and settings.empty_answer_retry
             and settings.empty_answer_fallback_model
+            and settings.weak_model_strong_fallback
             and not state.get("_weak_rerun")
         ):
             strong = self._resolve_fallback_model(out.get("model") or "")
@@ -225,7 +232,10 @@ class RAGAgentGenerate(RAGAgentTools):
                 state["model"] = strong
                 out = await self._generate_impl(state)
         if not _is_valid_answer(out.get("answer")):
-            out["answer"] = "（模型未返回有效内容，请重试或更换模型。）"
+            if is_weak_model(out.get("model") or "") and not settings.weak_model_strong_fallback:
+                out["answer"] = _WEAK_MODEL_SWITCH_HINT
+            else:
+                out["answer"] = "（模型未返回有效内容，请重试或更换模型。）"
             out["messages"] = [AIMessage(content=out["answer"])]
         return out
 
@@ -646,7 +656,7 @@ class RAGAgentGenerate(RAGAgentTools):
             msg.content = parse_answer_envelope(msg.content)
         # [两段式] 弱模型：一旦跑过工具轮，其「工具→总结」不可靠（实测吐空 / {} / 工具标记），
         # 不再赌它收尾——把工具记录交给强模型统一收尾（主动式，而非等它失败再回退）。
-        if settings.weak_model_two_stage and rounds > 0 and is_weak_model(model):
+        if settings.weak_model_two_stage and settings.weak_model_strong_fallback and rounds > 0 and is_weak_model(model):
             transcript = _build_tool_transcript(messages, state.get("question", ""))
             if transcript:
                 summary = await self._summarize_tool_transcript(transcript, model, state)
