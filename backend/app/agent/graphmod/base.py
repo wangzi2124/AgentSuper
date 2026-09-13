@@ -88,12 +88,25 @@ logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 
 def is_weak_model(model: str) -> bool:
-    """判断是否为「弱模型」（本地/小参数）：`ollama/` 前缀，或 settings.weak_models 命中。"""
+    """判断是否为「弱模型」。
+
+    判定优先级（从高到低）：
+    1. `.env` `WEAK_MODELS` 显式名单 → 无论能力如何都算弱模型；
+    2. 「模型管理」目录声明的能力 —— **「支持工具调用」(`capabilities.tool_use`) 是判据**：
+       目录收录的模型 tool_use=True → 非弱模型（允许工具），tool_use=False → 弱模型
+       （纯文本问答，不挂任何工具）；
+    3. 未收录目录的模型按历史启发式：`ollama/` 前缀视为弱。
+    """
     m = (model or "").lower()
-    if m.startswith("ollama/"):
-        return True
     weak = [x.strip().lower() for x in (settings.weak_models or "").split(",") if x.strip()]
-    return any(m == w or m.endswith("/" + w) for w in weak)
+    if any(m == w or m.endswith("/" + w) for w in weak):
+        return True
+    from app.models import catalog
+    entry = catalog.lookup(m)
+    if entry is not None:
+        caps = entry.get("capabilities") or {}
+        return not bool(caps.get("tool_use", True))
+    return m.startswith("ollama/")
 
 
 class RAGAgentBase:
