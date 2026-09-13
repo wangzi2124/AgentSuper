@@ -389,7 +389,7 @@ def test_build_tool_defs_weak_model_excludes_task_tool():
     agent = build_agent()
     agent.tools.append(ToolDef(name="tool_task", description="委派子 Agent", parameters={}, fn=lambda: ""))
     weak = agent._build_tool_defs("", model="ollama/qwen2.5-coder:latest")
-    assert weak == []  # 弱模型无任何工具
+    assert weak is None  # 弱模型无任何工具（None → LLM 调用不带 tools 字段）
     strong = agent._build_tool_defs("", model="deepseek/deepseek-v4-flash")
     assert any(d.get("function", {}).get("name") == "tool_task" for d in strong)
 

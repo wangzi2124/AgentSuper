@@ -467,9 +467,11 @@ class RAGAgentBase:
 
         # [弱模型] 不暴露任何工具：本地/小参数量模型工具调用不可靠（乱调 tool_task/
         # memory 视为写文件/工具→总结失败），改为纯文本问答，全部工具 schema 不挂载。
+        # 注意返回 None（而非 []）：Ollama 等本地模型收到空 tools=[] 会进入工具模式
+        # 并返回空内容（实测 olmo-3:7b），tools=None 省略字段则正常纯文本回答。
         weak_model = is_weak_model(model or self.model)
         if weak_model:
-            return []
+            return None
 
         # 本轮"想要"的工具集：常驻 + 固定 + 已使用 + 意图命中
         wanted: set[str] = set()
