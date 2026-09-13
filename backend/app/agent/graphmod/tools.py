@@ -74,6 +74,7 @@ from app.trace_log import trace, trace_messages  # [token trace v7]
 from app.prompt_log import log_prompt  # [prompt log v1]
 
 from app.permission import NeedsPermission, get_manager as get_perm_mgr
+from app.agent.sub_tools import _permission_request_payload
 from .base import RAGAgentBase
 # ── 跨子模块依赖（自动生成）──
 from .constants import _TASK_TOOL_SUBAGENTS
@@ -180,14 +181,9 @@ class RAGAgentTools(RAGAgentBase):
             mgr = get_perm_mgr()
             req = mgr.create_request(subagent_type, "task", "tool_task", args)
             if event_queue is not None:
-                event_queue.put_nowait({
-                    "type": "permission_request",
-                    "request_id": req.id,
-                    "path": subagent_type,
-                    "operation": "task",
-                    "tool_name": "tool_task",
-                    "tool_args": args,
-                })
+                event_queue.put_nowait(
+                    _permission_request_payload(req, subagent_type, "task", "tool_task", args)
+                )
             else:
                 return f"Error: delegation to '{subagent_type}' requires approval but no consent channel exists (denied)."
             decision = await mgr.await_decision(req.id)
@@ -379,14 +375,9 @@ class RAGAgentTools(RAGAgentBase):
                     req = mgr.create_request(e.path, e.operation, name, args)
                     eq = state.get("_event_queue") if state else None
                     if eq:
-                        eq.put_nowait({
-                            "type": "permission_request",
-                            "request_id": req.id,
-                            "path": e.path,
-                            "operation": e.operation,
-                            "tool_name": name,
-                            "tool_args": args,
-                        })
+                        eq.put_nowait(
+                            _permission_request_payload(req, e.path, e.operation, name, args)
+                        )
                     if not eq:
                         # 无事件队列（如多 agent 总线路径）时无人能审批，
                         # 直接拒绝而不是永久等待（此前会卡到 supervisor 超时）

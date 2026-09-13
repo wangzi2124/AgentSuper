@@ -32,6 +32,28 @@ from app.utils.json_repair import parse_tool_args
 logger = logging.getLogger(__name__)
 
 
+def _permission_request_payload(req, path, operation, tool_name, tool_args) -> dict:
+    """组装 permission_request 事件负载。
+
+    created_at/expires_at 供前端授权面板倒计时（到期自动拒绝）。这两个字段
+    由真实 PermissionManager.create_request 填充；对于 mock/替代实现可能缺失，
+    用 getattr 兜底保证事件照常发出。
+    """
+    payload = {
+        "type": "permission_request",
+        "request_id": req.id,
+        "path": path,
+        "operation": operation,
+        "tool_name": tool_name,
+        "tool_args": tool_args,
+    }
+    for field in ("created_at", "expires_at"):
+        value = getattr(req, field, None)
+        if value is not None:
+            payload[field] = value.isoformat()
+    return payload
+
+
 def strip_tool_call_markup(text: str) -> str:
     """剥离子 Agent 最终回答里模型误写（Hermes 风格）的工具调用块。
 
@@ -396,14 +418,7 @@ async def run_tool(name: str, args: dict, event_queue=None) -> str:
     except NeedsPermission as e:
         mgr = get_perm_mgr()
         req = mgr.create_request(e.path, e.operation, name, args)
-        emit(event_queue, {
-            "type": "permission_request",
-            "request_id": req.id,
-            "path": e.path,
-            "operation": e.operation,
-            "tool_name": name,
-            "tool_args": args,
-        })
+        emit(event_queue, _permission_request_payload(req, e.path, e.operation, name, args))
         if not event_queue:
             # 无事件队列（脱离请求流）时无人能审批，直接拒绝而不是永久等待
             logger.warning("Permission request denied: no event queue to approve %s", e.path)

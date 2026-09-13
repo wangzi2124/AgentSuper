@@ -661,7 +661,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             operation: event.operation!,
             tool_name: event.tool_name!,
             tool_args: event.tool_args as Record<string, unknown>,
-            created_at: new Date().toISOString(),
+            created_at: event.created_at || new Date().toISOString(),
+            expires_at: event.expires_at,
           })
         } else if (event.type === 'error') {
           session.streamPhase = 'idle'

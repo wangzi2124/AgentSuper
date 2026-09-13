@@ -65,6 +65,7 @@ async def list_pending(request: Request):
                 "tool_name": r.tool_name,
                 "tool_args": r.tool_args,
                 "created_at": r.created_at.isoformat(),
+                "expires_at": (getattr(r, "expires_at", None) or r.created_at).isoformat(),
             }
             for r in requests
         ]

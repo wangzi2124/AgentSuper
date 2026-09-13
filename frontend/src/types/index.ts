@@ -95,6 +95,8 @@ export interface PermissionRequest {
   tool_name: string
   tool_args: Record<string, unknown>
   created_at: string
+  /** 后端审批截止时间（ISO），前端据此倒计时并在到期前自动拒绝 */
+  expires_at?: string
 }
 
 // 聊天请求参数
@@ -313,6 +315,8 @@ export interface MultiAgentSSEEvent {
   operation?: string
   tool_name?: string
   tool_args?: Record<string, unknown>
+  created_at?: string
+  expires_at?: string
 }
 
 export interface MultiAgentChatRequest {

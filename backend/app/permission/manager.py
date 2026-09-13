@@ -6,7 +6,7 @@ import tempfile
 import time
 import uuid
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -86,6 +86,7 @@ class PermissionRequest:
         self.created_at = datetime.now()
         self.responded_at: Optional[datetime] = None
         self.response: Optional[str] = None
+        self.expires_at = self.created_at
         self._event = asyncio.Event()
 
 
@@ -462,6 +463,7 @@ class PermissionManager:
             if existing is not None and existing.status == "pending":
                 return existing
         req = PermissionRequest(path, operation, tool_name, tool_args or {}, session_id)
+        req.expires_at = datetime.now() + timedelta(seconds=self.approval_timeout)
         self._requests[req.id] = req
         self._pending_by_key[key] = req.id
         return req
