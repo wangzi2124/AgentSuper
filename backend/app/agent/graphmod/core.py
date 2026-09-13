@@ -292,6 +292,10 @@ class RAGAgent(RAGAgentGenerate):
         _is_ollama = _creds["is_ollama"]
         _api_key = _creds["api_key"]
         _api_base = _creds["api_base"]
+        from app.models.catalog import provider_config_hint
+        _hint = provider_config_hint(model, creds=_creds)
+        if _hint:
+            raise RuntimeError(_hint)
         try:
             stream = await litellm.acompletion(
                 model=model,

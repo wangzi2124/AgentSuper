@@ -539,6 +539,10 @@ async def tool_loop_chat(
     if model.startswith("ollama/"):
         api_key = "ollama"
         api_base = None
+    from app.models.catalog import provider_config_hint, provider_api
+    _hint = provider_config_hint(model, creds=provider_api(model))
+    if _hint:
+        raise RuntimeError(_hint)
     max_rounds = _sub_agent_max_rounds()
     # allowlist=None → 默认全量工具（不裁剪、不设运行时硬拒绝，保持既有开放行为）；
     # 显式传入 allowlist 时才按规则裁剪 schema + 运行时硬拒绝（对齐 opencode ruleset）。

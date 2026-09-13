@@ -548,6 +548,45 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False}
 
 
+def provider_config_hint(model_id: Optional[str], *, creds: Optional[dict] = None) -> str:
+    """检测模型对应的 Provider 是否已配置；未配置则返回友好中文提示，已配置返回 ""。
+
+    判定口径（与 provider_api 的解析优先级一致）：
+      - 无模型 / ollama 前缀 / provider 命中注册表且带 api_base → 视为已配置；
+      - 否则走 settings.llm_api_base/api_key 兜底：api_key 为空 AND
+        （api_base 为空 或 api_base 是 ollama 本地（localhost/127.0.0.1:11434）或默认
+        deepseek 端点）→ 说明用户根本没配服务商，返回提示而非把它当自定义 provider 直连。
+    提示文案面向「模型管理」页配置 Provider（api_base + api_key），也提及 .env 兜底。
+    """
+    from app.config import settings
+
+    mid = normalize_model(model_id)
+    if not mid:
+        return ""
+    provider = mid.split("/", 1)[0] if "/" in mid else ""
+    if not provider or provider == "ollama":
+        return ""
+    reg = read_providers().get(provider)
+    if reg and reg.get("api_base"):
+        return ""
+    resolved = creds or provider_api(mid)
+    if resolved.get("is_ollama"):
+        return ""
+    key = (resolved.get("api_key") or "").strip()
+    base = (resolved.get("api_base") or "").strip()
+    if key:
+        return ""
+    _local = ("localhost" in base) or base.startswith("127.0.0.1") or base.endswith(":11434")
+    _default_ds = base.rstrip("/") == "https://api.deepseek.com"
+    if not base or _local or _default_ds:
+        return (
+            "未配置模型服务商（Provider）「%s」：当前模型的 API 凭证缺失或指向了本地 Ollama/"
+            "默认地址，无法发起调用。请在「模型管理」页为该 Provider 配置 api_base 与 api_key"
+            "（也可在模型管理直接测试连通性），或在 .env 中设置 LLM_API_BASE/LLM_API_KEY 后重启后端。"
+        ) % provider
+    return ""
+
+
 def provider_models_source() -> list[dict[str, Any]]:
     """当前可用的提供商信息（前端模型管理面板）。"""
     out = []

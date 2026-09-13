@@ -111,3 +111,47 @@ def test_default_model_falls_back_to_settings():
     cat_flag = any(e.get("default") for e in catalog.build_catalog())
     assert cat_flag
     assert catalog.default_model()
+
+
+def test_provider_config_hint_ollama_and_none_configured():
+    # 本地模型 / 无模型 / 裸名（无 provider 前缀）一律视为已配置
+    assert catalog.provider_config_hint("ollama/qwen2.5:3b") == ""
+    assert catalog.provider_config_hint(None) == ""
+    assert catalog.provider_config_hint("") == ""
+    assert catalog.provider_config_hint("qwen2.5:7b", creds={"api_base": None, "api_key": None}) == ""
+
+
+def test_provider_config_hint_missing_creds_raises_hint(monkeypatch):
+    # 未注册 provider + 兜底指向 ollama 本地/默认 deepseek → 返回友好提示
+    monkeypatch.setattr(catalog, "read_providers", lambda: {})
+    for base in ("http://localhost:11434", "https://api.deepseek.com"):
+        hint = catalog.provider_config_hint(
+            "deepseek/deepseek-v4-flash",
+            creds={"api_base": base, "api_key": "", "is_ollama": False},
+        )
+        assert "deepseek" in hint
+        assert "模型管理" in hint or "LLM_API_BASE" in hint
+
+
+def test_provider_config_hint_custom_base_or_key_configured(monkeypatch):
+    # 用户显式配置了自定义 api_base（无 key 的本地服务）或有 api_key → 视为已配置
+    monkeypatch.setattr(catalog, "read_providers", lambda: {})
+    assert catalog.provider_config_hint(
+        "vllm/qwen2.5", creds={"api_base": "http://127.0.0.1:8000/v1", "api_key": "", "is_ollama": False}
+    ) == ""
+    assert catalog.provider_config_hint(
+        "openai/gpt-4o", creds={"api_base": None, "api_key": "sk-test", "is_ollama": False}
+    ) == ""
+
+
+def test_provider_config_hint_registered_provider_configured(monkeypatch):
+    # 模型管理页已注册该 provider（带 api_base）→ 已配置
+    monkeypatch.setattr(
+        catalog, "read_providers",
+        lambda: {"deepseek": {"label": "DeepSeek", "api_base": "https://api.deepseek.com",
+                             "api_key": "sk-x", "enabled": True}},
+    )
+    assert catalog.provider_config_hint(
+        "deepseek/deepseek-v4-flash",
+        creds={"api_base": "https://api.deepseek.com", "api_key": "sk-x", "is_ollama": False},
+    ) == ""
