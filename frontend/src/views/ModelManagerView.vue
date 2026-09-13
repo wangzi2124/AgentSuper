@@ -79,6 +79,11 @@ function openProviderForm(p?: ProviderInfo) {
 async function submitProvider() {
   const name = providerForm.name.trim()
   if (!name || !providerForm.api_base.trim()) return
+  if (name.includes('/')) {
+    // Provider 名称是 litellm 前缀，不含 '/'；模型 id 形如 deepseek/deepseek-v4-flash
+    mm.setError(`Provider 名称不能包含「/」，请只填前缀（如想让「deepseek/deepseek-v4-flash」可用，名称填 deepseek）`)
+    return
+  }
   await mm.updateProvider(name, { label: providerForm.label, api_base: providerForm.api_base, api_key: providerForm.api_key, enabled: providerForm.enabled })
   showProviderForm.value = false
 }
@@ -313,7 +318,7 @@ function capOf(m: ModelInfo) {
   </div>
 
   <!-- Provider 编辑弹窗 -->
-  <div v-if="showProviderForm" class="overlay" @click.self="showProviderForm = false">
+  <div v-if="showProviderForm" class="overlay">
     <div class="dialog">
       <div class="form-title">{{ providerForm.name ? '编辑 Provider' : '新增 Provider' }}</div>
       <div class="form-row">
@@ -344,7 +349,7 @@ function capOf(m: ModelInfo) {
   </div>
 
   <!-- 自定义模型编辑弹窗 -->
-  <div v-if="showModelForm" class="overlay" @click.self="showModelForm = false">
+  <div v-if="showModelForm" class="overlay">
     <div class="dialog wide">
       <div class="form-title">{{ modelForm.id && modelList.find(m => m.id === modelForm.id) ? '编辑模型' : '新增自定义模型' }}</div>
       <div class="form-row">

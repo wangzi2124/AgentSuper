@@ -579,11 +579,7 @@ def provider_config_hint(model_id: Optional[str], *, creds: Optional[dict] = Non
     _local = ("localhost" in base) or base.startswith("127.0.0.1") or base.endswith(":11434")
     _default_ds = base.rstrip("/") == "https://api.deepseek.com"
     if not base or _local or _default_ds:
-        return (
-            "未配置模型服务商（Provider）「%s」：当前模型的 API 凭证缺失或指向了本地 Ollama/"
-            "默认地址，无法发起调用。请在「模型管理」页为该 Provider 配置 api_base 与 api_key"
-            "（也可在模型管理直接测试连通性），或在 .env 中设置 LLM_API_BASE/LLM_API_KEY 后重启后端。"
-        ) % provider
+        return "未配置模型服务商（Provider）「%s」，请在「模型管理」页为该 Provider 配置 api_base 与 api_key。" % provider
     return ""
 
 

@@ -82,17 +82,25 @@ async def delete_custom(mid: str):
     return ok({"removed": removed, "models": catalog.get_catalog()})
 
 
-@router.put("/models/providers/{name}", dependencies=[Depends(require_admin)])
+@router.put("/models/providers/{name:path}", dependencies=[Depends(require_admin)])
 async def upsert_prov(name: str, req: Request):
-    """新增/更新 provider（api_base 指向 OpenAI 兼容服务，启动探测自动注册其模型）。"""
+    """新增/更新 provider（api_base 指向 OpenAI 兼容服务，启动探测自动注册其模型）。
+
+    name 为 litellm 前缀（不含 '/'）。用 {name:path} 捕获可能 URL 编码后的 '/'，
+    在业务层给出友好提示，避免裸 404（如误把完整模型 id 当作 provider 名时）。
+    """
+    if "/" in name:
+        return fail(message=f"Provider 名称不能包含「/」：{name}，请填写 litellm 前缀（如 deepseek）")
     body = await req.json()
     entry = catalog.upsert_provider(name, body)
     return ok({"provider": entry, "providers": catalog.provider_models_source(),
                "models": catalog.get_catalog()})
 
 
-@router.delete("/models/providers/{name}", dependencies=[Depends(require_admin)])
+@router.delete("/models/providers/{name:path}", dependencies=[Depends(require_admin)])
 async def delete_prov(name: str):
+    if "/" in name:
+        return fail(message=f"Provider 名称不能包含「/」：{name}，请填写 litellm 前缀")
     removed = catalog.remove_provider(name)
     return ok({"removed": removed, "providers": catalog.provider_models_source(),
                "models": catalog.get_catalog()})

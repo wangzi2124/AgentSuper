@@ -206,6 +206,7 @@ export const useModelManagerStore = defineStore('modelManager', () => {
 
   return {
     config, loading, saving, refreshing, busyId, error, notice,
+    setNotice, setError,
     load, addOrUpdateModel, removeModel, updateProvider, removeProvider, setDefaults,
     emptyModel, modelOptions,
   }
