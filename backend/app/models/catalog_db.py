@@ -1,7 +1,8 @@
-"""模型目录数据库存储（SQLite）：替代 data/model_catalog.json 的单一事实来源。
+"""模型目录数据库存储（SQLite / MySQL / PostgreSQL）：替代 data/model_catalog.json 的单一事实来源。
 
 设计：
-- 专用库 `data/model_catalog.db`（与 session.db 解耦，便于单独备份/迁移）。
+- sqlite：专用库 `data/model_catalog.db`（与 session.db 解耦，便于单独备份/迁移）。
+- mysql / postgresql：落到统一后端（app.storage.backends），schema 由 Alembic 迁移链管理。
 - 表结构：
     catalog_settings(key, value)            —— default_model / small_model / image_caption_model / voice_model_size
     providers(name, label, api_base, api_key, enabled, data) —— 前端配置的 Provider 注册表
@@ -10,8 +11,9 @@
 - 迁移：首次连接某库时，若三表皆空且存在旧 `model_catalog.json`，自动导入（JSON 保留不动作备份）。
 - 导出/导入：`export_config()` / `import_config()` 供迁移到别的机器。
 
-并发：每次操作新开连接（低频配置写，SQLite 本地开销可忽略），WAL + busy_timeout；
-初始化按「库路径」记录，环境变量切换 data 目录（测试/多租户）时各自独立导入。
+并发：每次操作新开连接（低频配置写，本地开销可忽略）；sqlite 走 WAL + busy_timeout，
+初始化按「库路径」记录，环境变量切换 data 目录（测试/多租户）时各自独立导入；
+非 sqlite 后端初始化按进程记录（process 级导 JSON 一次）。
 """
 
 from __future__ import annotations
@@ -22,30 +24,16 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS catalog_settings (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS providers (
-  name     TEXT PRIMARY KEY,
-  label    TEXT NOT NULL DEFAULT '',
-  api_base TEXT NOT NULL DEFAULT '',
-  api_key  TEXT NOT NULL DEFAULT '',
-  enabled  INTEGER NOT NULL DEFAULT 1,
-  data     TEXT NOT NULL DEFAULT '{}'
-);
-CREATE TABLE IF NOT EXISTS catalog_entries (
-  id   TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  data TEXT NOT NULL
-);
-"""
+from app.models.builtin_catalog import BUILTIN_CATALOG
+from app.storage import backends, schema as storage_schema
+
+_SCHEMA = storage_schema.derive_sqlite_ddl(storage_schema.CATALOG_TABLES)
 
 _SETTING_KEYS = ("default_model", "small_model", "image_caption_model", "voice_model_size")
 
 _lock = threading.RLock()
 _initialized_paths: set[str] = set()
+_json_imported_non_sqlite = False
 
 
 def _data_dir() -> Path:
@@ -63,18 +51,39 @@ def catalog_db_path() -> Path:
     return _data_dir() / "model_catalog.db"
 
 
-def _connect() -> sqlite3.Connection:
+def _connect():
+    """获取连接并初始化表结构。
+
+    - sqlite：data/model_catalog.db（WAL + busy_timeout）；按库路径惰性 JSON 导入。
+    - 非 sqlite：统一后端门面（schama 由 Alembic 迁移链管理）；进程级 JSON 导入一次。
+    """
+    if not backends.is_sqlite():
+        global _json_imported_non_sqlite
+        with _lock:
+            if not _json_imported_non_sqlite:
+                _json_imported_non_sqlite = True
+                conn = backends.connect()
+                try:
+                    _import_json_if_empty(conn)
+                    _seed_builtin(conn)
+                finally:
+                    conn.close()
+        return backends.connect()
+
     p = catalog_db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(p))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 10000")
-    conn.executescript(_SCHEMA)
+    conn = backends.make_sqlite_conn(
+        p,
+        row_factory=sqlite3.Row,
+        wal=True,
+        busy_timeout=10000,
+        schema_ddl=_SCHEMA,
+    )
     key = str(p)
     if key not in _initialized_paths:
         _initialized_paths.add(key)
         _import_json_if_empty(conn)
+        _seed_builtin(conn)
     return conn
 
 
@@ -107,6 +116,85 @@ def _import_json_if_empty(conn: sqlite3.Connection) -> None:
     if isinstance(data, dict):
         _write_config(conn, data)
         conn.commit()
+
+
+def _seed_builtin(conn) -> None:
+    """幂等物化 BUILTIN_CATALOG 到 catalog_entries(kind='builtin')。
+
+    已存在（按 id，不论任何 kind）的条目跳过——不会覆盖用户自定义的
+    extra / override 同名行，也不会重复追加。
+    """
+    existing_ids = {
+        r[0] for r in conn.execute("SELECT id FROM catalog_entries").fetchall()
+    }
+    for entry in BUILTIN_CATALOG:
+        mid = entry.get("id")
+        if not mid or mid in existing_ids:
+            continue
+        conn.execute(
+            "INSERT INTO catalog_entries(id, kind, data) VALUES (?, 'builtin', ?)",
+            (mid, json.dumps(entry, ensure_ascii=False)),
+        )
+    conn.commit()
+
+
+def load_builtin_entries() -> list[dict[str, Any]]:
+    """读取所有 kind='builtin' 的内建模型条目，返回解析后的 dict 列表。"""
+    with _lock:
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT data FROM catalog_entries WHERE kind = 'builtin'"
+            ).fetchall()
+        finally:
+            conn.close()
+    entries: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            d = json.loads(row["data"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(d, dict):
+            entries.append(d)
+    return entries
+
+
+def export_full() -> dict[str, Any]:
+    """全量导出：settings + providers + catalog_entries（含 kind）。
+
+    供模型列表完整迁移 / 快照 / 恢复用，与 import_full 配对。
+    """
+    with _lock:
+        conn = _connect()
+        try:
+            settings_: dict[str, Any] = {}
+            for row in conn.execute("SELECT key, value FROM catalog_settings"):
+                try:
+                    settings_[row["key"]] = json.loads(row["value"])
+                except (json.JSONDecodeError, TypeError):
+                    settings_[row["key"]] = row["value"]
+
+            providers: dict[str, Any] = {}
+            for row in conn.execute("SELECT name, label, api_base, api_key, enabled, data FROM providers"):
+                providers[row["name"]] = {
+                    "label": row["label"],
+                    "api_base": row["api_base"],
+                    "api_key": row["api_key"],
+                    "enabled": bool(row["enabled"]),
+                    **(json.loads(row["data"] or "{}") if row["data"] else {}),
+                }
+
+            entries: list[dict[str, Any]] = []
+            for row in conn.execute("SELECT id, kind, data FROM catalog_entries"):
+                try:
+                    entries.append({"id": row["id"], "kind": row["kind"],
+                                    "data": json.loads(row["data"])})
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        finally:
+            conn.close()
+
+    return {"settings": settings_, "providers": providers, "catalog_entries": entries}
 
 
 def _read_config(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -182,11 +270,12 @@ def _write_config(conn: sqlite3.Connection, cfg: dict[str, Any]) -> None:
                  json.dumps(extra, ensure_ascii=False)),
             )
 
-        conn.execute("DELETE FROM catalog_entries")
+        conn.execute("DELETE FROM catalog_entries WHERE kind <> 'builtin'")
         seen_ids: set[str] = set()
         for mid, patch in (cfg.get("overrides") or {}).items():
             if mid in seen_ids:
                 continue
+            conn.execute("DELETE FROM catalog_entries WHERE id = ?", (mid,))
             conn.execute(
                 "INSERT INTO catalog_entries(id, kind, data) VALUES (?, 'override', ?)",
                 (mid, json.dumps(patch, ensure_ascii=False)),
@@ -196,6 +285,7 @@ def _write_config(conn: sqlite3.Connection, cfg: dict[str, Any]) -> None:
             mid = e.get("id") if isinstance(e, dict) else None
             if not mid or mid in seen_ids:
                 continue
+            conn.execute("DELETE FROM catalog_entries WHERE id = ?", (mid,))
             conn.execute(
                 "INSERT INTO catalog_entries(id, kind, data) VALUES (?, 'extra', ?)",
                 (mid, json.dumps(e, ensure_ascii=False)),

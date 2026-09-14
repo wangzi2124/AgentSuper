@@ -1,19 +1,23 @@
-"""Task state persistence with SQLite.
+"""Task state persistence with a SQLite/MySQL/PostgreSQL backend.
 
 Tracks task execution state across the agent loop, enabling:
 - Step counting for max_steps enforcement
 - Compaction history tracking
 - Crash recovery (resume from last checkpoint)
+
+sqlite：data/tasks.db（每线程复用一条连接，WAL + busy_timeout）。
+非 sqlite：统一后端门面（app.storage.backends），schema 由 Alembic 迁移链管理。
 """
 
 import json
 import logging
-import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+
+from app.storage import backends, schema as storage_schema
 
 logger = logging.getLogger(__name__)
 
@@ -23,33 +27,26 @@ DB_PATH = Path(__file__).resolve().parents[2] / "data" / "tasks.db"
 _TASK_RETENTION_DAYS = 7
 
 # 每线程复用一条连接（agent 每步 save() 高频调用，避免反复建连）；
-# WAL + busy_timeout 解决多会话并发写导致的 `database is locked`。
+# sqlite：WAL + busy_timeout 解决多会话并发写导致的 `database is locked`；
+# 非 sqlite：同样 thread-local 复用统一后端门面连接。
 _thread_local = threading.local()
 
-_SCHEMA = (
-    "CREATE TABLE IF NOT EXISTS tasks ("
-    "  id TEXT PRIMARY KEY,"
-    "  conversation_id TEXT NOT NULL,"
-    "  status TEXT NOT NULL DEFAULT 'running',"
-    "  step INTEGER NOT NULL DEFAULT 0,"
-    "  total_tokens INTEGER NOT NULL DEFAULT 0,"
-    "  last_compaction_step INTEGER NOT NULL DEFAULT 0,"
-    "  tool_calls_count INTEGER NOT NULL DEFAULT 0,"
-    "  created_at TEXT NOT NULL DEFAULT (datetime('now')),"
-    "  updated_at TEXT NOT NULL DEFAULT (datetime('now'))"
-    ")"
-)
+_SCHEMA = storage_schema.derive_sqlite_ddl(storage_schema.TASK_TABLES)
 
 
-def _get_db() -> sqlite3.Connection:
+def _get_db():
     """Get current thread's task database connection (reused, not reopened)."""
+    if not backends.is_sqlite():
+        return backends.thread_local_connect()
     conn = getattr(_thread_local, "conn", None)
     if conn is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(DB_PATH), timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        conn.execute(_SCHEMA)
+        conn = backends.make_sqlite_conn(
+            DB_PATH,
+            wal=True,
+            busy_timeout=30000,
+            schema_ddl=_SCHEMA,
+        )
         conn.commit()
         _thread_local.conn = conn
     return conn
@@ -58,16 +55,29 @@ def _get_db() -> sqlite3.Connection:
 def cleanup_old_tasks() -> None:
     """清理超过保留时间的已完成/失败任务记录。
 
-    updated_at 统一存 UTC（ISO-8601 含时区偏移），SQLite datetime() 会正确换算，
-    与 datetime('now') 对齐比较，避免本地时区导致任务被提前删除。
+    updated_at 统一存 UTC（ISO-8601 含时区偏移）。
+    - sqlite：datetime() 函数换算比较（与 datetime('now') 对齐）。
+    - mysql / postgresql：用同一 ISO-8601 格式的 Python 截止串做字典序比较
+      （任务写入方统一使用 datetime.now(timezone.utc).isoformat()，格式一致）。
     """
     try:
         conn = _get_db()
-        conn.execute(
-            "DELETE FROM tasks WHERE status IN ('completed', 'failed') "
-            "AND datetime(updated_at) < datetime('now', ?)",
-            (f"-{_TASK_RETENTION_DAYS} days",),
-        )
+        if backends.is_sqlite():
+            conn.execute(
+                "DELETE FROM tasks WHERE status IN ('completed', 'failed') "
+                "AND datetime(updated_at) < datetime('now', ?)",
+                (f"-{_TASK_RETENTION_DAYS} days",),
+            )
+        else:
+            cutoff = (
+                datetime.now(timezone.utc)
+                - timedelta(days=_TASK_RETENTION_DAYS)
+            ).isoformat()
+            conn.execute(
+                "DELETE FROM tasks WHERE status IN ('completed', 'failed') "
+                "AND updated_at < ?",
+                (cutoff,),
+            )
         conn.commit()
     except Exception as e:
         logger.warning("Failed to cleanup old tasks: %s", e)

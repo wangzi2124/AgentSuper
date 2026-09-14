@@ -451,6 +451,8 @@ class TestPruneToolOutputs:
 @pytest.fixture
 def task_db(tmp_path, monkeypatch):
     monkeypatch.setattr(task_state, "DB_PATH", tmp_path / "tasks.db")
+    # 强制 sqlite：.env DB_TYPE=mysql 时任务状态单测也不该打到真实 MySQL
+    monkeypatch.setattr("app.context.task_state.backends.is_sqlite", lambda: True)
     task_state._thread_local.conn = None
     yield task_state
     task_state._thread_local.conn = None

@@ -92,7 +92,17 @@ Rules:
 
 
 # ── 数据库访问 ───────────────────────────────────────────────────────────────
-def _connect() -> sqlite3.Connection:
+def _connect():
+    """获取连接。
+
+    - sqlite：data/session.db（兼容原有独立脚本语义）。
+    - 非 sqlite：统一后端门面（schema 由 Alembic 迁移链管理；ON CONFLICT / BEGIN
+      IMMEDIATE / `?` 占位符经门面翻译为对应方言）。
+    """
+    from app.storage import backends
+
+    if not backends.is_sqlite():
+        return backends.connect()
     conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
     conn.row_factory = sqlite3.Row
     return conn

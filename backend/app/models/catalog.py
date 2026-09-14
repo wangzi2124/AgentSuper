@@ -24,162 +24,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-# ── 内置目录 ─────────────────────────────────────────────────────────────
-# cost 单位：USD / 每 1M tokens。价格未知记 0（opencode 当前即硬编码 0 的成本态）。
-# deepseek v4 系列暂无官方价，以下用 DeepSeek 家族参考价（deepseek-chat V3 口径），
-# 可在 data/model_catalog.json 里按实际合同价覆盖。
-_BUILTIN_CATALOG: list[dict[str, Any]] = [
-    {
-        "id": "deepseek/deepseek-v4-flash",
-        "provider": "deepseek",
-        "family": "deepseek-v4",
-        "name": "DeepSeek V4 Flash",
-        "description": "轻量高速模型，日常问答与多智能体调度首选，速度与质量兼顾",
-        "capabilities": {"tool_use": True, "vision": False, "reasoning": True},
-        "context_length": 160000,
-        "limits": {"max_output_tokens": 8192},
-        "cost": {"input_per_1m": 0.27, "output_per_1m": 1.10,
-                 "cache_read_per_1m": 0.07, "cache_write_per_1m": 0.0},
-        "default": True,
-    },
-    {
-        "id": "deepseek/deepseek-v4-pro",
-        "provider": "deepseek",
-        "family": "deepseek-v4",
-        "name": "DeepSeek V4 Pro",
-        "description": "旗舰推理模型，复杂任务、长文本与深度分析能力更强",
-        "capabilities": {"tool_use": True, "vision": False, "reasoning": True},
-        "context_length": 160000,
-        "limits": {"max_output_tokens": 8192},
-        "cost": {"input_per_1m": 0.27, "output_per_1m": 1.10,
-                 "cache_read_per_1m": 0.07, "cache_write_per_1m": 0.0},
-    },
-    {
-        "id": "openai/gpt-4o",
-        "provider": "openai",
-        "family": "gpt-4o",
-        "name": "OpenAI GPT-4o",
-        "description": "OpenAI 多模态旗舰模型，图文理解与通用任务表现均衡",
-        "capabilities": {"tool_use": True, "vision": True, "reasoning": False},
-        "context_length": 128000,
-        "limits": {"max_output_tokens": 16384},
-        "cost": {"input_per_1m": 2.50, "output_per_1m": 10.00,
-                 "cache_read_per_1m": 1.25, "cache_write_per_1m": 0.0},
-    },
-    {
-        "id": "openai/gpt-4o-mini",
-        "provider": "openai",
-        "family": "gpt-4o",
-        "name": "OpenAI GPT-4o-mini",
-        "description": "GPT-4o 轻量版，成本更低、响应更快，适合高频简单任务",
-        "capabilities": {"tool_use": True, "vision": True, "reasoning": False},
-        "context_length": 128000,
-        "limits": {"max_output_tokens": 16384},
-        "cost": {"input_per_1m": 0.15, "output_per_1m": 0.60,
-                 "cache_read_per_1m": 0.075, "cache_write_per_1m": 0.0},
-    },
-    {
-        "id": "ollama/qwen2.5-coder:latest",
-        "provider": "ollama",
-        "family": "qwen2.5-coder",
-        "name": "Ollama Qwen2.5-Coder",
-        "description": "本地代码生成模型，编程与代码任务首选，支持工具调用",
-        "capabilities": {"tool_use": True, "vision": False, "reasoning": False},
-        "context_length": 32768,
-        "limits": {"max_output_tokens": 8192},
-        "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
-                 "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
-    },
-    {
-        "id": "ollama/qwen2.5:7b",
-        "provider": "ollama",
-        "family": "qwen2.5",
-        "name": "Ollama Qwen2.5 7B",
-        "description": "通义千问轻量版，中文理解与生成能力均衡，支持工具调用",
-        "capabilities": {"tool_use": True, "vision": False, "reasoning": False},
-        "context_length": 32768,
-        "limits": {"max_output_tokens": 8192},
-        "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
-                 "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
-    },
-    {
-        "id": "ollama/qwen2.5:14b",
-        "provider": "ollama",
-        "family": "qwen2.5",
-        "name": "Ollama Qwen2.5 14B",
-        "description": "通义千问中型版，复杂推理与长文本处理能力更强，支持工具调用",
-        "capabilities": {"tool_use": True, "vision": False, "reasoning": False},
-        "context_length": 32768,
-        "limits": {"max_output_tokens": 8192},
-        "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
-                 "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
-    },
-    {
-        "id": "ollama/qwen2.5:32b",
-        "provider": "ollama",
-        "family": "qwen2.5",
-        "name": "Ollama Qwen2.5 32B",
-        "description": "通义千问大型版，高质量生成与深度分析，支持工具调用",
-        "capabilities": {"tool_use": True, "vision": False, "reasoning": False},
-        "context_length": 32768,
-        "limits": {"max_output_tokens": 8192},
-        "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
-                 "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
-    },
-    {
-        "id": "ollama/codellama:latest",
-        "provider": "ollama",
-        "family": "codellama",
-        "name": "Ollama CodeLlama",
-        "description": "Meta 代码专用模型，Python/JavaScript 编程优化",
-        "capabilities": {"tool_use": False, "vision": False, "reasoning": False},
-        "context_length": 16384,
-        "limits": {"max_output_tokens": 4096},
-        "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
-                 "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
-    },
-    {
-        "id": "ollama/llama3.1:latest",
-        "provider": "ollama",
-        "family": "llama3.1",
-        "name": "Ollama Llama 3.1",
-        "description": "Meta 最新通用模型，多语言支持与推理能力",
-        "capabilities": {"tool_use": False, "vision": False, "reasoning": False},
-        "context_length": 131072,
-        "limits": {"max_output_tokens": 4096},
-        "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
-                 "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
-    },
-    {
-        "id": "ollama/mistral:latest",
-        "provider": "ollama",
-        "family": "mistral",
-        "name": "Ollama Mistral",
-        "description": "轻量高效模型，快速响应与低资源占用",
-        "capabilities": {"tool_use": False, "vision": False, "reasoning": False},
-        "context_length": 32768,
-        "limits": {"max_output_tokens": 4096},
-        "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
-                 "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
-    },
-    {
-        "id": "ollama/olmo-3:7b",
-        "provider": "ollama",
-        "family": "olmo-3",
-        "name": "Ollama OLMo 3 7B",
-        "description": "本地开源模型，AI2 OLMo 3，支持工具调用",
-        "capabilities": {"tool_use": True, "vision": False, "reasoning": False},
-        "context_length": 32768,
-        "limits": {"max_output_tokens": 8192},
-        "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
-                 "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
-    },
-]
-
-_ZERO_COST = {
-    "input_per_1m": 0.0, "output_per_1m": 0.0,
-    "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0,
-}
+from app.models.builtin_catalog import BUILTIN_CATALOG as _BUILTIN_CATALOG  # noqa: F841 — 供 build_catalog 回退
+from app.models.builtin_catalog import ZERO_COST as _ZERO_COST            # noqa: F841 — 供 probes / upsert / get_catalog 默认填充
 
 
 def catalog_path() -> Path:
@@ -217,13 +63,36 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
-def build_catalog(cfg: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
-    """内置目录 + 数据库覆盖（overrides 深合并 / extra 追加）。
+def _db_builtin_entries() -> Optional[list[dict[str, Any]]]:
+    """从 DB 读取 kind='builtin' 的内建条目；空库返回 None（触发回退常量）。"""
+    from app.models.catalog_db import load_builtin_entries
+    return load_builtin_entries() or None
 
-    cfg 可注入内存配置（未落库前的自愈校验用），默认自 DB 读取。
+
+def base_specs() -> dict[str, dict[str, Any]]:
+    """内置基准：代码常量 + DB kind='builtin'（同 id 时 DB 覆盖代码）。
+
+    代码常量永远兜底（长生命库中某内置模型被用户 override/删除后仍补齐规格），
+    DB 行是被物化、可查可导的真实快照。
     """
-    entries = [_deep_merge(dict(e), {}) for e in _BUILTIN_CATALOG]
-    by_id: dict[str, dict] = {e["id"]: e for e in entries}
+    base: dict[str, dict[str, Any]] = {e["id"]: dict(e) for e in _BUILTIN_CATALOG}
+    for db_entry in _db_builtin_entries() or []:
+        mid = db_entry.get("id")
+        if mid:
+            base[mid] = db_entry
+    return base
+
+
+def build_catalog(cfg: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    """内置目录（DB+常量双源）+ 数据库覆盖（overrides 深合并 / extra 追加）。
+
+    - 基准 = 代码常量，同一 id 被 DB kind='builtin' 行 supersede（可查可导）。
+    - cfg 可注入内存配置（未落库前的自愈校验用），默认自 DB 读取。
+    """
+    by_id: dict[str, dict] = {
+        mid: _deep_merge(dict(e), {})
+        for mid, e in base_specs().items()
+    }
     data = cfg if cfg is not None else load_config()
     for mid, patch in (data.get("overrides") or {}).items():
         if mid not in by_id:

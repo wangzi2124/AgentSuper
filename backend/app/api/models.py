@@ -139,6 +139,17 @@ async def export_models():
     return ok(catalog_db.export_config())
 
 
+@router.get("/models/catalog-full")
+async def export_catalog_full():
+    """全量模型快照：settings + providers + catalog_entries（含 kind 字段）。
+
+    与 /models/export 不同：export 只含用户覆盖层（overrides/extras），catalog-full
+    包含所有 kind=builtin/override/extra 的原始条目，供跨机器迁移或 DB 快照。
+    """
+    from app.models import catalog_db
+    return ok(catalog_db.export_full())
+
+
 @router.post("/models/import", dependencies=[Depends(require_admin)])
 async def import_models(req: Request):
     """导入模型配置（覆盖写库；body 为与旧 model_catalog.json 同构的对象）。"""

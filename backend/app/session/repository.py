@@ -250,7 +250,9 @@ def remove_session(session_id: str) -> None:
 def append_message(session_id: str, msg_type: str, data: dict[str, Any]) -> Message:
     """追加一条消息到事件日志并返回（对齐 SessionProjector 的追加写）。
 
-    seq 在单条 INSERT 内原子计算（BEGIN IMMEDIATE 持有写锁），并发写者
+    seq 在单条 INSERT..SELECT 内原子计算（MAX(seq)+1），跨 SQLite/MySQL/PostgreSQL
+    同一条语句语义一致；sqlite 下 BEGIN IMMEDIATE 额外持有写锁（经统一后端门面
+    翻译，非 sqlite 时该语句被跳过，依赖应用层 write_lock 串行化）。并发写者
     （coordinator 执行体 + multi-agent 直写 + compact/revert/fork 等）不会
     算出相同 seq 造成主键冲突或乱序。
     """
@@ -261,8 +263,9 @@ def append_message(session_id: str, msg_type: str, data: dict[str, Any]) -> Mess
         now = int(time.time() * 1000)
         conn.execute(
             "INSERT INTO session_messages (seq, id, session_id, type, data, time_created)"
-            " VALUES ((SELECT COALESCE(MAX(seq), 0) + 1 FROM session_messages WHERE session_id = ?),?,?,?,?,?)",
-            (session_id, mid, session_id, msg_type, json.dumps(data, ensure_ascii=False), now),
+            " SELECT COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?"
+            " FROM session_messages WHERE session_id = ?",
+            (mid, session_id, msg_type, json.dumps(data, ensure_ascii=False), now, session_id),
         )
         seq = conn.execute(
             "SELECT seq FROM session_messages WHERE session_id = ? AND id = ?", (session_id, mid)

@@ -13,6 +13,8 @@ from app.models import catalog, catalog_db
 @pytest.fixture
 def iso(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTSUPER_DATA", str(tmp_path))
+    # 强制 sqlite，避免 .env DB_TYPE=mysql 时目录测试打到真实 MySQL
+    monkeypatch.setattr("app.models.catalog_db.backends.is_sqlite", lambda: True)
     return tmp_path
 
 

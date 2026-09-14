@@ -17,6 +17,20 @@ class Settings(BaseSettings):
     llm_api_key: Optional[str] = None
     llm_api_base: Optional[str] = "https://api.deepseek.com"
 
+    # ── 持久化后端（session.db / model_catalog.db / chapter_store.db / tasks.db 的统一后端）──
+    # DB_TYPE: sqlite | mysql | postgresql
+    # - sqlite（默认）：各子系统沿用各自 data/*.db 文件（建表零回归，测试/迁移工具不变）。
+    # - mysql / postgresql：四个子系统的表统一落在同一个 DB_URL 数据库内，schema 由
+    #   Alembic 迁移链管理（backend/alembic，`upgrade head` 在启动时执行）。
+    # DB_URL 优先；未提供时按 DB_HOST/DB_PORT/DB_USERNAME/DB_PASSWORD/DB_NAME 拼装。
+    db_type: str = "sqlite"
+    db_url: Optional[str] = None
+    db_host: str = "127.0.0.1"
+    db_port: int = 0  # 0 = 按类型取默认（mysql 3306 / postgresql 5432）
+    db_username: str = "root"
+    db_password: str = ""
+    db_name: str = "agentsuper"
+
     vector_store_path: str = "data/vector_store"
     upload_dir: str = "data/uploads"
 

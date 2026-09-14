@@ -36,6 +36,11 @@ async def lifespan(app: FastAPI):
         logging.getLogger(__name__).info(
             "Auto-clear on startup: %s", result,
         )
+    # 统一持久化后端迁移：非 sqlite（mysql/postgresql）时执行 Alembic upgrade head，
+    # 四个子系统的表统一建在同一个数据库里（sqlite 后端连接时幂等建表，此处跳过）。
+    from app.storage.migrations import run_migrations
+
+    run_migrations()
     # Session 管理（session.db）：建表（多 Agent 直写落库，无单 Agent executor）
     init_db()
     # 模型目录（model_catalog.db）：建表 + 首次从旧 model_catalog.json 导入
@@ -77,7 +82,7 @@ async def lifespan(app: FastAPI):
             try:
                 from app.services.kb_repair import repair_incomplete_documents
 
-                result = await repair_incomplete_documents(app)
+                result = await repair_incomplete_documents(app.state)
                 if result["repaired"]:
                     logger.info("Scheduled KB repair: %s", result)
             except Exception as e:  # noqa: BLE001
@@ -93,7 +98,7 @@ async def lifespan(app: FastAPI):
         from app.services.kb_repair import repair_incomplete_documents
 
         try:
-            result = await repair_incomplete_documents(app)
+            result = await repair_incomplete_documents(app.state)
             if result["repaired"]:
                 logging.getLogger(__name__).info("Startup KB repair completed: %s", result)
         except Exception as e:  # noqa: BLE001

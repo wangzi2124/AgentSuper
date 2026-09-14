@@ -22,3 +22,7 @@ python-docx
 python-pptx
 Pillow
 pytesseract
+sqlalchemy
+alembic
+pymysql
+psycopg2-binary

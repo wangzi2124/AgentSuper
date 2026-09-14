@@ -83,8 +83,9 @@ def test_sum_usage_keywise():
 
 
 def test_override_file(tmp_path, monkeypatch):
-    # 用 tmp 作为 data 目录写入覆盖文件，避免污染真实 data/
+    # 用 tmp 作为 data 目录写入覆盖文件，避免污染真实 data/（强制 sqlite 隔离）
     monkeypatch.setenv("AGENTSUPER_DATA", str(tmp_path))
+    monkeypatch.setattr("app.models.catalog_db.backends.is_sqlite", lambda: True)
     override = {
         "default_model": "ollama/my-custom:latest",
         "overrides": {

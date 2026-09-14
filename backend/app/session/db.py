@@ -7,6 +7,13 @@ context_epoch / session_inputs（旧的 conversations.db 已移除，数据全�
 - sessions.project_id / workspace_id / parent_id 三级隔离（sql.ts）
 - session_messages append-only 事件日志 + seq（sql.ts）
 - session_context_epoch per-session 上下文快照（context-epoch.ts）
+
+后端支持：
+- **sqlite**：沿用本模块内的 _ConnectionPool（原生 sqlite3，零回归），
+  _SCHEMA 由 `app.storage.schema.derive_sqlite_ddl` 从单一 metadata 编译，
+  与 Alembic 初始迁移同源。
+- **mysql / postgresql**：_get_db() 返回 `app.storage.backends` 的连接门面
+  （SQLAlchemy 引擎，参数/事务方言由门面翻译），本模块的 Pool 不参与。
 """
 
 import sqlite3
@@ -15,113 +22,13 @@ from pathlib import Path
 from typing import Optional
 
 from app.config import settings
+from app.storage import backends, schema as storage_schema
 
 DB_PATH = Path(__file__).resolve().parents[2] / "data" / "session.db"
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS projects (
-  id         TEXT PRIMARY KEY,
-  name       TEXT NOT NULL DEFAULT '',
-  root       TEXT NOT NULL,
-  vcs        TEXT NOT NULL DEFAULT '',
-  time_created INTEGER NOT NULL,
-  time_updated INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS workspaces (
-  id         TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  name       TEXT NOT NULL DEFAULT '',
-  time_created INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-  id         TEXT PRIMARY KEY,
-  slug       TEXT NOT NULL,
-  version    TEXT NOT NULL DEFAULT '1',
-  user_id    TEXT NOT NULL,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
-  parent_id  TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-  directory  TEXT NOT NULL,
-  path       TEXT NOT NULL DEFAULT '',
-  title      TEXT NOT NULL,
-  agent      TEXT,
-  model      TEXT,
-  kind       TEXT NOT NULL DEFAULT 'chat',
-  status     TEXT NOT NULL DEFAULT 'idle',
-  cost       REAL NOT NULL DEFAULT 0,
-  tokens_input INTEGER NOT NULL DEFAULT 0,
-  tokens_output INTEGER NOT NULL DEFAULT 0,
-  tokens_cache_read INTEGER NOT NULL DEFAULT 0,
-  tokens_cache_write INTEGER NOT NULL DEFAULT 0,
-  tokens_reasoning INTEGER NOT NULL DEFAULT 0,
-  time_created INTEGER NOT NULL,
-  time_updated INTEGER NOT NULL,
-  time_compacted INTEGER,
-  time_archived INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(time_updated);
-
-CREATE TABLE IF NOT EXISTS session_messages (
-  seq         INTEGER NOT NULL,
-  id          TEXT NOT NULL,
-  session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  type        TEXT NOT NULL,
-  data        TEXT NOT NULL,
-  time_created INTEGER NOT NULL,
-  PRIMARY KEY (session_id, seq),
-  UNIQUE (session_id, id)
-);
-CREATE INDEX IF NOT EXISTS idx_messages_session_time ON session_messages(session_id, time_created);
-
-CREATE TABLE IF NOT EXISTS message_parts (
-  id          TEXT NOT NULL,
-  session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  message_id  TEXT NOT NULL,
-  type        TEXT NOT NULL,
-  data        TEXT NOT NULL,
-  time_created INTEGER NOT NULL,
-  PRIMARY KEY (session_id, id)
-);
-CREATE INDEX IF NOT EXISTS idx_parts_message ON message_parts(message_id);
-
-CREATE TABLE IF NOT EXISTS session_context_epoch (
-  session_id   TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-  baseline     TEXT NOT NULL,
-  baseline_seq INTEGER NOT NULL,
-  snapshot     TEXT NOT NULL,
-  time_created INTEGER NOT NULL,
-  time_updated INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS session_inputs (
-  id           TEXT NOT NULL,
-  session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  prompt       TEXT NOT NULL,
-  delivery     TEXT NOT NULL DEFAULT 'steer',
-  admitted_seq INTEGER NOT NULL,
-  promoted_seq INTEGER,
-  time_created INTEGER NOT NULL,
-  PRIMARY KEY (session_id, id)
-);
-
-CREATE TABLE IF NOT EXISTS session_tasks (
-  id           TEXT PRIMARY KEY,
-  session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  parent_task_id TEXT REFERENCES session_tasks(id) ON DELETE CASCADE,
-  status       TEXT NOT NULL DEFAULT 'running',
-  step         INTEGER NOT NULL DEFAULT 0,
-  total_tokens INTEGER NOT NULL DEFAULT 0,
-  tool_calls_count INTEGER NOT NULL DEFAULT 0,
-  time_created INTEGER NOT NULL,
-  time_updated INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_tasks_session ON session_tasks(session_id);
-"""
+# 由 metadata 表声明编译的 sqlite DDL（建表 + 建索引，全部 IF NOT EXISTS）
+_SESSION_TABLES = storage_schema.SESSION_TABLES
+_SCHEMA = storage_schema.derive_sqlite_ddl(_SESSION_TABLES)
 
 
 class _PooledConnection:
@@ -202,12 +109,14 @@ class _ConnectionPool:
     def _open(self) -> sqlite3.Connection:
         db_path = DB_PATH
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA busy_timeout = 10000")
-        conn.executescript(_SCHEMA)
+        conn = backends.make_sqlite_conn(
+            db_path,
+            row_factory=sqlite3.Row,
+            foreign_keys=True,
+            wal=True,
+            busy_timeout=10000,
+            schema_ddl=_SCHEMA,
+        )
         _ensure_column(conn, "sessions", "tokens_reasoning", "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
         return conn
@@ -217,19 +126,25 @@ class _ConnectionPool:
 _pool = _ConnectionPool(max(6, settings.max_concurrent_agents + 2))
 
 
-def _get_db(path: Optional[Path] = None) -> sqlite3.Connection:
-    """获取连接并初始化表结构（默认使用 session.db，走连接池）。"""
+def _get_db(path: Optional[Path] = None):
+    """获取连接并初始化表结构（默认使用 session.db，走连接池；非 sqlite 走统一后端）。"""
     if path is not None:
-        # 自定义路径不走池（rare：测试/迁移），保持独立连接
+        # 自定义路径强制 sqlite 文件（rare：测试/迁移，独立连接；与后端方言无关）
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.executescript(_SCHEMA)
+        conn = backends.make_sqlite_conn(
+            path,
+            row_factory=sqlite3.Row,
+            foreign_keys=True,
+            wal=True,
+            busy_timeout=10000,
+            schema_ddl=_SCHEMA,
+        )
         _ensure_column(conn, "sessions", "tokens_reasoning", "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
         return conn
+    if not backends.is_sqlite():
+        # 非 sqlite：返回统一后端门面（repository 方法会在 try/finally 中 close）
+        return backends.connect()
     return _pool.acquire()
 
 

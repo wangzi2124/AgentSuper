@@ -4,9 +4,16 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from app.storage import backends, schema as storage_schema
+
 
 class ChapterStore:
-    """基于 SQLite 的章节元数据存储，支持按关键词和章节号查询。"""
+    """章节元数据存储（支持 SQLite / MySQL / PostgreSQL）。
+
+    sqlite 路径：本地 .db 文件（WAL + 显式写锁，上传线程与检索线程共享同一连接）。
+    非 sqlite 路径：统一后端门面（schema 由 Alembic 迁移链管理），按线程复用连接，
+    与 sqlite 的"连接不主动关闭"语义对齐。
+    """
 
     def __init__(self, db_path: str):
         self.db_path = Path(db_path)
@@ -17,42 +24,30 @@ class ChapterStore:
         self._write_lock = threading.Lock()
         self._init_db()
 
-    def _get_conn(self) -> sqlite3.Connection:
-        """获取数据库连接，支持 WAL 模式和超时配置。"""
+    def _get_conn(self):
+        """获取数据库连接，支持 WAL 模式和超时配置（sqlite）或统一后端门面（非 sqlite）。"""
+        if not backends.is_sqlite():
+            return backends.thread_local_connect()
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn = backends.make_sqlite_conn(
+                self.db_path,
+                wal=True,
+                busy_timeout=5000,
+            )
         return self._conn
 
     def _init_db(self):
         """初始化数据库表和索引。"""
         with self._write_lock:
             conn = self._get_conn()
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS chapters (
-                    id TEXT PRIMARY KEY,
-                    document_id TEXT NOT NULL,
-                    document_filename TEXT NOT NULL,
-                    chapter_number INTEGER,
-                    chapter_title TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    parent_chunk_id TEXT
+            if backends.is_sqlite():
+                conn.executescript(
+                    storage_schema.derive_sqlite_ddl(storage_schema.CHAPTER_TABLES)
                 )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_chapters_doc
-                ON chapters(document_id)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_chapters_title
-                ON chapters(chapter_title)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_chapters_number
-                ON chapters(chapter_number)
-            """)
-            conn.commit()
+                conn.commit()
+            else:
+                # 非 sqlite：表结构由 Alembic 迁移链统一管理（backends.init_schema 惰性兜底）
+                backends.init_schema()
 
     def add_chapter(
         self, document_id: str, filename: str,
