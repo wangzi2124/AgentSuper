@@ -206,8 +206,8 @@ class Settings(BaseSettings):
     # 工具密集型子 Agent（如 code）的更长等待超时（秒），避免长任务被误判超时
     sub_agent_timeout_extended: float = 300.0
     # 使用 extended 超时的子 Agent 列表（逗号分隔）
-    extended_timeout_agents: str = "code"
-    # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth，默认 1 = 主 Agent 只能再委派一层）
+    extended_timeout_agents: str = "build"
+    # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth；当前 build 委派 explore 仅 1 层）
     subagent_depth: int = 4
     # [opencode task 授权] 委派规则（对齐 permission.task）：如 {"*":"allow","plan":"ask"}。
     # 空 = 白名单内全部 allow（保持现状）；deny 的子类型从 tool_task enum 移除，ask 走审批。

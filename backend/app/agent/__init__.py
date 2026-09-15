@@ -6,7 +6,6 @@
   - memory.py:            共享记忆管理器（Agent 间上下文共享）
   - rag_wrapper.py:       RAGAgent 的 BaseAgent 适配器
   - web_search_agent.py:  网络搜索 Agent
-  - code_agent.py:        代码辅助 Agent
   - explore_agent.py:     只读代码探索 Agent（对齐 opencode explore subagent）
   - plan_agent.py:        规划模式 Agent（对齐 opencode plan agent）
   - supervisor.py:        Supervisor Agent（路由编排 + 任务分解）
@@ -18,7 +17,6 @@ from app.agent.bus import AgentBus
 from app.agent.memory import MemoryManager
 from app.agent.rag_wrapper import RAGAgentWrapper
 from app.agent.web_search_agent import WebSearchAgent
-from app.agent.code_agent import CodeAgent
 from app.agent.explore_agent import ExploreAgent
 from app.agent.plan_agent import PlanAgent
 from app.agent.supervisor import SupervisorAgent
@@ -30,7 +28,6 @@ __all__ = [
     "MemoryManager",
     "RAGAgentWrapper",
     "WebSearchAgent",
-    "CodeAgent",
     "ExploreAgent",
     "PlanAgent",
     "SupervisorAgent",

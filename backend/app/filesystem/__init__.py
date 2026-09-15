@@ -45,7 +45,6 @@ from .gitignore import GitignoreMatcher, glob_to_regex, parse_gitignore
 from .models import FileContent, FileInfo, FileNode, FileStatus
 from .project import Project
 from .ripgrep import InvalidPatternError, RawMatch, find as rg_find, ripgrep_binary
-from .search import Entry as SearchEntry, Match as SearchMatch
 from .shell import acceptable as shell_acceptable, name as shell_name, platform_shell
 from .watcher import Event as FileSystemEvent, FileSystemWatcher, has_native_binding
 

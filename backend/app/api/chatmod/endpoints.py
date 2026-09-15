@@ -12,7 +12,6 @@ import json
 
 import logging
 
-import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -20,22 +19,17 @@ from fastapi.responses import StreamingResponse
 
 from app.config import settings
 
-from app.context.token_counter import estimate_tokens
 
-from app.context.budget import usable_context_tokens
 
-from app.middleware.summarization import HierarchicalSummarizationMiddleware
 
 from app.models.schemas import ChatRequest, Source, StepEvent, MultiAgentChatResponse
 from app.models.catalog import model_ref_dict
 
-from app.session import repository as session_repo
 
 from app.session import task_bridge
 
 from app.session.agent_executor import classify_error, PartBridgeQueue
 
-from app.session.deps import discover_project_root
 
 from app.agent.base import AgentMessage
 
@@ -65,23 +59,17 @@ logger = logging.getLogger(__name__)
 import asyncio
 import json
 import logging
-import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
-from app.context.token_counter import estimate_tokens
-from app.context.budget import usable_context_tokens
 
-from app.middleware.summarization import HierarchicalSummarizationMiddleware
 from app.models.schemas import ChatRequest, Source, StepEvent, MultiAgentChatResponse
 
 # ── Session 管理（session.db）──
-from app.session import repository as session_repo
 from app.session import task_bridge
 from app.session.agent_executor import classify_error, PartBridgeQueue
-from app.session.deps import discover_project_root
 
 # ── 多 Agent 系统 ──
 from app.agent.base import AgentMessage

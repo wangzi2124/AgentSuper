@@ -245,7 +245,7 @@ class PlanAgent(BaseAgent):
         messages = [
             {"role": "system", "content": PLAN_SYSTEM_PROMPT},
         ]
-        # 添加历史对话（最多 4 轮；规划任务通常无需很多上文，且 tool_task 委派时 history 为空）
+        # 添加历史对话（最多 8 轮；规划任务通常无需很多上文，且 tool_task 委派时 history 为空）
         for h in history[-8:]:
             if not isinstance(h, dict):
                 continue
@@ -263,7 +263,7 @@ class PlanAgent(BaseAgent):
             api_key=self._api_key,
             api_base=self._api_base,
             messages=messages,
-            max_tokens=2048,
+            max_tokens=settings.llm_max_tokens,
             temperature=0.3,
             cache_prompt=True,
         )

@@ -4,33 +4,23 @@
 
 # ── 复制自原模块的顶层 import ──
 
-import base64
 
-import json
 
 import os
 
-import re
 
 import shlex
 
-import shutil
 
 import signal
 
-import stat
 
 import subprocess
 
-import time
 
-from datetime import datetime
 
-from pathlib import Path
 
-from typing import Optional
 
-from app.filesystem import GitignoreMatcher, ScanCache, get_project, glob_to_regex
 
 from app.permission import get_manager as get_perm_mgr, NeedsPermission, current_session_workspace
 
@@ -245,11 +235,17 @@ def tool_execute(command: str, timeout: int = 300, workdir: str = ".") -> dict:
             args,
             shell=False,
             capture_output=True,
-            text=True,
             timeout=timeout,
             cwd=str(resolved_cwd),
         )
-        return _format_execute_output(result.returncode, result.stdout, result.stderr, command)
+        # 字节管道 + 三级解码（utf-8 → GBK → replace），与 shell 路径 _run_shell 一致；
+        # text=True 会按进程 locale(cp936) 解码，UTF-8 的子进程输出(如 git/node/python)会乱码。
+        return _format_execute_output(
+            result.returncode,
+            decode_process_output(result.stdout),
+            decode_process_output(result.stderr),
+            command,
+        )
     except subprocess.TimeoutExpired:
         return _env("execute", f"Error: command timed out after {timeout}s", error=True, timed_out=True)
     except ValueError as e:

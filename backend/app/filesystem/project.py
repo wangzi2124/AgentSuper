@@ -14,7 +14,6 @@ import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from .core import find_up, normalize_path
 

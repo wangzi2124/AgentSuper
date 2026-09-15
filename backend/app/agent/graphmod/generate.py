@@ -4,27 +4,18 @@
 # ── 复制自原模块的顶层 import ──
 import asyncio
 
-import inspect
 
 import logging
 
-import os
 
-import shlex
 
-import subprocess
 
-import threading
 
 import time as tmod
 
-import uuid
 
-from collections.abc import Sequence
 
-from pathlib import Path
 
-from typing import Annotated, Callable, TypedDict
 
 from app.context.token_counter import truncate_messages as _truncate_messages
 
@@ -41,42 +32,24 @@ from app.agent.image_processor import describe_image
 
 from app.utils.json_repair import parse_tool_args
 
-import litellm
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
-from langgraph.graph import StateGraph, END
 
-from app.agent.base import AgentMessage
 
-from app.rag.retriever import Retriever
 
-from app.rag.reranker import Reranker
 
-from app.skills.loader import SkillLoader
 
-from app.plugins.loader import PluginLoader
 
 from app.config import settings
 
-from app.agent.tools import (
-    ToolDef,
-    LONG_CONTENT_FILE_RULE,
-    create_filesystem_tools,
-    create_skill_tools,
-    create_plugin_tools,
-    build_system_prompt_no_kb,
-)
 
-from app.skills.custom_tools import CustomToolStore  # [token 优化 v6]
 
 from app.monitor import record_model_call
 
 from app.trace_log import trace, trace_messages  # [token trace v7]
 
-from app.prompt_log import log_prompt  # [prompt log v1]
 
-from app.permission import NeedsPermission, get_manager as get_perm_mgr
 from .tools import RAGAgentTools
 # ── 跨子模块依赖（自动生成）──
 from .base import is_weak_model
@@ -88,7 +61,6 @@ from .task_registry import get_task_registry as _get_task_registry
 from .state import AgentState
 from .state import _ZERO_USAGE
 from .state import _attachment_parts
-from .state import _find_attachment
 
 # [弱模型鲁棒性] 精简系统提示：本地/小参数模型不挂任何工具（见 _build_tool_defs），
 # 纯文本问答，避免乱调工具导致空输出（{}）或死循环。

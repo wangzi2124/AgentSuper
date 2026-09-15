@@ -4,35 +4,22 @@
 
 # ── 复制自原模块的顶层 import ──
 
-import base64
 
-import json
 
-import os
 
 import re
 
-import shlex
 
-import shutil
 
-import signal
 
-import stat
 
-import subprocess
 
-import time
 
-from datetime import datetime
 
 from pathlib import Path
 
-from typing import Optional
 
-from app.filesystem import GitignoreMatcher, ScanCache, get_project, glob_to_regex
 
-from app.permission import get_manager as get_perm_mgr, NeedsPermission, current_session_workspace
 
 # ── 跨子模块依赖（自动生成）──
 

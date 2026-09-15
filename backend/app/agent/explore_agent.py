@@ -17,7 +17,6 @@ from app.agent.agent_specs import get_agent_spec, get_agent_spec_or_none
 from app.agent.memory import MemoryManager
 from app.agent.stream_events import agent_meta, emit, step_event
 from app.agent.sub_tools import tool_loop_chat
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 

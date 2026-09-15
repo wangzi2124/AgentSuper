@@ -630,11 +630,15 @@ async def tool_loop_chat(
         return tc.id, result
 
     doom_fingerprints: list[str] = []
+    doom_threshold = max(2, settings.doom_loop_threshold)
+    doom_max_strikes = max(1, settings.doom_loop_max_strikes)
+    doom_strikes = 0
+    steps_prompt_injected = False
     ws_token = set_session_workspace(directory) if directory else None
     try:
         for rnd in range(1, max_rounds + 1):
             messages[:] = _trim_messages(messages)  # 每轮前裁剪,防 context 无限膨胀
-            use_tools = (rnd < max_rounds) and not weak_model
+            use_tools = (rnd < max_rounds) and not weak_model and not steps_prompt_injected
             start = tmod.time()
             response = await litellm.acompletion(**_llm_call(use_tools))
             usage = getattr(response, "usage", None)
@@ -689,19 +693,31 @@ async def tool_loop_chat(
                     "content": bounded,
                 })
 
-            # Doom-loop 检测：连续相同指纹 ≥3 轮 → 注入策略变更提示（对齐主 Agent）
+            # Doom-loop 检测：连续相同指纹 ≥ threshold 轮 → 注入策略变更提示（对齐主 Agent）；
+            # 首次提示后仍连续重复（升级到 doom_loop_max_strikes）→ 强制收尾总结
             fp = "|".join(
                 sorted(f"{tc.function.name}:{tc.function.arguments}" for tc in tool_calls)
             )
             doom_fingerprints.append(fp)
-            if len(doom_fingerprints) >= 3 and len(set(doom_fingerprints[-3:])) == 1:
+            if len(doom_fingerprints) >= doom_threshold and len(set(doom_fingerprints[-doom_threshold:])) == 1:
+                doom_strikes += 1
+                if doom_strikes >= doom_max_strikes:
+                    logger.warning(
+                        "Sub-agent doom loop persisted (%d strikes), forcing structured summary: %s",
+                        doom_strikes, fp[:120],
+                    )
+                    messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
+                    steps_prompt_injected = True
+                    doom_fingerprints.clear()
+                    break
                 logger.warning("Sub-agent doom loop detected (%s), injecting strategy prompt", fp[:120])
-                messages.append({"role": "user", "content": DOOM_LOOP_PROMPT})
+                messages.append({"role": "assistant", "content": DOOM_LOOP_PROMPT})
                 doom_fingerprints.clear()
 
-        # 达到最大轮数：注入收尾提示并禁用工具强制总结（对齐 MAX_STEPS 语义）
-        messages.append({"role": "user", "content": MAX_STEPS_PROMPT})
-        response = await litellm.acompletion(**_llm_call(False, max_tokens=2048))
+        # 达到最大轮数（或被对局升级强制收尾）：注入收尾提示并禁用工具强制总结（对齐 MAX_STEPS 语义）
+        if not steps_prompt_injected:
+            messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
+        response = await litellm.acompletion(**_llm_call(False, max_tokens=settings.llm_max_tokens))
         from app.utils.json_repair import parse_answer_envelope
         return parse_answer_envelope(
             strip_tool_call_markup((response.choices[0].message.content or "").strip())

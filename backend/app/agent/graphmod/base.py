@@ -4,49 +4,31 @@
 # ── 复制自原模块的顶层 import ──
 import asyncio
 
-import inspect
 
 import logging
 
 import os
 
-import shlex
 
-import subprocess
 
 import threading
 
 import time as tmod
 
-import uuid
 
-from collections.abc import Sequence
 
-from collections import OrderedDict
 
-from pathlib import Path
 
-from typing import Annotated, Callable, TypedDict
 
-from app.context.token_counter import truncate_messages as _truncate_messages
 
-from app.context.token_counter import sanitize_tool_messages
 
-from app.context.tool_output import bound_tool_output, prune_tool_outputs
 
-from app.context.tool_dedup import ToolResultDedup
 
-from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
 
-from app.utils.json_repair import parse_tool_args
 
-import litellm
 
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
-from langgraph.graph import StateGraph, END
 
-from app.agent.base import AgentMessage
 
 from app.rag.retriever import Retriever
 
@@ -71,13 +53,9 @@ from app.agent.web_search_agent import web_search_tool
 
 from app.skills.custom_tools import CustomToolStore  # [token 优化 v6]
 
-from app.monitor import record_model_call
 
-from app.trace_log import trace, trace_messages  # [token trace v7]
 
-from app.prompt_log import log_prompt  # [prompt log v1]
 
-from app.permission import NeedsPermission, get_manager as get_perm_mgr
 # ── 跨子模块依赖（自动生成）──
 from .constants import _TASK_TOOL_SCHEMA
 from .constants import _TASK_TOOL_SUBAGENTS

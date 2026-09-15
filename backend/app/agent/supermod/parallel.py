@@ -16,27 +16,22 @@ import asyncio
 
 import logging
 
-import re
 
 import time as tmod
 
 import uuid
 
-from typing import AsyncIterator, Optional
 
 import litellm
 
 from app.agent.base import BaseAgent, AgentMessage
 
-from app.agent.bus import AgentBus
 
-from app.agent.memory import MemoryManager
 
 from app.config import settings
 
 from app.monitor import record_model_call
 
-from app.utils.json_repair import parse_json_value
 from .decompose import SupervisorAgentDecompose
 # ── 跨子模块依赖（自动生成）──
 from .constants import SUB_RESULT_TRUNC

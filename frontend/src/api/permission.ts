@@ -3,10 +3,10 @@ import { addAuthHeaders } from './fetch'
 // 权限 API 基础路径
 const BASE = '/api/permission'
 
-// 获取待审批的权限请求列表
+// 获取待审批的权限请求列表（含 expires_at，供前端倒计时/自动拒绝）
 export async function fetchPendingRequests(): Promise<{ pending: Array<{
   id: string; path: string; operation: string; tool_name: string;
-  tool_args: Record<string, unknown>; created_at: string
+  tool_args: Record<string, unknown>; created_at: string; expires_at: string
 }> }> {
   const res = await fetch(BASE + '/pending', { headers: await addAuthHeaders() })
   if (!res.ok) throw new Error('Failed to fetch pending requests')

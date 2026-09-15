@@ -3,7 +3,7 @@
 
 覆盖 PermissionManager 的判定语义（对齐当前审批桥设计）：
   - .env / *.db / *.sqlite* / permissions.json → 读返回 ask（弹窗审批），写/执行 deny
-  - 任意层级含 .git 的路径 → 读返回 ask（弹窗审批），写/执行 deny（_is_git_path）
+  - 任意层级含 .git 的路径 → 读/写/执行一律 deny（_is_git_path，密钥/历史文件绝不泄露）
   - app / plugins / skills / config / main.py 等源码 → 写/执行返回 ask（弹窗审批，用户可放行）
   - 工作区内普通文件 → 读/写放行；工作区外默认 external → ask
 说明：ask 表示需要前端 PermissionDialog 审批（allowed 后临时放行）；deny 表示无条件拒绝。
@@ -61,15 +61,16 @@ def test_critical_files_deny_write(tmp_path):
     assert mgr.check(str(ws / "data" / "session.db"), "write") == "deny"
 
 
-def test_git_path_read_ask_write_deny(tmp_path):
+def test_git_path_always_deny(tmp_path):
     mgr = _mgr(tmp_path)
     ws = tmp_path / "workspace"
-    # 任意层级含 .git（目录或文件）：读需审批，写/执行拒绝，与操作无关路径形状
-    assert mgr.check(str(ws / "repo" / ".git" / "config"), "read") == "ask"
+    # 任意层级含 .git（目录或文件）：读/写/执行一律 deny，密钥/历史文件绝不泄露
+    assert mgr.check(str(ws / "repo" / ".git" / "config"), "read") == "deny"
     assert mgr.check(str(ws / "x" / ".git" / "HEAD"), "write") == "deny"
+    assert mgr.check(str(ws / "x" / ".git" / "HEAD"), "execute") == "deny"
     # worktree 内的 .git 同样受保护（worktree 判定在前，.git 硬保护在后）
     repo = tmp_path / "repo"
-    assert mgr.check(str(repo / ".git" / "config"), "read") == "ask"
+    assert mgr.check(str(repo / ".git" / "config"), "read") == "deny"
 
 
 def test_source_paths_write_requires_approval(tmp_path):
@@ -118,7 +119,7 @@ def test_worktree_inside_temp_not_hijacked(tmp_path):
         project_worktree=str(repo_path), external_default="ask",
     )
     assert mgr.classify_path(str(repo_path)) == "workspace"
-    assert mgr.check(str(repo_path / ".git" / "config"), "read") == "ask"
+    assert mgr.check(str(repo_path / ".git" / "config"), "read") == "deny"
 
 
 def test_external_path_default_ask(tmp_path):

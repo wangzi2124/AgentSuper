@@ -384,7 +384,7 @@ async def test_tool_execute_non_shell_path(monkeypatch, tmp_path):
     _tool_execute_env(monkeypatch, tmp_path)
     monkeypatch.setattr(ex, "_validate_shell_command", lambda c, cwd, ask: None)
     monkeypatch.setattr(ex, "_needs_shell", lambda c: False)
-    monkeypatch.setattr(ex.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout="RES", stderr=""))
+    monkeypatch.setattr(ex.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=b"RES", stderr=b""))
     monkeypatch.setattr(os, "name", "posix")
     out = ex.tool_execute("python script.py")
     assert "RES" in out["output"]

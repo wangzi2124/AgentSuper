@@ -27,14 +27,6 @@ export interface Part {
   data: Record<string, any>
 }
 
-// 聊天响应
-export interface ChatResponse {
-  answer: string
-  sources: Source[]
-  conversation_id: string
-  steps?: AgentStep[]
-}
-
 // SSE 流式事件
 export interface SSEEvent {
   type: 'step_start' | 'step_end' | 'tool_start' | 'tool_end' | 'done' | 'error' | 'permission_request' | 'tool_output' | 'tool_heartbeat' | 'queued' | 'text_delta'
@@ -97,17 +89,6 @@ export interface PermissionRequest {
   created_at: string
   /** 后端审批截止时间（ISO），前端据此倒计时并在到期前自动拒绝 */
   expires_at?: string
-}
-
-// 聊天请求参数
-export interface ChatRequest {
-  message: string
-  conversation_id?: string
-  model?: string
-  use_vector_db?: boolean
-  files?: FileContent[]
-  /** 会话绑定的工作目录（opencode ctx.directory），首条消息创建会话时生效 */
-  directory?: string
 }
 
 // 文档信息
@@ -330,6 +311,10 @@ export interface MultiAgentChatRequest {
   client_msg_id?: string
   /** [F8] 多模态附件（拖拽/粘贴/选择），data 为 base64 编码内容 */
   files?: FileContent[]
+  /** 语音消息（前端已上传音频文件，附带在消息上持久化） */
+  voice?: VoiceMessageData
+  /** Agent 模式：省略 = supervisor 路由，default = build，plan = 规划 */
+  agent_mode?: string
 }
 
 export interface MultiAgentMessage {

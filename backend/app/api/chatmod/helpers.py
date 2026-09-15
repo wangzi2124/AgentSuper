@@ -6,17 +6,13 @@
 
 # ── 复制自原模块的顶层 import ──
 
-import asyncio
 
-import json
 
 import logging
 
-import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 
-from fastapi.responses import StreamingResponse
 
 from app.config import settings
 
@@ -28,19 +24,12 @@ from app.middleware.summarization import HierarchicalSummarizationMiddleware
 
 from app.models.schemas import ChatRequest, Source, StepEvent, MultiAgentChatResponse
 
-from app.session import repository as session_repo
 
-from app.session import task_bridge
 
-from app.session.agent_executor import classify_error, PartBridgeQueue
 
-from app.session.deps import discover_project_root
 
-from app.agent.base import AgentMessage
 
-from app.agent.bus import AgentBus
 
-from app.agent.stream_events import AgentEventCollector
 
 logger = logging.getLogger(__name__)
 

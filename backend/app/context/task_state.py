@@ -9,7 +9,6 @@ sqlite：data/tasks.db（每线程复用一条连接，WAL + busy_timeout）。
 非 sqlite：统一后端门面（app.storage.backends），schema 由 Alembic 迁移链管理。
 """
 
-import json
 import logging
 import threading
 import uuid

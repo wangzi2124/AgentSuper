@@ -14,31 +14,19 @@
 
 # ── 复制自原模块的顶层 import ──
 
-import asyncio
 
 import logging
 
-import re
 
-import time as tmod
 
-import uuid
 
-from typing import AsyncIterator, Optional
 
-import litellm
 
-from app.agent.base import BaseAgent, AgentMessage
 
-from app.agent.bus import AgentBus
 
-from app.agent.memory import MemoryManager
 
-from app.config import settings
 
-from app.monitor import record_model_call
 
-from app.utils.json_repair import parse_json_value
 
 logger = logging.getLogger(__name__)
 
@@ -57,21 +45,9 @@ logger = logging.getLogger(__name__)
   - thread_id 覆盖: 子请求使用独立 thread_id，防止覆盖调用方的 Future
 """
 
-import asyncio
 import logging
-import re
-import time as tmod
-import uuid
-from typing import AsyncIterator, Optional
 
-import litellm
 
-from app.agent.base import BaseAgent, AgentMessage
-from app.agent.bus import AgentBus
-from app.agent.memory import MemoryManager
-from app.config import settings
-from app.monitor import record_model_call
-from app.utils.json_repair import parse_json_value
 
 logger = logging.getLogger(__name__)
 

@@ -16,15 +16,11 @@ import asyncio
 
 import logging
 
-import re
 
-import time as tmod
 
-import uuid
 
 from typing import AsyncIterator, Optional
 
-import litellm
 
 from app.agent.base import BaseAgent, AgentMessage
 
@@ -36,9 +32,7 @@ from app.agent.memory import MemoryManager
 
 from app.config import settings
 
-from app.monitor import record_model_call
 
-from app.utils.json_repair import parse_json_value
 logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 class SupervisorAgentBase(BaseAgent):

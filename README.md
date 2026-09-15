@@ -19,7 +19,7 @@
 | **上传进度** | 上传过程实时显示进度条（0-100%）及阶段描述（上传→分块→嵌入→入库） |
 | **多轮对话** | 自动生成 conversation_id，支持同一会话内的上下文连续对话 |
 | **会话隔离** | 每个会话独立消息存储，切换会话时消息互不干扰，后台流式请求继续运行 |
-| **会话持久化** | IndexedDB 本地缓存 + 服务器 SQLite 双重持久化，页面刷新/SSE 中断不丢失消息（含 DataCloneError 修复：JSON 序列化剥离不可克隆值） |
+| **会话持久化** | IndexedDB 本地缓存 + 服务器 SQLite / MySQL / PostgreSQL 双重持久化，页面刷新/SSE 中断不丢失消息（含 DataCloneError 修复：JSON 序列化剥离不可克隆值） |
 | **会话管理系统** | 归一化会话库：用户/项目/工作区三级隔离、子会话树与 fork、上下文纪元、压缩基线持久化、消息撤销（revert）、AgentBus 任务自动登记为子会话 |
 | **错误重试机制** | 三层重试架构：litellm 内置重试 → AgentBus 事件循环自愈 → 前端自动重试倒计时 + 手动重试按钮 |
 | **并发控制** | 后端全局 Semaphore 限制同时运行的 Agent 任务数（`MAX_CONCURRENT_AGENTS` 默认 4），超出自动排队，前端实时显示排队/流式状态；session.db 使用 SQLite 连接池（WAL + busy_timeout），避免高并发连接反复开关 |
@@ -31,7 +31,7 @@
 | **本地 Embedding** | 使用 sentence-transformers 本地运行，通过 ModelScope 下载模型 |
 | **检索重排序** | Cross-encoder 对检索结果重打分（top-3），显著提升回答精度 |
 | **上下文管理** | tiktoken 精确 token 计数 + 上下文预算控制 + 工具输出智能边界/回溯清理 + 工具结果去重，防止 context 膨胀 |
-| **对话持久化** | SQLite 存储对话历史，服务重启不丢失 |
+| **对话持久化** | SQLite / MySQL / PostgreSQL 统一存储后端持久化对话历史，服务重启不丢失 |
 | **来源引用** | 回答时标注检索到的文档来源及相似度分数 |
 | **系统监控** | 请求级日志（方法/路径/状态/耗时）+ LLM 调用统计（模型/token/耗时/工具轮数），Web 页面可视化展示 |
 | **消息滚动** | 聊天消息列表智能自动滚动（靠近底部才跟随，`isTrusted` 用户手势优先，用户上翻不被打断）；上翻浏览时右下角浮现「回到底部」悬浮按钮，点击平滑回底并恢复自动跟随 |
@@ -227,7 +227,7 @@ _retrieve(state)
 | **向量数据库** | ChromaDB（本地持久化，余弦相似度） |
 | **文本嵌入** | sentence-transformers（all-MiniLM-L6-v2，通过 ModelScope 下载） |
 | **检索重排序** | Cross-encoder（cross-encoder/ms-marco-MiniLM-L-6-v2，通过 ModelScope 下载） |
-| **对话存储** | SQLite（本地持久化对话历史） |
+| **对话存储** | SQLite（默认，本地持久化对话历史）/ MySQL / PostgreSQL（`DB_TYPE` 一键切换，统一存储后端） |
 | **前端框架** | Vue 3, TypeScript 5.7, Vite 6 |
 | **状态管理** | Pinia |
 | **路由** | Vue Router 4 |
@@ -238,7 +238,7 @@ _retrieve(state)
 | **天气查询** | Open-Meteo API（免费，无需 key）获取天气实况和预报 |
 | **生成文件管理** | Web 页面浏览/搜索/下载/删除 Agent 生成的 .docx/.pdf/.xlsx 文件 |
 | **文本分块** | 父子文档分块（parent=章节摘要，child=正文块），按 `第X章`/`Chapter X` 边界 |
-| **章节元数据** | SQLite 章节映射表（`ChapterStore`），支持章节号/标题精确查询 |
+| **章节元数据** | SQLite / MySQL / PostgreSQL 章节映射表（`ChapterStore`），支持章节号/标题精确查询 |
 | **查询意图识别** | 正则匹配 `第X章`/`Chapter X`/`关于...章节`，自动选择检索策略 |
 
 ---
@@ -434,6 +434,28 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
 # EXTERNAL_PATH_DEFAULT=ask
 ```
 
+### 持久化后端（数据库）
+
+四大子系统（会话 session.db、模型目录 model_catalog.db、章节 chapter_store.db、任务 tasks.db）共用同一套表结构（`app/storage/schema.py` 单一 metadata 来源），可切换三种后端：
+
+```ini
+# ===== Database backend =====
+# DB_TYPE: sqlite | mysql | postgresql
+DB_TYPE=mysql
+# 二选一：DB_URL 直接给完整 SQLAlchemy URL（优先），或按下放各组件拼装
+# DB_URL=mysql+pymysql://root:pass@127.0.0.1:3306/agentsuper?charset=utf8mb4
+# DB_URL=postgresql+psycopg2://postgres:pass@127.0.0.1:5432/agentsuper
+DB_HOST=127.0.0.1
+DB_PORT=0               # 0 = 按类型取默认（mysql 3306 / postgresql 5432）
+DB_USERNAME=root
+DB_PASSWORD=
+DB_NAME=agentsuper
+```
+
+- **sqlite**（默认）：各子系统仍用各自 `backend/data/*.db` 文件，连接时按 metadata 幂等建表（零回归）。
+- **mysql / postgresql**：四个子系统的表统一建在同一个 `DB_NAME` 库内，schema 由 Alembic 迁移链管理（`backend/alembic`，非 sqlite 启动时自动 `upgrade head`）；连接走 SQLAlchemy 引擎 + 兼容 sqlite3 调用面的门面（`app/storage/backends.py`），上层代码无需感知后端差异。SQLite3 与 pymysql 依赖均内置；postgresql 需 `psycopg2`。
+- **真实环境验证（2026-09-15）**：MySQL 5.7（`root/wangzi2124`@3306）与 PostgreSQL 16（`postgres/wangzi2124`@5432）均已直连 + 端到端验证——Alembic 迁移成功、`/api/sessions` 列表、`/api/sessions/{id}/messages` 全量内容、`/api/models` 模型目录读数据正常，且写路径（POST 建会话 → GET 读回 → DELETE）全链路通过。切换只需改 `DB_TYPE` 那 5 行后重启后端。
+
 ### 切换 LLM 提供商
 
 | 提供商 | LLM_API_BASE | LLM_MODEL 示例 |
@@ -568,7 +590,7 @@ fetch("http://localhost:8000/api/chat/multi-agent", {
 
 ## 会话管理系统（Session Management）
 
-基于 SQLite（`backend/data/session.db`）的归一化会话体系，对齐 OpenCode 的 session 模型，为多 Agent 编排与任务执行提供统一底座。旧 `conversations.db` 保持只读，首次访问时惰性迁移（`conversation_id == session.id`），前端无需改动。
+基于 SQLite（默认 `backend/data/session.db`，亦可切换 MySQL / PostgreSQL，见「持久化后端」）的归一化会话体系，对齐 OpenCode 的 session 模型，为多 Agent 编排与任务执行提供统一底座。旧 `conversations.db` 保持只读，首次访问时惰性迁移（`conversation_id == session.id`），前端无需改动。
 
 ### 核心概念
 

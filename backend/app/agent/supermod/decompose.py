@@ -12,7 +12,6 @@
 修复的 Bug:
   - thread_id 覆盖: 子请求使用独立 thread_id，防止覆盖调用方的 Future"""
 # ── 复制自原模块的顶层 import ──
-import asyncio
 
 import logging
 
@@ -20,19 +19,13 @@ import re
 
 import time as tmod
 
-import uuid
 
-from typing import AsyncIterator, Optional
 
 import litellm
 
-from app.agent.base import BaseAgent, AgentMessage
 
-from app.agent.bus import AgentBus
 
-from app.agent.memory import MemoryManager
 
-from app.config import settings
 
 from app.monitor import record_model_call
 
@@ -152,7 +145,7 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
                                 "请严格按照以下 JSON 数组格式重新输出（不要 markdown 代码块标记），"
                                 "且 agent 字段只能取 " + ", ".join(routable) + "：\n"
                                 '[\n  {"agent": "build", "question": "第一个子任务的问题描述"},\n'
-                                '  {"agent": "explore", "question": "第二个子任务的问题描述"}\n]\n'
+                                '  {"agent": "plan", "question": "第二个子任务的问题描述"}\n]\n'
                             ),
                         },
                     ]

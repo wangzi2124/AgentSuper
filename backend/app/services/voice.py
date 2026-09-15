@@ -1,7 +1,6 @@
 """语音服务：子进程驱动本地 Qwen3-TTS（ttsclone CLI），无外部 HTTP 接口调用。
 
-与 `backend/plugins/voice_clone.py` 同源的 subprocess 架构（进程级隔离，
-后端 venv 零语音依赖）；本 service 为**唯一实现**，供：
+子进程架构（进程级隔离，后端 venv 零语音依赖）；本 service 为**唯一实现**，供：
   - `/api/voice/*` 路由（前端录音转写 + 朗读）
   - 主 Agent 语音工具（`tool_tts_synthesize` / `tool_voice_transcribe`）
 共用，避免双实现漂移。

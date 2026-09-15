@@ -13,7 +13,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
 
 from .gitignore import GitignoreMatcher, glob_to_regex
 from .ripgrep import MAX_RECORD_BYTES, find as rg_find, ripgrep_binary

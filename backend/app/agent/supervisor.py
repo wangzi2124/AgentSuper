@@ -2,9 +2,6 @@
 本模块保持原有 import 路径（含下划线私有符号）与 __all__。"""
 # 由 split_module.py 生成，勿手工改动此文件头
 from .supermod.constants import *
-from .supermod.base import SupervisorAgentBase
-from .supermod.core import SupervisorAgentCore
-from .supermod.decompose import SupervisorAgentDecompose
 from .supermod.parallel import SupervisorAgent
 import logging
 logger = logging.getLogger(__name__)

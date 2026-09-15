@@ -6,7 +6,6 @@ Falls back to character-based heuristic when tiktoken is unavailable.
 
 import json
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
