@@ -350,22 +350,24 @@ class PermissionManager:
     def check(self, path_str: str, operation: str) -> str:
         """检查指定路径的操作权限，返回allow/deny/ask。
 
-        敏感路径（.git）读/写/执行统一 deny，密钥/历史文件绝不泄露给模型；
+        任意层级含 `.git` 的路径读/写/执行一律 deny（regardless of
+        worktree/workspace membership，密钥/历史文件绝不泄露给模型）；其余
         .env/.db/permissions.json 的读走 ask → 前端弹审批对话框，用户允许后
         临时授权（add_temp_approval 后重试）；写/执行仍直接 deny，
         密钥/数据库文件绝不允许被模型改写（弹窗授权写入会暴露篡改风险）。
         """
+        p = Path(path_str).resolve()
+        if self._is_git_path(p):
+            # .git 内部路径：读/写/执行一律直接拒绝（对齐 AGENTS.md "ALWAYS denied"、
+            # "regardless of worktree/workspace membership"，防止白名单/临时/外部路径
+            # 放行后读取 .git/config 等含凭据文件）
+            return "deny"
         cls = self.classify_path(path_str)
         if cls == "system":
             return "deny"
         if cls == "temp":
             return "allow"
-        p = Path(path_str).resolve()
         if cls == "workspace":
-            if self._is_git_path(p):
-                # .git 内部路径：读/写/执行一律直接拒绝（对齐 AGENTS.md "ALWAYS denied"，
-                # 防止审批放行后读取 .git/config 等含凭据文件）
-                return "deny"
             if self._is_critical_read(p):
                 # .env/.db/permissions.json：读弹窗审批，写/执行直接拒绝
                 return "ask" if operation == "read" else "deny"

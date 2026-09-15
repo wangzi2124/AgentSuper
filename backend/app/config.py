@@ -125,15 +125,6 @@ class Settings(BaseSettings):
     step_summary_interval: int = 2
     # 摘要后原样保留的最近消息条数（覆盖最近一轮 assistant+tool 结果）
     step_summary_keep_messages: int = 4
-    # [C5 · 方案 E/F 多请求接力] 长任务小步快走：code 子 Agent 对多步骤实现类任务
-    # 先拆计划、每步一个独立 fresh-context 请求执行，步间只传落盘 STEP_STATE
-    # （上下文永不膨胀）。默认开启（经 LONG_TASK_MIN_QUESTION_CHARS 门控，短问题
-    # 不触发规划调用，零额外开销）；真实 API 冒烟已验证。
-    long_task_step_mode: bool = True
-    # 接力规划门控：问题字符数低于该阈值时不拆计划（保持普通单请求路径）
-    long_task_min_question_chars: int = 30
-    # 接力时计划最多拆几步
-    long_task_max_steps: int = 6
     # ── [F8/F9] 图片上传解析给模型（多模态附件管线）──
     # 上传图片先规格化（缩放+JPEG 压缩）再投递给模型，避免大图 base64 撑爆上下文。
     image_max_dimension: int = 1024          # 长边缩放上限（px）
@@ -203,7 +194,7 @@ class Settings(BaseSettings):
     # Doom-loop 升级：首次提示之后，再次连续触发 N 次相同指纹即强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具），
     # 对齐 opencode processor.ts 的 permission.ask(doom_loop) → deny 后 stop 语义
     doom_loop_max_strikes: int = 2
-    # 工具密集型子 Agent（如 code）的更长等待超时（秒），避免长任务被误判超时
+    # 工具密集型子 Agent（如 build）的更长等待超时（秒），避免长任务被误判超时
     sub_agent_timeout_extended: float = 300.0
     # 使用 extended 超时的子 Agent 列表（逗号分隔）
     extended_timeout_agents: str = "build"

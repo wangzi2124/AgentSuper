@@ -73,6 +73,29 @@ def test_git_path_always_deny(tmp_path):
     assert mgr.check(str(repo / ".git" / "config"), "read") == "deny"
 
 
+def test_git_path_denied_outside_workspace(tmp_path):
+    """回归：.git 硬保护必须对 workspace 之外的路径也生效（temp / external /
+    whitelist 分支此前会先 return，绕过 _is_git_path）。对齐 AGENTS.md
+    "regardless of worktree/workspace membership" 语义。"""
+    sys_tmp = tmp_path / "sys_tmp"
+    sys_tmp.mkdir(exist_ok=True)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir(exist_ok=True)
+    data = tmp_path / "data"
+    data.mkdir(exist_ok=True)
+    mgr = PermissionManager(
+        workspace=str(tmp_path / "workspace"), whitelist_path=str(data),
+        external_default="allow",  # worktree/whitelist 全放行，唯独 .git 不能被放行
+    )
+    # temp 分支此前无条件 allow → 现在 deny
+    assert mgr.check(str(sys_tmp / "repo" / ".git" / "config"), "read") == "deny"
+    assert mgr.check(str(sys_tmp / "repo" / ".git" / "config"), "write") == "deny"
+    # external_default=allow 分支此前放行 → 现在 deny
+    assert mgr.check(str(outside / "repo" / ".git" / "HEAD"), "read") == "deny"
+    # whitelist（extra worktree）分支此前直接 allow → 现在 deny
+    assert mgr.check(str(data / "repo" / ".git" / "config"), "read") == "deny"
+
+
 def test_source_paths_write_requires_approval(tmp_path):
     mgr = _mgr(tmp_path)
     ws = tmp_path / "workspace"

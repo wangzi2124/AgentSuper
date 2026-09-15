@@ -711,7 +711,7 @@ async def tool_loop_chat(
                     doom_fingerprints.clear()
                     break
                 logger.warning("Sub-agent doom loop detected (%s), injecting strategy prompt", fp[:120])
-                messages.append({"role": "assistant", "content": DOOM_LOOP_PROMPT})
+                messages.append({"role": "user", "content": DOOM_LOOP_PROMPT})
                 doom_fingerprints.clear()
 
         # 达到最大轮数（或被对局升级强制收尾）：注入收尾提示并禁用工具强制总结（对齐 MAX_STEPS 语义）

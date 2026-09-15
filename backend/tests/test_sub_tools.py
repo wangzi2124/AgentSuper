@@ -282,6 +282,39 @@ async def test_loop_chat_doom_loop(monkeypatch, fake_acompletion):
 
 
 @pytest.mark.asyncio
+async def test_loop_chat_doom_escalation_forces_summary(monkeypatch, fake_acompletion):
+    """升级路径：doom_loop_max_strikes 次提示后仍连续重复 → 强制收尾（MAX_STEPS
+    以 assistant 角色注入 + 禁用工具 break，最后一轮纯文本总结）。"""
+    from app.config import settings
+    monkeypatch.setattr(settings, "doom_loop_threshold", 3)
+    monkeypatch.setattr(settings, "doom_loop_max_strikes", 2)
+    script = [
+        _resp(tool_calls=[("tool_probe", '{"a":"1"}')]),
+        _resp(tool_calls=[("tool_probe", '{"a":"1"}')]),
+        _resp(tool_calls=[("tool_probe", '{"a":"1"}')]),  # 3 连 → strike 1：DOOM_LOOP_PROMPT
+        _resp(tool_calls=[("tool_probe", '{"a":"1"}')]),  # 4 连 → strike 2：升级收尾 break
+        _resp(content="forced-summary"),
+    ]
+    calls = fake_acompletion(script)
+
+    async def fake_run(name, args, event_queue=None):
+        return "R"
+    monkeypatch.setattr(st, "run_tool", fake_run)
+    out = await st.tool_loop_chat("sys", "user")
+    assert out == "forced-summary"
+    # DOOM_LOOP_PROMPT 以 user 角色注入（和主 Agent generate.py 一致）
+    doom_msgs = [m for kw in calls for m in kw["messages"]
+                 if "疑似陷入死循环" in (m.get("content") or "")]
+    assert doom_msgs and all(m["role"] == "user" for m in doom_msgs)
+    # 升级收尾：MAX_STEPS 以 assistant 角色注入 + 强制轮禁用工具
+    assert any(m["role"] == "assistant" and "MAXIMUM STEPS REACHED" in (m.get("content") or "")
+               for kw in calls for m in kw["messages"])
+    assert "tools" not in calls[-1]
+    assert any(m.get("content") and "MAXIMUM STEPS REACHED" in m["content"]
+               for m in calls[-1]["messages"])
+
+
+@pytest.mark.asyncio
 async def test_loop_chat_max_rounds_forced_summary(monkeypatch, fake_acompletion):
     from app.config import settings
     monkeypatch.setattr(settings, "max_tool_rounds", 2)

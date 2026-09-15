@@ -403,7 +403,7 @@ class RAGAgentBase:
         (("图片", "海报", "设计", "艺术", "绘图", "生成图", "image", "poster", "art", "draw"),
          ("load_skill_canvas_design", "load_skill_algorithmic_art", "load_skill_slack_gif_creator")),
         (("语音", "声音", "配音", "克隆", "合成", "朗读", "voice", "audio", "speech"),
-         ("plugin_voice-clone_", "tool_tts_synthesize", "tool_voice_transcribe")),
+         ("tool_tts_synthesize", "tool_voice_transcribe")),
         (("角色", "人物", "对话", "台词", "character", "dialogue"),
          ("plugin_character-analysis_",)),
         (("知识库", "kb", "导出"),

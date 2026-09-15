@@ -224,7 +224,7 @@ class SupervisorAgent(SupervisorAgentDecompose):
                     {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
                     {"role": "user", "content": f"用户问题: {question}\n\n各 Agent 返回:\n{context}"},
                 ],
-                max_tokens=2048,
+                max_tokens=settings.llm_max_tokens,
                 temperature=0.3,
                 cache_prompt=True,
             )
