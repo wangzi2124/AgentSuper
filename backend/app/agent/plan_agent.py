@@ -99,6 +99,8 @@ class PlanAgent(BaseAgent):
         if self._model.startswith("ollama/"):
             self._api_key = "ollama"
             self._api_base = None
+        from app.models.catalog import provider_api, litellm_extra_kwargs
+        self._llm_extra = litellm_extra_kwargs(provider_api(self._model))
 
     @property
     def agent_id(self) -> str:
@@ -266,6 +268,7 @@ class PlanAgent(BaseAgent):
             max_tokens=settings.llm_max_tokens,
             temperature=0.3,
             cache_prompt=True,
+            **self._llm_extra,
         )
         dur = (tmod.time() - start) * 1000
         usage = getattr(response, "usage", None)

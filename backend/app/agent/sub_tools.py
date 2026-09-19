@@ -539,8 +539,10 @@ async def tool_loop_chat(
     if model.startswith("ollama/"):
         api_key = "ollama"
         api_base = None
-    from app.models.catalog import provider_config_hint, provider_api
-    _hint = provider_config_hint(model, creds=provider_api(model))
+    from app.models.catalog import provider_config_hint, provider_api, litellm_extra_kwargs
+    _creds = provider_api(model)
+    _llm_extra = litellm_extra_kwargs(_creds)
+    _hint = provider_config_hint(model, creds=_creds)
     if _hint:
         raise RuntimeError(_hint)
     max_rounds = _sub_agent_max_rounds()
@@ -579,7 +581,8 @@ async def tool_loop_chat(
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": 0.2,
-            "cache_prompt": True
+            "cache_prompt": True,
+            **_llm_extra,
         }
         # 空 allowlist（如 plan 纯 LLM 规格）不挂 tools 字段，退化为普通对话
         if with_tools and tool_schema_set:

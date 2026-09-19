@@ -88,6 +88,7 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
         # 未配置 small_model 时回落本 Agent 的主模型。
         from app.models.catalog import provider_api as _provider_api
         from app.models.catalog import small_model as _small_model
+        from app.models.catalog import litellm_extra_kwargs
         clf_model = _small_model() or self._model
         _creds = _provider_api(clf_model)
         _ckey = "ollama" if _creds["is_ollama"] else _creds["api_key"]
@@ -102,6 +103,7 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
                 max_tokens=1024,
                 temperature=0.1,
                 cache_prompt=True,
+                **litellm_extra_kwargs(_creds),
             )
             usage = getattr(response, "usage", None)
             usage_dict = {

@@ -208,6 +208,11 @@ class Settings(BaseSettings):
     # 有意义。清空 history 可避免 N 个并行子 Agent 各自重复 prefill ≤16K 历史。
     sub_task_fresh_history: bool = True
 
+    # Ollama 上下文窗口（num_ctx，传给本地推理服务的 options）。Ollama 默认 2048，
+    # 超出窗口的 prompt 会被服务器截断 -> 历史/长上下文静默丢失（模型答"记不清/无历史"）。
+    # 按本机内存/显存调大，例：3090 可 32768；OOM 则下调。
+    ollama_num_ctx: int = 8192
+
     # ── 弱模型鲁棒性（本地/小参数模型）──
     # 弱模型识别：逗号分隔的模型名（`ollama/` 前缀始终视为弱模型）
     weak_models: str = ""

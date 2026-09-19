@@ -194,7 +194,7 @@ def ocr_image(data_b64: str, filename: str = "") -> str:
         return ""
 
 
-def _caption_kwargs() -> tuple[str, Optional[str], Optional[str], str, int]:
+def _caption_kwargs() -> tuple[str, Optional[str], Optional[str], str, int, dict]:
     from app.config import settings
     # [模型管理] 图片解析模型在 model_catalog.json 配置（前端可选全部 Provider，含 ollama）；
     # 未配置回落 IMAGE_CAPTION_MODEL。
@@ -206,9 +206,11 @@ def _caption_kwargs() -> tuple[str, Optional[str], Optional[str], str, int]:
     if model.startswith("ollama/"):
         api_base = None
         api_key = "ollama"
+    from app.models.catalog import provider_api, litellm_extra_kwargs
+    extra = litellm_extra_kwargs(provider_api(model))
     prompt = settings.image_caption_prompt or DEFAULT_CAPTION_PROMPT
     timeout = max(5, int(settings.image_caption_timeout or 15))
-    return model, api_base, api_key, prompt, timeout
+    return model, api_base, api_key, prompt, timeout, extra
 
 
 _caption_cache: dict[str, str] = {}
@@ -228,7 +230,7 @@ async def caption_image(data_b64: str, mime_type: str = "", filename: str = "") 
     结果按指纹缓存：同图（同 base64）跨 _generate 与 persist 只调用一次 VLM。
     """
     import litellm
-    model, api_base, api_key, prompt, timeout = _caption_kwargs()
+    model, api_base, api_key, prompt, timeout, extra = _caption_kwargs()
     if not model or not data_b64:
         return ""
     fp = _img_fingerprint(data_b64)
@@ -255,7 +257,7 @@ async def caption_image(data_b64: str, mime_type: str = "", filename: str = "") 
             kwargs["api_key"] = api_key
         if api_base:
             kwargs["api_base"] = api_base
-        resp = await litellm.acompletion(**kwargs,cache_prompt=True)
+        resp = await litellm.acompletion(**kwargs, cache_prompt=True, **extra)
         content = (resp.choices[0].message.content or "").strip()
         if content:
             _caption_cache[fp] = content

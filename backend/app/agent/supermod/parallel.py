@@ -227,6 +227,7 @@ class SupervisorAgent(SupervisorAgentDecompose):
                 max_tokens=settings.llm_max_tokens,
                 temperature=0.3,
                 cache_prompt=True,
+                **self._llm_extra,
             )
             dur = (tmod.time() - start) * 1000
             usage = getattr(response, "usage", None)

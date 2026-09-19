@@ -408,25 +408,41 @@ def probe_configured_providers(known_ids: set[str], force: bool = False) -> list
 
 
 def provider_api(model_id: Optional[str]) -> dict[str, Any]:
-    """解析模型对应的调用凭证：{api_base, api_key, is_ollama}。优先级：
+    """解析模型对应的调用凭证：{api_base, api_key, is_ollama, options}。优先级：
 
     1) model 的 provider 命中注册表（providers.<name>.api_base/api_key）；
     2) ollama 前缀 → OLLAMA_HOST/api_key="ollama"（沿用 litellm 自动发现）；
     3) 未注册的自定义 provider → 回落 settings.llm_api_base/llm_api_key。
+
+    `options`：需要透传给 litellm 的 provider 特定参数。Ollama 默认 num_ctx=2048，
+    超过窗口的往期历史会被推理服务截断（模型答"记不清/无历史"），因此必须显式
+    放大 num_ctx（settings.ollama_num_ctx）；带 deterministic 能力的 provider 也可在此扩展。
     """
     from app.config import settings
     mid = normalize_model(model_id)
     if not mid:
-        return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False}
+        return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False, "options": None}
     provider = mid.split("/", 1)[0] if "/" in mid else ""
     if provider == "ollama":
-        return {"api_base": None, "api_key": "ollama", "is_ollama": True}
+        return {"api_base": None, "api_key": "ollama", "is_ollama": True,
+                "options": {"num_ctx": settings.ollama_num_ctx}}
     reg = read_providers().get(provider)
     if reg:
         return {"api_base": reg.get("api_base") or settings.llm_api_base,
                 "api_key": reg.get("api_key") or settings.llm_api_key,
-                "is_ollama": False}
-    return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False}
+                "is_ollama": False, "options": None}
+    return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False, "options": None}
+
+
+def litellm_extra_kwargs(creds: Optional[dict]) -> dict:
+    """把 provider_api() 的 `options` 展开成 litellm 顶层 kwargs。
+
+    litellm 对 Ollama 只认顶层 `num_ctx`（非嵌套 `options`：transformation 会
+    丢弃任意 `options` 键，导致 num_ctx 不生效、推理服务默认 2048 窗口截断历史）。
+    非 ollama（options=None）返回 {}，避免把 num_ctx=None 透传给其它 provider。
+    """
+    opts = (creds or {}).get("options") or {}
+    return {"num_ctx": opts["num_ctx"]} if opts.get("num_ctx") is not None else {}
 
 
 def provider_config_hint(model_id: Optional[str], *, creds: Optional[dict] = None) -> str:

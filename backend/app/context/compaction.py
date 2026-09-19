@@ -376,6 +376,8 @@ class ContextCompactor:
                 kwargs["api_key"] = self.api_key
             if self.api_base:
                 kwargs["api_base"] = self.api_base
+            from app.models.catalog import provider_api, litellm_extra_kwargs
+            kwargs.update(litellm_extra_kwargs(provider_api(self.model)))
 
             start = tmod.time()
             resp = await litellm.acompletion(**kwargs)

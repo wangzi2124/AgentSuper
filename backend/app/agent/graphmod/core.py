@@ -267,11 +267,12 @@ class RAGAgent(RAGAgentGenerate):
         self._last_call_estimate = estimate_tokens_messages(messages) + estimate_tools(tool_defs)
         # 参照 settings.llm_api_base/key 作为兜底；注册过 providers 的自定义模型
         # （前端模型管理写入 model_catalog.json）按 model 的 provider 解析 api_base/api_key。
-        from app.models.catalog import provider_api
+        from app.models.catalog import provider_api, litellm_extra_kwargs
         _creds = provider_api(model)
         _is_ollama = _creds["is_ollama"]
         _api_key = _creds["api_key"]
         _api_base = _creds["api_base"]
+        _llm_extra = litellm_extra_kwargs(_creds)
         from app.models.catalog import provider_config_hint
         _hint = provider_config_hint(model, creds=_creds)
         if _hint:
@@ -290,6 +291,7 @@ class RAGAgent(RAGAgentGenerate):
                 stream=True,
                 stream_options={"include_usage": True},
                 cache_prompt=True,
+                **_llm_extra,
             )
         except Exception as e:
             logger.warning("LLM stream init failed, falling back to non-stream: %s", e)
@@ -305,6 +307,7 @@ class RAGAgent(RAGAgentGenerate):
                     timeout=500,
                     num_retries=2,
                     cache_prompt=True,
+                    **_llm_extra,
                 )
             except Exception as exc:
                 dur = (tmod.time() - start) * 1000

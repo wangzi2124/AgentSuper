@@ -145,7 +145,7 @@ async def _generate_title_llm(messages: list[dict]) -> str:
 
     # [模型管理] 标题生成属内部轻量任务 → 用 small_model（含其 provider 凭证）；
     # 未配置 small_model 时回落默认模型。
-    from app.models.catalog import provider_api, small_model
+    from app.models.catalog import provider_api, small_model, litellm_extra_kwargs
     title_model = small_model() or settings.llm_model
     _creds = provider_api(title_model)
 
@@ -169,6 +169,7 @@ async def _generate_title_llm(messages: list[dict]) -> str:
             max_tokens=30,
             temperature=0.5,
             cache_prompt=True,
+            **litellm_extra_kwargs(_creds),
         )
         text = (response.choices[0].message.content or "").strip()
         text = text.strip("\"'“”‘’。,.，、;；!！?？ ")
