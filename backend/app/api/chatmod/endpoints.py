@@ -28,7 +28,7 @@ from app.models.catalog import model_ref_dict
 
 from app.session import task_bridge
 
-from app.session.agent_executor import classify_error, PartBridgeQueue
+from app.session.agent_executor import classify_error, friendly_chat_error, PartBridgeQueue
 
 
 from app.agent.base import AgentMessage
@@ -69,7 +69,7 @@ from app.models.schemas import ChatRequest, Source, StepEvent, MultiAgentChatRes
 
 # ── Session 管理（session.db）──
 from app.session import task_bridge
-from app.session.agent_executor import classify_error, PartBridgeQueue
+from app.session.agent_executor import classify_error, friendly_chat_error, PartBridgeQueue
 
 # ── 多 Agent 系统 ──
 from app.agent.base import AgentMessage
@@ -200,14 +200,17 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         service.update(user_id, child_id, status="error")
         logger.exception("multi-agent request failed: user=%s session=%s classified=%s",
                          user_id, session_id, classify_error(e))
-        raise HTTPException(status_code=500, detail="处理请求时发生内部错误，请稍后重试")
+        raise HTTPException(status_code=500, detail=friendly_chat_error(e, model=body.model))
 
     if reply.type == "error":
         task_bridge.unregister(child_id)
         service.update(user_id, child_id, status="error")
+        _err_detail = (reply.payload or {}).get("error", "")
         logger.error("multi-agent reply error: user=%s session=%s detail=%s",
-                     user_id, session_id, reply.payload.get("error", ""))
-        raise HTTPException(status_code=500, detail="处理请求时发生内部错误，请稍后重试")
+                     user_id, session_id, _err_detail)
+        raise HTTPException(status_code=500, detail=friendly_chat_error(
+            RuntimeError(_err_detail) if _err_detail else None, model=body.model,
+        ))
 
     payload = reply.payload
     answer = payload.get("answer", "")
@@ -341,9 +344,12 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     )
 
                     if reply.type == "error":
+                        _err_detail = (reply.payload or {}).get("error", "")
                         logger.error("multi-agent reply error: session=%s detail=%s",
-                                     session_id, reply.payload.get("error", ""))
-                        generic_error = "处理请求时发生内部错误，请稍后重试"
+                                     session_id, _err_detail)
+                        generic_error = friendly_chat_error(
+                            RuntimeError(_err_detail) if _err_detail else None, model=body.model,
+                        )
                         collector.fail_running(generic_error)
                         await event_queue.put({
                             "type": "error",
@@ -414,7 +420,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     logger.exception("multi-agent stream invocation failed: user=%s session=%s",
                                      user_id, session_id)
                     service.update(user_id, child_id, status="error")
-                    generic_error = "处理请求时发生内部错误，请稍后重试"
+                    generic_error = friendly_chat_error(e, model=body.model)
                     collector.fail_running(generic_error)
                     await event_queue.put({
                         "type": "error",

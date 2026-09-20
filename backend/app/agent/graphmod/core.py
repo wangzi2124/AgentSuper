@@ -313,6 +313,10 @@ class RAGAgent(RAGAgentGenerate):
                 dur = (tmod.time() - start) * 1000
                 trace("llm.usage", where="error", model=model, pt=0, ct=0, duration_ms=dur)  # [token trace v7]
                 record_model_call(model, duration_ms=dur)
+                from app.models.catalog import normalize_llm_exception
+                _friendly = normalize_llm_exception(exc, model)
+                if _friendly:
+                    raise RuntimeError(_friendly)
                 raise exc
             return self._assemble_response(model, response, start, state, push_text=True)
 

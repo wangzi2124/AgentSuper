@@ -643,7 +643,14 @@ async def tool_loop_chat(
             messages[:] = _trim_messages(messages)  # 每轮前裁剪,防 context 无限膨胀
             use_tools = (rnd < max_rounds) and not weak_model and not steps_prompt_injected
             start = tmod.time()
-            response = await litellm.acompletion(**_llm_call(use_tools))
+            try:
+                response = await litellm.acompletion(**_llm_call(use_tools))
+            except Exception as _exc:  # noqa: BLE001 —— 统一归一为友好中文（Ollama 未装等）
+                from app.models.catalog import normalize_llm_exception
+                _friendly = normalize_llm_exception(_exc, model)
+                if _friendly:
+                    raise RuntimeError(_friendly) from _exc
+                raise
             usage = getattr(response, "usage", None)
             pt = getattr(usage, "prompt_tokens", 0) if usage else 0
             ct = getattr(usage, "completion_tokens", 0) if usage else 0
@@ -720,7 +727,14 @@ async def tool_loop_chat(
         # 达到最大轮数（或被对局升级强制收尾）：注入收尾提示并禁用工具强制总结（对齐 MAX_STEPS 语义）
         if not steps_prompt_injected:
             messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
-        response = await litellm.acompletion(**_llm_call(False, max_tokens=settings.llm_max_tokens))
+        try:
+            response = await litellm.acompletion(**_llm_call(False, max_tokens=settings.llm_max_tokens))
+        except Exception as _exc:  # noqa: BLE001 —— 统一归一为友好中文（Ollama 未装等）
+            from app.models.catalog import normalize_llm_exception
+            _friendly = normalize_llm_exception(_exc, model)
+            if _friendly:
+                raise RuntimeError(_friendly) from _exc
+            raise
         from app.utils.json_repair import parse_answer_envelope
         return parse_answer_envelope(
             strip_tool_call_markup((response.choices[0].message.content or "").strip())

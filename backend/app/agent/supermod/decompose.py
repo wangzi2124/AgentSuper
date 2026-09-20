@@ -89,8 +89,12 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
         from app.models.catalog import provider_api as _provider_api
         from app.models.catalog import small_model as _small_model
         from app.models.catalog import litellm_extra_kwargs
+        from app.models.catalog import provider_config_hint
         clf_model = _small_model() or self._model
         _creds = _provider_api(clf_model)
+        _hint = provider_config_hint(clf_model, creds=_creds)
+        if _hint:
+            raise RuntimeError(_hint)
         _ckey = "ollama" if _creds["is_ollama"] else _creds["api_key"]
         _cbase = None if _creds["is_ollama"] else _creds["api_base"]
 

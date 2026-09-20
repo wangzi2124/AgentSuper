@@ -38,6 +38,34 @@ def classify_error(exc: Exception) -> dict[str, Any]:
     return {"retryable": retryable, "status_code": status_code, "error_type": error_type}
 
 
+def friendly_chat_error(exc: BaseException, *, model: Optional[str] = None, fallback: str = "处理请求时发生内部错误，请稍后重试") -> str:
+    """把任意异常归一为面向用户的中文错误消息，用于模型切换/调用失败时「统一回答」。
+
+    优先级：
+      1. 直接携带中文友好提示的异常（如各调用点 raise RuntimeError(provider_config_hint /
+         normalize_llm_exception 结果)）→ 原样返回；
+      2. 其它异常尝试 `catalog.normalize_llm_exception`（Ollama 未装 / 连接 / 鉴权）→ 中文；
+      3. 无法归一 → 返回 fallback 通用文案。
+    """
+    if not exc:
+        return fallback
+    msg = str(exc).strip()
+    # 先尝试归一器：能识别的（Ollama 未装/连接/鉴权）一律归一为中文；
+    # 已在调用点通过 provider_config_hint/normalize 升格的 RuntimeError 中文提示原样透传。
+    try:
+        from app.models.catalog import normalize_llm_exception
+        friendly = normalize_llm_exception(exc, model)
+        if friendly:
+            return friendly
+    except Exception:  # noqa: BLE001 —— 归一器自身异常不阻断主流程
+        pass
+    if isinstance(exc, RuntimeError) and msg and any(
+        _k in msg for _k in ("模型", "模型管理", "api_base", "API Key", "请重试", "未配置", "未安装")
+    ):
+        return msg
+    return fallback
+
+
 class PartBridgeQueue:
     """把 graph 事件实时落库为 message_parts，同时转发给请求级 SSE 队列。
 

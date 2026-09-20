@@ -156,3 +156,84 @@ def test_provider_config_hint_registered_provider_configured(monkeypatch):
         "deepseek/deepseek-v4-flash",
         creds={"api_base": "https://api.deepseek.com", "api_key": "sk-x", "is_ollama": False},
     ) == ""
+
+
+def test_ollama_model_installed(monkeypatch):
+    # 非 ollama / 空模型 → 放行
+    assert catalog.ollama_model_installed(None) is True
+    assert catalog.ollama_model_installed("deepseek/deepseek-v4-flash") is True
+
+    # 固定探测结果，避免依赖真实 ollama（测试机/CI 可能无 ollama 或模型不同）
+    monkeypatch.setattr(catalog, "probe_ollama_models", lambda known, force=False: [])
+
+    # 探测成功 + 模型已装 → True
+    monkeypatch.setattr(catalog, "_ollama_probe_ok", True)
+    monkeypatch.setattr(catalog, "_ollama_installed", {"qwen2.5:3b"})
+    assert catalog._ollama_installed_names() == {"qwen2.5:3b"}
+    assert catalog.ollama_model_installed("ollama/qwen2.5:3b") is True
+
+    # 探测成功 + 模型未装 → False
+    assert catalog.ollama_model_installed("ollama/qwen2.5:7b") is False
+
+    # 探测失败（ollama 未启动）→ 放行，不误判
+    monkeypatch.setattr(catalog, "_ollama_probe_ok", False)
+    monkeypatch.setattr(catalog, "_ollama_installed", None)
+    assert catalog.ollama_model_installed("ollama/qwen2.5:7b") is True
+
+
+def test_provider_config_hint_ollama_model_not_installed(monkeypatch):
+    monkeypatch.setattr(catalog, "probe_ollama_models", lambda known, force=False: [])
+    monkeypatch.setattr(catalog, "_ollama_probe_ok", True)
+    monkeypatch.setattr(catalog, "_ollama_installed", {"qwen2.5:3b"})
+    hint = catalog.provider_config_hint("ollama/qwen2.5:7b")
+    assert "qwen2.5:7b" in hint
+    assert "ollama pull" in hint
+    # 已安装的模型不提示
+    assert catalog.provider_config_hint("ollama/qwen2.5:3b") == ""
+
+
+def test_normalize_llm_exception_ollama_not_found(monkeypatch):
+    class FakeConnectionError(Exception):
+        pass
+
+    monkeypatch.setattr(catalog, "probe_ollama_models", lambda known, force=False: [])
+    monkeypatch.setattr(catalog, "_ollama_probe_ok", True)
+    monkeypatch.setattr(catalog, "_ollama_installed", set())
+    exc = FakeConnectionError(
+        'OllamaException - {"error":"model \'qwen2.5:7b\' not found"}'
+    )
+    msg = catalog.normalize_llm_exception(exc, "ollama/qwen2.5:7b")
+    assert "ollama pull qwen2.5:7b" in msg
+    # 不带 model_id 时也能从文本解析
+    msg2 = catalog.normalize_llm_exception(exc)
+    assert "模型不存在" in msg2
+
+
+def test_normalize_llm_exception_connection_and_auth():
+    class FakeConn(Exception):
+        pass
+
+    assert "连接" in catalog.normalize_llm_exception(FakeConn("connection refused: 127.0.0.1:11434"))
+    class FakeAuth(Exception):
+        pass
+
+    assert "鉴权" in catalog.normalize_llm_exception(FakeAuth("401 Unauthorized: invalid api key"))
+    assert catalog.normalize_llm_exception(FakeConn("unrelated format issue")) == ""
+
+
+def test_friendly_chat_error_priority():
+    from app.session.agent_executor import friendly_chat_error
+    # 已带友好中文的 RuntimeError → 原样透传
+    assert friendly_chat_error(RuntimeError("本地 Ollama 未安装模型「qwen2.5:7b」。")) == \
+        "本地 Ollama 未安装模型「qwen2.5:7b」。"
+    # 可被 normalize 识别的其它异常 → 中文
+    class FakeConn(Exception):
+        pass
+
+    assert "ollama" in friendly_chat_error(
+        FakeConn('OllamaException - {"error":"model \'x:y\' not found"}'),
+        model="ollama/x:y",
+    )
+    # 无法识别 → 兜底通用文案
+    assert friendly_chat_error(FakeConn("some cryptic failure"), model="deepseek/deepseek-v4-flash") == \
+        "处理请求时发生内部错误，请稍后重试"

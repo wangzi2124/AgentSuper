@@ -126,6 +126,8 @@ def _cache_key() -> str:
 _OLLAMA_TTL = 60.0
 _ollama_cache: Optional[list[dict[str, Any]]] = None
 _ollama_cache_time: float = 0.0
+_ollama_probe_ok: bool = False
+_ollama_installed: Optional[set[str]] = None
 _ollama_lock = threading.Lock()
 
 
@@ -142,7 +144,7 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
     ollama 未启动/不可达/超时一律返回 []（不抛异常，不阻塞启动）；
     成功探测结果按 TTL 缓存，避免每个请求都去打 /api/tags。
     """
-    global _ollama_cache, _ollama_cache_time
+    global _ollama_cache, _ollama_cache_time, _ollama_probe_ok, _ollama_installed
     now = time.time()
     if not force and _ollama_cache is not None and now - _ollama_cache_time < _OLLAMA_TTL:
         return _ollama_cache
@@ -177,11 +179,48 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
                     "limits": {"max_output_tokens": 8192},
                     "cost": dict(_ZERO_COST),
                 })
-            _ollama_cache, _ollama_cache_time = extras, now
+            _ollama_cache, _ollama_cache_time, _ollama_probe_ok = extras, now, True
+            _ollama_installed = {
+                (m.get("name") or "").strip()
+                for m in (data.get("models") or [])
+                if (m.get("name") or "").strip()
+            }
             return extras
         except Exception:
-            _ollama_cache, _ollama_cache_time = [], now
+            _ollama_cache, _ollama_cache_time, _ollama_probe_ok = [], now, False
+            _ollama_installed = None
             return []
+
+
+def _ollama_installed_names() -> Optional[set[str]]:
+    """本机 ollama 已安装模型名集合（探测 /api/tags，TTL 缓存）。
+
+    返回 None 表示探测失败（ollama 未启动/不可达）——调用方应放行；
+    返回 set（可能为空）表示探测成功——空集即「任何 ollama/xxx 都未安装」。
+    """
+    probe_ollama_models(set(), force=False)
+    if not _ollama_probe_ok:
+        return None
+    return _ollama_installed or set()
+
+
+def ollama_model_installed(model_id: Optional[str]) -> bool:
+    """ollama/<name> 是否已在本机安装（按 /api/tags 探测）。
+
+    - 非 ollama 前缀 / 空模型 → True（不拦截）；
+    - 探测失败（ollama 未启动/不可达）→ True（放行，交给 litellm 报原始错误，
+      避免把「服务未启动」误判成「模型未安装」）；
+    - 探测成功但目录里没有该模型名 → False（用户需 `ollama pull <name>`）。
+    """
+    if not model_id:
+        return True
+    provider, _, name = model_id.partition("/")
+    if provider != "ollama" or not name:
+        return True
+    installed = _ollama_installed_names()
+    if installed is None:
+        return True
+    return name in installed
 
 
 def get_catalog(force_reload: bool = False) -> list[dict[str, Any]]:
@@ -462,6 +501,13 @@ def provider_config_hint(model_id: Optional[str], *, creds: Optional[dict] = Non
         return ""
     provider = mid.split("/", 1)[0] if "/" in mid else ""
     if not provider or provider == "ollama":
+        # ollama 前缀：provider 本身无需配置；但模型必须已安装
+        if provider == "ollama":
+            mname = mid.split("/", 1)[1] if "/" in mid else ""
+            if mname and not ollama_model_installed(mid):
+                return ("本地 Ollama 未安装模型「%s」。请在终端执行 `ollama pull %s` "
+                        "安装后重试，或在「模型管理」页切换为其它已安装模型。"
+                        % (mname, mname))
         return ""
     reg = read_providers().get(provider)
     if reg and reg.get("api_base"):
@@ -477,6 +523,53 @@ def provider_config_hint(model_id: Optional[str], *, creds: Optional[dict] = Non
     _default_ds = base.rstrip("/") == "https://api.deepseek.com"
     if not base or _local or _default_ds:
         return "未配置模型服务商（Provider）「%s」，请在「模型管理」页为该 Provider 配置 api_base 与 api_key。" % provider
+    return ""
+
+
+def normalize_llm_exception(exc: BaseException, model_id: Optional[str] = None) -> str:
+    """把 litellm/底层调用异常归一为「面向模型服务商配置」的友好中文提示；无法识别的返回空串。
+
+    识别两类高频可操作错误：
+      1) Ollama 模型未安装：`model 'qwen2.5:7b' not found`（litellm 包成
+         APIConnectionError: OllamaException - {"error": ...}）→ 提示 `ollama pull`。
+      2) Provider 服务/密钥不可用（连接失败、401、404、NoneType API key 等）→
+         提示到「模型管理」页核对 api_base/api_key。
+    `model_id` 可选：提供时优先用 ollama_model_installed 探测做前置判定（比解析报错更稳）。
+    """
+    msg = str(exc)
+    if not msg:
+        return ""
+    # 1) Ollama 模型未安装 —— 解析报错文本里的 `'<name>'` / `model "<name>"` 引用
+    if model_id:
+        provider, _, name = str(model_id).partition("/")
+        if provider == "ollama" and name:
+            if not ollama_model_installed(model_id):
+                return ("本地 Ollama 未安装模型「%s」。请在终端执行 `ollama pull %s` "
+                        "安装后重试，或在「模型管理」页切换为其它已安装模型。"
+                        % (name, name))
+            if "not found" in msg.lower() or "ollamaexception" in msg.lower():
+                return ("本地 Ollama 未能加载模型「%s」：%s。请确认已执行 `ollama pull %s` "
+                        "且 Ollama 服务正在运行，或切换为其它模型。"
+                        % (name, msg.strip()[:200], name))
+        else:
+            # 非 ollama provider：报错文本若含 model not found，同样给出统一提示
+            if "not found" in msg.lower() and ("model" in msg.lower() or "404" in msg.lower()):
+                return ("模型「%s」不存在（%s）。请到「模型管理」页核对模型 id 或切换为目录内可用模型。"
+                        % (str(model_id), msg.strip()[:200]))
+    if "not found" in msg.lower() and ("model '" in msg or 'model "' in msg or "ollama" in msg.lower()):
+        _name = "（见上方报错）"
+        return ("模型不存在：%s。若是本地 Ollama，请执行 `ollama pull <模型名>` 安装；"
+                "若是云端服务，请到「模型管理」页核对模型 id。" % msg.strip()[:200])
+    # 2) 连接/鉴权类 —— 报错文本常见的连接拒绝、401/403/404
+    low = msg.lower()
+    if ("api key" in low or "apikey" in low or "401" in low or "403" in low or
+            "authentication" in low or "authorization" in low):
+        return ("模型服务商鉴权失败：%s。请到「模型管理」页核对当前模型的 api_base 与 api_key，"
+                "或检查 .env 的 LLM_API_BASE / LLM_API_KEY。" % msg.strip()[:200])
+    if ("connect" in low or "connection" in low or "refused" in low or
+            "timeout" in low or "unreachable" in low or "network" in low):
+        return ("无法连接到模型服务商：%s。请确认服务地址（api_base）可达、网络已放行，"
+                "本地 Ollama 请确认已 `ollama serve` 启动。" % msg.strip()[:200])
     return ""
 
 

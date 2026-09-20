@@ -260,6 +260,10 @@ class PlanAgent(BaseAgent):
         log_prompt("plan_agent.generate_plan", messages, model=self._model)
 
         start = tmod.time()
+        from app.models.catalog import provider_config_hint
+        _hint = provider_config_hint(self._model)
+        if _hint:
+            raise RuntimeError(_hint)
         response = await litellm.acompletion(
             model=self._model,
             api_key=self._api_key,
