@@ -34,11 +34,24 @@ LANGUAGES = [
 MODEL_SIZES = ("0.6B", "1.7B")
 
 
+def _normalize_model_size(raw: "str | None") -> str:
+    """宽松归一化 TTS 模型规格：允许 `0.6`/`0.6B`/`0.6b`、`1.7`/`1.7B`/`1.7b`，
+    非法值（含 None/空）兜底 1.7B。避免 `.env` 少写 B 后缀就静默跳大模型 ——
+    0.6B 实测 ~2.4GB 常驻 / 1.7B ~4.3GB 常驻。
+    """
+    s = (raw or "").strip().upper()
+    if s in ("0.6", "0.6B"):
+        return "0.6B"
+    if s in ("1.7", "1.7B"):
+        return "1.7B"
+    return "1.7B"
+
+
 def _catalog_voice_size() -> "str | None":
     """[模型管理] 语音模型规格（model_catalog.json）；未配置返回 None。"""
     try:
         from app.models.catalog import voice_model_size
-        return voice_model_size()
+        return _normalize_model_size(voice_model_size())
     except Exception:  # noqa: BLE001 —— 目录异常不阻断语音
         return None
 
@@ -287,9 +300,11 @@ class VoiceService:
             self.speaker = "Vivian"
         # [模型管理] 语音模型规格在 model_catalog.json 配置（0.6B/1.7B）；未配置回落
         # VOICE_TTS_MODEL_SIZE（.env）。运行时改 catalog 也即时生效（synthesize 每次读取）。
-        self.model_size = (model_size or _catalog_voice_size() or settings.voice_tts_model_size)
-        if self.model_size not in MODEL_SIZES:
-            self.model_size = "1.7B"
+        # 用 _normalize_model_size 宽松归一化（`0.6`/`0.6B` 均识别），避免配置少写
+        # B 后缀就静默跳 1.7B 兜底 —— 0.6B 实测 ~2.4GB 常驻 / 1.7B ~4.3GB 常驻。
+        self.model_size = _normalize_model_size(
+            model_size or _catalog_voice_size() or settings.voice_tts_model_size
+        )
         self.timeout = timeout or settings.voice_tts_timeout
         self.output_dir = Path(output_dir or (base / "data" / "generated"))
         self._whisper_worker: _WhisperWorker | None = None
@@ -473,7 +488,7 @@ class VoiceService:
         # [模型管理] 每次调用读取 catalog 规格：改配置后无需重启即生效（与常驻 worker
         # 尺寸不一致时自动走临时子进程路径，其余场景复用常驻模型）。
         cur = _catalog_voice_size() or self.model_size
-        ms = model_size if model_size in MODEL_SIZES else cur
+        ms = _normalize_model_size(model_size) if model_size else cur
         self.output_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         outfile = self.output_dir / f"tts_{spk}_{ts}.wav"

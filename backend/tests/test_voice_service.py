@@ -69,6 +69,18 @@ def test_speaker_model_fallback():
     assert svc.model_size == "1.7B"
 
 
+@pytest.mark.parametrize("raw,expected", [
+    ("0.6", "0.6B"), ("0.6B", "0.6B"), ("0.6b", "0.6B"),
+    ("1.7", "1.7B"), ("1.7B", "1.7B"),
+    ("", "1.7B"), (None, "1.7B"), ("99B", "1.7B"),
+])
+def test_model_size_loose_normalization(raw, expected):
+    """[固定] VOICE_TTS_MODEL_SIZE=0.6 这种少写 B 后缀的配置必须归一化到 0.6B，
+    而非静默兜底 1.7B（1.7B 常驻 ~4.3GB 内存，0.6B 只有 ~2.4GB）。"""
+    assert vs.VoiceService(speaker="Nobody", model_size=raw, timeout=5).model_size == expected
+    assert vs._normalize_model_size(raw) == expected
+
+
 # ── 子进程解析 ─────────────────────────────────────────────────────────────
 
 def test_run_parses_json(monkeypatch, tmp_path):
