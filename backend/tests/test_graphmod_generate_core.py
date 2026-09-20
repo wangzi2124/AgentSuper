@@ -579,6 +579,12 @@ async def test_generate_multimodal_files(gen_env, monkeypatch):
         return "图片描述内容"
     monkeypatch.setattr(gen_mod, "describe_image", fake_describe)
     monkeypatch.setattr(settings, "image_caption_model", "openai/gpt-4o-mini")  # 开启描述桥
+    # [能力驱动视觉] 模拟视觉模型（vision=True → 原生附图），不依赖 live catalog 的模型能力声明
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(
+        catalog_mod, "read_capabilities",
+        lambda m: {"tool_use": True, "vision": True, "reasoning": False},
+    )
 
     agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="A")])
     state = make_state(files=[{"filename": "img.png", "mime_type": "image/png", "data": "AAAA"}])
@@ -605,6 +611,12 @@ async def test_generate_images_not_resent_after_first_round(gen_env, monkeypatch
     monkeypatch.setattr(gen_mod, "describe_image",
                         lambda *a, **k: ("CAP" if "data_b64" in k or True else ""))
     monkeypatch.setattr(settings, "image_caption_model", "")
+    # [能力驱动视觉] 模拟视觉模型（vision=True → 原生附图），不依赖 live catalog 的能力声明
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(
+        catalog_mod, "read_capabilities",
+        lambda m: {"tool_use": True, "vision": True, "reasoning": False},
+    )
 
     agent, llm = _setup_generate(gen_env, [
         FakeLLM().response(tool_calls=[("tool_probe", '{"a":"1"}')]),
@@ -641,7 +653,41 @@ async def test_generate_images_not_resent_after_first_round(gen_env, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_generate_session_cwd_in_system(gen_env):
+async def test_generate_non_vision_model_skips_image_url(gen_env, monkeypatch):
+    """[能力驱动视觉] vision=False 的模型不附图：图片替换为文本占位，仅靠描述桥/文件名。
+    （真实 qwen3.5:4b 若在模型管理勾选支持视觉 = True → 走原生 image_url。）"""
+    monkeypatch.setattr(gen_mod, "_attachment_parts",
+                        lambda files, budget=6000: (
+                            [{"filename": "img.png", "mime_type": "image/png", "data": "AAAA"}],
+                            "FILE_TEXT",
+                        ))
+    monkeypatch.setattr(settings, "image_caption_model", "")
+    # 非视觉模型（vision=False）→ 不发送 image_url 数据块
+    import app.models.catalog as catalog_mod
+    monkeypatch.setattr(
+        catalog_mod, "read_capabilities",
+        lambda m: {"tool_use": True, "vision": False, "reasoning": True},
+    )
+
+    agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="ok")])
+    state = make_state(files=[{"filename": "img.png", "mime_type": "image/png", "data": "AAAA"}])
+    await agent._generate(state)
+    _, messages, _ = llm.calls[0]
+    user = messages[-1]["content"]
+    assert isinstance(user, list)
+    types = [p["type"] for p in user]
+    assert "image_url" not in types
+    # 提供文件名提示文本，模型依然"知道"有图（走描述桥/文件名）
+    joined = " ".join(p.get("text", "") for p in user)
+    assert "附加图片" in joined and "img.png" in joined
+
+    # 未收录模型（read_capabilities={}）→ 默认附图不臆断
+    monkeypatch.setattr(catalog_mod, "read_capabilities", lambda m: {})
+    agent2, llm2 = _setup_generate(gen_env, [FakeLLM().response(content="ok")])
+    await agent2._generate(make_state(files=[{"filename": "b.png", "mime_type": "image/png", "data": "BB"}]))
+    _, msgs2, _ = llm2.calls[0]
+    types2 = [p["type"] for p in msgs2[-1]["content"]]
+    assert "image_url" in types2
     agent, llm = _setup_generate(gen_env, [FakeLLM().response(content="A")])
     await agent._generate(make_state(_cwd="/workdir"))
     _, messages, _ = llm.calls[0]
@@ -1134,6 +1180,67 @@ async def test_llm_call_stream_assembly(core_env, monkeypatch):
     assert tc.function.name == "tool_xy"
     assert tc.function.arguments == '{"a":1}'
     assert agent._usage_accum["input"] == 10 and agent._usage_accum["output"] == 5
+
+
+@pytest.mark.asyncio
+async def test_llm_call_stream_reasoning_fallback(core_env, monkeypatch):
+    """[reasoning 方言] qwen3.5 think=True：只有 reasoning_content 流、content 空 → 回退 reasoning。"""
+    def _rc_chunk(rc=None, content=None, finish_reason=None, usage=None):
+        delta = SimpleNamespace(content=content, tool_calls=None)
+        setattr(delta, "reasoning_content", rc)
+        choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
+        return SimpleNamespace(choices=[choice], usage=usage)
+
+    fake_acompletion = _stream_acompletion([
+        _rc_chunk(rc="思考过程第"),
+        _rc_chunk(rc="一部分……"),
+        _rc_chunk(rc="", content=None, finish_reason="stop"),
+        _chunk(usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5,
+               prompt_cache_hit_tokens=3, prompt_cache_miss_tokens=7)),
+    ])
+    monkeypatch.setattr(core_mod.litellm, "acompletion", fake_acompletion)
+    agent = build_agent()
+    q = asyncio.Queue()
+    resp = await agent._llm_call("m", [{"role": "user", "content": "q"}], None, state=make_state(_event_queue=q))
+    assert resp.choices[0].message.content == "思考过程第一部分……"
+    # content 非空（正常路径）时不被 reasoning 覆盖
+    agent2 = build_agent()
+    fake2 = _stream_acompletion([
+        _chunk(content="正常回答"),
+        _rc_chunk(rc="思考噪声"),
+        _chunk(usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1,
+               prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=2)),
+    ])
+    monkeypatch.setattr(core_mod.litellm, "acompletion", fake2)
+    resp2 = await agent2._llm_call("m", [], None)
+    assert resp2.choices[0].message.content == "正常回答"
+
+
+def test_assemble_response_non_stream_reasoning_fallback():
+    """[reasoning 方言] 非流式：content 空 + reasoning_content 非空 → 回退并写回 msg0.content。"""
+    class Msg:
+        def __init__(self, content, reasoning_content):
+            self.content = content
+            self.reasoning_content = reasoning_content
+
+    agent = build_agent()
+    msg = Msg("", "这里是 reasoning 里的正史")
+    resp = SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1, prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=2),
+        choices=[SimpleNamespace(message=msg)],
+    )
+    out = agent._assemble_response("deepseek/deepseek-v4-flash", resp, time.time(), make_state(), push_text=True)
+    assert out.choices[0].message.content == "这里是 reasoning 里的正史"
+    assert msg.content == "这里是 reasoning 里的正史"  # 回写
+
+    # content 非空 → 不覆盖
+    msg2 = Msg("正式内容", "思考过程")
+    resp2 = SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1, prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=2),
+        choices=[SimpleNamespace(message=msg2)],
+    )
+    agent._assemble_response("deepseek/deepseek-v4-flash", resp2, time.time(), make_state(), push_text=True)
+    assert msg2.content == "正式内容"
 
 
 @pytest.mark.asyncio

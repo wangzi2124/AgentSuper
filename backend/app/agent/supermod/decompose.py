@@ -123,7 +123,14 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
                     clf_model,
                     input_tokens=usage_dict.get("prompt_tokens", 0),
                     output_tokens=usage_dict.get("completion_tokens", 0))
-            return response.choices[0].message.content, usage_dict
+            content = response.choices[0].message.content
+            # [reasoning 方言] 分类模型若为思考模型（ollama think=True）、content 为空，
+            # 回退 reasoning_content（对齐 sub_tools/plan_agent 的 reasoning 回退）
+            if not (content or "").strip():
+                reasoning = getattr(response.choices[0].message, "reasoning_content", None) or ""
+                if reasoning.strip():
+                    content = reasoning
+            return content, usage_dict
 
         start = tmod.time()
         attempts = []

@@ -237,3 +237,126 @@ def test_friendly_chat_error_priority():
     # 无法识别 → 兜底通用文案
     assert friendly_chat_error(FakeConn("some cryptic failure"), model="deepseek/deepseek-v4-flash") == \
         "处理请求时发生内部错误，请稍后重试"
+
+
+def _fake_ollama_tags(tmp_path, monkeypatch, models):
+    """写入假 /api/tags 响应并让 probe_ollama_models 从文件读，避免依赖真实 ollama。"""
+    import urllib.request
+
+    payload = json.dumps({"models": models}).encode("utf-8")
+    tags_file = tmp_path / "tags.json"
+    tags_file.write_bytes(payload)
+
+    real_urlopen = urllib.request.urlopen
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda req, timeout: _FakeResp(tags_file.read_bytes()) if "api/tags" in req.full_url else real_urlopen(req, timeout=timeout),
+    )
+    # 重置全局探测缓存，强制重新探测
+    monkeypatch.setattr(catalog, "_ollama_cache", None)
+    monkeypatch.setattr(catalog, "_ollama_cache_time", 0)
+    monkeypatch.setattr(catalog, "_ollama_probe_ok", False)
+
+
+class _FakeResp:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def read(self) -> bytes:
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_probe_ollama_models_maps_capabilities(tmp_path, monkeypatch):
+    # 只保留「目录未收录」的增量：已收录模型（ollama/qwen2.5:3b）被跳过
+    _fake_ollama_tags(tmp_path, monkeypatch, [
+        {"name": "qwen3.5:4b", "capabilities": ["vision", "completion", "tools", "thinking"]},
+        {"name": "llava:latest", "capabilities": ["completion", "vision"]},
+        {"name": "qwen2.5:3b", "capabilities": ["completion", "tools"]},
+        {"name": "mistral:latest", "capabilities": ["completion", "tools"]},
+    ])
+    extras = catalog.probe_ollama_models(known_ids={"ollama/qwen2.5:3b"}, force=True)
+    by_id = {e["id"]: e for e in extras}
+    assert set(by_id) == {"ollama/qwen3.5:4b", "ollama/llava:latest", "ollama/mistral:latest"}
+    # capabilities 映射：tools→tool_use、vision→vision、thinking→reasoning
+    assert by_id["ollama/qwen3.5:4b"]["capabilities"] == \
+        {"tool_use": True, "vision": True, "reasoning": True}
+    assert by_id["ollama/llava:latest"]["capabilities"] == \
+        {"tool_use": False, "vision": True, "reasoning": False}
+    assert by_id["ollama/mistral:latest"]["capabilities"] == \
+        {"tool_use": True, "vision": False, "reasoning": False}
+    # 探测成功 → 已安装名集合含全部模型（含已收录的）
+    assert catalog._ollama_installed_names() == {
+        "qwen3.5:4b", "llava:latest", "qwen2.5:3b", "mistral:latest"}
+
+
+def test_read_capabilities_returns_declared_and_unknown(monkeypatch):
+    # 内置目录 deepseek → 按目录能力返回
+    caps = catalog.read_capabilities("deepseek/deepseek-v4-flash")
+    assert set(caps) == {"tool_use", "vision", "reasoning"}
+    assert all(isinstance(v, bool) for v in caps.values())
+    # 未收录模型 → {}（调用方按默认处理，不臆断）
+    assert catalog.read_capabilities("nope/nope") == {}
+    assert catalog.read_capabilities("") == {}
+    assert catalog.read_capabilities(None) == {}
+
+
+def test_read_capabilities_ollama_extra_respects_override(tmp_path, monkeypatch):
+    # 目录 extra 区显式声明的能力优先——读得回 DB/覆盖文件保存的勾选
+    monkeypatch.setenv("AGENTSUPER_DATA", str(tmp_path))
+    monkeypatch.setattr("app.models.catalog_db.backends.is_sqlite", lambda: True)
+    override = {
+        "extra": [{
+            "id": "ollama/qwen3.5:4b", "provider": "ollama", "family": "qwen3.5",
+            "name": "Qwen3.5 4B", "description": "",
+            "capabilities": {"tool_use": True, "vision": False, "reasoning": True},
+            "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
+                     "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
+        }],
+    }
+    (tmp_path / "model_catalog.json").write_text(json.dumps(override), encoding="utf-8")
+    caps = catalog.read_capabilities("ollama/qwen3.5:4b")
+    assert caps == {"tool_use": True, "vision": False, "reasoning": True}
+
+
+def test_provider_api_ollama_think_from_reasoning_capability(monkeypatch):
+    # ollama + 声明推理 → think=True；未声明推理 → 不传 think（不臆断）
+    monkeypatch.setattr(catalog, "read_capabilities", lambda m: {"tool_use": True, "vision": False, "reasoning": True})
+    creds = catalog.provider_api("ollama/qwen3.5:4b")
+    assert creds["is_ollama"] is True
+    assert creds["options"]["think"] is True
+    assert creds["options"]["num_ctx"] == settings.ollama_num_ctx
+
+    monkeypatch.setattr(catalog, "read_capabilities", lambda m: {"tool_use": True, "vision": True, "reasoning": False})
+    assert catalog.provider_api("ollama/llava:latest")["options"]["think"] is False
+
+    # 未收录/能力缺失 → options 不含 think
+    monkeypatch.setattr(catalog, "read_capabilities", lambda m: {})
+    opts = catalog.provider_api("ollama/something-new")["options"]
+    assert "think" not in opts
+
+    # 非 ollama（deepseek）→ options=None，绝不含 think
+    monkeypatch.setattr(catalog, "read_providers", lambda: {})
+    creds = catalog.provider_api("deepseek/deepseek-v4-flash")
+    assert creds["is_ollama"] is False
+    assert creds["options"] is None
+
+
+def test_litellm_extra_kwargs_expands_think_and_num_ctx():
+    # 展开 ollama options → 顶层 kwargs（供 ** 注入 litellm 调用点）
+    kw = catalog.litellm_extra_kwargs({"options": {"num_ctx": 8192, "think": True}})
+    assert kw == {"num_ctx": 8192, "think": True}
+    kw2 = catalog.litellm_extra_kwargs({"options": {"think": False}})
+    assert kw2 == {"think": False}
+    # 非 ollama（options=None）→ {}，不污染其它 provider
+    assert catalog.litellm_extra_kwargs({"options": None}) == {}
+    assert catalog.litellm_extra_kwargs(None) == {}
+    # think 透传时不传 num_ctx=None
+    kw3 = catalog.litellm_extra_kwargs({"options": {"num_ctx": None, "think": True}})
+    assert kw3 == {"think": True}

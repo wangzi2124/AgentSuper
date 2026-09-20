@@ -168,13 +168,21 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
                 if mid in known_ids:
                     continue
                 family = name.split(":", 1)[0]
+                # [能力透传] /api/tags 的 capabilities 列出入参能力（vision/completion/tools/thinking），
+                # 映射为本系统能力键：tools→tool_use、thinking→reasoning。探测失败/缺失默认关。
+                raw_caps = set(m.get("capabilities") or [])
+                capabilities = {
+                    "tool_use": "tools" in raw_caps,
+                    "vision": "vision" in raw_caps,
+                    "reasoning": "thinking" in raw_caps,
+                }
                 extras.append({
                     "id": mid,
                     "provider": "ollama",
                     "family": family,
                     "name": f"Ollama {family}",
                     "description": "本地 Ollama 模型（探测自 /api/tags）",
-                    "capabilities": {"tool_use": False, "vision": False, "reasoning": False},
+                    "capabilities": capabilities,
                     "context_length": 32768,
                     "limits": {"max_output_tokens": 8192},
                     "cost": dict(_ZERO_COST),
@@ -456,6 +464,11 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     `options`：需要透传给 litellm 的 provider 特定参数。Ollama 默认 num_ctx=2048，
     超过窗口的往期历史会被推理服务截断（模型答"记不清/无历史"），因此必须显式
     放大 num_ctx（settings.ollama_num_ctx）；带 deterministic 能力的 provider 也可在此扩展。
+
+    `think`：Ollama 思考模型（qwen3.5 等，/api/tags capabilities 含 thinking）默认思考态
+    出空 content（litellm 不落最终回答），必须按模型管理的「推理模型」能力显式传 think：
+    reasoning=True→think=True（保留思考，供 reasoning_content 回退），
+    reasoning=False→think=False（关闭思考，得到干净的最终回答）。
     """
     from app.config import settings
     mid = normalize_model(model_id)
@@ -463,8 +476,13 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False, "options": None}
     provider = mid.split("/", 1)[0] if "/" in mid else ""
     if provider == "ollama":
-        return {"api_base": None, "api_key": "ollama", "is_ollama": True,
-                "options": {"num_ctx": settings.ollama_num_ctx}}
+        opts: dict[str, Any] = {"num_ctx": settings.ollama_num_ctx}
+        caps = read_capabilities(mid)
+        # 能力未声明（非目录模型）→ 不传 think（交给推理服务默认，不臆断）；
+        # 声明了 reasoning → 严格按它传（True 保留思考 / False 关闭防空内容）
+        if "reasoning" in caps:
+            opts["think"] = bool(caps["reasoning"])
+        return {"api_base": None, "api_key": "ollama", "is_ollama": True, "options": opts}
     reg = read_providers().get(provider)
     if reg:
         return {"api_base": reg.get("api_base") or settings.llm_api_base,
@@ -478,10 +496,16 @@ def litellm_extra_kwargs(creds: Optional[dict]) -> dict:
 
     litellm 对 Ollama 只认顶层 `num_ctx`（非嵌套 `options`：transformation 会
     丢弃任意 `options` 键，导致 num_ctx 不生效、推理服务默认 2048 窗口截断历史）。
+    `think` 同理需顶层传（Qwen3.5 思考模型按「推理模型」能力显式开关）。
     非 ollama（options=None）返回 {}，避免把 num_ctx=None 透传给其它 provider。
     """
     opts = (creds or {}).get("options") or {}
-    return {"num_ctx": opts["num_ctx"]} if opts.get("num_ctx") is not None else {}
+    out: dict[str, Any] = {}
+    if opts.get("num_ctx") is not None:
+        out["num_ctx"] = opts["num_ctx"]
+    if opts.get("think") is not None:
+        out["think"] = bool(opts["think"])
+    return out
 
 
 def provider_config_hint(model_id: Optional[str], *, creds: Optional[dict] = None) -> str:
@@ -596,6 +620,25 @@ def lookup(model_id: Optional[str]) -> Optional[dict[str, Any]]:
         if e["id"] == model_id:
             return e
     return None
+
+
+def read_capabilities(model_id: Optional[str]) -> dict[str, bool]:
+    """读取模型声明的能力（tool_use/vision/reasoning）。
+
+    - 目录收录（内置/覆盖/探测增量）→ 按要求能力键读取；
+    - 未收录模型 → 空 dict（调用方按默认值处理，不臆断能力）。
+    """
+    if not model_id:
+        return {}
+    entry = lookup(model_id)
+    if not entry:
+        return {}
+    caps = entry.get("capabilities") or {}
+    return {
+        "tool_use": bool(caps.get("tool_use", False)),
+        "vision": bool(caps.get("vision", False)),
+        "reasoning": bool(caps.get("reasoning", False)),
+    }
 
 
 # ── 模型引用归一化 ───────────────────────────────────────────────────────

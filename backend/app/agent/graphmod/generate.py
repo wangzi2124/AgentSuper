@@ -278,11 +278,21 @@ class RAGAgentGenerate(RAGAgentTools):
             #   - 其余（pdf/docx/xlsx/txt/md/csv/json 等）→ 经 LangChain document
             #     loaders 解析为文本上下文（attachment_loader），让模型能读到文档正文。
             image_files, text_ctx = _attachment_parts(user_files)
-            for img in image_files:
-                user_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{img['mime_type']};base64,{img['data']}"},
-                })
+            # [能力驱动视觉] 按「模型管理」声明的 vision 能力决定是否附图：
+            #   vision=True（含未收录模型，默认附图不臆断）→ 原生 image_url 数据块；
+            #   vision=False（明确无视觉）→ 不附图、仅提示文件名，由 caption 桥（describe_image）
+            #     注入文本描述 / OCR，模型依然能"读懂"图里内容。
+            from app.models.catalog import read_capabilities as _read_caps
+            _model_vision = _read_caps(_model_hint).get("vision")
+            if _model_vision is not False:
+                for img in image_files:
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{img['mime_type']};base64,{img['data']}"},
+                    })
+            elif image_files:
+                _names = "、".join(im.get("filename", "") or f"图片{i+1}" for i, im in enumerate(image_files))
+                user_content.append({"type": "text", "text": f"[附加图片：{_names}]（当前模型不支持视觉，未附图，以下描述供参考）"})
             # [F8] 图片描述桥：视觉 LLM caption 注入文本（非视觉主模型/子 Agent 也能看图）
             if image_files and settings.image_vlm_caption and settings.image_caption_model:
                 caps = []

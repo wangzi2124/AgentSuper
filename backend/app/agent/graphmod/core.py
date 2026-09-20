@@ -248,7 +248,19 @@ class RAGAgent(RAGAgentGenerate):
             model, pt, ct, hit, miss, dur,
         )
         if state is not None and push_text:
-            content = getattr(response.choices[0].message, "content", "") or ""
+            msg0 = getattr(response.choices[0], "message", None)
+            content = getattr(msg0, "content", None) or ""
+            if not content.strip():
+                # [reasoning 方言] 非流式同样有 content 空、正史在 reasoning_content 的模型，
+                # 回退拼接（对齐 sub_tools/plan_agent 的 reasoning 回退）
+                reasoning = getattr(msg0, "reasoning_content", None) or ""
+                if reasoning.strip():
+                    content = reasoning
+                    # 回写 message.content，让上游 generate.py 读到的不是空内容
+                    try:
+                        msg0.content = content
+                    except Exception:
+                        pass
             if content:
                 self._push_stream_event(state, {"type": "text_delta", "delta": content})
         return response
@@ -321,6 +333,7 @@ class RAGAgent(RAGAgentGenerate):
             return self._assemble_response(model, response, start, state, push_text=True)
 
         text_chunks: list[str] = []
+        reasoning_chunks: list[str] = []
         pending_text: list[str] = []
         tool_slots: dict[int, dict] = {}
         finish_reason = None
@@ -344,6 +357,11 @@ class RAGAgent(RAGAgentGenerate):
                 if c:
                     text_chunks.append(c)
                     pending_text.append(c)
+                # [reasoning 方言] qwen3.5 等思考模型把思考逐步流进 delta.reasoning_content，
+                # 收集备用：最终 content 为空时回退（对齐 sub_tools/plan_agent 的 reasoning 回退）
+                rc = getattr(delta, "reasoning_content", None)
+                if rc:
+                    reasoning_chunks.append(rc)
                     # 仍可能属于 Ollama 流式工具调用 JSON 的文本 → 暂缓推送，
                     # 避免把工具调用 JSON 闪给前端；流结束统一转换/补推。
                     circum = "".join(text_chunks)
@@ -381,6 +399,13 @@ class RAGAgent(RAGAgentGenerate):
             logger.warning("LLM stream interrupted, using accumulated content", exc_info=True)
 
         content = "".join(text_chunks)
+        # [reasoning 方言] 思考模型（如 qwen3.5 think=True）只有 reasoning_content 流、
+        # content 为空（litellm 不落最终回答）；回退：content 空且 reasoning 非空 → 用 reasoning。
+        if not content.strip() and reasoning_chunks:
+            reasoning = "".join(reasoning_chunks).strip()
+            if reasoning:
+                logger.info("content empty but reasoning present (%d chars) → fallback", len(reasoning))
+                content = reasoning
 
         # [Ollama 流式兼容] 工具调用被 litellm 注入为 content 中的 JSON 文本而非标准
         # tool_calls 增量（Ollama 原生把函数调用随 message 文本返回）。重组：
