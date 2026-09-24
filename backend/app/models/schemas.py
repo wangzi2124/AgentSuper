@@ -118,3 +118,11 @@ class MultiAgentChatResponse(BaseModel):
     conversation_id: str
     steps: list[StepEvent] = []
     routed_to: Optional[str] = None
+    # [文件改动] 本次轮次改动的文件 + 行数（快照 diff，聊天框展示）
+    files_changed: list = Field(default_factory=list)
+
+
+class RestoreSnapshotRequest(BaseModel):
+    """[撤回改动] 恢复某条 assistant 消息对应轮次文件改动的请求。"""
+    conversation_id: str
+    message_id: str

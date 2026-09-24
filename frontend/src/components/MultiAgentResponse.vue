@@ -9,7 +9,7 @@ const props = defineProps<{
   isLast: boolean
 }>()
 
-defineEmits<{ undo: [] }>()
+const emit = defineEmits<{ undo: []; restore: [] }>()
 
 // 单 Agent 路由时，最终答案与 Agent 面板内容完全一致，
 // 再渲染一遍会造成"两条最终答案"的重复。仅在内容有新增信息时才展示。
@@ -67,6 +67,13 @@ function orderedParts(agent: {
     parts.push({ seq: parts.length, kind: 'text' as const, text: agent.content })
   }
   return parts
+}
+
+// 文件改动状态 → 中文徽标文案
+function statusLabel(status: string): string {
+  if (status === 'added') return '新增'
+  if (status === 'deleted') return '删除'
+  return '修改'
 }
 </script>
 
@@ -127,6 +134,29 @@ function orderedParts(agent: {
     <!-- final answer -->
     <div v-if="showFinalAnswer" class="text"><MarkdownContent :text="message.content" /></div>
 
+    <!-- files changed（快照 diff：本次轮次改动了哪些文件 + 行数） -->
+    <div v-if="message.files_changed?.length" class="files-changed">
+      <div class="fc-title">
+        <span>文件改动 · {{ message.files_changed.length }}</span>
+        <button
+          class="fc-restore"
+          :disabled="message.snapshotRestored"
+          :class="{ restored: message.snapshotRestored }"
+          @click="emit('restore')"
+        >{{ message.snapshotRestored ? '已撤回' : '撤回本轮改动' }}</button>
+      </div>
+      <div v-for="fc in message.files_changed" :key="fc.file" class="fc-row">
+        <span class="fc-badge" :class="fc.status">{{ statusLabel(fc.status) }}</span>
+        <span class="fc-file" :title="fc.file">{{ fc.file }}</span>
+        <span v-if="fc.external" class="fc-lines binary">外部路径</span>
+        <span v-else-if="fc.binary" class="fc-lines binary">二进制</span>
+        <span v-else class="fc-lines">
+          <span class="add">+{{ fc.additions ?? 0 }}</span>
+          <span class="del">-{{ fc.deletions ?? 0 }}</span>
+        </span>
+      </div>
+    </div>
+
     <!-- error -->
     <div v-if="message.isError && message.errorInfo" class="err">
       ⚠️ {{ message.errorInfo.message }}
@@ -136,3 +166,62 @@ function orderedParts(agent: {
 
 
 <style scoped src="../styles/chat/multiAgentResponse.css"></style>
+
+<style scoped>
+.files-changed {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-elevated);
+  font-size: 13px;
+}
+.fc-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.fc-restore {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: var(--radius-pill);
+  padding: 2px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.fc-restore:hover:not(:disabled) { background: var(--primary-glow); }
+.fc-restore:disabled { opacity: 0.6; cursor: default; }
+.fc-restore.restored { color: var(--text-secondary); }
+.fc-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+.fc-badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.fc-badge.added { background: var(--success-soft); color: var(--success); }
+.fc-badge.modified { background: var(--primary-glow); color: var(--primary); }
+.fc-badge.deleted { background: var(--danger-soft); color: var(--danger); }
+.fc-file {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.fc-lines { flex-shrink: 0; font-family: var(--font-mono); font-size: 12.5px; }
+.fc-lines .add { color: var(--success); margin-right: 6px; }
+.fc-lines .del { color: var(--danger); }
+.fc-lines.binary { color: var(--text-secondary); }
+</style>

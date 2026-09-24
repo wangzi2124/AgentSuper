@@ -177,6 +177,24 @@ function handleUndo(index: number) {
   }
 }
 
+// [撤回改动] 恢复某条 assistant 消息对应轮次的文件改动
+async function handleRestore(msg: { id: string }) {
+  if (agent.loading) agent.cancel()
+  try {
+    const r = await agent.restoreSnapshot(msg.id)
+    if (r?.already) {
+      agent.setNotice('该轮次改动已恢复过，无需重复操作')
+    } else if (r && r.missing && r.missing.length) {
+      agent.setNotice(`已撤回 ${r.restored_files?.length ?? r.internal ?? 0} 个文件；${r.missing.length} 个文件已无法恢复（${r.missing.join('、')}）`)
+    } else {
+      agent.setNotice('已撤回本轮文件改动')
+    }
+  } catch (e) {
+    console.error('Restore failed:', e)
+    agent.setNotice(`撤回失败：${e instanceof Error ? e.message : '未知错误'}`)
+  }
+}
+
 function handleMessageDelete(messageId: string) {
   if (agent.loading) agent.cancel()
   agent.deleteMessage(messageId)
@@ -357,7 +375,7 @@ async function handleCopy(messageId: string, text: string) {
               </template>
 
               <template v-else>
-                <MultiAgentResponse :message="msg" :routingStatus="agent.routingStatus" :isLast="idx === messages.length - 1" />
+                <MultiAgentResponse :message="msg" :routingStatus="agent.routingStatus" :isLast="idx === messages.length - 1" @restore="handleRestore(msg)" />
               </template>
 
               <div class="message-footer">

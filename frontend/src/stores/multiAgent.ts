@@ -3,6 +3,7 @@ import { ref, computed, reactive, onScopeDispose } from 'vue'
 import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep, FileContent, AgentOutputPart, VoiceMessageData } from '../types'
 import {
   sendMultiAgentStream,
+  restoreSnapshot as apiRestoreSnapshot,
 } from '../api/multiAgent'
 import {
   listConversations,
@@ -309,6 +310,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         model: (m as any).model,
         tokens: (m as any).tokens,
         cost: (m as any).cost,
+        files_changed: (m as any).files_changed || [],
+        snapshotRestored: !!((m as any).snapshot_restored),
         timestamp: new Date(),
       }))
       // 从 IndexedDB 加载本地缓存（SSE 中断时可能有未同步消息）
@@ -688,6 +691,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           if (event.model) assistantMsg.model = event.model
           if (event.tokens) assistantMsg.tokens = event.tokens
           if (typeof event.cost === 'number' && event.cost > 0) assistantMsg.cost = event.cost
+          // [文件改动] 本轮改动的文件 + 行数（快照 diff）
+          if (event.files_changed && event.files_changed.length) assistantMsg.files_changed = event.files_changed
           // 回填服务器生成的消息 id，保证删除/撤销能命中真实消息
           if (event.assistant_msg_id) assistantMsg.id = event.assistant_msg_id
           if (event.user_msg_id) {
@@ -788,6 +793,17 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
   }
 
+  // [撤回改动] 恢复某条 assistant 消息对应轮次的文件改动（调后端 restore-snapshot）
+  async function restoreSnapshot(messageId: string) {
+    const s = activeSessionId.value ? sessions.value[activeSessionId.value] : undefined
+    if (!s?.conversationId) throw new Error('会话尚未在服务器创建，无法撤回改动')
+    const result = await apiRestoreSnapshot(s.conversationId, messageId)
+    const msg = s.messages.find(m => m.id === messageId)
+    if (msg) msg.snapshotRestored = true
+    await persistSession(activeSessionId.value!)
+    return result
+  }
+
   // 删除单条消息：先同步后端（存在会话时），再移除本地
   async function deleteMessage(messageId: string) {
     if (activeSessionId.value) {
@@ -840,7 +856,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     sessionDirectory, setSessionDirectory, agentMode,
     messages, conversationId, conversationTitle, loading, streamPhase, queuePosition,
     retryCountdown, notice, setNotice,
-    send, cancel, clear, undoMessage, deleteMessage, deleteConversation,
+    send, cancel, clear, undoMessage, restoreSnapshot, deleteMessage, deleteConversation,
     loadConversations, loadConversation, newChat, renameConversation,
     retryLastMessage, manualRetry, cancelAutoRetry,
   }

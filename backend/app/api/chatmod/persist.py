@@ -186,7 +186,9 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
                                tokens: dict | None = None, cost: float = 0.0,
                                client_msg_id: str | None = None,
                                files: list | None = None,
-                               voice: dict | None = None) -> tuple[str, str]:
+                               voice: dict | None = None,
+                               files_changed: list | None = None,
+                               snapshot_restore: dict | None = None) -> tuple[str, str]:
     """主会话 + 子任务会话各追加 user/assistant 消息；新会话生成标题。
 
     主会话写经 write_lock 串行化（与 /stream 协调器执行体、compact/revert 互斥），
@@ -223,6 +225,11 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
                 "role": "assistant", "content": answer, "sources": sources, "steps": steps,
                 "agents": agents or [], "parent_id": user_msg_id, "agent": "supervisor", "model": model,
                 "tokens": tokens or {}, "cost": round(float(cost), 6),
+                # [文件改动] 本次轮次实际改动的文件 + 增减行数（快照 diff，聊天框展示）
+                "files_changed": files_changed or [],
+                # [撤回改动] 该轮次的恢复描述：git before_tree + 外部文件 before 归档，
+                # 供 /api/chat/multi-agent/restore-snapshot 还原磁盘文件。
+                "snapshot": snapshot_restore or {},
             })
             _persist_multi_agent_parts(session_id, assistant_msg.id, answer, agents)
             _account_session_usage(session_id, tokens, cost)
@@ -237,7 +244,8 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
     try:
         async with service.write_lock(child_id):
             _ensure_child_pair(service, user_id, child_id, question, answer, sources,
-                               steps, agents, model, tokens, cost, client_msg_id)
+                               steps, agents, model, tokens, cost, client_msg_id,
+                               files_changed, snapshot_restore)
     except Exception:
         logger.exception("Failed to persist child session %s (main %s), main already committed", child_id, session_id)
     return user_msg_id, assistant_msg_id
@@ -266,7 +274,9 @@ def _existing_pair(service, user_id: str, session_id: str,
 
 def _ensure_child_pair(service, user_id: str, session_id: str, question: str, answer: str,
                        sources: list, steps: list, agents: list | None, model: str | None,
-                       tokens: dict | None, cost: float = 0.0, client_msg_id: str | None = None) -> None:
+                       tokens: dict | None, cost: float = 0.0, client_msg_id: str | None = None,
+                       files_changed: list | None = None,
+                       snapshot_restore: dict | None = None) -> None:
     """[B4] 确保子任务会话存在与主会话一致的 user/assistant 对（幂等）。"""
     user_msg_id, existing_assistant_id = _existing_pair(service, user_id, session_id, client_msg_id)
     if existing_assistant_id:
@@ -280,6 +290,8 @@ def _ensure_child_pair(service, user_id: str, session_id: str, question: str, an
         "role": "assistant", "content": answer, "sources": sources, "steps": steps,
         "agents": agents or [], "parent_id": user_msg_id, "agent": "supervisor", "model": model,
         "tokens": tokens or {}, "cost": round(float(cost), 6),
+        "files_changed": files_changed or [],
+        "snapshot": snapshot_restore or {},
     })
     _persist_multi_agent_parts(session_id, child_assist.id, answer, agents)
     _account_session_usage(session_id, tokens, cost)

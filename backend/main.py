@@ -61,6 +61,13 @@ async def lifespan(app: FastAPI):
         cleanup_truncated()
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning("Truncated output cleanup failed: %s", e)
+    # 清理过期的轮次级外部文件归档（data/snapshot/turns，保留期 7 天）
+    try:
+        from app.snapshot.turn import cleanup_turn_archives
+
+        cleanup_turn_archives()
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("Turn snapshot archives cleanup failed: %s", e)
     # 定时 TTL 清理：VECTOR_STORE_TTL_DAYS>0 时按间隔定期清理过期文档；
     # 后台维护循环同时执行知识库自愈（D2：index_state!=ready 的文档重放建索引）。
     _maintenance_task = None

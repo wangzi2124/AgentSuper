@@ -46,6 +46,12 @@ from .persist import _build_compressed_history
 from .persist import _persist_interrupted_partial
 from .persist import _persist_multi_agent
 from .persist import _resolve_multi_agent_parent
+from .snapshot_diff import _abort_turn, _before_hash, _files_changed
+
+from app.session import repository as session_repo
+from app.snapshot.turn import restore_session_turn
+
+from app.models.schemas import RestoreSnapshotRequest
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +164,9 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     # 登记子任务会话（kind='task'）+ AgentBus thread
     child_id, thread_id = _begin_task_session(service, user_id, session_id, body.message)
 
+    # [文件改动] 请求开始前拍快照（before tree），完成后 diff 出本次变更文件
+    before_hash = _before_hash(request)
+
     try:
         # 通过 Supervisor 发送请求
         # 如果指定了 agent_mode（顶层命令仅 plan），直接发送到 plan Agent
@@ -194,12 +203,14 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
             abort(thread_id)
         task_bridge.unregister(child_id)
         service.update(user_id, child_id, status="interrupted")
+        _abort_turn()
         raise HTTPException(status_code=499, detail="Request cancelled")
     except Exception as e:
         task_bridge.unregister(child_id)
         service.update(user_id, child_id, status="error")
         logger.exception("multi-agent request failed: user=%s session=%s classified=%s",
                          user_id, session_id, classify_error(e))
+        _abort_turn()
         raise HTTPException(status_code=500, detail=friendly_chat_error(e, model=body.model))
 
     if reply.type == "error":
@@ -208,6 +219,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         _err_detail = (reply.payload or {}).get("error", "")
         logger.error("multi-agent reply error: user=%s session=%s detail=%s",
                      user_id, session_id, _err_detail)
+        _abort_turn()
         raise HTTPException(status_code=500, detail=friendly_chat_error(
             RuntimeError(_err_detail) if _err_detail else None, model=body.model,
         ))
@@ -218,6 +230,9 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     steps = payload.get("steps", [])
     routed_to = payload.get("routed_to")
 
+    # [文件改动] 完成后对比 before/after，得到本次轮次的变更文件 + 行数 + 恢复描述
+    files_changed, snapshot_restore = _files_changed(request, before_hash)
+
     # 落库：主会话 + 子任务会话
     user_msg_id, assistant_msg_id = await _persist_multi_agent(
         service, user_id, session_id, child_id, body.message, answer, sources, steps,
@@ -225,6 +240,8 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         client_msg_id=body.client_msg_id,
         files=[f.model_dump() for f in body.files],
         voice=body.voice.model_dump() if body.voice else None,
+        files_changed=files_changed,
+        snapshot_restore=snapshot_restore,
     )
     task_bridge.unregister(child_id)
 
@@ -234,6 +251,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         conversation_id=session_id,
         steps=[StepEvent(**s) if isinstance(s, dict) else s for s in steps],
         routed_to=routed_to,
+        files_changed=files_changed,
     )
 
 
@@ -320,6 +338,9 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     if body.agent_mode == "plan":
                         target_agent = body.agent_mode
 
+                    # [文件改动] 请求开始前拍快照（before tree），完成后 diff 变更文件
+                    before_hash = _before_hash(request)
+
                     reply = await agent_bus.send_and_wait(
                         AgentMessage(
                             source="user",
@@ -350,6 +371,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         generic_error = friendly_chat_error(
                             RuntimeError(_err_detail) if _err_detail else None, model=body.model,
                         )
+                        _abort_turn()
                         collector.fail_running(generic_error)
                         await event_queue.put({
                             "type": "error",
@@ -368,6 +390,9 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     routed_to = payload.get("routed_to")
                     agents = collector.agents_snapshot()
 
+                    # [文件改动] 完成后对比 before/after，得到本次轮次的变更文件 + 行数 + 恢复描述
+                    files_changed, snapshot_restore = _files_changed(request, before_hash)
+
                     # 落库：主会话 + 子任务会话（先落库以拿到消息 id）
                     user_msg_id, assistant_msg_id = await _persist_multi_agent(
                         service, user_id, session_id, child_id, body.message, answer, sources, steps,
@@ -375,6 +400,8 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         cost=payload.get("cost") or 0.0, client_msg_id=body.client_msg_id,
                         files=[f.model_dump() for f in body.files],
                         voice=body.voice.model_dump() if body.voice else None,
+                        files_changed=files_changed,
+                        snapshot_restore=snapshot_restore,
                     )
 
                     await event_queue.put({
@@ -394,9 +421,11 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         "agents": agents,
                         "tokens": payload.get("tokens") or {},
                         "cost": payload.get("cost") or 0.0,
+                        "files_changed": files_changed,
                     })
 
                 except asyncio.TimeoutError:
+                    _abort_turn()
                     collector.fail_running("请求超时，请重试")
                     await event_queue.put({
                         "type": "error",
@@ -408,6 +437,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     })
                 except asyncio.CancelledError:
                     service.update(user_id, child_id, status="interrupted")
+                    _abort_turn()
                     collector.fail_running("请求已取消")
                     await event_queue.put({
                         "type": "error",
@@ -420,6 +450,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     logger.exception("multi-agent stream invocation failed: user=%s session=%s",
                                      user_id, session_id)
                     service.update(user_id, child_id, status="error")
+                    _abort_turn()
                     generic_error = friendly_chat_error(e, model=body.model)
                     collector.fail_running(generic_error)
                     await event_queue.put({
@@ -519,6 +550,60 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
         # 使"停止/撤销"按钮在任何时刻都能 POST /interrupt 真正打断后台 Agent 任务
         headers={"X-Session-Id": session_id},
     )
+
+
+@router.post("/multi-agent/restore-snapshot")
+async def chat_multi_agent_restore_snapshot(request: Request, body: RestoreSnapshotRequest):
+    """[撤回改动] 恢复某条 assistant 消息对应轮次的文件改动。
+
+    body: {conversation_id, message_id}。校验消息归属当前用户且为 assistant 类型，
+    读取其 data.snapshot 恢复描述还原磁盘文件——内部（git worktree）文件从 before_tree
+    恢复、外部文件写回归档内容（原来不存在则删除），并把该消息标记为已撤回
+    （已撤回后再请求直接返回 already=True，避免把之后的人工修改再次覆盖掉）。
+    任一文件失败只跳过该文件，不中断整体恢复。
+    """
+    user_id = _get_user_id(request)
+    try:
+        service, session_id, _ = _resolve_multi_agent_parent(request, user_id, body.conversation_id, "")
+    except session_repo.Forbidden:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    except HTTPException:
+        raise
+    target = None
+    try:
+        for m in service.messages(user_id, session_id):
+            if m.id == body.message_id and m.type == "assistant":
+                target = m
+                break
+    except Exception:
+        logger.exception("restore-snapshot list messages failed: %s", session_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    data = dict(target.data or {})
+    if data.get("snapshot_restored"):
+        return {
+            "restored": True, "already": True,
+            "internal": 0, "external": 0,
+            "restored_files": data.get("snapshot_restored_files") or [],
+        }
+    descriptor = data.get("snapshot") or {}
+    if not descriptor:
+        raise HTTPException(status_code=400, detail="该消息没有可撤回的快照")
+    snap = getattr(request.app.state, "snapshot", None)
+    result = restore_session_turn(snap, descriptor)
+    data["snapshot_restored"] = True
+    data["snapshot_restored_files"] = result.get("restored") or []
+    try:
+        session_repo.update_message(session_id, body.message_id, data)
+    except Exception:
+        logger.exception("mark snapshot restored failed for %s", body.message_id)
+    return {
+        "restored": True, "already": False,
+        "internal": result.get("internal", 0),
+        "external": result.get("external", 0),
+        "restored_files": result.get("restored") or [],
+        "missing": result.get("missing") or [],
+    }
 
 
 

@@ -13,14 +13,26 @@ FSUtil — opencode @opencode-ai/core/fs-util 移植（纯路径助手 + 文件�
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import secrets
+import shutil
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from .gitignore import glob_to_regex
+
+
+class FileSystemError(RuntimeError):
+    """平台无关的文件系统错误(glob 语法错、非法模式等)。
+
+    用于区分"文件缺失/IO 故障"(透传 OSError)与"调用参数层面的错误",
+    避免上层把逻辑错误误判为文件缺失。对齐规格 §4.2 ③。
+    """
 
 
 @dataclass
@@ -32,6 +44,15 @@ class DirEntry:
 
     def to_dict(self) -> dict:
         return {"name": self.name, "type": self.type}
+
+
+@dataclass
+class FileStat:
+    """stat 结果，对齐规格 §4.1 stat() => {size, type, ...}。"""
+
+    size: int
+    type: str  # "File" | "Directory" | "Symlink" | "Unknown"
+    mtime_ns: int
 
 
 def normalize_path(path: str | os.PathLike[str]) -> str:
@@ -200,6 +221,82 @@ def read_file_string(path: str | os.PathLike[str], encoding: str = "utf-8", erro
         return f.read()
 
 
+def read_file(path: str | os.PathLike[str]) -> bytes:
+    """读取文件原始字节,对应规格 §4.1 readFile(path)。"""
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def stat(path: str | os.PathLike[str]) -> Optional[FileStat]:
+    """返回路径 stat 信息;不存在返回 None。对应规格 §4.1 stat(path)。"""
+    p = Path(path)
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    if p.is_symlink():
+        t = "Symlink"
+    elif p.is_dir():
+        t = "Directory"
+    elif p.is_file():
+        t = "File"
+    else:
+        t = "Unknown"
+    return FileStat(size=st.st_size, type=t, mtime_ns=st.st_mtime_ns)
+
+
+def _atomic_write_bytes(path: str | os.PathLike[str], data: bytes) -> None:
+    """原子写:先写 `path.tmp-<rand>` 同目录临时文件再 os.replace。
+
+    对齐规格 §4.2 ① —— 写路径不被并发读者看到半个文件,失败不留半成品。
+    """
+    p = Path(path)
+    tmp = p.parent / f".{p.name}.tmp-{secrets.token_hex(8)}"
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, p)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def write_file(path: str | os.PathLike[str], data: str | bytes, atomic: bool = True) -> None:
+    """写入文件(自动建父目录),默认原子写。对应规格 §4.1 writeFile(path, data)。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = data.encode("utf-8") if isinstance(data, str) else data
+    if atomic:
+        _atomic_write_bytes(p, payload)
+    else:
+        p.write_bytes(payload)
+
+
+def append_file(path: str | os.PathLike[str], data: str | bytes) -> None:
+    """追加内容到文件;文件不存在时原子创建。对应规格 §4.1 appendFile(path, data)。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = data.encode("utf-8") if isinstance(data, str) else data
+    if p.exists():
+        with open(p, "ab") as f:
+            f.write(payload)
+    else:
+        _atomic_write_bytes(p, payload)
+
+
+def remove(path: str | os.PathLike[str]) -> None:
+    """删除文件或目录(目录递归),不存在时静默成功。对应规格 §4.1 remove(path)。"""
+    p = Path(path)
+    try:
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def read_directory_entries(path: str | os.PathLike[str]) -> list[DirEntry]:
     """列出目录下的条目(仅 name/type,不 stat),对应 opencode readDir()。"""
     entries: list[DirEntry] = []
@@ -239,5 +336,47 @@ def read_json(path: str | os.PathLike[str], default: Any = None) -> Any:
 
 
 def write_json(path: str | os.PathLike[str], data: Any) -> None:
-    """写 JSON 文件(自动建目录)。"""
-    write_with_dirs(path, json.dumps(data, ensure_ascii=False, indent=2))
+    """写 JSON 文件(自动建目录,原子替换)。"""
+    write_file(path, json.dumps(data, ensure_ascii=False, indent=2))
+
+
+_FILE_LOCKS: dict[str, tuple[threading.RLock, int]] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+@contextlib.contextmanager
+def file_lock(path: str | os.PathLike[str], *, timeout: Optional[float] = None) -> Iterator[None]:
+    """文件级可重入锁(按规范化绝对路径,Windows 下大小写不敏感)。
+
+    对齐规格 §4.2 ② —— 对同一文件的编辑必须串行化,防止并发的部分写。
+    用法:
+        with file_lock("/workspace/a/b.txt"):
+            ...
+    同一路径可重入;并发请求不同路径互不阻塞。锁注册表自动清理。
+    """
+    key = normalize_path(path)
+    if os.name == "nt":
+        key = key.lower()
+    with _FILE_LOCKS_GUARD:
+        lock, count = _FILE_LOCKS.get(key, (threading.RLock(), 0))
+        _FILE_LOCKS[key] = (lock, count + 1)
+    if timeout is None:
+        lock.acquire()
+    elif not lock.acquire(timeout=timeout):
+        with _FILE_LOCKS_GUARD:
+            _l, c2 = _FILE_LOCKS.get(key, (lock, 1))
+            if c2 <= 1:
+                _FILE_LOCKS.pop(key, None)
+            else:
+                _FILE_LOCKS[key] = (_l, c2 - 1)
+        raise FileSystemError(f"timeout acquiring file lock for {path}")
+    try:
+        yield
+    finally:
+        lock.release()
+        with _FILE_LOCKS_GUARD:
+            _l, c2 = _FILE_LOCKS.get(key, (lock, 1))
+            if c2 <= 1:
+                _FILE_LOCKS.pop(key, None)
+            else:
+                _FILE_LOCKS[key] = (_l, c2 - 1)

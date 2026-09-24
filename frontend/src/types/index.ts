@@ -268,6 +268,17 @@ export interface AgentStreamData {
   parts?: AgentOutputPart[]
 }
 
+// 文件改动（快照 diff）：聊天框展示本次轮次改动了哪些文件 + 行数
+export interface FileChange {
+  file: string
+  status: 'added' | 'modified' | 'deleted'
+  binary?: boolean
+  additions?: number
+  deletions?: number
+  /** [撤回改动] 外部文件（git worktree 之外，如用户桌面路径）：file 为绝对路径 */
+  external?: boolean
+}
+
 export interface MultiAgentSSEEvent {
   type: 'routing' | 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'error' | 'queued' | 'text_delta' | 'model_switched'
   agent_id: string
@@ -298,6 +309,8 @@ export interface MultiAgentSSEEvent {
   tool_args?: Record<string, unknown>
   created_at?: string
   expires_at?: string
+  /** [文件改动] 本次轮次改动的文件 + 行数（快照 diff，done 事件携带） */
+  files_changed?: FileChange[]
 }
 
 export interface MultiAgentChatRequest {
@@ -339,5 +352,9 @@ export interface MultiAgentMessage {
   tokens?: { input?: number; output?: number; cache_read?: number; cache_write?: number; reasoning?: number }
   /** [模型目录] 本次回复成本（USD，data.cost） */
   cost?: number
+  /** [文件改动] 本次轮次改动的文件 + 行数（from done 事件 / 历史回放 data.files_changed） */
+  files_changed?: FileChange[]
+  /** [撤回改动] 该轮次的文件改动是否已撤回（restore-snapshot 成功后置 true） */
+  snapshotRestored?: boolean
 }
 

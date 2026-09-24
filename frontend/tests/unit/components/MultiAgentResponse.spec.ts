@@ -101,4 +101,71 @@ describe('MultiAgentResponse 输出部件渲染', () => {
     // 单 agent 内容与 message.content 一致 → 不重复展示 final answer
     expect(wrapper.findAll('.text .md-stub').length).toBe(1)
   })
+
+  it('files_changed 渲染改动文件卡片（状态徽标 + 相对路径 + 增减行）', () => {
+    const message = base({})
+    message.files_changed = [
+      { file: 'src/a.ts', status: 'modified', additions: 3, deletions: 1 },
+      { file: 'src/b.txt', status: 'added', additions: 10, deletions: 0 },
+      { file: 'img/logo.png', status: 'added', binary: true },
+    ]
+    const wrapper = mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+    const rows = wrapper.findAll('.fc-row')
+    expect(rows).toHaveLength(3)
+    expect(rows[0].text()).toContain('修改')
+    expect(rows[0].text()).toContain('src/a.ts')
+    expect(rows[0].text()).toContain('+3')
+    expect(rows[0].text()).toContain('-1')
+    expect(rows[1].text()).toContain('新增')
+    expect(rows[1].text()).toContain('+10')
+    // 二进制文件不再显示行数，显示"二进制"
+    expect(rows[2].text()).toContain('二进制')
+    expect(rows[2].text()).not.toContain('+0')
+    expect(wrapper.find('.fc-title').text()).toContain('文件改动')
+  })
+
+  it('无 files_changed 不渲染改动卡片', () => {
+    const wrapper = mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message: base({}) },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+    expect(wrapper.find('.files-changed').exists()).toBe(false)
+  })
+
+  it('[撤回改动] 文件卡片展示恢复按钮，点击 emit restore（外部文件标注外部路径）', async () => {
+    const message = base({})
+    message.files_changed = [
+      { file: 'src/a.ts', status: 'modified', additions: 2, deletions: 0 },
+      { file: 'C:\\Users\\me\\Desktop\\out.txt', status: 'modified', additions: 1, deletions: 1, external: true },
+    ]
+    const wrapper = mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+    const btn = wrapper.find('.fc-restore')
+    expect(btn.exists()).toBe(true)
+    expect(btn.text()).toBe('撤回本轮改动')
+    expect(btn.attributes('disabled')).toBeUndefined()
+    // 外部文件显示"外部路径"标注
+    expect(wrapper.findAll('.fc-row')[1].text()).toContain('外部路径')
+    await btn.trigger('click')
+    expect(wrapper.emitted('restore')).toHaveLength(1)
+  })
+
+  it('[撤回改动] 已撤回消息按钮置灰显示"已撤回"', () => {
+    const message = base({})
+    message.files_changed = [{ file: 'src/a.ts', status: 'modified', additions: 1, deletions: 0 }]
+    message.snapshotRestored = true
+    const wrapper = mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+    const btn = wrapper.find('.fc-restore')
+    expect(btn.text()).toBe('已撤回')
+    expect(btn.attributes('disabled')).toBeDefined()
+    expect(btn.classes()).toContain('restored')
+  })
 })

@@ -18,6 +18,7 @@ from app.services.task_manager import TaskManager
 from app.services.voice import VoiceService
 from app.skills.loader import SkillLoader
 from app.storage.file_store import FileStore
+from app.snapshot import Snapshot  # [snapshot 快照层] 规格模块 B
 
 # ── 多 Agent 系统 ──
 from app.agent.bus import AgentBus
@@ -127,6 +128,12 @@ def _do_init(app):
     app.state.storage_paths = _storage_paths
     app.state.project_storage = _project_storage
     logger.info("project initialized: id=%s worktree=%s", project.id, project.worktree)
+
+    # [snapshot 快照层] 规格模块 B：针对项目 worktree 的步骤级快照/回滚。
+    # 内部 git 仓库只写对象（write-tree），不建 commit、不碰用户 index/分支/HEAD → 零干扰；
+    # 由 chat 轮次钩子（chatmod/snapshot_diff.py）在每次用户请求前/后自动 track，
+    # diff_full 出「本次改动的文件 + 行数」随 assistant 消息展示（原 /api/snapshot 管理路由已移除）。
+    app.state.snapshot = Snapshot(worktree=project.worktree, data_dir=str(_data_dir))
 
     # [token 优化 v6] 自定义工具存储：脚本型写 plugins/custom_*.py（复用插件加载链路），
     # 固定型（pin）写 data/pinned_tools.json（按需挂载时始终保留该工具 schema）

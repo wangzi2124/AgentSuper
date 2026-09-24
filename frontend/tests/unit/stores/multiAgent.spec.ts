@@ -7,6 +7,7 @@ import type { MultiAgentSSEEvent, FileContent, VoiceMessageData } from '@/types'
 
 const mocks = vi.hoisted(() => ({
   sendStream: vi.fn(),
+  restoreSnapshot: vi.fn(),
   getConversation: vi.fn(),
   listConversations: vi.fn(),
   revertSession: vi.fn(),
@@ -20,7 +21,7 @@ const mocks = vi.hoisted(() => ({
     [...(s || []), ...(c || [])].filter(m => !m?.live && !(d || []).includes(m?.id)),
 }))
 
-vi.mock('@/api/multiAgent', () => ({ sendMultiAgentStream: mocks.sendStream }))
+vi.mock('@/api/multiAgent', () => ({ sendMultiAgentStream: mocks.sendStream, restoreSnapshot: mocks.restoreSnapshot }))
 vi.mock('@/api/sessions', () => ({
   listConversations: mocks.listConversations,
   getConversation: mocks.getConversation,
@@ -55,6 +56,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
   uid = 0
   mocks.sendStream.mockReset()
+  mocks.restoreSnapshot.mockReset()
   mocks.getConversation.mockReset()
   mocks.revertSession.mockReset()
   mocks.deleteSessionMessage.mockReset()
@@ -161,6 +163,26 @@ describe('send 流式', () => {
     expect(store.activeSessionId).toBe('server-1')
     // 首事件即拿到会话 id（中断可打断）
     expect(mocks.sendStream.mock.calls[0][2]).toBeTruthy()
+  })
+
+  it('done 事件携带 files_changed → 附加到 assistant 消息', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({
+        type: 'done',
+        conversation_id: 'server-1',
+        answer: '改好了',
+        files_changed: [
+          { file: 'src/a.ts', status: 'modified', additions: 3, deletions: 1 },
+          { file: 'src/b.txt', status: 'added', additions: 10, deletions: 0 },
+        ],
+      }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('改一下 a.ts')
+    const msg = store.messages[1]
+    expect(msg.files_changed).toHaveLength(2)
+    expect(msg.files_changed![0]).toMatchObject({ file: 'src/a.ts', status: 'modified', additions: 3, deletions: 1 })
+    expect(msg.files_changed![1].status).toBe('added')
   })
 
   it('模型不可用 → 拒绝发送 + notice', async () => {
@@ -272,7 +294,10 @@ describe('会话加载', () => {
   it('loadConversation 合并服务器 + 缓存 + 同步工作目录', async () => {
     mocks.getConversation.mockResolvedValue({
       id: 'c1', title: '标题', directory: '/work',
-      messages: [{ id: 'm0', role: 'user', content: 'server', agents: [], files: [] }],
+      messages: [{
+        id: 'm0', role: 'user', content: 'server', agents: [], files: [],
+        files_changed: [{ file: 'docs/a.md', status: 'modified', additions: 5, deletions: 2 }],
+      }],
     })
     mocks.loadCache.mockResolvedValue({
       messages: [{ id: 'local', role: 'user', content: '本地未同步', agents: [], timestamp: new Date() }],
@@ -285,6 +310,62 @@ describe('会话加载', () => {
     const ids = store.messages.map(m => m.id)
     expect(ids).toContain('m0')
     expect(ids).toContain('local')
+    // 历史回放也携带 files_changed（assistant 消息 data.files_changed）
+    const serverMsg = store.messages.find(m => m.id === 'm0')
+    expect(serverMsg?.files_changed).toEqual([{ file: 'docs/a.md', status: 'modified', additions: 5, deletions: 2 }])
+  })
+
+  it('[撤回改动] 回放映射 snapshot_restored → snapshotRestored', async () => {
+    mocks.getConversation.mockResolvedValue({
+      id: 'c2', title: '标题', directory: '/work',
+      messages: [{
+        id: 'm1', role: 'assistant', content: 'x', agents: [], files: [],
+        files_changed: [{ file: 'a.ts', status: 'modified', additions: 1, deletions: 0 }],
+        snapshot_restored: true,
+      }],
+    })
+    mocks.loadCache.mockResolvedValue({ messages: [], deletedIds: [] })
+    const store = useMultiAgentStore()
+    await store.loadConversation('c2')
+    expect(store.messages.find(m => m.id === 'm1')?.snapshotRestored).toBe(true)
+  })
+})
+
+describe('[撤回改动] restoreSnapshot store 方法', () => {
+  it('调后端 API + 置消息 snapshotRestored + 持久化', async () => {
+    mocks.restoreSnapshot.mockResolvedValue({ restored: true, already: false, internal: 1, external: 0, restored_files: ['a.ts'], missing: [] })
+    const store = useMultiAgentStore()
+    store.activeSessionId = 's1'
+    store.sessions['s1'] = {
+      messages: [
+        { id: 'm0', role: 'user', content: 'a', agents: [], timestamp: new Date() },
+        {
+          id: 'm1', role: 'assistant', content: 'A', agents: [],
+          files_changed: [{ file: 'a.ts', status: 'modified', additions: 1, deletions: 0 }],
+          snapshotRestored: false, timestamp: new Date(),
+        },
+      ],
+      conversationId: 'c1', conversationTitle: '', loading: false, abortController: null,
+      streamPhase: 'idle', queuePosition: null, deletedIds: [],
+    }
+    mocks.saveCache.mockResolvedValue(undefined)
+    const result = await store.restoreSnapshot('m1')
+    expect(mocks.restoreSnapshot).toHaveBeenCalledWith('c1', 'm1')
+    expect(store.messages.find(m => m.id === 'm1')?.snapshotRestored).toBe(true)
+    expect(mocks.saveCache).toHaveBeenCalled()
+    expect(result.missing).toEqual([])
+  })
+
+  it('无服务器会话时抛错（不静默返回）', async () => {
+    const store = useMultiAgentStore()
+    store.activeSessionId = 's1'
+    store.sessions['s1'] = {
+      messages: [{ id: 'm1', role: 'assistant', content: 'A', agents: [], timestamp: new Date() }],
+      conversationId: '', conversationTitle: '', loading: false, abortController: null,
+      streamPhase: 'idle', queuePosition: null, deletedIds: [],
+    }
+    await expect(store.restoreSnapshot('m1')).rejects.toThrow('会话尚未在服务器创建')
+    expect(mocks.restoreSnapshot).not.toHaveBeenCalled()
   })
 })
 

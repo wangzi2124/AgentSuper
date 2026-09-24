@@ -19,6 +19,10 @@ import re
 from pathlib import Path
 
 
+from app.filesystem import fsutil  # [snapshot] 原子写 + 文件级锁（规格 §4.2）
+
+from app.snapshot.turn import archive_external  # [snapshot] 轮次级外部文件 before 归档
+
 
 
 # ── 跨子模块依赖（自动生成）──
@@ -55,11 +59,15 @@ def _read_text_raw(path: Path) -> tuple[str, bool]:
     return (text[1:] if has_bom else text), has_bom
 
 def _write_text_raw(path: Path, text: str, has_bom: bool = False) -> None:
-    """以 newline="" 原样写入文本（不做 os.linesep 转换），可选补回 UTF-8 BOM。"""
+    """以 newline="" 原样写入文本（不做 os.linesep 转换），可选补回 UTF-8 BOM。
+
+    [原子写] 委托 fsutil.write_file：同目录临时文件 + os.replace，读者看不到半成品、
+    失败不留残文件；[文件锁] 同一路径串行化写入，对齐规格 §4.2 的并发编辑约束。
+    """
     if has_bom and not text.startswith("\ufeff"):
         text = "\ufeff" + text
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
+    with fsutil.file_lock(str(path), timeout=30):
+        fsutil.write_file(path, text, atomic=True)
 
 def tool_write_file(path: str, content: str, overwrite: bool = False) -> dict:
     """创建新文件并写入内容。overwrite=True 时允许覆盖已存在的文件。
@@ -67,15 +75,17 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> dict:
     行尾按内容原样写入（newline=""），不做系统换行符转换。
     """
     target = _resolve(path)
+    archive_external(target)  # [snapshot] 轮次级 before 归档（外部文件）
     _ensure_safe(target, "write")
     overwrite = _coerce_bool(overwrite)
-    if target.exists() and not overwrite:
-        return _env("write", f"Error: file already exists: {path} (use overwrite=True to overwrite, or edit_file to modify)", error=True)
     target.parent.mkdir(parents=True, exist_ok=True)
-    existed = target.exists()
     try:
-        _write_text_raw(target, str(content))
-        action = "Overwritten" if existed else "Created"
+        with fsutil.file_lock(str(target), timeout=30):
+            existed = target.exists()
+            if existed and not overwrite:
+                return _env("write", f"Error: file already exists: {path} (use overwrite=True to overwrite, or edit_file to modify)", error=True)
+            _write_text_raw(target, str(content))
+            action = "Overwritten" if existed else "Created"
         _scan_cache.invalidate(target.parent)
         size = target.stat().st_size
         return _env("write", f"{action} {path} ({size} bytes)", path=str(target), size=size, action=action.lower())
@@ -85,12 +95,14 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> dict:
 def tool_append_file(path: str, content: str) -> dict:
     """向文件追加内容（文件不存在则创建）。用于分段写入大文件：先 tool_write_file 写首段，再多次 append。"""
     target = _resolve(path)
+    archive_external(target)  # [snapshot] 轮次级 before 归档
     _ensure_safe(target, "write")
     target.parent.mkdir(parents=True, exist_ok=True)
     existed = target.exists()
     try:
-        with open(target, "a", encoding="utf-8", newline="") as f:
-            f.write(str(content))
+        with fsutil.file_lock(str(target), timeout=30):
+            with open(target, "a", encoding="utf-8", newline="") as f:
+                f.write(str(content))
         total = target.stat().st_size
         action = "Appended to" if existed else "Created"
         _scan_cache.invalidate(target.parent)
@@ -374,41 +386,46 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
     old/new 字符串会归一化后转换到目标文件的行尾再做匹配，避免换行符静默损坏。
     """
     target = _resolve(path)
+    archive_external(target)  # [snapshot] 轮次级 before 归档
     _ensure_safe(target, "write")
     replace_all = _coerce_bool(replace_all)
     if not target.is_file():
         return _env("edit", f"File {path} not found", error=True)
     try:
-        text, has_bom = _read_text_raw(target)
+        # 整个 read-modify-write 持同一把文件锁：防止两个并发编辑读过同一旧内容后
+        # 互相覆盖（_write_text_raw 内的锁只串行化写那一段，此处锁住完整事务）。
+        with fsutil.file_lock(str(target), timeout=30):
+            text, has_bom = _read_text_raw(target)
+            ending = _detect_line_ending(text)
+            try:
+                if old_string == "":
+                    # [C5 修复] 空 old_string 曾被解释为「整文件替换」→ LLM 误发空字符串会
+                    # 静默清空文件（foot-gun）。对齐 opencode edit.ts：old_string 必填，
+                    # 空值直接报错，绝不执行替换。
+                    return _env(
+                        "edit",
+                        "Error: old_string 不能为空（空值曾导致整文件被替换的清空风险），"
+                        "请提供要查找的确切文本；若需新建/覆盖请用 tool_write_file。",
+                        error=True,
+                    )
+                old = _convert_line_ending(_normalize_line_endings(old_string), ending)
+                replacement = _convert_line_ending(_normalize_line_endings(new_string), ending)
+                content_new = _edit_replace(text, old, replacement, replace_all)
+            except ValueError as e:
+                return _env("edit", f"Error: {e}", error=True)
+            try:
+                _write_text_raw(target, content_new, has_bom)
+            except Exception as e:
+                return _env("edit", f"Error writing file: {e}", error=True)
     except Exception as e:
         return _env("edit", f"Error reading file: {e}", error=True)
-    ending = _detect_line_ending(text)
-    try:
-        if old_string == "":
-            # [C5 修复] 空 old_string 曾被解释为「整文件替换」→ LLM 误发空字符串会
-            # 静默清空文件（foot-gun）。对齐 opencode edit.ts：old_string 必填，
-            # 空值直接报错，绝不执行替换。
-            return _env(
-                "edit",
-                "Error: old_string 不能为空（空值曾导致整文件被替换的清空风险），"
-                "请提供要查找的确切文本；若需新建/覆盖请用 tool_write_file。",
-                error=True,
-            )
-        old = _convert_line_ending(_normalize_line_endings(old_string), ending)
-        replacement = _convert_line_ending(_normalize_line_endings(new_string), ending)
-        content_new = _edit_replace(text, old, replacement, replace_all)
-    except ValueError as e:
-        return _env("edit", f"Error: {e}", error=True)
-    try:
-        _write_text_raw(target, content_new, has_bom)
-        _scan_cache.invalidate(target.parent)
-        return _env("edit", f"Edited {path}", path=str(target), replace_all=replace_all)
-    except Exception as e:
-        return _env("edit", f"Error writing file: {e}", error=True)
+    _scan_cache.invalidate(target.parent)
+    return _env("edit", f"Edited {path}", path=str(target), replace_all=replace_all)
 
 def tool_delete_file(path: str) -> dict:
     """删除指定文件或空目录（仅限工作区内）。"""
     target = _resolve(path)
+    archive_external(target)  # [snapshot] 轮次级 before 归档
     _ensure_safe(target, "write")
     if not target.exists():
         return _env("delete", f"Error: not found: {path}", error=True)
@@ -430,6 +447,8 @@ def tool_rename_file(path: str, new_path: str) -> dict:
     """重命名或移动文件/目录到新路径。"""
     src = _resolve(path)
     dst = _resolve(new_path)
+    archive_external(src)  # [snapshot] 轮次级 before 归档（源内容 + 目标缺席）
+    archive_external(dst)
     _ensure_safe(src, "write")
     _ensure_safe(dst, "write")
     if not src.exists():

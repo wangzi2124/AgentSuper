@@ -20,6 +20,8 @@
 
 from app.permission import get_manager as get_perm_mgr, NeedsPermission, current_session_workspace
 
+from app.snapshot.turn import archive_external  # [snapshot] 轮次级外部文件 before 归档
+
 # ── 跨子模块依赖（自动生成）──
 
 from .common import _env
@@ -168,6 +170,7 @@ def tool_apply_patch(patch_text: str) -> dict:
     try:
         for action, rel_path, body in sections:
             target = _resolve(rel_path)
+            archive_external(target)  # [snapshot] 轮次级 before 归档（add=absent / update·delete=内容）
             _ensure_safe(target, "write")
             if action == "add":
                 if target.exists():

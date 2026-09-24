@@ -1,8 +1,31 @@
 import type { MultiAgentChatRequest, MultiAgentSSEEvent, ChatError } from '../types'
-import { classifyNetworkError } from './errors'
+import { apiRequest, classifyNetworkError } from './errors'
 import { fetchWithTimeout, addAuthHeaders } from './fetch'
 
 const BASE = '/api/chat'
+
+/** [撤回改动] 恢复某条 assistant 消息对应轮次的文件改动（内部 before_tree + 外部文件写回） */
+export async function restoreSnapshot(conversationId: string, messageId: string): Promise<{
+  restored: boolean
+  already?: boolean
+  internal?: number
+  external?: number
+  restored_files?: string[]
+  missing?: string[]
+}> {
+  return apiRequest(BASE + '/multi-agent/restore-snapshot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ conversation_id: conversationId, message_id: messageId }),
+  }, true) as Promise<{
+    restored: boolean
+    already?: boolean
+    internal?: number
+    external?: number
+    restored_files?: string[]
+    missing?: string[]
+  }>
+}
 
 export async function sendMultiAgentStream(
   data: MultiAgentChatRequest,
