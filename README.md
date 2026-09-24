@@ -1,6 +1,6 @@
 # Knowledge Base System — RAG + AI Agent
 
-基于 RAG（检索增强生成）的知识库 AI 问答系统，支持文档上传、向量检索、多模型对话、Skills 和 Plugins 动态扩展。
+基于 RAG（检索增强生成）的知识库 AI 问答系统，支持文档上传、向量检索、多模型对话、Plugins 动态扩展。
 
 ---
 
@@ -23,7 +23,6 @@
 | **会话管理系统** | 归一化会话库：用户/项目/工作区三级隔离、子会话树与 fork、上下文纪元、压缩基线持久化、消息撤销（revert）、AgentBus 任务自动登记为子会话 |
 | **错误重试机制** | 三层重试架构：litellm 内置重试 → AgentBus 事件循环自愈 → 前端自动重试倒计时 + 手动重试按钮 |
 | **并发控制** | 后端全局 Semaphore 限制同时运行的 Agent 任务数（`MAX_CONCURRENT_AGENTS` 默认 4），超出自动排队，前端实时显示排队/流式状态；session.db 使用 SQLite 连接池（WAL + busy_timeout），避免高并发连接反复开关 |
-| **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如搜索、天气、生成文档），Agent 按需调用 |
 | **HTTP 客户端** | Agent 可直接发起 HTTP 请求测试 API 接口（GET/POST/PUT/DELETE），支持自定义 headers 和 body |
 | **Vector DB 开关** | 用户可在聊天界面手动控制是否启用向量库检索，关闭后 Agent 仅凭自身知识回答 |
@@ -351,7 +350,7 @@ ADMIN_TOKEN=<强随机>                          # 管理接口鉴权；不配�
 ```
 
 - 前端 HTTPS → 后端也必须 HTTPS（否则浏览器拦截混合内容）；
-- 不配 `VITE_ADMIN_TOKEN` 而后端配了 `ADMIN_TOKEN` → 前端管理操作（工作目录/插件/技能/配置）会 **403**；
+- 不配 `VITE_ADMIN_TOKEN` 而后端配了 `ADMIN_TOKEN` → 前端管理操作（工作目录/插件/配置）会 **403**；
 - 前端实现见 `frontend/src/api/base.ts`，详细说明见 `frontend/README.md`。
 
 ---
@@ -379,8 +378,7 @@ CHUNK_OVERLAP=200
 ENABLE_RERANKER=true
 RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 
-# ===== Skills & Plugins =====
-SKILLS_DIR=skills
+# ===== Plugins =====
 PLUGINS_DIR=plugins
 
 # ===== Tavily（互联网搜索）======
@@ -537,8 +535,6 @@ fetch("http://localhost:8000/api/chat/multi-agent", {
 | GET | `/api/documents/tasks/{task_id}` | 查询上传任务进度（progress + stage） |
 | GET | `/api/documents/` | 文档列表 |
 | DELETE | `/api/documents/{id}` | 删除文档 |
-| GET | `/api/skills/` | 技能列表 |
-| POST | `/api/skills/{name}/toggle` | 启用/禁用技能 |
 | GET | `/api/plugins/` | 插件列表 |
 | POST | `/api/plugins/{name}/toggle` | 启用/禁用插件 |
 | GET | `/api/vectors/?offset=0&limit=50&query=xxx&document_id=xxx` | 查看/搜索向量库内容（分页+全文检索） |
@@ -936,98 +932,7 @@ Agent 创建的文档（通过 docx-generator、pdf-generator、excel-generator�
 
 ---
 
-## Skills & Plugins
-
-### Skills（技能）
-
-已预装以下技能包，直接输入需求即可自动触发。技能分为两大来源：
-
-- **Anthropic Agent Skills** — 文档处理、设计、开发工具类
-- **Matt Pocock Skills** — 软件工程实践、代码质量、需求管理类（来自 [mattpocock/skills](https://github.com/mattpocock/skills)）
-
-#### 📝 文档处理与创作
-
-| Skill | 触发示例 |
-|-------|----------|
-| **Word 文档** (`docx`) | *"帮我创建一个 Word 文档，内容是产品介绍"* · *"把这个内容导出为 .docx 文件"* · *"帮我写一份报告，格式要好看"* |
-| **PPT 演示文稿** (`pptx`) | *"给我做一份 6 页的 PPT，主题是新能源"* · *"把这份大纲变成幻灯片"* · *"帮我美化这个 .pptx 文件"* |
-| **PDF 处理** (`pdf`) | *"把这份文档转成 PDF"* · *"提取这个 PDF 中的表格"* · *"合并这几个 PDF 文件"* · *"给 PDF 添加水印"* |
-| **Excel 表格** (`xlsx`) | *"创建一个 Excel 表格，包含销售数据"* · *"帮我把这份 CSV 转成 .xlsx"* · *"在这个表格里加个图表"* |
-
-#### 🎨 设计与视觉创作
-
-| Skill | 触发示例 |
-|-------|----------|
-| **前端界面设计** (`frontend-design`) | *"帮我设计一个产品展示的 Landing Page"* · *"做一个仪表盘风格的页面"* · *"美化这个 React 组件"* |
-| **算法艺术** (`algorithmic-art`) | *"用 p5.js 画一个粒子系统动画"* · *"生成一张算法艺术图，流场风格"* · *"创建一个创意编程作品"* |
-| **海报/画布设计** (`canvas-design`) | *"帮我设计一张海报，主题是科技论坛"* · *"创建一张艺术画布，输出 PNG"* · *"做一个活动宣传图"* |
-| **品牌风格** (`brand-guidelines`) | *"应用 Anthropic 的品牌风格到这个页面"* · *"使用品牌的配色方案"* · *"按品牌规范调整这个设计"* |
-| **主题定制** (`theme-factory`) | *"给这份 PPT 应用海洋主题"* · *"帮我生成一个自定义主题，暖色调"* · *"应用 sunset-boulevard 主题"* |
-
-#### 🔧 开发与工具
-
-| Skill | 触发示例 |
-|-------|----------|
-| **Claude API 开发** (`claude-api`) | *"帮我写一个调用 Claude API 的代码"* · *"给这段代码加上 prompt caching"* · *"从 Claude 3.5 迁移到 Claude 4"* |
-| **文档协作编写** (`doc-coauthoring`) | *"帮我写一份技术方案文档"* · *"一起协作写一篇提案"* · *"帮我起草一份设计文档"* |
-| **MCP 服务器构建** (`mcp-builder`) | *"创建一个 MCP 服务器，对接 GitHub API"* · *"用 FastMCP 写一个天气查询工具"* · *"帮我构建一个 MCP server"* |
-| **Web 应用测试** (`webapp-testing`) | *"帮我测试本地运行的 Web 应用"* · *"用 Playwright 跑一下这个页面的 E2E 测试"* · *"截图看看这个页面长什么样"* |
-| **Web Artifacts 构建** (`web-artifacts-builder`) | *"创建一个多组件交互的 HTML Artifact"* · *"用 React + Tailwind 搭建一个复杂的仪表盘"* · *"使用 shadcn/ui 构建这个页面"* |
-| **Slack GIF 制作** (`slack-gif-creator`) | *"帮我做一个欢迎新同事的 GIF，用于 Slack"* · *"创建一个产品发布的动画 GIF"* · *"做一个搞笑的 GIF"* |
-| **Skill 创建器** (`skill-creator`) | *"帮我创建一个自定义技能"* · *"优化这个技能的触发描述"* · *"测试这个技能的效果"* |
-
-#### ⚙️ 工程实践（Matt Pocock Skills）
-
-这些技能来自 [mattpocock/skills](https://github.com/mattpocock/skills)，专注于软件工程最佳实践。Agent 会根据你的描述自动匹配并加载对应技能。
-
-**需求与规划**
-
-| Skill | 触发示例 | 说明 |
-|-------|----------|------|
-| **需求追问** (`grill-me`) | *"我想做一个用户管理系统，帮我梳理需求"* · *"帮我把这个想法想清楚"* | 追问式需求分析，适用于无代码库场景 |
-| **需求追问+文档** (`grill-with-docs`) | *"帮我梳理这个项目的需求，顺便更新文档"* · *"我想加一个新功能，先帮我理清思路"* | 追问式需求分析 + 自动生成术语表和 ADR |
-| **追问核心** (`grilling`) | *"压力测试一下我的方案"* · *"这个设计有没有漏洞"* | 追问原语，逐个问题深挖直到达成共识 |
-| **会话交接** (`handoff`) | *"把当前对话总结一下，我要开新会话"* · *"交接一下上下文"* | 生成交接文档，让新会话无缝继续 |
-| **对话转规格** (`to-spec`) | *"把我们讨论的内容整理成规格文档"* · *"生成一份 PRD"* | 综合对话上下文，输出结构化规格文档 |
-| **规格转票据** (`to-tickets`) | *"把这个规格拆分成开发任务"* · *"拆分成可执行的 ticket"* | 将规格文档拆分为垂直切片的开发票据 |
-| **任务实现** (`implement`) | *"按照这个规格开始实现"* · *"实现这个 ticket"* | 按规格/票据实现功能，集成 TDD 和代码审查 |
-| **大型项目规划** (`wayfinder`) | *"这个项目太大了，帮我规划一下"* · *"从零开始规划一个大功能"* | 将大型项目拆分为决策票据，逐步推进 |
-
-**代码质量**
-
-| Skill | 触发示例 | 说明 |
-|-------|----------|------|
-| **测试驱动开发** (`tdd`) | *"用 TDD 方式实现这个功能"* · *"先写测试再实现"* · *"红色-绿色-重构"* | 红-绿循环 TDD，含测试规范和反模式 |
-| **代码审查** (`code-review`) | *"帮我审查一下这个分支的代码"* · *"review 一下最近的改动"* · *"检查代码质量"* | 双轴审查：标准（编码规范）+ 规格（需求匹配） |
-| **Bug 诊断** (`diagnosing-bugs`) | *"帮我调试这个 bug"* · *"这个 bug 很难复现"* · *"帮我诊断这个问题"* | 6 阶段诊断循环：反馈环 → 复现 → 假设 → 排查 → 修复 → 复盘 |
-| **合并冲突解决** (`resolving-merge-conflicts`) | *"帮我解决这个 merge conflict"* · *"rebase 冲突了"* | 系统化解决 Git 合并冲突，保留双方意图 |
-
-**架构设计**
-
-| Skill | 触发示例 | 说明 |
-|-------|----------|------|
-| **模块设计** (`codebase-design`) | *"这个模块的接口怎么设计"* · *"怎样让代码更可测试"* · *"什么是深度模块"* | 深度模块设计词汇：模块、接口、深度、接缝、适配器 |
-| **架构改进** (`improve-codebase-architecture`) | *"帮我看看这个代码库有什么架构问题"* · *"扫描一下有哪些可以改进的地方"* | 扫描代码库，生成 HTML 架构改进报告 |
-| **领域建模** (`domain-modeling`) | *"帮我梳理项目的领域术语"* · *"这个概念用什么名字好"* · *"更新一下术语表"* | 建立和维护项目领域词汇表 + ADR |
-
-**研究与学习**
-
-| Skill | 触发示例 | 说明 |
-|-------|----------|------|
-| **后台研究** (`research`) | *"帮我调研一下 GraphQL 和 REST 的区别"* · *"查一下这个 API 的文档"* | 后台代理研究，输出引用 Markdown 文件 |
-| **教学** (`teach`) | *"教我学习 Rust"* · *"帮我系统学习 Docker"* | 多会话教学系统，含课程、学习记录、术语表 |
-| **原型验证** (`prototype`) | *"帮我做个原型验证一下这个状态机"* · *"做个 UI 原型看看效果"* | 抛弃型原型：状态逻辑原型 或 UI 多方案对比 |
-| **技能编写参考** (`writing-great-skills`) | *"怎么写一个好用的技能"* · *"优化这个技能的描述"* | 技能编写最佳实践参考 |
-| **技能路由器** (`ask-matt`) | *"我不知道该用哪个技能"* · *"有什么技能可以用"* | 路由器：根据场景推荐合适的技能 |
-
-**问题分流**
-
-| Skill | 触发示例 | 说明 |
-|-------|----------|------|
-| **问题分流** (`triage`) | *"帮我看看有哪些 issue 需要处理"* · *"把 #42 标记为 ready-for-agent"* | 问题状态机分流：分类 → 验证 → 追问 → 写 Agent 简报 |
-| **技能配置** (`setup-matt-pocock-skills`) | *"配置一下 issue tracker"* · *"设置分流标签"* | 首次使用前配置 issue tracker 和分流标签 |
-
-### Plugins（插件）
+## Plugins（插件）
 
 预装插件可通过输入需求自动触发：
 
@@ -1071,37 +976,6 @@ Agent 创建的文档（通过 docx-generator、pdf-generator、excel-generator�
 在聊天框中直接输入需求，Agent 会自动判断需要调用哪些工具来完成你的请求。
 
 **PDF 中文支持**：pdf-generator 插件内置微软雅黑字体（`backend/fonts/msyh.ttc` + `msyhbd.ttc`），支持中文、日文、韩文及常见 Unicode 符号（天气图标、数学符号等）正常显示。
-
-支持两种文件格式：
-
-**格式一：平铺 `.md` 文件**
-
-`backend/skills/*.md`，YAML 头 + Markdown 内容：
-
-```yaml
----
-name: my-skill
-description: 技能描述
-enabled: true
----
-技能内容 Markdown ...
-```
-
-**格式二：子目录 + `SKILL.md`（兼容 [Anthropic Agent Skills](https://github.com/anthropics/skills) 标准）**
-
-`backend/skills/<skill-name>/SKILL.md`，支持打包脚本、模板、资源文件：
-
-```
-backend/skills/
-  pdf/
-    SKILL.md         # 核心定义（YAML 头 + 指令）
-    scripts/         # Python 工具脚本
-    reference.md     # 参考文档
-    forms.md         # 子主题
-    LICENSE.txt
-```
-
-两种格式可以混用，`SkillLoader` 在启动时自动检测并加载。目录型 skill 中的脚本/资源文件保持原位，LLM 通过 `load_skill_<name>()` 工具获取 `SKILL.md` 内容后按指令引用。
 
 ---
 
@@ -1533,7 +1407,6 @@ backend/app/api/documents.py  → 文档上传 + 异步任务
 
 ```
 backend/app/plugins/loader.py   → 插件如何加载（扫描 tool_* 函数）
-backend/app/skills/loader.py    → Skill 如何加载（Markdown 文件）
 backend/plugins/example_plugin.py → 最简单的插件示例
 ```
 

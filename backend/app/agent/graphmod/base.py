@@ -34,8 +34,6 @@ from app.rag.retriever import Retriever
 
 from app.rag.reranker import Reranker
 
-from app.skills.loader import SkillLoader
-
 from app.plugins.loader import PluginLoader
 
 from app.config import settings
@@ -44,7 +42,6 @@ from app.agent.tools import (
     ToolDef,
     LONG_CONTENT_FILE_RULE,
     create_filesystem_tools,
-    create_skill_tools,
     create_plugin_tools,
     build_system_prompt_no_kb,
 )
@@ -91,7 +88,6 @@ class RAGAgentBase:
     def __init__(
         self,
         retriever: Retriever,
-        skill_loader: SkillLoader | None = None,
         plugin_loader: PluginLoader | None = None,
         reranker: Reranker | None = None,
         custom_tools: CustomToolStore | None = None,  # [token 优化 v6] 前端添加的自定义工具/固定工具
@@ -100,7 +96,6 @@ class RAGAgentBase:
     ):
         self.retriever = retriever
         self.reranker = reranker
-        self.skill_loader = skill_loader
         self.plugin_loader = plugin_loader
         self.custom_tools = custom_tools
         self.memory = memory
@@ -131,8 +126,6 @@ class RAGAgentBase:
             },
             fn=web_search_tool,
         ))
-        if skill_loader:
-            self.tools.extend(create_skill_tools(skill_loader))
         if plugin_loader:
             self.tools.extend(create_plugin_tools(plugin_loader))
         # [opencode task tool] 主 Agent 自主委派子 Agent（explore / plan）。
@@ -234,7 +227,6 @@ class RAGAgentBase:
         self.task_bus: object | None = None
 
         self.system_prompt = build_system_prompt_no_kb(
-            skill_loader or SkillLoader(""),
             plugin_loader or PluginLoader(""),
             include_filesystem=True,
             has_memory=memory is not None,
@@ -254,12 +246,11 @@ class RAGAgentBase:
 
         self.graph = self._build_graph()
     def rebuild_system_prompt(self):
-        """仅重建系统提示词（不重建图），用于工作区/技能/插件变化后的热更新。
+        """仅重建系统提示词（不重建图），用于工作区/插件变化后的热更新。
 
         工作区列表由 build_system_prompt_no_kb 动态读取权限管理器，无需重启。
         """
         self.system_prompt = build_system_prompt_no_kb(
-            self.skill_loader or SkillLoader(""),
             self.plugin_loader or PluginLoader(""),
             include_filesystem=True,
             has_memory=getattr(self, "memory", None) is not None,
@@ -354,8 +345,8 @@ class RAGAgentBase:
             "\n- If a source has 'chapter_summary', it is a chapter overview — use it to describe the chapter's content."
             "\n- If you don't have enough information, say so."
             "\n\nYou have access to built-in filesystem tools (tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file, tool_glob, tool_grep, tool_execute, tool_apply_patch) for reading/writing files, running shell commands and applying patches."
-            "\nYou also have access to skill tools (load_skill_*) and plugin tools."
-            "\nIf the user asks to create/edit/manipulate documents (Word, PDF, PPT, Excel), generate visual designs, build web pages, or use other specialized capabilities, call the relevant skill or plugin tool to get instructions first."
+            "\nYou also have access to plugin tools."
+            "\nIf the user asks to create/edit/manipulate documents (Word, PDF, PPT, Excel), generate visual designs, build web pages, or use other specialized capabilities, call the relevant plugin tool to get instructions first."
             "\n\nCharacter Analysis (for novels, scripts, or documents with dialogues):"
             "\n- plugin_character-analysis_tool_list_characters(): List all characters and their dialogue counts."
             "\n- plugin_character-analysis_tool_get_character_dialogues(character_name, limit): Get all dialogues spoken by a character."
@@ -384,7 +375,7 @@ class RAGAgentBase:
             + LONG_CONTENT_FILE_RULE
         )
 
-    # [token 优化 v5] 按需挂载工具 schema：核心文件工具常驻，技能/插件按意图关键词 + 已使用保留
+    # [token 优化 v5] 按需挂载工具 schema：核心文件工具常驻，插件按意图关键词 + 已使用保留
     _CORE_TOOL_PREFIXES = ("tool_",)
     _WEATHER_TOOL_PREFIXES = ("plugin_weather", "plugin_weather-alert")
     _WEATHER_RESULT_LIMIT = 1500  # 字符
@@ -393,36 +384,17 @@ class RAGAgentBase:
         (("天气", "台风", "气象", "温度", "降雨", "下雪", "weather", "typhoon", "forecast"),
          ("plugin_weather", "plugin_weather-alert")),
         (("文档", "word", "docx", "pdf", "excel", "xlsx", "ppt", "pptx", "表格", "幻灯片", "报告"),
-         ("plugin_docx-generator", "plugin_pdf-generator", "plugin_excel-generator", "plugin_pptx-generator",
-          "load_skill_docx", "load_skill_pdf", "load_skill_xlsx", "load_skill_pptx", "load_skill_doc_coauthoring")),
-        (("网页", "前端", "react", "vue", "html", "css", "网站", "页面", "artifact", "frontend", "web"),
-         ("load_skill_frontend_design", "load_skill_web_artifacts_builder", "load_skill_webapp_testing",
-          "load_skill_theme_factory", "load_skill_canvas_design")),
+         ("plugin_docx-generator", "plugin_pdf-generator", "plugin_excel-generator", "plugin_pptx-generator")),
         (("搜索", "查一下", "新闻", "资讯", "上网", "search", "news", "internet"),
          ("plugin_internet-search_",)),
-        (("图片", "海报", "设计", "艺术", "绘图", "生成图", "image", "poster", "art", "draw"),
-         ("load_skill_canvas_design", "load_skill_algorithmic_art", "load_skill_slack_gif_creator")),
         (("语音", "声音", "配音", "克隆", "合成", "朗读", "voice", "audio", "speech"),
          ("tool_tts_synthesize", "tool_voice_transcribe")),
         (("角色", "人物", "对话", "台词", "character", "dialogue"),
          ("plugin_character-analysis_",)),
         (("知识库", "kb", "导出"),
          ("plugin_kb-export_",)),
-        (("代码", "编程", "bug", "调试", "重构", "code", "debug", "test", "tdd", "review", "实现"),
-         ("load_skill_tdd", "load_skill_code_review", "load_skill_diagnosing_bugs", "load_skill_implement",
-          "load_skill_to_tickets", "load_skill_grilling", "load_skill_grill_me", "load_skill_codebase_design")),
-        (("技能", "skill"),
-         ("load_skill_",)),
         (("插件", "plugin"),
          ("plugin_",)),
-        (("教学", "学习", "teach"),
-         ("load_skill_teach",)),
-        (("研究", "research"),
-         ("load_skill_research",)),
-        (("模型", "api", "claude", "大模型"),
-         ("load_skill_claude_api",)),
-        (("架构", "模块", "设计模式", "architecture"),
-         ("load_skill_codebase_design", "load_skill_domain_modeling", "load_skill_improve_codebase_architecture")),
     ]
     def _tool_matches_intent(self, t: ToolDef, question_lower: str) -> bool:
         """意图关键词命中：问题包含关键词且工具名前缀匹配 → 挂载该工具 schema。"""
@@ -435,8 +407,8 @@ class RAGAgentBase:
     def _build_tool_defs(self, question: str = "", used_names: set | None = None, conversation_id: str = "", model: str = "") -> list[dict] | None:
         """[token 优化 v5+v15] 按需挂载 OpenAI 工具定义，会话内只增不减。
 
-        system prompt 只列常驻工具名 + 一行 skill 提示（[token 优化 v10]），技能清单与
-        描述依赖此处按意图把 load_skill_* schema 挂载给 LLM；此处只发本轮可能用到的
+        system prompt 只列常驻工具名 + 插件提示（[token 优化 v10]），插件清单与
+        描述依赖此处按意图把插件 schema 挂载给 LLM；此处只发本轮可能用到的
         schema：核心文件工具常驻 + 意图关键词命中 + 已使用工具保留。
         schema 固定开销从 8-12K 降到 2-4K。若模型调用了未挂载工具，
         _execute_tool 仍可执行（self.tools 全量），下一轮该工具自动保留。
@@ -445,7 +417,7 @@ class RAGAgentBase:
         **只增不减**（新命中追加到末尾）：使「system + tools」前缀跨请求字节稳定 →
         DeepSeek 前缀缓存命中（0.1x 计费 + TTFT 下降），避免旧实现每次按问题意图
         重建 schema 导致前缀漂移、缓存频繁失效。无 conversation_id（一次性调用）
-        时保持原状态按意图即时筛选，不污染共享缓存。技能/插件热更新移除的工具
+        时保持原状态按意图即时筛选，不污染共享缓存。插件热更新移除的工具
         自动跳过（从缓存剔除，前缀在管理员操作后才会变，可接受）。
         """
         if not self.tools:

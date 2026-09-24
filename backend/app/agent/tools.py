@@ -3,7 +3,6 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from app.skills.loader import SkillLoader
 from app.plugins.loader import PluginLoader
 
 
@@ -109,37 +108,6 @@ class ToolDef:
         }
 
 
-def create_skill_tools(skill_loader: SkillLoader) -> List[ToolDef]:
-    """根据技能加载器创建技能工具列表。"""
-    tools: List[ToolDef] = []
-    for skill in skill_loader.get_enabled_skills():
-        # [opencode 对齐] disable-model-invocation：该技能仅由用户显式触发，
-        # 不生成 load_skill_* 工具（弱模型会误调用并胡言乱语，如 to-spec/setup-*）。
-        if getattr(skill, "disable_model_invocation", False):
-            continue
-        content = skill_loader.get_skill_content(skill.name)
-        name = f"load_skill_{skill.name.replace('-', '_').replace(' ', '_')}"
-        # [token 优化 v3] 描述截断到 200 字符：40 个技能全启用时避免 schema 体积膨胀（完整描述仍在 SKILL.md）
-        _d = " ".join(skill.description.split())
-        description = f"Load the '{skill.name}' skill content. Description: {_d[:200]}{'…' if len(_d) > 200 else ''}"
-
-        def make_skill_fn(n: str, desc: str, c: str) -> ToolDef:
-            def skill_tool() -> str:
-                return c
-
-            skill_tool.__name__ = n
-            skill_tool.__doc__ = desc
-            return ToolDef(
-                name=n,
-                description=desc,
-                parameters={"type": "object", "properties": {}, "required": []},
-                fn=skill_tool,
-            )
-
-        tools.append(make_skill_fn(name, description, content or ""))
-    return tools
-
-
 def create_filesystem_tools() -> List[ToolDef]:
     """创建文件系统操作工具列表（ls、read、write、append、edit等）。"""
     from app.tools.file_tools import (
@@ -234,7 +202,7 @@ def create_plugin_tools(plugin_loader: PluginLoader) -> List[ToolDef]:
 
 
 def build_system_prompt_no_kb(
-    skill_loader: SkillLoader, plugin_loader: PluginLoader, include_filesystem: bool = True, cwd: str = "",
+    plugin_loader: PluginLoader, include_filesystem: bool = True, cwd: str = "",
     has_memory: bool = False, has_voice: bool = False,
 ) -> str:
     """构建无知识库时的系统提示词，包含可用工具说明。
@@ -244,7 +212,6 @@ def build_system_prompt_no_kb(
     has_memory: 是否启用共享记忆工具（tool_memory_set/get/search）。注入共享
     记忆管理器时开启（opencode memory 语义）。
     """
-    enabled_skills = skill_loader.get_enabled_skills()
     enabled_plugins = plugin_loader.get_enabled_plugins()
 
     parts = [
@@ -289,17 +256,6 @@ def build_system_prompt_no_kb(
             "survive reliably across turns."
         )
 
-    if enabled_skills:
-        # [token 优化 v10] 不再逐一列出全部技能名（30+ 技能约 1.3K 字符，固定随每次调用发出）。
-        # 技能清单 + 截断描述已由 graph._build_tool_defs 按意图把 load_skill_* schema 按需挂载，
-        # 系统提示词只保留一行提示，使前缀保持完全静态，最大化 DeepSeek 前缀缓存命中。
-        tool_parts.append(
-            "Skill tools (load_skill_<name>()): specialized skills are available. The inventory and "
-            "descriptions of relevant skills are mounted into the tool schema based on your request — "
-            "call the matching load_skill_<name>() tool when the task calls for one (documents, "
-            "web/frontend, design, coding practices, teaching, research, etc.)."
-        )
-
     if enabled_plugins:
         lines = []
         for p in enabled_plugins:
@@ -341,8 +297,8 @@ def build_system_prompt_no_kb(
         ] if has_voice else []),
         "- If no tool fits, answer directly without calling tools.",
         "",
-        "IMPORTANT - Before code/design tasks: FIRST call the relevant load_skill_*() tool for best practices, "
-        "then write files with tool_write_file; use tool_execute for build/install/test/check (e.g. python -m py_compile) as needed.",
+        "IMPORTANT - Before code/design tasks: write files with tool_write_file; use tool_execute for "
+        "build/install/test/check (e.g. python -m py_compile) as needed.",
         "",
         "IMPORTANT - Documents (.docx/.pdf/.xlsx/.pptx): use the matching generator plugin "
         "(docx/pdf/excel/pptx-generator); section/slide schemas are in each tool's description. Files saved per your directory rules.",

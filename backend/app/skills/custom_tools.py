@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """自定义工具存储 [token 优化 v6]。
 
-前端「Skills → 自定义工具」页面的后端支撑:
+前端「自定义工具」页面的后端支撑:
   - 脚本型（script）: 用户粘贴的 Python 源码写入 plugins/custom_<name>.py,
     复用 PluginLoader 的加载/启停/执行链路（tool_* 函数自动变为工具）。
   - 固定型（pin）  : 用户从前端工具目录中选择已有工具名，写入 data/pinned_tools.json;

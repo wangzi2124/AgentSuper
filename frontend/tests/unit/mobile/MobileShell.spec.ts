@@ -35,7 +35,7 @@ const slotStub = (name: string, props = '') => ({
 const global = {
   plugins: [createPinia()],
   stubs: {
-    MobileChat: true, MobileDocuments: true, MobileSkills: true, MobilePlugins: true,
+    MobileChat: true, MobileDocuments: true, MobilePlugins: true,
     MobileVectors: true, MobileGenerated: true, MobileMonitoring: true, MobileCustomTools: true,
     'van-nav-bar': slotStub('van-nav-bar'),
     'van-popup': { props: ['show'], template: '<div class="van-popup" :class="{open: !!show}"><slot /></div>' },

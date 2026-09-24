@@ -151,14 +151,6 @@ export interface ChunkListResponse {
   limit: number
 }
 
-// 技能信息
-export interface Skill {
-  name: string
-  description: string
-  path: string
-  enabled: boolean
-}
-
 // 插件信息
 export interface Plugin {
   name: string

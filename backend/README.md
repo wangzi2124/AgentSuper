@@ -1,6 +1,6 @@
 # Knowledge Base System — RAG + AI Agent
 
-基于 RAG（检索增强生成）的知识库 AI 问答系统，支持文档上传、向量检索、多模型对话、Skills 和 Plugins 动态扩展。
+基于 RAG（检索增强生成）的知识库 AI 问答系统，支持文档上传、向量检索、多模型对话、Plugins 动态扩展。
 
 ---
 
@@ -12,7 +12,6 @@
 | **多模型支持** | 前端下拉菜单切换 DeepSeek V3 / R1、OpenAI GPT-4o / 4o-mini |
 | **文档管理** | 支持 TXT / MD / PDF 上传，自动分块、向量化存储到 ChromaDB |
 | **多轮对话** | 自动生成 conversation_id，支持同一会话内的上下文连续对话 |
-| **Skills（技能）** | Markdown 文件定义技能，动态加载，可在 Web 界面启用/禁用 |
 | **Plugins（插件）** | Python 文件定义 tool_* 函数（如计算器、查时间），Agent 按需调用 |
 | **本地 Embedding** | 使用 sentence-transformers 本地运行，通过 ModelScope 下载模型 |
 | **检索重排序** | Cross-encoder 对检索结果重打分（top-3），显著提升回答精度 |

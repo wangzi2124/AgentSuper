@@ -4,7 +4,7 @@
 前端「Skills → 自定义工具」页面的后端接口：
   - 脚本型：粘贴 Python 源码（含 tool_* 函数）→ 写入 plugins/custom_*.py → 热加载
   - 固定型：把已有工具 pin 到常驻列表（按需挂载时始终挂载其 schema）
-所有写操作后都会 reload 插件并 refresh_tools（与 skills toggle 同一链路）。
+所有写操作后都会 reload 插件并 refresh_tools（与插件 toggle 同一链路）。
 """
 import logging
 
@@ -41,7 +41,7 @@ def _store(request: Request):
 
 
 async def _reload(request: Request) -> None:
-    """热加载：重新扫描插件 + 刷新 agent 工具（与 skills toggle 相同链路）。"""
+    """热加载：重新扫描插件 + 刷新 agent 工具（与插件 toggle 相同链路）。"""
     try:
         request.app.state.plugin_loader.load_all()
     except Exception as e:  # noqa: BLE001

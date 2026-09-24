@@ -48,7 +48,6 @@ class Settings(BaseSettings):
     # 单个下载源（ModelScope / HuggingFace）内的重试次数（不含首次尝试）
     model_download_retries: int = 2
 
-    skills_dir: str = "skills"
     plugins_dir: str = "plugins"
 
     summarization_model: Optional[str] = None

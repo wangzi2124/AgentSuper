@@ -16,7 +16,6 @@ from app.rag.retriever import Retriever
 from app.rag.vector_store import VectorStore
 from app.services.task_manager import TaskManager
 from app.services.voice import VoiceService
-from app.skills.loader import SkillLoader
 from app.storage.file_store import FileStore
 from app.snapshot import Snapshot  # [snapshot 快照层] 规格模块 B
 
@@ -99,9 +98,6 @@ def _do_init(app):
 
     _load_env_to_os()
 
-    skill_loader = SkillLoader(settings.skills_dir)
-    skill_loader.load_all()
-
     plugin_loader = PluginLoader(settings.plugins_dir)
     plugin_loader.load_all()
 
@@ -168,7 +164,7 @@ def _do_init(app):
         logger.info("Voice service enabled (dir=%s)", voice_service.tts_dir)
 
     agent = RAGAgent(
-        retriever, skill_loader, plugin_loader,
+        retriever, plugin_loader,
         reranker=reranker, custom_tools=custom_tools,
         memory=shared_memory,  # [opencode memory] 主 Agent 记忆读写工具
         voice_service=voice_service,  # [语音] 主 Agent 语音合成/转写工具
@@ -208,7 +204,6 @@ def _do_init(app):
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
     )
-    app.state.skill_loader = skill_loader
     app.state.plugin_loader = plugin_loader
     app.state.custom_tools = custom_tools
     app.state.voice_service = voice_service

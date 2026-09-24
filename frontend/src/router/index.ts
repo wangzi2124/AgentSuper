@@ -31,11 +31,6 @@ const router = createRouter({
       component: () => import('../views/DocumentsView.vue'),
     },
     {
-      path: '/skills',
-      name: 'Skills',
-      component: () => import('../views/SkillsView.vue'),
-    },
-    {
       path: '/plugins',
       name: 'Plugins',
       component: () => import('../views/PluginsView.vue'),

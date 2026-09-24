@@ -27,7 +27,6 @@ function toggleCollapsed() {
 const navItems = [
   { path: '/multi-agent', label: '多智能体', icon: '🤖' },
   { path: '/documents', label: '文档管理', icon: '📄' },
-  { path: '/skills', label: '技能', icon: '🧠' },
   { path: '/plugins', label: '插件', icon: '🔌' },
   { path: '/custom-tools', label: '自定义工具', icon: '🧰' },
   { path: '/vectors', label: '向量库', icon: '🔢' },

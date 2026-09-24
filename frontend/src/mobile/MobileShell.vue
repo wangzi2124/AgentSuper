@@ -6,7 +6,6 @@ import { useVectorStore } from '../stores/vectors'
 
 import MobileChat from './views/MobileChat.vue'
 import MobileDocuments from './views/MobileDocuments.vue'
-import MobileSkills from './views/MobileSkills.vue'
 import MobilePlugins from './views/MobilePlugins.vue'
 import MobileVectors from './views/MobileVectors.vue'
 import MobileGenerated from './views/MobileGenerated.vue'
@@ -20,7 +19,6 @@ const router = useRouter()
 const tabs = [
   { name: 'MultiAgent', path: '/multi-agent', title: '聊天', icon: 'chat-o' },
   { name: 'Documents', path: '/documents', title: '文档', icon: 'description' },
-  { name: 'Skills', path: '/skills', title: '技能', icon: 'star-o' },
   { name: 'Plugins', path: '/plugins', title: '插件', icon: 'apps-o' },
   { name: 'Vectors', path: '/vectors', title: '向量库', icon: 'cluster-o' },
 ]
@@ -29,7 +27,6 @@ const tabs = [
 const menu = [
   { name: 'MultiAgent', path: '/multi-agent', title: '多智能体', vanIcon: 'chat-o', color: '#6d5ef1', soft: 'rgba(109,94,241,.12)' },
   { name: 'Documents', path: '/documents', title: '文档管理', vanIcon: 'description', color: '#3b82f6', soft: 'rgba(59,130,246,.12)' },
-  { name: 'Skills', path: '/skills', title: '技能', vanIcon: 'star-o', color: '#8b5cf6', soft: 'rgba(139,92,246,.12)' },
   { name: 'Plugins', path: '/plugins', title: '插件', vanIcon: 'apps-o', color: '#06b6d4', soft: 'rgba(6,182,212,.12)' },
   { name: 'CustomTools', path: '/custom-tools', title: '自定义工具', vanIcon: 'setting-o', color: '#ec4899', soft: 'rgba(236,72,153,.12)' },
   { name: 'Vectors', path: '/vectors', title: '向量库', vanIcon: 'cluster-o', color: '#10b981', soft: 'rgba(16,185,129,.12)' },
@@ -55,7 +52,6 @@ const mobileViews: Record<string, unknown> = {
   MultiAgent: MobileChat,
   MultiAgentConversation: MobileChat,
   Documents: MobileDocuments,
-  Skills: MobileSkills,
   Plugins: MobilePlugins,
   Vectors: MobileVectors,
   Generated: MobileGenerated,

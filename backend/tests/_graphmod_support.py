@@ -13,7 +13,6 @@ from app.agent.graphmod.core import RAGAgent  # noqa: E402
 def build_agent(
     retriever=None,
     reranker=None,
-    skill_loader=None,
     plugin_loader=None,
     custom_tools=None,
     memory=None,
@@ -21,7 +20,6 @@ def build_agent(
     r = retriever or SimpleNamespace(is_empty=True, invoke=lambda q, k=3: [])
     return RAGAgent(
         r,
-        skill_loader=skill_loader,
         plugin_loader=plugin_loader,
         reranker=reranker,
         custom_tools=custom_tools,
