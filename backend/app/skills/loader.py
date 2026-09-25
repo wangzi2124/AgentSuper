@@ -51,6 +51,12 @@ class SkillLoader:
         """扫描技能目录，加载所有.md格式的技能文件（含子目录中的SKILL.md）。"""
         self._skills.clear()
 
+        # [安全] 技能目录是前端指定的（runtime 用 create=False 不自动建目录），
+        # 目录不存在时视为「当前无技能」返回空列表，而不是启动即抛 FileNotFoundError。
+        if not self.skills_dir.is_dir():
+            logger.warning("技能目录不存在，跳过加载: %s", self.skills_dir)
+            return self.list()
+
         for f in self.skills_dir.glob("*.md"):
             skill = self._load_skill_file(f)
             if skill:

@@ -187,6 +187,15 @@ def test_skill_loader_set_dir(tmp_path):
         loader.set_dir(str(tmp_path / "missing"))
 
 
+def test_skill_loader_missing_dir_no_crash(tmp_path):
+    """[前端指定目录] create=False 且目录不存在时 load_all 返回空技能而非抛错（runtime 启动路径）。"""
+    from app.skills.loader import SkillLoader
+    loader = SkillLoader(str(tmp_path / "not-there"), create=False)
+    assert loader.load_all() == []
+    assert loader.list() == []
+    assert loader.get_enabled_skills() == []
+
+
 # ── create_plugin_tools ────────────────────────────────────────────────────
 
 class FakePlugin:
