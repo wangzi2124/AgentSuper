@@ -99,6 +99,94 @@ def test_create_filesystem_tools():
     assert exec_tool.parameters["required"] == ["command"]
 
 
+# ── create_skill_tools ─────────────────────────────────────────────────────
+
+class FakeSkill:
+    def __init__(self, name, description, disable_model_invocation=False):
+        self.name = name
+        self.description = description
+        self.disable_model_invocation = disable_model_invocation
+
+
+class FakeSkillLoader:
+    def __init__(self, skills):
+        self.skills = skills
+
+    def get_enabled_skills(self):
+        return self.skills
+
+    def get_skill_content(self, name):
+        return f"CONTENT[{name}]"
+
+
+def test_create_skill_tools():
+    loader = FakeSkillLoader([
+        FakeSkill("my-skill", "  多个  空格 的  描述 "),
+        FakeSkill("docx", "d" * 250),
+    ])
+    tools = at.create_skill_tools(loader)
+    assert len(tools) == 2
+    # 名字净化：- 和空格 → _
+    assert tools[0].name == "load_skill_my_skill"
+    assert tools[0].fn() == "CONTENT[my-skill]"
+    # 描述压缩空格 + 截断 200 字符
+    assert "多个 空格 的 描述" in tools[0].description
+    assert tools[1].description.endswith("…")
+    assert tools[0].parameters["required"] == []
+
+
+def test_create_skill_tools_skips_model_invocation_disabled():
+    """[opencode 对齐] disable-model-invocation 的技能不生成 load_skill_* 工具（弱模型勿误调用）。"""
+    loader = FakeSkillLoader([
+        FakeSkill("to-spec", "user-only", disable_model_invocation=True),
+        FakeSkill("docx", "d"),
+    ])
+    tools = at.create_skill_tools(loader)
+    assert [t.name for t in tools] == ["load_skill_docx"]
+
+
+def test_skill_loader_parses_disable_model_invocation(tmp_path):
+    """SkillLoader 解析 frontmatter 的 disable-model-invocation 标志。"""
+    from app.skills.loader import SkillLoader
+    d = tmp_path / "skills"
+    (d / "user-only").mkdir(parents=True)
+    (d / "user-only" / "SKILL.md").write_text(
+        "---\nname: user-only\ndescription: x\ndisable-model-invocation: true\nenabled: true\n---\nbody\n",
+        encoding="utf-8",
+    )
+    (d / "normal").mkdir(parents=True)
+    (d / "normal" / "SKILL.md").write_text(
+        "---\nname: normal\ndescription: y\nenabled: true\n---\nbody\n",
+        encoding="utf-8",
+    )
+    loader = SkillLoader(str(d))
+    loader.load_all()
+    assert loader.get("user-only").disable_model_invocation is True
+    assert loader.get("normal").disable_model_invocation is False
+    assert loader.get("user-only").to_dict()["disable_model_invocation"] is True
+
+
+def test_skill_loader_set_dir(tmp_path):
+    """SkillLoader.set_dir 热切换目录并重载。"""
+    from app.skills.loader import SkillLoader
+    a = tmp_path / "a"
+    (a / "alpha.md").parent.mkdir(parents=True)
+    (a / "alpha.md").write_text("---\nname: alpha\ndescription: x\nenabled: true\n---\n", encoding="utf-8")
+    b = tmp_path / "b"
+    (b / "beta.md").parent.mkdir(parents=True)
+    (b / "beta.md").write_text("---\nname: beta\ndescription: y\nenabled: true\n---\n", encoding="utf-8")
+    loader = SkillLoader(str(a))
+    loader.load_all()
+    assert loader.get("alpha") is not None
+
+    loader.set_dir(str(b))
+    assert loader.get("beta") is not None
+    assert loader.get("alpha") is None  # 旧目录技能已卸载
+
+    with pytest.raises(FileNotFoundError):
+        loader.set_dir(str(tmp_path / "missing"))
+
+
 # ── create_plugin_tools ────────────────────────────────────────────────────
 
 class FakePlugin:
@@ -141,8 +229,9 @@ def test_create_plugin_tools():
 
 # ── build_system_prompt_no_kb ──────────────────────────────────────────────
 
-def _prompt(filesystem=True, memory=False, cwd="", plugins=None):
+def _prompt(filesystem=True, memory=False, cwd="", skills=None, plugins=None):
     return at.build_system_prompt_no_kb(
+        FakeSkillLoader(skills or []),
         FakePluginLoader(plugins or []),
         include_filesystem=filesystem,
         cwd=cwd,
@@ -168,6 +257,12 @@ def test_prompt_with_memory():
     p = _prompt(memory=True)
     assert "tool_memory_set" in p
     assert "Remember SPARINGLY" in p
+
+
+def test_prompt_with_skills():
+    p = _prompt(skills=[FakeSkill("docx", "文档")])
+    assert "load_skill_<name>()" in p
+    assert "Skill tools" in p
 
 
 def test_prompt_with_cwd():

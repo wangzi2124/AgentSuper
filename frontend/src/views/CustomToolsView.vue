@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useCustomToolsStore } from '../stores/customTools'
+import { useSkillStore } from '../stores/skills'
 import type { CustomToolItem } from '../types/customTools'
+import DirPickerModal from '../components/DirPickerModal.vue'
 
 const store = useCustomToolsStore()
+const skillStore = useSkillStore()
 
 const searchText = ref('')
 const filteredItems = computed(() => {
@@ -14,12 +17,43 @@ const filteredItems = computed(() => {
   )
 })
 
+// ── 技能目录（前端选择文件夹 → 热加载 load_skill_* 工具）──
+const showDirPicker = ref(false)
+const skillBusy = ref(false)
+const skillError = ref('')
+
+async function handleSelectSkillDir(path: string) {
+  showDirPicker.value = false
+  skillBusy.value = true
+  skillError.value = ''
+  try {
+    await skillStore.setDirectory(path)
+  } catch (err: any) {
+    skillError.value = err?.message || '设置技能目录失败'
+  } finally {
+    skillBusy.value = false
+  }
+}
+
+async function handleToggleSkill(skill: { name: string; enabled: boolean }, enabled: boolean) {
+  try {
+    await skillStore.toggle(skill.name, !enabled)
+  } catch (err: any) {
+    skillError.value = err?.message || '切换技能失败'
+  }
+}
+
 onMounted(async () => {
   await store.fetchAll()
   try {
     await store.fetchCatalog()
   } catch (err: any) {
     console.warn('加载工具目录失败:', err?.message || err)
+  }
+  try {
+    await skillStore.fetchAll()
+  } catch (err: any) {
+    console.warn('加载技能失败:', err?.message || err)
   }
 })
 
@@ -212,6 +246,52 @@ const pinCandidates = () => {
         </div>
       </div>
     </div>
+
+    <!-- 技能（扫描前端选择的技能文件夹，load_skill_* 工具） -->
+    <div class="card skills-card">
+      <div class="skills-header">
+        <div>
+          <div class="skills-title">⚡ 技能（Skills）</div>
+          <div class="skills-sub">
+            从「选择技能文件夹」扫描的 load_skill_* 工具。当前目录：
+            <span class="skills-dir">{{ skillStore.directory || '未设置' }}</span>
+          </div>
+        </div>
+        <button class="btn btn-primary" :disabled="skillBusy" @click="showDirPicker = true">
+          {{ skillBusy ? '加载中…' : '选择技能文件夹' }}
+        </button>
+      </div>
+      <p v-if="skillError" class="form-error">{{ skillError }}</p>
+
+      <div v-if="skillStore.skills.length === 0" class="skills-empty">
+        暂无技能（在所选文件夹中未发现 .md / SKILL.md）。选择一个含技能 Markdown 的文件夹即可。
+      </div>
+      <div v-else class="skill-list">
+        <div v-for="s in skillStore.skills" :key="s.name" class="skill-item">
+          <div class="skill-info">
+            <div class="skill-name">
+              load_skill_{{ s.name.replace(/-/g, '_').replace(/ /g, '_') }}
+              <span v-if="s.disable_model_invocation" class="badge type-badge" title="该技能仅由用户显式触发，不暴露为模型工具">仅手动</span>
+            </div>
+            <div class="skill-desc">{{ s.description }}</div>
+            <div class="skill-path">{{ s.path }}</div>
+          </div>
+          <span class="badge" :class="s.enabled ? 'badge-enabled' : 'badge-disabled'">
+            {{ s.enabled ? '已启用' : '已禁用' }}
+          </span>
+          <button
+            class="btn btn-sm"
+            :class="s.enabled ? 'btn-danger' : 'btn-primary'"
+            :disabled="s.disable_model_invocation"
+            @click="handleToggleSkill(s, s.enabled)"
+          >
+            {{ s.enabled ? '禁用' : '启用' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <DirPickerModal :show="showDirPicker" @close="showDirPicker = false" @select="handleSelectSkillDir" />
   </div>
 </template>
 
@@ -306,6 +386,28 @@ const pinCandidates = () => {
 .tool-sub .path { font-family: 'JetBrains Mono', Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .btn-sm { padding: 7px 14px; font-size: 12px; }
+
+.skills-card { display: flex; flex-direction: column; gap: 12px; }
+.skills-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.skills-title { font-weight: 700; font-size: 14px; color: var(--text); }
+.skills-sub { font-size: 12px; color: var(--text-secondary); margin-top: 3px; line-height: 1.5; }
+.skills-dir { font-family: 'JetBrains Mono', Consolas, monospace; color: var(--primary); }
+.skills-empty { font-size: 13px; color: var(--text-muted); padding: 8px 0; }
+.skill-list { display: flex; flex-direction: column; gap: 8px; }
+.skill-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  flex-wrap: wrap;
+}
+.skill-info { flex: 1; min-width: 0; }
+.skill-name { font-weight: 600; font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 6px; }
+.skill-desc { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.skill-path { font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (max-width: 600px) {
   .tool-card { gap: 12px; }

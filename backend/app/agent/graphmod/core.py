@@ -48,6 +48,7 @@ from app.agent.tools import (
     ToolDef,
     LONG_CONTENT_FILE_RULE,
     create_filesystem_tools,
+    create_skill_tools,
     create_plugin_tools,
     build_system_prompt_no_kb,
 )
@@ -503,13 +504,15 @@ class RAGAgent(RAGAgentGenerate):
         builder.add_edge("generate", END)
         return builder.compile()
     async def refresh_tools(self):
-        """刷新工具列表和系统提示，用于热更新插件。
+        """刷新工具列表和系统提示，用于热更新技能和插件。
 
-        加锁避免与并发请求中的 graph 使用竞态（插件切换时原子替换）。
+        加锁避免与并发请求中的 graph 使用竞态（技能/插件切换时原子替换）。
         """
         async with self._refresh_lock:
             self.tools = []
             self.tools.extend(create_filesystem_tools())
+            if self.skill_loader:
+                self.tools.extend(create_skill_tools(self.skill_loader))
             if self.plugin_loader:
                 self.tools.extend(create_plugin_tools(self.plugin_loader))
             self.rebuild_system_prompt()

@@ -32,6 +32,7 @@ from app.api import generated as generated_api
 from app.api import permission as permission_api
 from app.api import plugins as plugins_api
 from app.api import responses as responses_api
+from app.api import skills as skills_api
 from app.api import vectors as vectors_api
 from app.api import weather as weather_api
 from app.api.config import SummarizationConfig, get_summarization_config, update_summarization_config
@@ -44,6 +45,7 @@ from app.session import service as session_service_mod
 from app.session.deps import create_project_context, resolve_session_context
 from app.session.models import RevertRequest, SessionCreate, SessionUpdate
 from app.skills.custom_tools import CustomToolStore
+from app.skills.loader import SkillLoader
 from app.plugins.loader import PluginLoader
 from app.services.task_manager import TaskManager
 from app.storage.file_store import FileStore
@@ -154,6 +156,7 @@ class FakeEmbeddings:
 def make_state(tmp_path, include_custom_tools=True):
     uploads = tmp_path / "uploads"
     plugins_dir = str(tmp_path / "plugins")
+    skills_dir = str(tmp_path / "skills")
     pinned = str(tmp_path / "pinned_tools.json")
     tools = CustomToolStore(plugins_dir, pinned) if include_custom_tools else None
     return types.SimpleNamespace(
@@ -162,6 +165,7 @@ def make_state(tmp_path, include_custom_tools=True):
         chapter_store=FakeChapterStore(),
         bm25_index=FakeBM25(),
         agent=FakeAgent(),
+        skill_loader=SkillLoader(skills_dir),
         plugin_loader=PluginLoader(plugins_dir),
         custom_tools=tools,
         task_manager=TaskManager(),
@@ -368,6 +372,66 @@ def test_repair_vectors(tmp_path, priv, monkeypatch):
     monkeypatch.setattr("app.services.kb_repair.repair_incomplete_documents", fake_repair)
     res = asyncio.run(vectors_api.repair_vectors(admin_req(st)))
     assert "已重建 1 个文档" in res["message"] and res["repaired"] == ["d1"]
+
+
+# ── skills 路由 /app/api/skills.py ──────────────────────────────────────────
+
+
+def _write_skill(loader, name="test-skill"):
+    path = loader.skills_dir / "test-skill.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\nname: test-skill\ndescription: demo\nenabled: true\n---\n# body\n",
+        encoding="utf-8",
+    )
+
+
+def test_skills_list_and_toggle(tmp_path, priv):
+    st = make_state(tmp_path)
+    _write_skill(st.skill_loader)
+    st.skill_loader.load_all()
+    items = asyncio.run(skills_api.list_skills(req(st)))
+    assert any(s["name"] == "test-skill" for s in items)
+
+    res = asyncio.run(skills_api.toggle_skill("test-skill", skills_api.ToggleSkillRequest(enabled=False), admin_req(st)))
+    assert "disabled" in res["message"] and st.agent.refresh_calls == 1
+
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(skills_api.toggle_skill("ghost", skills_api.ToggleSkillRequest(enabled=True), admin_req(st)))
+    assert e.value.status_code == 404
+
+
+def test_skills_directory_get_set(tmp_path, priv, monkeypatch):
+    """技能目录由前端在自定义工具页选择：GET 返回当前目录，POST 热切换并 refresh_tools。"""
+    # 持久化文件指到 tmp，避免污染真实 backend/data/runtime_skills_dir.json
+    monkeypatch.setattr(skills_api, "RUNTIME_SKILLS_DIR_FILE", str(tmp_path / "runtime_skills_dir.json"))
+    st = make_state(tmp_path)
+    _write_skill(st.skill_loader)
+    st.skill_loader.load_all()
+
+    # GET：返回当前目录（未持久化时借 DUT 内部回退）
+    before = asyncio.run(skills_api.get_skills_directory(req(st)))
+    assert before["directory"]
+
+    # POST：切到新的有效目录并热加载
+    new_dir = tmp_path / "custom-skills"
+    new_dir.mkdir()
+    (new_dir / "my-skill.md").write_text(
+        "---\nname: my-skill\ndescription: demo2\nenabled: true\n---\n# body\n",
+        encoding="utf-8",
+    )
+    res = asyncio.run(skills_api.set_skills_directory(
+        skills_api.SetSkillsDirRequest(directory=str(new_dir)), admin_req(st)))
+    assert res["directory"] == str(new_dir.resolve())
+    assert any(s["name"] == "my-skill" for s in res["skills"])
+    assert st.agent.refresh_calls == 1
+    assert not any(s["name"] == "test-skill" for s in res["skills"])  # 已切走旧目录
+
+    # POST 无效目录 → 400
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(skills_api.set_skills_directory(
+            skills_api.SetSkillsDirRequest(directory=str(tmp_path / "nope")), admin_req(st)))
+    assert e.value.status_code == 400
 
 
 # ── plugins 路由 /app/api/plugins.py ──────────────────────────────────────

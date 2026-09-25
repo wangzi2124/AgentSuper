@@ -101,13 +101,35 @@ def _do_init(app):
     plugin_loader = PluginLoader(settings.plugins_dir)
     plugin_loader.load_all()
 
+    _base_dir = Path(__file__).resolve().parents[1]
+    _data_dir = _base_dir / "data"
+
+    # 技能目录由前端「自定义工具」页选择（持久化于 data/runtime_skills_dir.json，
+    # 未设置时回退 backend/skills），不再由 .env 的 SKILLS_DIR 配置。
+    from app.skills.loader import SkillLoader
+
+    def _resolve_skills_dir() -> str:
+        import json
+        # 与 app/api/skills.py 的 RUNTIME_SKILLS_DIR_FILE 保持一致（data/runtime_skills_dir.json）
+        _p = _data_dir / "runtime_skills_dir.json"
+        try:
+            if _p.exists():
+                d = str(json.loads(_p.read_text("utf-8")).get("directory", "")).strip()
+                if d:
+                    return d
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to read skills dir from %s: %s", _p, e)
+        return str(_base_dir / "skills")
+
+    skill_loader = SkillLoader(_resolve_skills_dir(), create=False)
+    skill_loader.load_all()
+    logger.info("Skills dir: %s (%d skills)", skill_loader.skills_dir, len(skill_loader.list()))
+
     # 可写工作目录完全由前端「工作目录」面板配置（持久化于 data/runtime_workspaces.json），
     # 不再支持 .env 的 EXTRA_WORKSPACES。
     # 文件工具的相对路径基准 = 项目 worktree（git 仓库根，见 app/tools/file_tools.py `_workspace()`）；
     # 源码保护（app/plugins/skills/config/main.py 等）仍以 backend/ 为基准判定，
     # 权限层通过 project_worktree 将仓库根下路径识别为 workspace。
-    _base_dir = Path(__file__).resolve().parents[1]
-    _data_dir = _base_dir / "data"
 
     # ── opencode 风格文件系统:项目模型 + 分层存储 + 目录扫描缓存 ──
     # 项目:优先 git rev-parse 定位 worktree,ID 取 git 根哈希(持久化到 .git/opencode)
@@ -164,7 +186,7 @@ def _do_init(app):
         logger.info("Voice service enabled (dir=%s)", voice_service.tts_dir)
 
     agent = RAGAgent(
-        retriever, plugin_loader,
+        retriever, skill_loader, plugin_loader,
         reranker=reranker, custom_tools=custom_tools,
         memory=shared_memory,  # [opencode memory] 主 Agent 记忆读写工具
         voice_service=voice_service,  # [语音] 主 Agent 语音合成/转写工具
@@ -205,6 +227,7 @@ def _do_init(app):
         chunk_overlap=settings.chunk_overlap,
     )
     app.state.plugin_loader = plugin_loader
+    app.state.skill_loader = skill_loader
     app.state.custom_tools = custom_tools
     app.state.voice_service = voice_service
     app.state.task_manager = TaskManager()

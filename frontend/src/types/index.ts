@@ -350,3 +350,12 @@ export interface MultiAgentMessage {
   snapshotRestored?: boolean
 }
 
+// 技能信息（扫描前端在自定义工具页选择的技能文件夹）
+export interface Skill {
+  name: string
+  description: string
+  path: string
+  enabled: boolean
+  disable_model_invocation: boolean
+}
+

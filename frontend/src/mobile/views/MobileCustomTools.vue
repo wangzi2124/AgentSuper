@@ -1,10 +1,38 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useCustomToolsStore } from '../../stores/customTools'
+import { useSkillStore } from '../../stores/skills'
 import type { CustomToolItem } from '../../types/customTools'
 import { showConfirmDialog, showToast } from 'vant'
+import DirPickerModal from '../../components/DirPickerModal.vue'
 
 const store = useCustomToolsStore()
+const skillStore = useSkillStore()
+
+// ── 技能（扫描前端选择的技能文件夹，load_skill_* 工具）──
+const showSkillDirPicker = ref(false)
+const skillBusy = ref(false)
+
+async function handleSelectSkillDir(path: string) {
+  showSkillDirPicker.value = false
+  skillBusy.value = true
+  try {
+    await skillStore.setDirectory(path)
+    showToast('技能目录已切换')
+  } catch (err: any) {
+    showToast(err?.message || '设置技能目录失败')
+  } finally {
+    skillBusy.value = false
+  }
+}
+
+async function handleToggleSkill(skill: { name: string; enabled: boolean }, enabled: boolean) {
+  try {
+    await skillStore.toggle(skill.name, !enabled)
+  } catch (err: any) {
+    showToast(err?.message || '切换技能失败')
+  }
+}
 
 const searchText = ref('')
 const filteredItems = computed(() => {
@@ -18,6 +46,7 @@ const filteredItems = computed(() => {
 onMounted(async () => {
   await store.fetchAll()
   try { await store.fetchCatalog() } catch (e: any) { console.warn('加载工具目录失败:', e?.message || e) }
+  try { await skillStore.fetchAll() } catch (e: any) { console.warn('加载技能失败:', e?.message || e) }
 })
 
 // ── 创建脚本型 ──
@@ -93,6 +122,7 @@ async function handleDelete(item: CustomToolItem) {
     <div class="cta">
       <van-button size="small" plain type="primary" icon="plus" @click="showScriptForm = true">创建脚本工具</van-button>
       <van-button size="small" plain type="primary" icon="bookmark-o" @click="showPinForm = true">固定已有工具</van-button>
+      <van-button size="small" plain type="primary" icon="folder-o" :loading="skillBusy" @click="showSkillDirPicker = true">技能文件夹</van-button>
     </div>
 
     <van-loading v-if="store.loading" class="loading" />
@@ -116,6 +146,37 @@ async function handleDelete(item: CustomToolItem) {
         </template>
       </van-swipe-cell>
     </div>
+
+    <!-- 技能（扫描前端选择的技能文件夹，load_skill_* 工具） -->
+    <div class="skills-m">
+      <div class="skills-m-title">⚡ 技能</div>
+      <div class="skills-m-dir">
+        当前目录：<span class="skills-m-path">{{ skillStore.directory || '未设置' }}</span>
+      </div>
+      <van-empty v-if="skillStore.skills.length === 0" image="search" description="暂无技能（选择含 .md / SKILL.md 的文件夹）" />
+      <template v-else>
+        <div class="skills-m-count">{{ skillStore.skills.length }} 个技能</div>
+        <van-cell
+          v-for="s in skillStore.skills"
+          :key="s.name"
+          class="skill-cell"
+          :title="'load_skill_' + s.name.replace(/-/g, '_').replace(/ /g, '_')"
+          :label="(s.description || '') + (s.disable_model_invocation ? ' · 仅手动' : '')"
+          center
+        >
+          <template #right-icon>
+            <van-switch
+              :model-value="s.enabled"
+              :disabled="s.disable_model_invocation"
+              size="20px"
+              @update:model-value="handleToggleSkill(s, s.enabled)"
+            />
+          </template>
+        </van-cell>
+      </template>
+    </div>
+
+    <DirPickerModal :show="showSkillDirPicker" @close="showSkillDirPicker = false" @select="handleSelectSkillDir" />
 
     <van-popup v-model:show="showScriptForm" round position="bottom" :style="{ height: '80%' }">
       <div class="form-panel">
@@ -178,6 +239,12 @@ async function handleDelete(item: CustomToolItem) {
 .row-label { font-size: 14px; color: var(--text); }
 .pin-options { flex: 1; overflow-y: auto; }
 .pin-options :deep(.van-cell.active) { background: var(--primary-soft); }
+.skills-m { padding: 20px 16px 4px; }
+.skills-m-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.skills-m-dir { font-size: 12px; color: var(--text-secondary); margin: 4px 0 10px; }
+.skills-m-path { font-family: 'JetBrains Mono', Consolas, monospace; color: var(--primary); word-break: break-all; }
+.skills-m-count { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+.skill-cell { border-radius: 12px; margin-bottom: 6px; border: 1px solid var(--border); }
 </style>
 
 <style scoped>
