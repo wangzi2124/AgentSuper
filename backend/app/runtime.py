@@ -104,26 +104,19 @@ def _do_init(app):
     _base_dir = Path(__file__).resolve().parents[1]
     _data_dir = _base_dir / "data"
 
-    # 技能目录由前端「自定义工具」页选择（持久化于 data/runtime_skills_dir.json，
-    # 未设置时回退 backend/skills），不再由 .env 的 SKILLS_DIR 配置。
+    # 技能源：受管库 data/skills（自动创建）+ 用户追加的外部源（持久化于
+    # data/skills_sources.json）。开箱即有可用空库，不再出现「目录不存在」WARNING。
     from app.skills.loader import SkillLoader
+    from app.skills import registry as skills_registry
 
-    def _resolve_skills_dir() -> str:
-        import json
-        # 与 app/api/skills.py 的 RUNTIME_SKILLS_DIR_FILE 保持一致（data/runtime_skills_dir.json）
-        _p = _data_dir / "runtime_skills_dir.json"
-        try:
-            if _p.exists():
-                d = str(json.loads(_p.read_text("utf-8")).get("directory", "")).strip()
-                if d:
-                    return d
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Failed to read skills dir from %s: %s", _p, e)
-        return str(_base_dir / "skills")
-
-    skill_loader = SkillLoader(_resolve_skills_dir(), create=False)
+    _managed, _extras = skills_registry.load_sources()
+    skill_loader = SkillLoader(_managed, create=True, extra_dirs=_extras)
     skill_loader.load_all()
-    logger.info("Skills dir: %s (%d skills)", skill_loader.skills_dir, len(skill_loader.list()))
+    skills_registry.save_sources(str(skill_loader.skills_dir), skill_loader.extra_dir_strings())
+    logger.info(
+        "Skills: managed=%s extras=%s (%d skills)",
+        skill_loader.skills_dir, skill_loader.extra_dir_strings() or "[]", len(skill_loader.list()),
+    )
 
     # 可写工作目录完全由前端「工作目录」面板配置（持久化于 data/runtime_workspaces.json），
     # 不再支持 .env 的 EXTRA_WORKSPACES。

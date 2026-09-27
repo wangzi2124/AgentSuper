@@ -166,6 +166,70 @@ def test_skill_loader_parses_disable_model_invocation(tmp_path):
     assert loader.get("user-only").to_dict()["disable_model_invocation"] is True
 
 
+def test_skill_loader_subdir_name_fallback_no_collision(tmp_path):
+    """[回归] 子目录技能省略 frontmatter name 时，名称取**目录名**而非文件名词干。
+
+    旧实现回退到 path.stem，所有 foo/SKILL.md 都叫 "SKILL"，在 _skills 字典里
+    互相覆盖 → 多个匿名子目录技能只活下来一个（静默丢技能）。
+    """
+    from app.skills.loader import SkillLoader
+    d = tmp_path / "skills"
+    for sub in ("manual-only", "second-anon"):
+        (d / sub).mkdir(parents=True)
+        # 故意不写 name:
+        (d / sub / "SKILL.md").write_text(
+            "---\ndescription: sub %s\nenabled: true\n---\nbody\n" % sub, encoding="utf-8"
+        )
+    (d / "flat.md").write_text("---\ndescription: flat\nenabled: true\n---\n", encoding="utf-8")
+    (d / "no-frontmatter.md").write_text("# 无 frontmatter\n正文\n", encoding="utf-8")
+
+    loader = SkillLoader(str(d), create=False)
+    skills = loader.load_all()
+    names = {s.name for s in skills}
+    assert names == {"manual-only", "second-anon", "flat", "no-frontmatter"}, names
+    # 不得出现退化的 "SKILL" 名
+    assert "SKILL" not in names
+    assert loader.get("manual-only").description == "sub manual-only"
+    # 顶层平铺 .md 仍回退到文件名词干
+    assert loader.get("flat") is not None and loader.get("no-frontmatter") is not None
+    # 匿名子目录技能应正常挂载为工具
+    tool_names = {t.name for t in at.create_skill_tools(loader)}
+    assert {"load_skill_manual_only", "load_skill_second_anon"} <= tool_names
+    assert "load_skill_SKILL" not in tool_names
+
+
+def test_skill_loader_toggle_writes_frontmatter_back(tmp_path):
+    """toggle 把 enabled 状态写回 Markdown frontmatter，且无 frontmatter 的文件会被补齐。"""
+    from app.skills.loader import SkillLoader
+    d = tmp_path / "skills"
+    d.mkdir(parents=True)
+    p = d / "anon.md"
+    p.write_text("# 无 frontmatter\n正文\n", encoding="utf-8")
+
+    loader = SkillLoader(str(d), create=False)
+    loader.load_all()
+    assert loader.toggle("anon", False) is True
+    text = p.read_text(encoding="utf-8")
+    assert "enabled: false" in text and "name: anon" in text
+    # 重新加载后状态保持
+    loader.load_all()
+    assert loader.get("anon").enabled is False
+    assert "anon" not in {t.name for t in at.create_skill_tools(loader)}
+
+
+def test_skill_loader_missing_dir_degrades(tmp_path):
+    """[opencode 对齐] 技能目录不存在时视为「当前无技能」，不抛 FileNotFoundError。"""
+    from app.skills.loader import SkillLoader
+    loader = SkillLoader(str(tmp_path / "nope"), create=False)
+    assert loader.load_all() == []
+    assert at.create_skill_tools(loader) == []
+    # 空目录同理
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    l2 = SkillLoader(str(empty), create=False)
+    assert l2.load_all() == []
+
+
 def test_skill_loader_set_dir(tmp_path):
     """SkillLoader.set_dir 热切换目录并重载。"""
     from app.skills.loader import SkillLoader

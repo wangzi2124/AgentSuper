@@ -29,6 +29,7 @@ const navItems = [
   { path: '/documents', label: '文档管理', icon: '📄' },
   { path: '/plugins', label: '插件', icon: '🔌' },
   { path: '/custom-tools', label: '自定义工具', icon: '🧰' },
+  { path: '/skills', label: '技能', icon: '⚡' },
   { path: '/vectors', label: '向量库', icon: '🔢' },
   { path: '/generated', label: '生成文件', icon: '📝' },
   { path: '/monitoring', label: '系统监控', icon: '📊' },

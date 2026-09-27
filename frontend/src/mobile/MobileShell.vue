@@ -32,6 +32,7 @@ const menu = [
   { name: 'Documents', path: '/documents', title: '文档管理', vanIcon: 'description', color: '#3b82f6', soft: 'rgba(59,130,246,.12)' },
   { name: 'Plugins', path: '/plugins', title: '插件', vanIcon: 'apps-o', color: '#06b6d4', soft: 'rgba(6,182,212,.12)' },
   { name: 'CustomTools', path: '/custom-tools', title: '自定义工具', vanIcon: 'setting-o', color: '#ec4899', soft: 'rgba(236,72,153,.12)' },
+  { name: 'Skills', path: '/skills', title: '技能', vanIcon: 'fire-o', color: '#eab308', soft: 'rgba(234,179,8,.12)' },
   { name: 'Vectors', path: '/vectors', title: '向量库', vanIcon: 'cluster-o', color: '#10b981', soft: 'rgba(16,185,129,.12)' },
   { name: 'Generated', path: '/generated', title: '生成文件', vanIcon: 'file-o', color: '#f97316', soft: 'rgba(249,115,22,.12)' },
   { name: 'Monitoring', path: '/monitoring', title: '系统监控', vanIcon: 'chart-trending-o', color: '#f59e0b', soft: 'rgba(245,158,11,.12)' },

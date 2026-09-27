@@ -350,12 +350,31 @@ export interface MultiAgentMessage {
   snapshotRestored?: boolean
 }
 
-// 技能信息（扫描前端在自定义工具页选择的技能文件夹）
+// 技能信息（受管库 data/skills + 用户在「技能」页追加的外部技能源）
 export interface Skill {
   name: string
   description: string
   path: string
   enabled: boolean
   disable_model_invocation: boolean
+  /** true = 位于受管库（可编辑/删除）；false = 来自外部源（只读） */
+  managed?: boolean
+  /** 所属源目录（受管库或外部源），用于标注来源 */
+  source?: string
+}
+
+/** 技能详情（含完整正文，供编辑表单回填） */
+export interface SkillDetail extends Skill {
+  content: string
+}
+
+/** 技能源配置：受管库 + 外部源列表 */
+export interface SkillSources {
+  /** 受管技能库路径（后端启动时自动创建） */
+  managed: string
+  /** @deprecated 兼容旧字段，等于 managed */
+  directory: string
+  /** 用户追加的外部技能源 */
+  extra_dirs: string[]
 }
 

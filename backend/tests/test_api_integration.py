@@ -22,6 +22,7 @@ if __package__ in (None, ""):
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from starlette.datastructures import UploadFile
 
 from app import auth as auth_service
@@ -401,37 +402,175 @@ def test_skills_list_and_toggle(tmp_path, priv):
     assert e.value.status_code == 404
 
 
-def test_skills_directory_get_set(tmp_path, priv, monkeypatch):
-    """技能目录由前端在自定义工具页选择：GET 返回当前目录，POST 热切换并 refresh_tools。"""
-    # 持久化文件指到 tmp，避免污染真实 backend/data/runtime_skills_dir.json
-    monkeypatch.setattr(skills_api, "RUNTIME_SKILLS_DIR_FILE", str(tmp_path / "runtime_skills_dir.json"))
+@pytest.fixture(autouse=True)
+def no_persist_skills(monkeypatch):
+    """[全局隔离] 阻止任何 skills API 调用把测试用的 tmp 目录写进真实
+    backend/data/skills_sources.json。
+
+    autouse 是必需的：任何触发 _refresh() 的用例（toggle/create/update/delete/
+    追加外部源）都会落盘，非 autouse 时会污染真实运行时配置。
+    """
+    saved: list = []
+    monkeypatch.setattr(skills_api.registry, "save_sources",
+                        lambda managed, extras: saved.append((managed, list(extras))))
+    monkeypatch.setattr(skills_api.registry, "load_sources",
+                        lambda: (str(skills_api.registry.managed_skills_dir()), []))
+    return saved
+
+
+def test_skills_directory_add_is_additive(tmp_path, priv, no_persist_skills):
+    """技能源管理：选择技能文件夹 = **追加**外部源（受管库里的技能不丢，追加而非替换）。"""
     st = make_state(tmp_path)
     _write_skill(st.skill_loader)
     st.skill_loader.load_all()
 
-    # GET：返回当前目录（未持久化时借 DUT 内部回退）
+    # GET：返回受管库 + 外部源列表
     before = asyncio.run(skills_api.get_skills_directory(req(st)))
-    assert before["directory"]
+    assert before["directory"] == str(st.skill_loader.skills_dir)
+    assert before["extra_dirs"] == []
 
-    # POST：切到新的有效目录并热加载
+    # POST：追加一个外部源，两个源同时生效
     new_dir = tmp_path / "custom-skills"
     new_dir.mkdir()
     (new_dir / "my-skill.md").write_text(
         "---\nname: my-skill\ndescription: demo2\nenabled: true\n---\n# body\n",
         encoding="utf-8",
     )
-    res = asyncio.run(skills_api.set_skills_directory(
+    res = asyncio.run(skills_api.add_skills_directory(
         skills_api.SetSkillsDirRequest(directory=str(new_dir)), admin_req(st)))
-    assert res["directory"] == str(new_dir.resolve())
+    assert res["directory"] == str(st.skill_loader.skills_dir)   # 受管库未被替换
+    assert res["extra_dirs"] == [str(new_dir.resolve())]
     assert any(s["name"] == "my-skill" for s in res["skills"])
+    assert any(s["name"] == "test-skill" for s in res["skills"])  # 关键：旧技能仍在
     assert st.agent.refresh_calls == 1
-    assert not any(s["name"] == "test-skill" for s in res["skills"])  # 已切走旧目录
+
+    # 移除外部源 → 外部技能消失，受管的仍在
+    rm = asyncio.run(skills_api.remove_skills_directory(
+        skills_api.RemoveSkillsDirRequest(directory=str(new_dir)), admin_req(st)))
+    assert rm["extra_dirs"] == []
+    assert not any(s["name"] == "my-skill" for s in rm["skills"])
+    assert any(s["name"] == "test-skill" for s in rm["skills"])
 
     # POST 无效目录 → 400
     with pytest.raises(HTTPException) as e:
-        asyncio.run(skills_api.set_skills_directory(
+        asyncio.run(skills_api.add_skills_directory(
             skills_api.SetSkillsDirRequest(directory=str(tmp_path / "nope")), admin_req(st)))
     assert e.value.status_code == 400
+
+
+def test_skills_crud_in_managed_store(tmp_path, priv, no_persist_skills):
+    """受管库内技能的 新建 / 详情 / 编辑 / 删除 全链路。"""
+    st = make_state(tmp_path)
+
+    # 新建
+    created = asyncio.run(skills_api.create_skill(skills_api.SkillBody(
+        name="my-skill", description="做一件事", content="# 步骤\n1. …",
+    ), admin_req(st)))
+    assert created["name"] == "my-skill" and created["managed"] is True
+    assert st.agent.refresh_calls == 1
+    on_disk = st.skill_loader.skills_dir / "my-skill" / "SKILL.md"
+    assert on_disk.exists() and "做一件事" in on_disk.read_text("utf-8")
+
+    # 详情（带正文，供编辑表单回填）
+    detail = asyncio.run(skills_api.get_skill("my-skill", req(st)))
+    assert "做一件事" in detail["description"] and "# 步骤" in detail["content"]
+
+    # 列表带来源标记
+    items = asyncio.run(skills_api.list_skills(req(st)))
+    assert items[0]["source"] == str(st.skill_loader.skills_dir)
+
+    # 编辑（只传 description，其余保持）
+    upd = asyncio.run(skills_api.update_skill("my-skill", skills_api.SkillUpdate(
+        description="做另一件事"), admin_req(st)))
+    assert upd["description"] == "做另一件事"
+    assert "# 步骤" in asyncio.run(skills_api.get_skill("my-skill", req(st)))["content"]
+
+    # 删除
+    res = asyncio.run(skills_api.delete_skill("my-skill", admin_req(st)))
+    assert "deleted" in res["message"]
+    assert not on_disk.exists()
+    assert asyncio.run(skills_api.list_skills(req(st))) == []
+
+
+def test_skills_crud_error_branches(tmp_path, priv, no_persist_skills):
+    st = make_state(tmp_path)
+    # 重名
+    asyncio.run(skills_api.create_skill(
+        skills_api.SkillBody(name="dup", description="a"), admin_req(st)))
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(skills_api.create_skill(
+            skills_api.SkillBody(name="dup", description="b"), admin_req(st)))
+    assert e.value.status_code == 400
+    # 非法名（路径穿越 / 非法字符）→ 400
+    for bad in ("../evil", "a/b", "a\\b", "a:b"):
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(skills_api.create_skill(
+                skills_api.SkillBody(name=bad, description="x"), admin_req(st)))
+        assert e.value.status_code in (400, 422), bad
+    # 空名 → pydantic 层直接拒绝
+    for empty in ("", "   "):
+        with pytest.raises((ValidationError, HTTPException)):
+            asyncio.run(skills_api.create_skill(
+                skills_api.SkillBody(name=empty, description="x"), admin_req(st)))
+    # 路径穿越未落盘（受管库外不得产生文件）
+    assert not (st.skill_loader.skills_dir.parent / "evil").exists()
+    # 不存在
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(skills_api.get_skill("ghost", req(st)))
+    assert e.value.status_code == 404
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(skills_api.update_skill("ghost", skills_api.SkillUpdate(
+            description="x"), admin_req(st)))
+    assert e.value.status_code == 404
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(skills_api.delete_skill("ghost", admin_req(st)))
+    assert e.value.status_code == 404
+
+
+def test_skill_external_source_is_read_only(tmp_path, priv, no_persist_skills):
+    """外部源的技能：可见/可启停，但不可编辑/删除（保护用户仓库文件）。"""
+    st = make_state(tmp_path)
+    ext = tmp_path / "ext"
+    ext.mkdir()
+    (ext / "repo-skill.md").write_text(
+        "---\nname: repo-skill\ndescription: from repo\nenabled: true\n---\n# body\n",
+        encoding="utf-8")
+    asyncio.run(skills_api.add_skills_directory(
+        skills_api.SetSkillsDirRequest(directory=str(ext)), admin_req(st)))
+
+    items = {s["name"]: s for s in asyncio.run(skills_api.list_skills(req(st)))}
+    assert items["repo-skill"]["managed"] is False
+    assert items["repo-skill"]["source"] == str(ext.resolve())
+
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(skills_api.update_skill("repo-skill", skills_api.SkillUpdate(
+            description="x"), admin_req(st)))
+    assert e.value.status_code == 403
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(skills_api.delete_skill("repo-skill", admin_req(st)))
+    assert e.value.status_code == 403
+    assert (ext / "repo-skill.md").exists()   # 文件未被删
+    # 启停仍允许（写回用户自己的 md）
+    assert "disabled" in asyncio.run(skills_api.toggle_skill(
+        "repo-skill", skills_api.ToggleSkillRequest(enabled=False), admin_req(st)))["message"]
+
+
+def test_skill_managed_wins_name_conflict(tmp_path, priv, no_persist_skills):
+    """同名冲突：受管库优先（用户自建技能不被外部源覆盖）。"""
+    st = make_state(tmp_path)
+    ext = tmp_path / "ext"
+    ext.mkdir()
+    (ext / "shared.md").write_text(
+        "---\nname: shared\ndescription: 外部版\nenabled: true\n---\n# ext\n", encoding="utf-8")
+    asyncio.run(skills_api.add_skills_directory(
+        skills_api.SetSkillsDirRequest(directory=str(ext)), admin_req(st)))
+    asyncio.run(skills_api.create_skill(skills_api.SkillBody(
+        name="shared", description="受管版"), admin_req(st)))
+
+    items = {s["name"]: s for s in asyncio.run(skills_api.list_skills(req(st)))}
+    assert len(items) == 1
+    assert items["shared"]["description"] == "受管版"
+    assert items["shared"]["managed"] is True
 
 
 # ── plugins 路由 /app/api/plugins.py ──────────────────────────────────────
