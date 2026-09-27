@@ -328,6 +328,48 @@ def test_read_capabilities_ollama_extra_respects_override(tmp_path, monkeypatch)
     assert caps == {"tool_use": True, "vision": False, "reasoning": True}
 
 
+def test_is_weak_model_honors_capability_override_case_sensitive(monkeypatch):
+    """[回归] 取消勾选「支持工具调用」必须真的生效 —— 不能被同模型的其他记录遮蔽。
+
+    Ollama 探测入库的 id 保留 `/api/tags` 原始大小写（`ollama/Qwen2.5:7b`），
+    而用户可能保存了另一条大小写不同的记录。旧实现把 id 转小写**再查目录**，
+    于是命中另一条 `tool_use` 未声明的探测条目（默认 True），
+    表现为「模型管理里存了，但模型仍被当弱模型 → 工具一个都不挂」。
+    """
+    from app.agent.graphmod.base import is_weak_model
+
+    entries = [
+        # 用户在「模型管理」保存的记录（原始大小写）
+        {"id": "ollama/Qwen2.5:7b", "provider": "ollama", "name": "Qwen2.5 7B",
+         "capabilities": {"tool_use": True, "vision": False, "reasoning": False}},
+        # 探测生成的同名记录（小写 id，tool_use 未声明 → 默认 True）
+        {"id": "ollama/qwen2.5:7b", "provider": "ollama", "name": "Ollama Qwen2.5 7B",
+         "capabilities": {"tool_use": True, "vision": False, "reasoning": True}},
+    ]
+    monkeypatch.setattr(catalog, "lookup", lambda mid: next(
+        (e for e in entries if (e["id"] or "").lower() == (mid or "").lower()), None))
+
+    # 勾选 → 非弱模型
+    assert is_weak_model("ollama/Qwen2.5:7b") is False
+    # 取消勾选 → 必须变成弱模型（旧实现在这里恒返回 False）
+    entries[0]["capabilities"] = {"tool_use": False, "vision": False, "reasoning": False}
+    assert is_weak_model("ollama/Qwen2.5:7b") is True
+
+    # WEAK_MODELS 仍走小写比较，不受本次改动影响
+    monkeypatch.setattr(settings, "weak_models", "ollama/qwen2.5:7b")
+    entries[0]["capabilities"] = {"tool_use": True}
+    assert is_weak_model("ollama/Qwen2.5:7b") is True, "显式 WEAK_MODELS 名单应最高优先级"
+
+
+def test_is_weak_model_falls_back_to_ollama_prefix(monkeypatch):
+    """未收录目录的模型仍按 ollama/ 前缀启发式判为弱模型。"""
+    from app.agent.graphmod.base import is_weak_model
+    monkeypatch.setattr(settings, "weak_models", "")
+    monkeypatch.setattr(catalog, "lookup", lambda mid: None)
+    assert is_weak_model("ollama/never-seen:1b") is True
+    assert is_weak_model("deepseek/deepseek-v4-flash") is False
+
+
 def test_provider_api_ollama_think_from_reasoning_capability(monkeypatch):
     # ollama + 声明推理 → think=True；未声明推理 → 不传 think（不臆断）
     monkeypatch.setattr(catalog, "read_capabilities", lambda m: {"tool_use": True, "vision": False, "reasoning": True})

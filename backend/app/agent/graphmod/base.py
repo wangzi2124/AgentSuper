@@ -74,13 +74,19 @@ def is_weak_model(model: str) -> bool:
        目录收录的模型 tool_use=True → 非弱模型（允许工具），tool_use=False → 弱模型
        （纯文本问答，不挂任何工具）；
     3. 未收录目录的模型按历史启发式：`ollama/` 前缀视为弱。
+
+    注意：目录查���用**原始 id**，小写只用于 `WEAK_MODELS` 比较。Ollama 探测入库的 id
+    保留 `/api/tags` 原始大小写（如 `ollama/Qwen2.5:7b`），若先转小写再查目录，会命中
+    另一条同模型记录（探测条目 `tool_use` 未声明 → 默认 True），
+    导致用户在「模型管理」取消勾选「支持工具调用」**存了但无效**。
     """
-    m = (model or "").lower()
+    raw = (model or "").strip()
+    m = raw.lower()
     weak = [x.strip().lower() for x in (settings.weak_models or "").split(",") if x.strip()]
     if any(m == w or m.endswith("/" + w) for w in weak):
         return True
     from app.models import catalog
-    entry = catalog.lookup(m)
+    entry = catalog.lookup(raw) or catalog.lookup(m)
     if entry is not None:
         caps = entry.get("capabilities") or {}
         return not bool(caps.get("tool_use", True))

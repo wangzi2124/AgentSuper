@@ -145,8 +145,9 @@ async function submitModel() {
       cache_write_per_1m: Number(modelForm.cache_write_price) || 0,
     },
   }
-  await mm.addOrUpdateModel(entry)
-  showModelForm.value = false
+  // 仅在保存成功时关闭弹窗：失败时保留用户输入，否则错误 toast 容易被错过
+  const ok = await mm.addOrUpdateModel(entry)
+  if (ok) showModelForm.value = false
 }
 async function delModel(m: ModelInfo) {
   if (!window.confirm(`删除模型「${m.name || m.id}」？`)) return
