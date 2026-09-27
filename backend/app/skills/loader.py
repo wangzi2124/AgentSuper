@@ -9,12 +9,21 @@ logger = logging.getLogger(__name__)
 # 技能名不允许出现的字符（跨平台安全 + 阻断路径穿越）
 _ILLEGAL_NAME_CHARS = set('/\\:*?"<>|')
 
+# [递归技能发现] 嵌套扫描的深度上限（根=0，skills/<分类>/<名字>/SKILL.md 只需 2 层）
+_MAX_SCAN_DEPTH = 4
+# 递归扫描时跳过的目录（隐藏目录由 startswith('.') 统一处理，这里是可见但无关的）
+_SKIP_DIRS = {
+    "node_modules", "__pycache__", "venv", "env", "site-packages", "dist", "build",
+    "target", "out", "coverage", ".egg-info",
+}
+
 
 class Skill:
     """技能数据模型，封装技能的名称、描述、文件路径和启用状态。"""
 
     def __init__(self, name: str, description: str, path: str, enabled: bool = True,
-                 disable_model_invocation: bool = False, managed: bool = False):
+                 disable_model_invocation: bool = False, managed: bool = False,
+                 bundled: bool = False):
         self.name = name
         self.description = description
         self.path = path
@@ -24,6 +33,8 @@ class Skill:
         self.disable_model_invocation = disable_model_invocation
         # True = 位于受管库（UI 可编辑/删除）；False = 来自外部源（只读）
         self.managed = managed
+        # True = 由内置技能集播种而来（随包发布；UI 标「内置」以便与自建技能区分）
+        self.bundled = bundled
 
     def to_dict(self) -> dict:
         """将技能信息序列化为字典格式。"""
@@ -34,6 +45,7 @@ class Skill:
             "enabled": self.enabled,
             "disable_model_invocation": self.disable_model_invocation,
             "managed": self.managed,
+            "bundled": self.bundled,
         }
 
 
@@ -47,9 +59,12 @@ class SkillLoader:
     """
 
     def __init__(self, skills_dir: str = "skills", create: bool = True,
-                 extra_dirs: List[str] | None = None):
+                 extra_dirs: List[str] | None = None,
+                 bundled_names: set | None = None):
         self.skills_dir = Path(skills_dir)
         self.extra_dirs: List[Path] = [Path(d) for d in (extra_dirs or [])]
+        # 内置播种而来的技能名（用于 Skill.bundled 标记，仅影响展示）
+        self.bundled_names: set[str] = set(bundled_names or ())
         if create:
             # 只创建受管库；外部源必须是用户已存在的目录，绝不代建
             self.skills_dir.mkdir(parents=True, exist_ok=True)
@@ -124,25 +139,53 @@ class SkillLoader:
         return self.list()
 
     def _scan_dir(self, root: Path, managed: bool) -> List[Skill]:
-        """扫描单个目录：顶层 *.md + <subdir>/SKILL.md。"""
+        """扫描单个目录：根层平铺 *.md + 任意深度的 <dir>/SKILL.md。
+
+        [递归技能发现] 技能仓库常按分类嵌套（``<root>/engineering/tdd/SKILL.md``），
+        只扫一层会整类漏掉。规则刻意区分两层，避免把分类说明文档误判为技能：
+          - 深度 0（根目录自身）：``*.md`` 平铺技能（既有 opencode 约定，行为不变）
+          - 深度 ≥1：仅「**含 SKILL.md 的目录**」算技能 → ``engineering/README.md``
+            这类分类说明不会被当成名为 ``README`` 的技能（6 个分类 README 会互相覆盖）。
+        """
         found: List[Skill] = []
         for f in sorted(root.glob("*.md")):
             skill = self._load_skill_file(f, managed=managed)
             if skill:
                 found.append(skill)
-        for subdir in sorted(root.iterdir()):
-            if not subdir.is_dir():
+        found.extend(self._scan_nested(root, managed=managed, depth=1))
+        return found
+
+    def _scan_nested(self, root: Path, managed: bool, depth: int) -> List[Skill]:
+        """递归发现 ``<dir>/SKILL.md``（含子目录的技能，其配套文件也随目录保留）。"""
+        found: List[Skill] = []
+        if depth > _MAX_SCAN_DEPTH:
+            return found
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:  # pragma: no cover - 权限/并发删除
+            return found
+        for subdir in entries:
+            try:
+                if not subdir.is_dir() or subdir.is_symlink():
+                    continue
+            except OSError:  # pragma: no cover
+                continue
+            if subdir.name.startswith(".") or subdir.name in _SKIP_DIRS:
                 continue
             skill_file = subdir / "SKILL.md"
-            if not skill_file.exists():
-                continue
-            # [opencode 对齐] 子目录技能的身份是**目录名**（foo/SKILL.md → "foo"），
-            # frontmatter 的 name 可省略。此前回退到 path.stem 会让所有无 name 的
-            # 子目录技能都叫 "SKILL"，在 _skills 字典里互相覆盖 → 静默丢技能。
-            skill = self._load_skill_file(skill_file, fallback_name=subdir.name,
-                                          managed=managed)
-            if skill:
-                found.append(skill)
+            try:
+                has_skill = skill_file.is_file()
+            except OSError:  # pragma: no cover
+                has_skill = False
+            if has_skill:
+                # [opencode 对齐] 子目录技能的身份是**目录名**（foo/SKILL.md → "foo"），
+                # frontmatter 的 name 可省略。此前回退到 path.stem 会让所有无 name 的
+                # 子目录技能都叫 "SKILL"，在 _skills 字典里互相覆盖 → 静默丢技能。
+                skill = self._load_skill_file(skill_file, fallback_name=subdir.name,
+                                              managed=managed)
+                if skill:
+                    found.append(skill)
+            found.extend(self._scan_nested(subdir, managed=managed, depth=depth + 1))
         return found
 
     def _load_skill_file(self, path: Path, fallback_name: str = "",
@@ -175,6 +218,7 @@ class SkillLoader:
                              meta.get("disable_model_invocation", False))
                 ),
                 managed=managed,
+                bundled=name in self.bundled_names,
             )
         except Exception as e:
             logger.warning("Failed to load skill %s: %s", path.name, e)
@@ -259,7 +303,7 @@ class SkillLoader:
 
     def delete_skill(self, name: str) -> bool:
         """删除**受管库**中的技能文件/目录。外部源的技能一律拒绝。"""
-        skill = self.get(name)
+        skill = self._skills.get(name)
         if skill is None:
             return False
         path = Path(skill.path).resolve()
@@ -269,8 +313,20 @@ class SkillLoader:
             return False
         if path.parent == managed_root:      # 顶层平铺的 <managed>/foo.md
             path.unlink(missing_ok=True)
-        else:                                # <managed>/foo/SKILL.md
-            shutil.rmtree(path.parent, ignore_errors=True)
+        else:                                # <managed>/foo/SKILL.md（含嵌套 <managed>/a/b/）
+            target_dir = path.parent
+            shutil.rmtree(target_dir, ignore_errors=True)
+            # [递归发现] 嵌套技能删除后把沿途空目录一并清掉，避免受管库里留垃圾骨架
+            parent = target_dir.parent
+            while managed_root in parent.parents:
+                try:
+                    next(parent.iterdir())
+                    break            # 还有别的内容，停止上溯
+                except StopIteration:
+                    parent.rmdir()
+                    parent = parent.parent
+                except OSError:      # pragma: no cover
+                    break
         self.load_all()
         return True
 
@@ -326,7 +382,7 @@ class SkillLoader:
         return [s for s in self._skills.values() if s.enabled]
 
     def get_skill_content(self, name: str) -> Optional[str]:
-        """读取指定技能文件的完整文本内容。"""
+        """读取指定技能文件的完整文本内容（含 frontmatter）。"""
         skill = self._skills.get(name)
         if not skill:
             return None
@@ -334,6 +390,21 @@ class SkillLoader:
             return Path(skill.path).read_text(encoding="utf-8")
         except Exception:
             return None
+
+    def get_skill_body(self, name: str) -> Optional[str]:
+        """读取技能**正文**（剥掉 YAML frontmatter）。
+
+        编辑表单只改正文，元信息（name/description/enabled）由独立的表单字段提交。
+        若把含 frontmatter 的全文回填进正文框，保存时 `update_skill` 会再套一层
+        frontmatter → 产出 `---\n...\n---\n---\nname: x\n...` 的嵌套损坏文件。
+        """
+        raw = self.get_skill_content(name)
+        if raw is None:
+            return None
+        parts = raw.split("---", 2)
+        if len(parts) >= 3 and parts[0].strip() == "":
+            return parts[2].lstrip("\n")
+        return raw
 
 
 def _safe_resolve(p: Path) -> str:

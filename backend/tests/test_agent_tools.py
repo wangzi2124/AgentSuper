@@ -198,6 +198,122 @@ def test_skill_loader_subdir_name_fallback_no_collision(tmp_path):
     assert "load_skill_SKILL" not in tool_names
 
 
+def test_skill_loader_recursive_nested_discovery(tmp_path):
+    """[递归发现] 技能仓库按分类嵌套时（<root>/engineering/tdd/SKILL.md）要能发现。
+
+    只扫一层的旧实现对 `skills/` 这种根目录会整类漏掉（实测 0 个）。
+    """
+    from app.skills.loader import SkillLoader
+    d = tmp_path / "skills"
+    (d / "engineering" / "tdd").mkdir(parents=True)
+    (d / "engineering" / "tdd" / "SKILL.md").write_text(
+        "---\nname: tdd\ndescription: TDD\n---\nbody", encoding="utf-8")
+    # 技能目录里的配套文件（scripts/、references/）不应被当成技能
+    (d / "engineering" / "tdd" / "tests.md").write_text("# notes", encoding="utf-8")
+    (d / "productivity" / "handoff").mkdir(parents=True)
+    (d / "productivity" / "handoff" / "SKILL.md").write_text(
+        "---\ndescription: no name\n---\nbody", encoding="utf-8")
+
+    loader = SkillLoader(str(d), create=False)
+    names = {s.name for s in loader.load_all()}
+    assert names == {"tdd", "handoff"}, names
+    assert {t.name for t in at.create_skill_tools(loader)} == {
+        "load_skill_tdd", "load_skill_handoff"}
+
+
+def test_skill_loader_nested_skips_category_readme(tmp_path):
+    """[递归发现] 分类级 README.md 不是技能 —— 否则 6 个分类的 README 会互相覆盖。"""
+    from app.skills.loader import SkillLoader
+    d = tmp_path / "skills"
+    for cat in ("engineering", "misc", "productivity"):
+        (d / cat).mkdir(parents=True)
+        (d / cat / "README.md").write_text(f"# {cat} 说明", encoding="utf-8")
+        (d / cat / "real-skill").mkdir()
+        (d / cat / "real-skill" / "SKILL.md").write_text(
+            f"---\nname: {cat}-skill\ndescription: d\n---\nb", encoding="utf-8")
+
+    loader = SkillLoader(str(d), create=False)
+    names = {s.name for s in loader.load_all()}
+    assert names == {"engineering-skill", "misc-skill", "productivity-skill"}, names
+    assert "README" not in names
+
+
+def test_skill_loader_nested_skips_junk_dirs(tmp_path):
+    """[递归发现] 隐藏目录 / node_modules / .venv 等不得被遍历（防巨量无关文件）。"""
+    from app.skills.loader import SkillLoader
+    d = tmp_path / "skills"
+    (d / "real").mkdir(parents=True)
+    (d / "real" / "SKILL.md").write_text(
+        "---\nname: real\ndescription: d\n---\nb", encoding="utf-8")
+    for junk in (".git", "node_modules", ".venv", "__pycache__", "dist"):
+        (d / junk).mkdir()
+        (d / junk / "SKILL.md").write_text(
+            f"---\nname: from-{junk}\ndescription: d\n---\nb", encoding="utf-8")
+
+    loader = SkillLoader(str(d), create=False)
+    assert {s.name for s in loader.load_all()} == {"real"}
+
+
+def test_skill_loader_delete_nested_prunes_empty_parents(tmp_path):
+    """[递归发现] 删除嵌套技能后清掉沿途空目录，不在受管库留垃圾骨架。"""
+    from app.skills.loader import SkillLoader
+    d = tmp_path / "skills"
+    (d / "cat" / "deep" / "SKILL.md").parent.mkdir(parents=True)
+    (d / "cat" / "deep" / "SKILL.md").write_text(
+        "---\nname: deep\ndescription: d\n---\nb", encoding="utf-8")
+    (d / "cat" / "other").mkdir(parents=True)
+    (d / "cat" / "other" / "SKILL.md").write_text(
+        "---\nname: other\ndescription: d\n---\nb", encoding="utf-8")
+
+    loader = SkillLoader(str(d), create=True)
+    assert len(loader.load_all()) == 2
+    assert loader.delete_skill("deep") is True
+    assert not (d / "cat" / "deep").exists()
+    assert (d / "cat").exists(), "同级技能还在，cat 不能被删"
+    # 删掉最后一个 → cat 也应被清掉
+    assert loader.delete_skill("other") is True
+    assert not (d / "cat").exists()
+    assert d.is_dir()
+
+
+def test_skill_bundled_flag_marks_seeded_names(tmp_path):
+    """[内置技能] bundled_names 注入的技能被打 bundled 标记（供 UI 徽章）。"""
+    from app.skills.loader import SkillLoader
+    d = tmp_path / "skills"
+    (d / "tdd").mkdir(parents=True)
+    (d / "tdd" / "SKILL.md").write_text(
+        "---\nname: tdd\ndescription: d\n---\nb", encoding="utf-8")
+    (d / "mine").mkdir()
+    (d / "mine" / "SKILL.md").write_text(
+        "---\nname: mine\ndescription: d\n---\nb", encoding="utf-8")
+
+    loader = SkillLoader(str(d), create=False, bundled_names={"tdd"})
+    loader.load_all()
+    assert loader.get("tdd").to_dict()["bundled"] is True
+    assert loader.get("mine").to_dict()["bundled"] is False
+    assert loader.get("tdd").managed is True      # 播种进受管库 → 可编辑
+
+
+def test_skill_get_body_strips_frontmatter(tmp_path):
+    """[回归] 编辑详情只回填正文 —— 含 frontmatter 会让保存时套出嵌套 frontmatter。"""
+    from app.skills.loader import SkillLoader
+    d = tmp_path / "skills"
+    (d / "x").mkdir(parents=True)
+    (d / "x" / "SKILL.md").write_text(
+        "---\nname: x\ndescription: d\nenabled: true\n---\n\n# 标题\n\n正文\n", encoding="utf-8")
+    loader = SkillLoader(str(d), create=False)
+    loader.load_all()
+    assert "name: x" in loader.get_skill_content("x")
+    body = loader.get_skill_body("x")
+    assert "name: x" not in body and "---" not in body
+    assert body.strip() == "# 标题\n\n正文"
+
+    # 无 frontmatter 的技能：原样返回全文
+    (d / "y.md").write_text("# 无 fm\n", encoding="utf-8")
+    loader.load_all()
+    assert loader.get_skill_body("y") == "# 无 fm\n"
+
+
 def test_skill_loader_toggle_writes_frontmatter_back(tmp_path):
     """toggle 把 enabled 状态写回 Markdown frontmatter，且无 frontmatter 的文件会被补齐。"""
     from app.skills.loader import SkillLoader

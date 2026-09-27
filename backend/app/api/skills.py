@@ -55,7 +55,8 @@ def _loader(request: Request):
     if loader is None:
         from app.skills.loader import SkillLoader
         managed, extras = registry.load_sources()
-        loader = SkillLoader(managed, create=True, extra_dirs=extras)
+        loader = SkillLoader(managed, create=True, extra_dirs=extras,
+                             bundled_names=registry.bundled_names(managed))
         loader.load_all()
         request.app.state.skill_loader = loader
     return loader
@@ -106,7 +107,8 @@ async def get_skill(name: str, request: Request):
         raise HTTPException(status_code=404, detail=f"技能不存在: {name}")
     d = skill.to_dict()
     d["source"] = loader.source_of(name)
-    d["content"] = loader.get_skill_content(name) or ""
+    # 只回填**正文**（不含 frontmatter）：元信息走独立表单字段，避免保存时套两层 frontmatter
+    d["content"] = loader.get_skill_body(name) or ""
     return d
 
 

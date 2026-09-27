@@ -33,6 +33,8 @@ const toolCount = computed(
   () => skillStore.skills.filter((s) => s.enabled && !s.disable_model_invocation).length,
 )
 const managedCount = computed(() => skillStore.skills.filter((s) => s.managed).length)
+/** 随系统发布的内置技能（后端 app/skills/bundled 播种进受管库） */
+const bundledCount = computed(() => skillStore.skills.filter((s) => s.bundled).length)
 
 /** 技能挂载为 load_skill_<name> 工具（后端 app/agent/tools.py:create_skill_tools 同款命名） */
 function toolNameOf(name: string): string {
@@ -207,6 +209,10 @@ async function handleDelete() {
         <div class="stat-num">{{ managedCount }}</div>
         <div class="stat-label">受管（可编辑）</div>
       </div>
+      <div class="stat">
+        <div class="stat-num">{{ bundledCount }}</div>
+        <div class="stat-label">内置</div>
+      </div>
       <div class="stat-actions">
         <input v-model="search" class="ctrl search" placeholder="搜索技能…" />
         <button class="btn" :disabled="busy || skillStore.loading" @click="reload">
@@ -221,7 +227,7 @@ async function handleDelete() {
       <div class="src-head">
         <div class="src-title">技能源</div>
         <div class="src-hint">
-          受管库由系统自动创建，<b>新建的技能保存在这里</b>；外部源用于引入已有的技能仓库，两者可并存，同名以受管库优先。
+          受管库由系统自动创建，<b>新建的技能保存在这里</b>；<b>{{ bundledCount }} 个内置技能</b>随系统发布、首次启动自动播种进来（和自建技能一样可编辑可删除，删掉不会自动恢复）；外部源用于引入已有的技能仓库，三者并存，同名以受管库优先。
         </div>
       </div>
       <div class="src-row">
@@ -265,6 +271,7 @@ async function handleDelete() {
           <div class="skill-name">
             <span class="skill-title">{{ s.name }}</span>
             <span class="badge mono">{{ toolNameOf(s.name) }}</span>
+            <span v-if="s.bundled" class="badge builtin" title="随系统发布的内置技能（可编辑/删除，删掉不会自动恢复）">内置</span>
             <span v-if="s.disable_model_invocation" class="badge warn" title="仅由用户显式触发，不暴露为模型工具">仅手动</span>
             <span v-if="!isManaged(s)" class="badge" title="来自外部技能源，只读">只读</span>
           </div>
@@ -445,7 +452,8 @@ async function handleDelete() {
   border-radius: var(--radius-pill); white-space: nowrap; letter-spacing: 0.02em;
 }
 .badge.mono { font-family: 'JetBrains Mono', Consolas, monospace; background: var(--bg-subtle); color: var(--text-secondary); }
-.badge.warn { background: color-mix(in srgb, #eab308 20%, transparent); color: #a16207; }
+  .badge.warn { background: color-mix(in srgb, #eab308 20%, transparent); color: #a16207; }
+  .badge.builtin { background: color-mix(in srgb, #0ea5e9 18%, transparent); color: #0369a1; }
 .badge.ok { background: color-mix(in srgb, #16a34a 15%, transparent); color: #16a34a; }
 .badge.off { background: var(--bg-subtle); color: var(--text-muted); }
 

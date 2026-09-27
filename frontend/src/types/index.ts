@@ -359,6 +359,8 @@ export interface Skill {
   disable_model_invocation: boolean
   /** true = 位于受管库（可编辑/删除）；false = 来自外部源（只读） */
   managed?: boolean
+  /** true = 随包发布的内置技能（由 app/skills/bundled 播种进受管库） */
+  bundled?: boolean
   /** 所属源目录（受管库或外部源），用于标注来源 */
   source?: string
 }

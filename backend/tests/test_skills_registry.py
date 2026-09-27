@@ -80,3 +80,111 @@ def test_corrupt_file_falls_back(fake_backend):
     managed, extras = registry.load_sources()
     assert managed == str(fake_backend / "data" / "skills")
     assert extras == []
+
+
+# ── 内置技能播种（bundled）────────────────────────────────────────────────
+
+@pytest.fixture
+def fake_bundled(tmp_path, monkeypatch):
+    """把内置技能目录指到 tmp：内容最小化，只测播种语义，不测随包内容。"""
+    b = tmp_path / "bundled"
+    for cat, names in (("engineering", ("alpha", "beta")), ("productivity", ("gamma",))):
+        for n in names:
+            d = b / cat / n
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {n}\ndescription: {n} desc\n---\n# {n}\n", encoding="utf-8")
+    (b / "engineering" / "alpha" / "helper.md").write_text("配套文件", encoding="utf-8")
+    (b / "engineering" / "README.md").write_text("# 分类说明，不是技能", encoding="utf-8")
+    monkeypatch.setattr(registry, "bundled_skills_dir", lambda: b)
+    return b
+
+
+def test_bundled_dir_is_inside_package():
+    """内置目录必须在 app/skills/bundled（包内随代码分发）——data/ 被 .gitignore 忽略。"""
+    d = registry.bundled_skills_dir()
+    assert d.name == "bundled"
+    assert d.parent.name == "skills"
+    assert d.parent.parent.name == "app"
+
+
+def test_bundled_content_ships_with_package():
+    """随包内置内容真的存在（Skills_Real_Engineers，28 个技能按分类嵌套）。"""
+    d = registry.bundled_skills_dir()
+    assert d.is_dir(), "内置技能目录缺失"
+    names = registry._discover_bundled()
+    assert len(names) >= 20, f"内置技能过少: {len(names)}"
+    # 嵌套两层（<分类>/<名字>/SKILL.md）必须能被播种发现
+    assert "tdd" in names and "triage" in names and "handoff" in names
+
+
+def test_discover_bundled_finds_nested_and_skips_readme(fake_bundled):
+    found = registry._discover_bundled()
+    assert sorted(found) == ["alpha", "beta", "gamma"]
+    assert "README" not in found
+
+
+def test_seed_bundled_first_run_copies_tree(tmp_path, fake_bundled):
+    managed = tmp_path / "data" / "skills"
+    assert sorted(registry.seed_bundled(managed)) == ["alpha", "beta", "gamma"]
+    assert (managed / "alpha" / "SKILL.md").is_file()
+    # 配套文件（技能可能带 scripts/、references/）必须随目录一起搬运
+    assert (managed / "alpha" / "helper.md").read_text("utf-8") == "配套文件"
+    assert sorted(registry.bundled_names(managed)) == ["alpha", "beta", "gamma"]
+
+
+def test_seed_bundled_is_idempotent(tmp_path, fake_bundled):
+    """幂等：重复启动零拷贝。"""
+    managed = tmp_path / "data" / "skills"
+    registry.seed_bundled(managed)
+    assert registry.seed_bundled(managed) == []
+    assert len([p for p in managed.iterdir() if p.is_dir()]) == 3
+
+
+def test_seed_bundled_does_not_overwrite_user_edits(tmp_path, fake_bundled):
+    """非破坏：用户改过的内置技能，升级/重启都不能被冲掉。"""
+    managed = tmp_path / "data" / "skills"
+    registry.seed_bundled(managed)
+    f = managed / "alpha" / "SKILL.md"
+    f.write_text("---\nname: alpha\ndescription: 我改过的\n---\n我的内容", encoding="utf-8")
+    registry.seed_bundled(managed)
+    after = f.read_text("utf-8")
+    assert "我改过的" in after and "我的内容" in after
+
+
+def test_seed_bundled_respects_deletion(tmp_path, fake_bundled):
+    """尊重删除：用户删掉的内置技能不会在下次启动复活。"""
+    import shutil
+    managed = tmp_path / "data" / "skills"
+    registry.seed_bundled(managed)
+    shutil.rmtree(managed / "beta")
+    registry.seed_bundled(managed)
+    assert not (managed / "beta").exists()
+
+
+def test_seed_bundled_preserves_preexisting_same_name(tmp_path, fake_bundled):
+    """受管库里已存在的同名内容（自建技能）不覆盖，但仍标记为已处理以免每次重试。"""
+    managed = tmp_path / "data" / "skills"
+    (managed / "alpha").mkdir(parents=True)
+    (managed / "alpha" / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: 我自己写的\n---\nx", encoding="utf-8")
+    assert registry.seed_bundled(managed) == ["beta", "gamma"]
+    assert "我自己写的" in (managed / "alpha" / "SKILL.md").read_text("utf-8")
+    assert "alpha" in registry.bundled_names(managed)
+
+
+def test_seed_bundled_version_bump_adds_new_only(tmp_path, fake_bundled, monkeypatch):
+    """BUNDLED_VERSION 递增可补种新增技能，已存在的一律不动。"""
+    managed = tmp_path / "data" / "skills"
+    registry.seed_bundled(managed)
+    d = fake_bundled / "engineering" / "delta"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: delta\ndescription: 新增\n---\n# d", encoding="utf-8")
+    monkeypatch.setattr(registry, "BUNDLED_VERSION", registry.BUNDLED_VERSION + 1)
+    assert registry.seed_bundled(managed) == ["delta"]
+    assert registry.seed_bundled(managed) == []
+
+
+def test_seed_bundled_without_bundled_dir_is_noop(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry, "bundled_skills_dir", lambda: tmp_path / "nope")
+    assert registry.seed_bundled(tmp_path / "data" / "skills") == []
