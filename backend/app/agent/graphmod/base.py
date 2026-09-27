@@ -384,45 +384,37 @@ class RAGAgentBase:
             + LONG_CONTENT_FILE_RULE
         )
 
-    # [token 优化 v5] 按需挂载工具 schema：核心文件工具常驻，技能/插件按意图关键词 + 已使用保留
+    # 按需挂载工具 schema：核心文件工具 + 技能常驻，插件按意图关键词 + 已使用保留
     _CORE_TOOL_PREFIXES = ("tool_",)
+    # [技能常驻] load_skill_* 每轮无条件挂载，不再走意图门控。
+    # 理由（实测数据）：17 个技能 schema 共 1,683 token = 可用上下文 127K 的 1.32%，
+    # 外推到 40 个技能 3,960 token（3.12%），远低于压缩阈值余量（74,560 token）。
+    # 而意图门控的代价是：(1) 4/17 技能（brand-guidelines / internal-comms /
+    # mcp-builder / skill_creator）在自然提问下拿不到 schema，只能靠用户先说
+    # 「技能」兜底；(2) 每加一个技能都要改下面的硬编码名字表。
+    # 技能的启用/禁用语义完全不受影响：enabled=false 或 disable-model-invocation=true
+    # 的技能在 create_skill_tools 阶段就没有 ToolDef，不存在「已存在但不挂载」的情形。
+    _RESIDENT_SKILL_PREFIXES = ("load_skill_",)
     _WEATHER_TOOL_PREFIXES = ("plugin_weather", "plugin_weather-alert")
     _WEATHER_RESULT_LIMIT = 1500  # 字符
     # 意图关键词 → 需要挂载的工具名前缀（任一词命中即挂载该类工具）
+    # 仅用于**插件**与少数 tool_*：load_skill_* 已常驻（见 _RESIDENT_SKILL_PREFIXES），
+    # 原先挂在这些规则下的技能前缀已移除，避免留下看似生效实则无效的死规则。
     _INTENT_RULES: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
         (("天气", "台风", "气象", "温度", "降雨", "下雪", "weather", "typhoon", "forecast"),
          ("plugin_weather", "plugin_weather-alert")),
         (("文档", "word", "docx", "pdf", "excel", "xlsx", "ppt", "pptx", "表格", "幻灯片", "报告"),
-         ("plugin_docx-generator", "plugin_pdf-generator", "plugin_excel-generator", "plugin_pptx-generator",
-          "load_skill_docx", "load_skill_pdf", "load_skill_xlsx", "load_skill_pptx", "load_skill_doc_coauthoring")),
-        (("网页", "前端", "react", "vue", "html", "css", "网站", "页面", "artifact", "frontend", "web"),
-         ("load_skill_frontend_design", "load_skill_web_artifacts_builder", "load_skill_webapp_testing",
-          "load_skill_theme_factory", "load_skill_canvas_design")),
+         ("plugin_docx-generator", "plugin_pdf-generator", "plugin_excel-generator", "plugin_pptx-generator")),
         (("搜索", "查一下", "新闻", "资讯", "上网", "search", "news", "internet"),
          ("plugin_internet-search_",)),
-        (("图片", "海报", "设计", "艺术", "绘图", "生成图", "image", "poster", "art", "draw"),
-         ("load_skill_canvas_design", "load_skill_algorithmic_art", "load_skill_slack_gif_creator")),
         (("语音", "声音", "配音", "克隆", "合成", "朗读", "voice", "audio", "speech"),
          ("tool_tts_synthesize", "tool_voice_transcribe")),
         (("角色", "人物", "对话", "台词", "character", "dialogue"),
          ("plugin_character-analysis_",)),
         (("知识库", "kb", "导出"),
          ("plugin_kb-export_",)),
-        (("代码", "编程", "bug", "调试", "重构", "code", "debug", "test", "tdd", "review", "实现"),
-         ("load_skill_tdd", "load_skill_code_review", "load_skill_diagnosing_bugs", "load_skill_implement",
-          "load_skill_to_tickets", "load_skill_grilling", "load_skill_grill_me", "load_skill_codebase_design")),
-        (("技能", "skill"),
-         ("load_skill_",)),
         (("插件", "plugin"),
          ("plugin_",)),
-        (("教学", "学习", "teach"),
-         ("load_skill_teach",)),
-        (("研究", "research"),
-         ("load_skill_research",)),
-        (("模型", "api", "claude", "大模型"),
-         ("load_skill_claude_api",)),
-        (("架构", "模块", "设计模式", "architecture"),
-         ("load_skill_codebase_design", "load_skill_domain_modeling", "load_skill_improve_codebase_architecture")),
     ]
     def _tool_matches_intent(self, t: ToolDef, question_lower: str) -> bool:
         """意图关键词命中：问题包含关键词且工具名前缀匹配 → 挂载该工具 schema。"""
@@ -473,7 +465,7 @@ class RAGAgentBase:
             if t.name in used:
                 wanted.add(t.name)
                 continue
-            if t.name.startswith(self._CORE_TOOL_PREFIXES):
+            if t.name.startswith(self._CORE_TOOL_PREFIXES) or t.name.startswith(self._RESIDENT_SKILL_PREFIXES):
                 wanted.add(t.name)
                 continue
             if self._tool_matches_intent(t, q):

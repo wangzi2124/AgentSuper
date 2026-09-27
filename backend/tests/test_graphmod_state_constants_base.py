@@ -8,7 +8,7 @@
     _permission_denied_msg、_is_multi_agent_queue、常量集合
   - base.py：_activity_text、_push_event、_retrieve、_rerank、
     _system_prompt_with_kb、_tool_matches_intent、_build_tool_defs（pinned/used/核心/
-    意图）、_pinned_tool_names、_bound_plugin_result
+    意图/技能常驻）、_pinned_tool_names、_bound_plugin_result
 
 已知产品缺陷（已按现状锁定，待修）：`state._attachment_parts` 的 `from . import
 attachment_loader` 在 graphmod 子包下不存在 → 含非图片附件的请求会抛 ImportError。
@@ -402,6 +402,80 @@ def test_pinned_tool_names_exception():
     assert agent._pinned_tool_names() == set()
     agent2 = build_agent()
     assert agent2._pinned_tool_names() == set()
+
+
+# ── [技能常驻] load_skill_* 无条件挂载 ──────────────────────────────────────
+
+def _skill_tool(name: str):
+    from app.agent.tools import ToolDef
+    return ToolDef(name=name, description=f"{name} 技能", parameters={}, fn=lambda: "")
+
+
+# 曾经因硬编码关键词表缺失而「问不出来」的 4 个技能（品牌/周报/MCP/造技能）
+_ORPHAN_SKILLS = (
+    "load_skill_brand_guidelines",
+    "load_skill_internal_comms",
+    "load_skill_mcp_builder",
+    "load_skill_skill_creator",
+)
+
+
+def test_build_tool_defs_skills_are_resident_without_intent():
+    """[技能常驻] 与提问毫无关键词关系时 load_skill_* 仍必须挂载（回归：4 个技能曾挂不上）。"""
+    agent = build_agent()
+    for n in _ORPHAN_SKILLS:
+        agent.tools.append(_skill_tool(n))
+    # 「写一份内部周报」不命中任何技能关键词，「品牌配色」也不命中
+    for q in ("写一份内部周报", "帮我起个品牌配色", "随便聊聊", ""):
+        defs = agent._build_tool_defs(q, model="deepseek/deepseek-v4-flash")
+        names = {d["function"]["name"] for d in defs}
+        missing = set(_ORPHAN_SKILLS) - names
+        assert not missing, f"q={q!r} 未常驻挂载: {sorted(missing)}"
+
+
+def test_build_tool_defs_resident_skills_respects_weak_model():
+    """[技能常驻] 弱模型仍不挂任何工具（常驻不得绕过弱模型纯文本降级）。"""
+    agent = build_agent()
+    for n in _ORPHAN_SKILLS:
+        agent.tools.append(_skill_tool(n))
+    assert agent._build_tool_defs("随便聊聊", model="ollama/mistral:latest") is None
+
+
+def test_skill_toggle_semantics_unaffected_by_residency():
+    """[技能常驻] 启用/禁用语义不受影响：禁用的技能根本没有 ToolDef，无从挂载。
+
+    create_skill_tools 只遍历 get_enabled_skills() 且跳过 disable-model-invocation，
+    因此「常驻」是常驻**已存在**的工具，而不是让被禁用的技能复活。
+    """
+    from app.agent.tools import create_skill_tools
+
+    class FakeLoader:
+        def __init__(self, skills):
+            self._s = skills
+        def get_enabled_skills(self):
+            return [s for s in self._s if s.enabled]
+        def get_skill_content(self, name):
+            return "body"
+
+    mk = lambda n, en, dmi=False: SimpleNamespace(  # noqa: E731
+        name=n, description="d", enabled=en, disable_model_invocation=dmi,
+    )
+    loader = FakeLoader([
+        mk("on", True), mk("off", False), mk("manual", True, True),
+    ])
+    names = {t.name for t in create_skill_tools(loader)}
+    assert names == {"load_skill_on"}
+
+    # 只把 enabled 翻回 true，常驻层即可见（无需改 _build_tool_defs）
+    loader._s[1].enabled = True
+    assert {t.name for t in create_skill_tools(loader)} == {"load_skill_on", "load_skill_off"}
+
+
+def test_intent_rules_no_longer_reference_skills():
+    """[技能常驻] _INTENT_RULES 只服务插件/tool_*，不得残留 load_skill_* 死规则。"""
+    from app.agent.graphmod.base import RAGAgentBase
+    for _keywords, prefixes in RAGAgentBase._INTENT_RULES:
+        assert not any(p.startswith("load_skill") for p in prefixes), prefixes
 
 
 def test_bound_plugin_result_unwrap_and_weather(monkeypatch):

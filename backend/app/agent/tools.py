@@ -301,13 +301,14 @@ def build_system_prompt_no_kb(
 
     if enabled_skills:
         # [token 优化 v10] 不再逐一列出全部技能名（30+ 技能约 1.3K 字符，固定随每次调用发出）。
-        # 技能清单 + 截断描述已由 graph._build_tool_defs 按意图把 load_skill_* schema 按需挂载，
-        # 系统提示词只保留一行提示，使前缀保持完全静态，最大化 DeepSeek 前缀缓存命中。
+        # [技能常驻] 技能清单 + 截断描述由 graph._build_tool_defs 作为**常驻** load_skill_*
+        # schema 无条件挂载（17 技能约 1.7K token），系统提示词只保留这一行，避免重复描述。
         tool_parts.append(
-            "Skill tools (load_skill_<name>()): specialized skills are available. The inventory and "
-            "descriptions of relevant skills are mounted into the tool schema based on your request — "
-            "call the matching load_skill_<name>() tool when the task calls for one (documents, "
-            "web/frontend, design, coding practices, teaching, research, etc.)."
+            "Skill tools (load_skill_<name>()): specialized skills are available. Their inventory and "
+            "truncated descriptions are already present in your tool schema — scan that list first, "
+            "then call the matching load_skill_<name>() tool to load the full instructions BEFORE "
+            "starting a task that matches one (documents, web/frontend, design, coding practices, "
+            "teaching, research, etc.). Skills not in the schema were disabled by the user."
         )
 
     if tool_parts:
