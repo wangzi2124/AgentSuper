@@ -253,6 +253,9 @@ def _fake_ollama_tags(tmp_path, monkeypatch, models):
         "urlopen",
         lambda req, timeout: _FakeResp(tags_file.read_bytes()) if "api/tags" in req.full_url else real_urlopen(req, timeout=timeout),
     )
+    # 端口预检：探测前会先裸 TCP 连本地端口，没人监听就直接放弃（省掉赔满的超时）。
+    # 这里本机并没有 ollama 在跑，声明「假装它活着」才能走到被伪造的 urlopen。
+    monkeypatch.setattr(catalog, "local_endpoint_alive", lambda base_url, timeout=0.25: True)
     # 重置全局探测缓存，强制重新探测
     monkeypatch.setattr(catalog, "_ollama_cache", None)
     monkeypatch.setattr(catalog, "_ollama_cache_time", 0)
@@ -360,3 +363,89 @@ def test_litellm_extra_kwargs_expands_think_and_num_ctx():
     # think 透传时不传 num_ctx=None
     kw3 = catalog.litellm_extra_kwargs({"options": {"num_ctx": None, "think": True}})
     assert kw3 == {"think": True}
+
+# ── 本地端点端口预检（避免「没监听」赔满 HTTP 超时）─────────────────────────
+def test_local_endpoint_alive_skips_dead_local_port(monkeypatch):
+    """本地端口没人监听时，预检必须立刻判死——这是 8s 冷启动延迟的修复点。"""
+    import socket
+
+    seen: list = []
+
+    def _refuse(address, timeout=None, source_address=None):
+        seen.append((address, timeout))
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(socket, "create_connection", _refuse)
+    assert catalog.local_endpoint_alive("http://localhost:11434") is False
+    assert catalog.local_endpoint_alive("http://127.0.0.1:8001/v1") is False
+    # 确实做了裸 TCP 预检，且用的是短超时（不是赔满 HTTP 超时）
+    assert seen == [(("localhost", 11434), 0.25), (("127.0.0.1", 8001), 0.25)]
+    # 远程端点不做端口预检（交给 HTTP 探测自己判超时）
+    assert catalog.local_endpoint_alive("https://api.deepseek.com") is True
+    assert catalog.local_endpoint_alive("https://ollama.com/v1") is True
+    assert len(seen) == 2  # 远程端点没有触发 TCP 探测
+
+
+def test_local_endpoint_alive_true_when_listening(monkeypatch):
+    import socket
+
+    class _Sock:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(socket, "create_connection", lambda address, timeout=None, source_address=None: _Sock())
+    assert catalog.local_endpoint_alive("http://localhost:11434") is True
+
+
+def test_probe_ollama_models_short_circuits_when_port_closed(monkeypatch):
+    """端口没人听 → 不发 HTTP、返回 []，且探测标记为失败（放行 ollama_model_installed）。"""
+    def _boom(*a, **k):
+        raise AssertionError("端口已判死，不应再发 HTTP 探测")
+
+    monkeypatch.setattr(catalog, "local_endpoint_alive", lambda base_url, timeout=0.25: False)
+    monkeypatch.setattr(catalog, "_ollama_cache", None)
+    monkeypatch.setattr(catalog, "_ollama_cache_time", 0)
+    monkeypatch.setattr(catalog, "_ollama_probe_ok", False)
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    assert catalog.probe_ollama_models(known_ids=set(), force=True) == []
+    # 探测失败 → 放行（不误判「未安装」）
+    assert catalog._ollama_installed_names() is None
+    assert catalog.ollama_model_installed("ollama/qwen2.5:7b") is True
+
+
+def test_probe_provider_models_short_circuits_when_local_port_closed(monkeypatch):
+    """本地 provider（vLLM/LM Studio）端口没人听 → 直接返回 []，不赔超时。"""
+    import urllib.request
+
+    def _boom(*a, **k):
+        raise AssertionError("端口已判死，不应再发 HTTP 探测")
+
+    monkeypatch.setattr(catalog, "local_endpoint_alive", lambda base_url, timeout=0.25: False)
+    monkeypatch.setattr(catalog, "_probe_cache", {})
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    assert catalog.probe_provider_models("vllm", "http://127.0.0.1:8001/v1", "", set(), force=True) == []
+
+
+def test_probe_configured_providers_runs_in_parallel(monkeypatch):
+    """多个 enabled provider 的探测应并发（串行会把各端点超时累加）。"""
+    import threading
+    import time as _time
+
+    monkeypatch.setattr(catalog, "read_providers", lambda: {
+        "a": {"enabled": True, "api_base": "https://a.example.com"},
+        "b": {"enabled": True, "api_base": "https://b.example.com"},
+        "c": {"enabled": True, "api_base": "https://c.example.com"},
+    })
+    barrier = threading.Barrier(3, timeout=5)
+
+    def _probe(name, api_base, api_key, known, force=False):
+        barrier.wait()  # 只有并发才能全部到齐
+        return [{"id": f"{name}/m", "provider": name, "family": name, "name": name,
+                 "description": "", "capabilities": {}, "context_length": 1,
+                 "limits": {}, "cost": {}}]
+
+    monkeypatch.setattr(catalog, "probe_provider_models", _probe)
+    out = catalog.probe_configured_providers(set(), force=True)
+    assert {e["id"] for e in out} == {"a/m", "b/m", "c/m"}
+

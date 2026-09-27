@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import MultiAgentChatHistory from './MultiAgentChatHistory.vue'
 import PermissionDialog from './PermissionDialog.vue'
@@ -42,6 +42,7 @@ const showUserCard = computed(() => (auth.enabled ? auth.isLoggedIn : true))
 const usage = ref<UserUsage | null>(null)
 const stats = ref<MonitorStats | null>(null)
 const statsLoading = ref(false)
+const usageLoaded = ref(false)
 const profileOpen = ref(false)
 const nickDraft = ref('')
 
@@ -71,6 +72,7 @@ async function refreshUsage() {
     const [u, s] = await Promise.all([fetchUsage(), fetchStats()])
     usage.value = u
     stats.value = s
+    usageLoaded.value = true
   } catch {
     /* 忽略：接口暂不可用时静默 */
   } finally {
@@ -82,7 +84,9 @@ function toggleProfile() {
   profileOpen.value = !profileOpen.value
   if (profileOpen.value) {
     nickDraft.value = auth.nickname
-    void refreshUsage()
+    // 用量/统计只在面板打开时拉取：原先 onMounted 无条件发这两个请求，
+    // 而它们仅在面板内渲染 → 每次进任意页面都白付 2 个请求。
+    if (!usageLoaded.value) void refreshUsage()
   }
 }
 
@@ -132,8 +136,7 @@ function goMonitor() {
   router.push('/monitoring')
 }
 
-onMounted(() => { void refreshUsage() })
-
+// 不在 onMounted 拉用量/统计（见 toggleProfile 注释）——改为首次打开用户设置面板时按需拉取
 watch(() => route.path, () => { sidebarOpen.value = false })
 
 function handleLogout() {

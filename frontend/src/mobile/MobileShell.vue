@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showConfirmDialog, showToast } from 'vant'
 import { useVectorStore } from '../stores/vectors'
 
-import MobileChat from './views/MobileChat.vue'
-import MobileDocuments from './views/MobileDocuments.vue'
-import MobilePlugins from './views/MobilePlugins.vue'
-import MobileVectors from './views/MobileVectors.vue'
-import MobileGenerated from './views/MobileGenerated.vue'
-import MobileMonitoring from './views/MobileMonitoring.vue'
-import MobileCustomTools from './views/MobileCustomTools.vue'
+// 7 个移动页改为异步组件：此前静态 import 会把全部移动页（且 MobileChat 静态引入
+// 完整 MultiAgentView + ChatInput）打进 MobileShell chunk，导致进入外壳就要下载
+// 所有页面代码。改为 defineAsyncComponent 后只有当前路由对应的页面才会被拉取。
+const MobileChat = defineAsyncComponent(() => import('./views/MobileChat.vue'))
+const MobileDocuments = defineAsyncComponent(() => import('./views/MobileDocuments.vue'))
+const MobilePlugins = defineAsyncComponent(() => import('./views/MobilePlugins.vue'))
+const MobileVectors = defineAsyncComponent(() => import('./views/MobileVectors.vue'))
+const MobileGenerated = defineAsyncComponent(() => import('./views/MobileGenerated.vue'))
+const MobileMonitoring = defineAsyncComponent(() => import('./views/MobileMonitoring.vue'))
+const MobileCustomTools = defineAsyncComponent(() => import('./views/MobileCustomTools.vue'))
 
 const route = useRoute()
 const router = useRouter()

@@ -69,6 +69,20 @@ async def lifespan(app: FastAPI):
         cleanup_turn_archives()
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning("Turn snapshot archives cleanup failed: %s", e)
+    # [perf] 后台预热模型目录：get_catalog() 首次调用会同步探测 ollama /api/tags 与每个
+    # enabled provider 的 /v1/models（外网，各有超时）。而 `GET /api/models` 位于前端
+    # 每次整页加载的关键路径上（multiAgent.loadModels ← loadConversations），冷启动后
+    # 第一个页面要白等整轮探测（实测 8.7s）。这里丢到后台线程预热，端口一起来就能服务。
+    def _warm_model_catalog() -> None:
+        try:
+            from app.models import catalog as _catalog
+
+            n = len(_catalog.get_catalog())
+            logging.getLogger(__name__).info("Model catalog warmed: %d entries", n)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning("Model catalog warmup failed: %s", e)
+
+    asyncio.get_running_loop().run_in_executor(None, _warm_model_catalog)
     # 全链路日志：启动后台批量写入线程 + 按 TTL/行数上限裁剪历史日志。
     # start() 幂等且任何异常都被吞掉 —— 日志不可用绝不能阻断服务启动。
     if settings.chain_log_enabled:

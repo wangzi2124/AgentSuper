@@ -270,9 +270,9 @@ async function onClearAll() {
     </div>
 
     <!-- ── 链路列表 ── -->
-    <div v-if="store.view === 'traces'" class="card list-card">
+    <div v-if="store.view === 'traces'" class="card list-card list-traces">
       <div class="list-head">
-        <span>时间</span><span>路径 / 标题</span><span>会话</span><span>节点</span><span>异常</span><span>耗时</span>
+        <span>时间</span><span>路径 / 标题</span><span>会话</span><span class="al-r">节点</span><span class="al-r">异常</span><span class="al-r">耗时</span>
       </div>
       <div v-if="store.listLoading && !store.traces.length" class="loading-wrap"><span class="spinner"></span></div>
       <p v-else-if="store.listError" class="empty-state" style="color:var(--danger)">{{ store.listError }}</p>
@@ -284,22 +284,22 @@ async function onClearAll() {
         :class="{ active: store.activeTraceId === t.trace_id, hasErr: t.errors > 0 }"
         @click="store.openTrace(t.trace_id)"
       >
-        <span class="mono">{{ fmtTime(t.start_ts) }}</span>
-        <span class="trace-title" :title="t.title">
+        <span class="mono nowrap">{{ fmtTime(t.start_ts) }}</span>
+        <span class="trace-title" :title="[t.path, t.title].filter(Boolean).join(' · ')">
           <b>{{ t.path || '—' }}</b>
           <i>{{ t.title }}</i>
         </span>
-        <span class="mono dim" :title="t.session_id">{{ t.session_id ? t.session_id.slice(0, 12) : '—' }}</span>
-        <span class="mono">{{ t.nodes }}</span>
-        <span class="mono" :class="t.errors ? 'err' : 'dim'">{{ t.errors || t.warnings || '—' }}</span>
-        <span class="mono">{{ fmtDur(t.duration_ms) }}</span>
+        <span class="mono dim nowrap" :title="t.session_id">{{ t.session_id ? t.session_id.slice(0, 12) : '—' }}</span>
+        <span class="mono al-r">{{ t.nodes }}</span>
+        <span class="mono al-r nowrap" :class="t.errors ? 'err' : 'dim'">{{ t.errors || t.warnings || '—' }}</span>
+        <span class="mono al-r nowrap">{{ fmtDur(t.duration_ms) }}</span>
       </div>
     </div>
 
     <!-- ── 原始节点列表 ── -->
-    <div v-else class="card list-card">
+    <div v-else class="card list-card list-entries">
       <div class="list-head">
-        <span>时间</span><span>级别</span><span>阶段</span><span>事件</span><span>组件</span><span>消息</span>
+        <span>时间</span><span class="al-c">级别</span><span class="al-c">阶段</span><span>事件</span><span>组件</span><span>消息</span>
       </div>
       <div v-if="store.listLoading && !store.entries.length" class="loading-wrap"><span class="spinner"></span></div>
       <p v-else-if="store.listError" class="empty-state" style="color:var(--danger)">{{ store.listError }}</p>
@@ -311,11 +311,11 @@ async function onClearAll() {
         :class="['lv-' + levelOf(e.level)]"
         @click="store.openTrace(e.trace_id)"
       >
-        <span class="mono">{{ fmtTimeMs(e.ts) }}</span>
-        <span class="lvl" :class="'lv-' + levelOf(e.level)">{{ levelLabel(e.level) }}</span>
-        <span class="stage-chip" :class="'st-' + stageOf(e.stage)">{{ stageLabel(e.stage) }}</span>
+        <span class="mono nowrap">{{ fmtTimeMs(e.ts) }}</span>
+        <span class="lvl nowrap" :class="'lv-' + levelOf(e.level)">{{ levelLabel(e.level) }}</span>
+        <span class="stage-chip nowrap" :class="'st-' + stageOf(e.stage)">{{ stageLabel(e.stage) }}</span>
         <span class="mono ev-name" :title="e.event">{{ e.event }}</span>
-        <span class="mono dim" :title="e.component">{{ e.component || '—' }}</span>
+        <span class="mono dim ev-comp" :title="e.component">{{ e.component || '—' }}</span>
         <span class="ev-msg" :title="e.message">{{ e.message || '—' }}</span>
       </div>
     </div>
@@ -430,23 +430,36 @@ async function onClearAll() {
   color: var(--text-secondary); max-height: 220px; overflow: auto;
 }
 
-/* ── 列表 ── */
+/* ── 列表 ──
+   表头与数据行必须共用同一套 grid 列模板，否则「内容与列」永远对不上。
+   两种视图列宽不同，故在 list-card 上用视图修饰类分别绑定 list-head + 数据行。
+   数值/胶囊类窄列统一右对齐或居中，表头同步用 .al-r / .al-c 保持一致。 */
 .list-card { padding: 0; overflow: hidden; }
 .list-head, .trace-row, .entry-row {
   display: grid; gap: 8px; align-items: center; padding: 7px 12px; font-size: 12px;
 }
+/* 时间 104px = "MM-DD HH:MM:SS" 14 字符 × 7.2px；会话 92px = 12 字符 + 留白 */
+.list-traces .list-head,
+.list-traces .trace-row { grid-template-columns: 104px minmax(0, 1fr) 92px 44px 44px 70px; }
+/* 时间 134px = "MM-DD HH:MM:SS.mmm" 18 字符 × 7.2px；
+   级别 44px = 最宽「严重」胶囊(2 CJK@10px + padding) 与表头「级别」取大；阶段 66px = 「权限审批」胶囊 */
+.list-entries .list-head,
+.list-entries .entry-row { grid-template-columns: 134px 44px 66px minmax(0, 1fr) 130px minmax(0, 1.4fr); }
 .list-head {
-  grid-template-columns: 92px 1fr 110px 56px 56px 74px;
   color: var(--text-secondary); font-weight: 600; font-size: 10.5px;
   text-transform: uppercase; letter-spacing: 0.04em;
   border-bottom: 1px solid var(--border-subtle); background: var(--bg-subtle);
 }
-.entry-row { grid-template-columns: 128px 52px 74px 1fr 130px 1.4fr; }
+/* 单元格默认 min-width:auto 会被内容顶开，min-width:0 才能让 ellipsis 生效 */
+.list-head > span, .trace-row > span, .entry-row > span { min-width: 0; }
 .trace-row, .entry-row { border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
 .trace-row:hover, .entry-row:hover { background: var(--bg-subtle); }
 .trace-row.active { background: color-mix(in srgb, var(--primary) 10%, transparent); }
 .trace-row.hasErr .trace-title b { color: var(--danger); }
 .mono { font-family: 'JetBrains Mono', Consolas, monospace; font-variant-numeric: tabular-nums; }
+.nowrap { white-space: nowrap; }
+.al-r { text-align: right; }
+.al-c { text-align: center; }
 .dim { color: var(--text-secondary); }
 .err { color: var(--danger); font-weight: 700; }
 .trace-title { display: flex; flex-direction: column; min-width: 0; }
@@ -455,14 +468,21 @@ async function onClearAll() {
   font-style: normal; font-size: 11px; color: var(--text-secondary);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.lvl { font-size: 10px; font-weight: 700; text-align: center; padding: 1px 4px; border-radius: var(--radius-pill); }
+/* justify-self:center 让胶囊贴合文字宽度，而不是拉满整列 */
+.lvl {
+  justify-self: center; font-size: 10px; font-weight: 700; text-align: center;
+  padding: 1px 6px; border-radius: var(--radius-pill);
+}
 .lvl.lv-INFO { color: var(--text-secondary); }
 .lvl.lv-DEBUG { color: var(--text-secondary); opacity: 0.7; }
 .lvl.lv-WARNING { color: #f59e0b; }
 .lvl.lv-ERROR, .lvl.lv-CRITICAL { color: var(--danger); }
-.stage-chip { font-size: 10px; padding: 1px 6px; border-radius: var(--radius-pill); background: var(--bg-subtle); color: var(--text-secondary); }
-.ev-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ev-msg { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stage-chip {
+  justify-self: center; font-size: 10px; padding: 1px 6px; border-radius: var(--radius-pill);
+  background: var(--bg-subtle); color: var(--text-secondary);
+}
+.ev-name, .ev-comp, .ev-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev-msg { color: var(--text-secondary); }
 
 /* ── 分页 ── */
 .pager { display: flex; align-items: center; gap: 8px; }

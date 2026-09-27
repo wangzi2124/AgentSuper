@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { usePermissionStore } from '../stores/permission'
@@ -29,14 +29,41 @@ const searchQuery = ref('')
 const editingId = ref<string | null>(null)
 const editingTitle = ref('')
 // [ctx-strip 迁移] 会话用量浮层：鼠标悬浮历史项即显示（当前会话额外显示上下文占用）
+// [perf] 原实现在每次 mouseenter 都把整个 messages 数组 POST 给 /api/models/estimate-tokens，
+// 悬停一列历史 = N 个大请求。改为：悬停停留 250ms 才发 + 按会话/消息指纹缓存 + 同请求去重。
 const hoveredId = ref<string | null>(null)
 const ctxEst = ref<{ tokens: number; chars: number; method: string } | null>(null)
+const CTX_EST_DEBOUNCE_MS = 250
+let ctxHoverTimer: ReturnType<typeof setTimeout> | null = null
+let ctxEstInFlight: Promise<{ tokens: number; chars: number; method: string }> | null = null
+let ctxEstKey = ''
+
+function ctxEstCacheKey(): string {
+  const ms = agent.messages
+  // 指纹：条数 + 每条长度 + 末条内容尾部，变化即视为新上下文
+  let sig = `${agent.conversationId}|${ms.length}|`
+  for (const m of ms) sig += `${(m.content || '').length},`
+  const last = ms.length ? (ms[ms.length - 1].content || '') : ''
+  return sig + last.slice(-64)
+}
 
 async function loadCtxEst() {
   if (!agent.messages.length) { ctxEst.value = null; return }
+  const key = ctxEstCacheKey()
+  if (key === ctxEstKey && ctxEst.value) return
+  // 同一指纹的并发请求共享一个 Promise（悬停快速划过时只发一次）
+  if (key === ctxEstKey && ctxEstInFlight) {
+    try { ctxEst.value = await ctxEstInFlight } catch { /* 静默失败 */ }
+    return
+  }
+  ctxEstKey = key
+  ctxEstInFlight = estimateTokens({
+    messages: agent.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content || '' })),
+  })
   try {
-    ctxEst.value = await estimateTokens({ messages: agent.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content || '' })) })
+    ctxEst.value = await ctxEstInFlight
   } catch { /* 静默失败 */ }
+  finally { ctxEstInFlight = null }
 }
 function ctxLimitFor(c: ConversationMeta): number {
   const m = agent.models.find(mm => mm.id === (c.model?.id || agent.selectedModel))
@@ -49,11 +76,17 @@ function ctxPctFor(c: ConversationMeta): number {
 }
 function showUsage(c: ConversationMeta) {
   hoveredId.value = c.id
-  if (agent.conversationId === c.id) loadCtxEst()
+  if (agent.conversationId !== c.id) return
+  // 悬停停留一小会儿再请求，避免划过式悬停产生请求风暴
+  if (ctxHoverTimer) clearTimeout(ctxHoverTimer)
+  ctxHoverTimer = setTimeout(() => { ctxHoverTimer = null; void loadCtxEst() }, CTX_EST_DEBOUNCE_MS)
 }
 function hideUsage() {
   hoveredId.value = null
+  if (ctxHoverTimer) { clearTimeout(ctxHoverTimer); ctxHoverTimer = null }
 }
+
+onBeforeUnmount(() => { if (ctxHoverTimer) clearTimeout(ctxHoverTimer) })
 
 onMounted(() => {
   // 双保险：鉴权启用但未登录时不发会话/工作区请求（登录页不会挂载本组件，防止时序异常）

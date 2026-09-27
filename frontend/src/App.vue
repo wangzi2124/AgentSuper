@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { onMounted, ref, onBeforeUnmount, watch } from 'vue'
+import { onMounted, ref, onBeforeUnmount, watch, defineAsyncComponent, getCurrentInstance } from 'vue'
 import { useRoute } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
-import MobileShell from './mobile/MobileShell.vue'
 import { usePermissionStore } from './stores/permission'
 import { useThemeStore } from './stores/theme'
 import { useAuthStore } from './stores/auth'
+import { ensureVant } from './mobile/vant'
+
+// 移动端外壳改为异步组件：此前 App.vue 静态 import MobileShell，会把 7 个移动页
+// + MobileChat → 完整 MultiAgentView + ChatInput 全部拖进首屏 chunk（桌面端也照付），
+// 连带 vant 558KB / highlight.js 369KB。改为 defineAsyncComponent 后这些独立成 chunk，
+// 桌面端首屏完全不必下载。
+const MobileShell = defineAsyncComponent(() => import('./mobile/MobileShell.vue'))
 
 const perm = usePermissionStore()
 const theme = useThemeStore()
@@ -27,17 +33,28 @@ watch(
 
 // 移动端（≤768px）渲染 MobileShell（Vant NavBar + TabBar），桌面保持 Sidebar 布局
 const isMobile = ref(false)
+// Vant 动态注册完成前不渲染 MobileShell，否则 van-* 组件解析不到会渲染成空白标签
+const mobileUiReady = ref(false)
 const mql = typeof window !== 'undefined' ? window.matchMedia('(max-width: 768px)') : null
-function syncMobile() {
-  isMobile.value = !!mql?.matches
+async function syncMobile() {
+  const mobile = !!mql?.matches
+  isMobile.value = mobile
+  if (mobile && !mobileUiReady.value) {
+    const app = getCurrentInstance()?.appContext.app
+    if (app) {
+      await ensureVant(app)
+      mobileUiReady.value = true
+    }
+  }
 }
-syncMobile()
-mql?.addEventListener?.('change', syncMobile)
-onBeforeUnmount(() => mql?.removeEventListener?.('change', syncMobile))
+void syncMobile()
+function onViewportChange() { void syncMobile() }
+mql?.addEventListener?.('change', onViewportChange)
+onBeforeUnmount(() => mql?.removeEventListener?.('change', onViewportChange))
 </script>
 
 <template>
-  <MobileShell v-if="isMobile && route.name !== 'Login'" />
+  <MobileShell v-if="isMobile && mobileUiReady && route.name !== 'Login'" />
   <div v-else class="layout">
     <Sidebar v-if="route.name !== 'Login'" />
     <main class="main">

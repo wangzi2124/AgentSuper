@@ -44,16 +44,20 @@ async function handleToggleSkill(skill: { name: string; enabled: boolean }, enab
 }
 
 onMounted(async () => {
-  await store.fetchAll()
-  try {
-    await store.fetchCatalog()
-  } catch (err: any) {
-    console.warn('加载工具目录失败:', err?.message || err)
+  // 三个接口互不依赖，并行发起（原先串行 await = 3×RTT 才渲染完）
+  const [listRes, catalogRes, skillRes] = await Promise.allSettled([
+    store.fetchAll(),
+    store.fetchCatalog(),
+    skillStore.fetchAll(),
+  ])
+  if (catalogRes.status === 'rejected') {
+    console.warn('加载工具目录失败:', (catalogRes.reason as any)?.message || catalogRes.reason)
   }
-  try {
-    await skillStore.fetchAll()
-  } catch (err: any) {
-    console.warn('加载技能失败:', err?.message || err)
+  if (skillRes.status === 'rejected') {
+    console.warn('加载技能失败:', (skillRes.reason as any)?.message || skillRes.reason)
+  }
+  if (listRes.status === 'rejected') {
+    throw listRes.reason
   }
 })
 

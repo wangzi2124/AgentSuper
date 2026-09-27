@@ -119,8 +119,20 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   async function loadModels(force = false) {
     if (modelsLoaded && !force) return
     modelsLoaded = true
-    // 启动时先取本地快照（上次从后端拉取并保存的默认配置），后端不可达时兜底展示
+    // [perf] stale-while-revalidate：先用上次成功拉取的本地快照**同步**渲染模型下拉框，
+    // 再后台等网络刷新。此前必须 await fetchModels() 才填充 models，而后端首次探测
+    // provider（外网，各带超时）可达数秒 → 模型选择器整块空白等待。快照是纯本地读取，零延迟。
     const cache = loadModelCache()
+    if (cache && cache.models.length) {
+      models.value = cache.models
+      defaultModelId.value = cache.default_model || ''
+      smallModelId.value = cache.small_model || ''
+      imageCaptionModelId.value = cache.image_caption_model || ''
+      voiceModelSize.value = cache.voice_model_size || ''
+      if (defaultModelId.value && !models.value.some(m => m.id === selectedModel.value)) {
+        selectedModel.value = defaultModelId.value
+      }
+    }
     try {
       const res = await fetchModels()
       models.value = res.models || []
@@ -138,25 +150,12 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         voice_model_size: voiceModelSize.value,
       })
       if (defaultModelId.value && models.value.length && !models.value.some(m => m.id === selectedModel.value)) {
-        selectedModel.value = defaultModelId.value
-      }
-      // 选中模型已不在目录（被删除）时回退默认/首项，避免无效模型继续发送
-      if (models.value.length && !models.value.some(m => m.id === selectedModel.value) && defaultModelId.value) {
+        // 选中模型已不在目录（被删除）或首次选中 → 回退默认，避免无效模型继续发送
         selectedModel.value = defaultModelId.value
       }
     } catch (e) {
       console.error('Failed to load model catalog:', e)
-      // 后端不可达：回退本地快照，尽量保持选择器可用
-      if (cache && cache.models.length) {
-        models.value = cache.models
-        defaultModelId.value = cache.default_model || ''
-        smallModelId.value = cache.small_model || ''
-        imageCaptionModelId.value = cache.image_caption_model || ''
-        voiceModelSize.value = cache.voice_model_size || ''
-        if (defaultModelId.value && !models.value.some(m => m.id === selectedModel.value)) {
-          selectedModel.value = defaultModelId.value
-        }
-      }
+      // 后端不可达：保留上面的本地快照（若有），尽量保持选择器可用
     }
   }
   const useVectorDb = ref(false)

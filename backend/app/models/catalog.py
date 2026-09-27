@@ -138,6 +138,50 @@ def _ollama_base_url() -> str:
     return host.rstrip("/")
 
 
+# 本地端点（ollama / vLLM / LM Studio）快速预检。
+# 为什么需要：在装了 TUN/透明代理（mihomo/clash 等）的机器上，指向**没有监听**的
+# localhost 端口的连接不会立刻 refused，而是被静默丢包 → TCP connect 一直挂到超时。
+# 于是「ollama 没启动」这种最常见状态反而最贵：urlopen(timeout=3) 实测赔 ~4.1s，
+# 而 ollama 的 /api/tags 与 ollama provider 的 /v1/models 各赔一次 → `GET /api/models`
+# 冷启动 ~8.4s（串行时更高），该接口又在前端每次整页加载的关键路径上。
+# 这里先用 250ms 的裸 TCP connect 探一下端口，端口没人听就直接放弃 HTTP 探测。
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"}
+_LOCAL_PORT_PROBE_TIMEOUT = 0.25
+
+
+def _split_host_port(base_url: str) -> tuple[str, int] | None:
+    """从 http(s)://host:port 形式的 base_url 解析 (host, port)；非本地/无端口返回 None。"""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(base_url if "://" in base_url else "http://" + base_url)
+        host = (parsed.hostname or "").lower()
+        if host not in _LOCAL_HOSTS:
+            return None
+        return host, int(parsed.port or (443 if parsed.scheme == "https" else 80))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def local_endpoint_alive(base_url: str, timeout: float = _LOCAL_PORT_PROBE_TIMEOUT) -> bool:
+    """本地 base_url 的端口是否有监听。非本地端点一律返回 True（不拦远程探测）。"""
+    target = _split_host_port(base_url)
+    if target is None:
+        return True
+    import socket
+
+    host, port = target
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        sock.close()
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[str, Any]]:
     """探测本机 ollama 已安装模型，返回「目录未收录」的增量条目。
 
@@ -151,6 +195,11 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
     with _ollama_lock:
         if not force and _ollama_cache is not None and now - _ollama_cache_time < _OLLAMA_TTL:
             return _ollama_cache
+        # 本地 ollama 没监听就不必再发 HTTP（被 TUN 代理丢包时会赔满超时，见 local_endpoint_alive）
+        if not local_endpoint_alive(_ollama_base_url()):
+            _ollama_cache, _ollama_cache_time, _ollama_probe_ok = [], now, False
+            _ollama_installed = None
+            return []
         try:
             import urllib.request
             req = urllib.request.Request(
@@ -393,6 +442,9 @@ def _strip_unknown_fields(entry: dict) -> dict:
 
 # ── 自定义 Provider 模型探测（启动自动注册）────────────────────────────────
 _PROBE_TTL = 60.0
+# 单个 provider 的 /v1/models 探测超时。探测只用于把「provider 上有但目录未收录」的模型
+# 补进下拉框，属锦上添花，不值得让请求等太久——调小它可降低不可达端点的拖累。
+_PROBE_TIMEOUT = float(os.environ.get("MODEL_PROBE_TIMEOUT", "4") or 4)
 _probe_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _ollama_probe_state: tuple[Optional[list[dict[str, Any]]], float] = (None, 0.0)
 
@@ -407,16 +459,20 @@ def probe_provider_models(provider_name: str, api_base: str, api_key: str,
     cached = _probe_cache.get(provider_name)
     if cached and not force and now - cached[0] < _PROBE_TTL:
         return cached[1]
+    base = str(api_base or "").rstrip("/")
+    if not base:
+        _probe_cache[provider_name] = (now, [])
+        return []
+    # 本地端点没人监听就直接放弃（被 TUN 代理丢包时 HTTP 探测会赔满超时，见 local_endpoint_alive）
+    if not local_endpoint_alive(base):
+        _probe_cache[provider_name] = (now, [])
+        return []
     try:
         import urllib.request
-        base = str(api_base or "").rstrip("/")
-        url = base + "/v1/models" if base else ""
-        if not url:
-            _probe_cache[provider_name] = (now, [])
-            return []
+        url = base + "/v1/models"
         req = urllib.request.Request(url, headers={"User-Agent": "agentsuper/0.1",
                                                    **(dict({"Authorization": f"Bearer {api_key}"}) if api_key else {})})
-        with urllib.request.urlopen(req, timeout=4) as resp:
+        with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         extras: list[dict[str, Any]] = []
         for m in data.get("data") or []:
@@ -442,15 +498,40 @@ def probe_provider_models(provider_name: str, api_base: str, api_key: str,
 
 
 def probe_configured_providers(known_ids: set[str], force: bool = False) -> list[dict[str, Any]]:
-    """对所有 enabled 的自定义 provider 做 /v1/models 探测，合并增量条目。"""
-    out: list[dict[str, Any]] = []
-    for name, p in read_providers().items():
-        if not p.get("enabled", True) or not p.get("api_base"):
-            continue
+    """对所有 enabled 的自定义 provider 做 /v1/models 探测，合并增量条目。
+
+    并行探测：每个 provider 的探测是独立的外网 HTTP（timeout=_PROBE_TIMEOUT），
+    串行时端点不可达会把耗时累加（实测 3 个 provider 串行 → 8.7s，阻塞
+    `GET /api/models`，而该接口在前端每次整页加载的 critical path 上）。
+    并行后总耗时 = 最慢的那一个。`known_ids` 只读，无需跨线程共享写状态。
+    """
+    targets = [
+        (name, p)
+        for name, p in read_providers().items()
+        if p.get("enabled", True) and p.get("api_base")
+    ]
+    if not targets:
+        return []
+    if len(targets) == 1:
+        name, p = targets[0]
         try:
-            out.extend(probe_provider_models(name, p.get("api_base"), p.get("api_key") or "", known_ids, force=force))
+            return probe_provider_models(name, p.get("api_base"), p.get("api_key") or "", known_ids, force=force)
         except Exception:
-            continue
+            return []
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(item: tuple[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        name, p = item
+        try:
+            return probe_provider_models(name, p.get("api_base"), p.get("api_key") or "", known_ids, force=force)
+        except Exception:
+            return []
+
+    out: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(len(targets), 8), thread_name_prefix="model-probe") as pool:
+        for res in pool.map(_one, targets):
+            out.extend(res)
     return out
 
 

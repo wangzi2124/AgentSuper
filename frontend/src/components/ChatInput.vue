@@ -58,7 +58,7 @@ function pickAgent(value: typeof AGENT_OPTIONS[number]['value']) {
 //   采集初始化失败退回 MediaRecorder（一次性转写），再退回 Web Speech。
 //   ⚠ 并发转写会同时拉起多个 Whisper 子进程（内存翻倍），增量调用严格排队串行。
 import { transcribeAudio } from '../api/voice'
-import { showToast } from 'vant'
+import { showToast } from '../utils/toast'
 
 // [语音消息] 微信式按住说话 → 上传音频 → 发送真实语音气泡
 import { PressToTalkRecorder } from '../voice/recorder'

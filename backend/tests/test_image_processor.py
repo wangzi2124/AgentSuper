@@ -97,6 +97,19 @@ def _b64_1x1() -> str:
     return _b64bytes(_mk_image(1, 1))
 
 
+@pytest.fixture(autouse=True)
+def _clear_caption_cache():
+    """caption_image 按图片指纹缓存（模块级全局 dict），跨用例不清理。
+
+    本文件多个用例都用 _b64_1x1()，_mk_image 走 PIL effect_noise（进程内序列），
+    偶发生成相同字节 → 后续用例直接命中上一个用例缓存的 caption 而非自己的 fake，
+    表现为随机的 `assert cap == ...` 失败。每个用例前清一次即可根除这类顺序/随机 flake。
+    """
+    ip._caption_cache.clear()
+    yield
+    ip._caption_cache.clear()
+
+
 @pytest.fixture
 def caption_on(monkeypatch):
     monkeypatch.setattr(settings, "image_vlm_caption", True)
