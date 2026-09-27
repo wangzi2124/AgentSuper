@@ -56,6 +56,11 @@ const router = createRouter({
       component: () => import('../views/MonitoringView.vue'),
     },
     {
+      path: '/logs',
+      name: 'Logs',
+      component: () => import('../views/LogsView.vue'),
+    },
+    {
       path: '/model-manager',
       name: 'ModelManager',
       component: () => import('../views/ModelManagerView.vue'),

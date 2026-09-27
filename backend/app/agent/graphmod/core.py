@@ -21,7 +21,7 @@ import re
 
 
 
-from typing import Annotated, Callable, TypedDict
+from typing import Annotated, Any, Callable, TypedDict
 
 
 
@@ -207,6 +207,71 @@ def _sanitize_tool_call_content(content: str, mounted_names: set[str] | None = N
     return None
 
 
+# ── 全链路日志：LLM 调用节点 ─────────────────────────────────────────────
+
+def _chainlog_llm(
+    model: str,
+    *,
+    where: str,
+    duration_ms: float,
+    state: "AgentState | None" = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    cache_read: int = 0,
+    cache_write: int = 0,
+    cost: float = 0.0,
+    finish_reason: Any = None,
+    tool_calls: int = 0,
+    error: str = "",
+    error_type: str = "",
+) -> None:
+    """把一次 LLM 调用记进全链路日志（stage=llm）。
+
+    与 `app.monitor.record_model_call` 的全局计数互补：这里带 trace 上下文，
+    因此能在「日志管理」页按一次请求下钻到「这一轮 LLM 花了多少 token / 多久 /
+    为什么失败」。由 `CHAIN_LOG_LLM_CALLS` 开关控制（关闭可显著降低写入量）。
+    """
+    try:
+        from app import chainlog
+        from app.config import settings
+
+        if not getattr(settings, "chain_log_enabled", True):
+            return
+        if not getattr(settings, "chain_log_llm_calls", True):
+            return
+        data: dict = {
+            "where": where, "model": model,
+            "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "cache_read": cache_read, "cache_write": cache_write,
+            "cost": round(float(cost or 0.0), 8),
+            "tool_calls": tool_calls,
+        }
+        if finish_reason is not None:
+            data["finish_reason"] = str(finish_reason)
+        if error:
+            data["error"] = error
+            data["error_type"] = error_type
+        agent_id = ""
+        if state is not None:
+            agent_id = str(state.get("agent") or state.get("agent_id") or "")
+        chainlog.log(
+            "ERROR" if error else "INFO", "llm", "graph._llm_call",
+            f"llm.{where}",
+            message=(
+                f"{model} 调用失败: {error}" if error
+                else f"{model} pt={prompt_tokens} ct={completion_tokens} "
+                     f"cache={cache_read}/{cache_write} {duration_ms:.0f}ms"
+            ),
+            agent_id=agent_id,
+            data=data,
+            duration_ms=round(float(duration_ms or 0.0), 1),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgent(RAGAgentGenerate):
     def _push_stream_event(self, state: AgentState, event: dict):
@@ -325,6 +390,10 @@ class RAGAgent(RAGAgentGenerate):
                 dur = (tmod.time() - start) * 1000
                 trace("llm.usage", where="error", model=model, pt=0, ct=0, duration_ms=dur)  # [token trace v7]
                 record_model_call(model, duration_ms=dur)
+                _chainlog_llm(
+                    model, where="error", duration_ms=dur, state=state,
+                    error=str(exc), error_type=type(exc).__name__,
+                )
                 from app.models.catalog import normalize_llm_exception
                 _friendly = normalize_llm_exception(exc, model)
                 if _friendly:
@@ -474,6 +543,14 @@ class RAGAgent(RAGAgentGenerate):
         logger.info(
             "LLM call | model=%s pt=%d ct=%d cache_hit=%d cache_miss=%d dur=%.0fms",
             model, int(pt or 0), int(ct or 0), hit, miss, dur,
+        )
+        # [全链路日志] LLM 调用节点：模型/token/缓存/耗时/finish_reason/工具调用数
+        _chainlog_llm(
+            model, where="invoke", duration_ms=dur, state=state,
+            prompt_tokens=int(pt or 0), completion_tokens=int(ct or 0),
+            reasoning_tokens=rt, cache_read=hit, cache_write=miss, cost=cost,
+            finish_reason=finish_reason,
+            tool_calls=len(tool_slots),
         )
 
         tool_calls = None

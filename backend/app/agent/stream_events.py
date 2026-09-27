@@ -97,8 +97,25 @@ class AgentEventCollector:
         except Exception:
             pass
 
+    def _chainlog(self, event: dict) -> None:
+        """把事件镜像为全链路日志节点（子 Agent 工具/步骤明细的唯一埋点入口）。
+
+        所有子 Agent 的实时事件都要经本收集器转发，因此这里一处接入即可覆盖
+        全链路的工具调用/步骤/审批，无需改动任何 Agent 实现。镜像失败不影响
+        事件转发（tracer 内部已兜底）。
+        """
+        try:
+            from app import chainlog
+
+            chainlog.mirror_event(event)
+        except Exception:  # noqa: BLE001
+            pass
+
     def put_nowait(self, event: dict) -> None:
         et = event.get("type")
+        # [全链路日志] 事件入收集器即镜像落库（与 SSE 转发解耦，先记录后转发，
+        # 保证慢速消费端背压丢事件时链路日志仍然完整）
+        self._chainlog(event)
         # [F2] 增量文本：直通 SSE 用于主回答实时渲染；不进入 events 快照，
         # 避免超长生成把快照/内存撑爆（answer 终态仍由 done/落库提供）。
         if et == "text_delta":
@@ -176,11 +193,13 @@ class AgentEventCollector:
         """把仍处于 running 的子 Agent 标记为失败（超时/全局错误时兜底）。"""
         for a in self.agents_snapshot():
             if a["status"] == "running":
-                self.events.append({
+                ev = {
                     "type": "agent_error",
                     "agent_id": a["agent_id"],
                     "error": message,
-                })
+                }
+                self._chainlog(ev)
+                self.events.append(ev)
 
 
 class TaggedEventQueue:

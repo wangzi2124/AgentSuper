@@ -249,5 +249,27 @@ class Settings(BaseSettings):
     # 已注册用户（user_id → 设备密钥哈希）的持久化文件
     auth_users_path: str = "data/auth_users.json"
 
+    # ── 全链路日志（app/chainlog/，落库 data/chain_logs.db 或统一 DB）──
+    # 总开关：关闭后所有埋点为 no-op（仅一次 settings 读取，无额外开销）
+    chain_log_enabled: bool = True
+    # 采样率：0.0~1.0，按请求 trace 抽样（链路上所有节点同进同出，保证链路完整）
+    chain_log_sample_rate: float = 1.0
+    # 内存缓冲队列长度（条）。写入是异步批量落库，队列满时丢弃最旧的非关键节点
+    # （http.request / agent.start 等关键节点走同步直写，见 app/chainlog/store.py）
+    chain_log_queue_size: int = 5000
+    # 批量落盘间隔（秒）与单批最大条数
+    chain_log_flush_interval: float = 1.0
+    chain_log_flush_batch: int = 200
+    # 保留天数（TTL）：>0 时按 ts 定期/启动时清理过期链路日志；0 = 永久保留
+    chain_log_retention_days: int = 7
+    # 行数上限（防爆）：>0 时每批落盘后按 ts 裁剪到该行数
+    chain_log_max_rows: int = 200000
+    # 单条 data（JSON 负载）的最大字符数，超出截断并标记
+    chain_log_max_data_chars: int = 4000
+    # 记录链路上的 LLM 调用明细（模型/token/耗时）。关闭可显著降低写入量
+    chain_log_llm_calls: bool = True
+    # 记录链路上的工具调用明细（tool_start/tool_end）。关闭可显著降低写入量
+    chain_log_tool_calls: bool = True
+
 
 settings = Settings()

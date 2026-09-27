@@ -85,6 +85,20 @@ from app.agent.stream_events import AgentEventCollector
 logger = logging.getLogger(__name__)
 
 
+# ── 全链路日志（app/chainlog）────────────────────────────────────────────
+# 一次请求的链路节点：chat.received → session.resolved → history.ready →
+# agent.dispatch → (sub-agent 内部节点) → agent.reply → persist.done → chat.done。
+# trace 上下文由 ChainLogMiddleware 建立，这里把会话/子任务等后知信息补进上下文，
+# 并把上下文 attach 进 AgentMessage.payload，让子 Agent 落在同一条链路上。
+
+def _chainlog_trace_fields(session_id: str = "", child_id: str = "") -> dict:
+    """把会话信息补进当前 trace 上下文（供后续所有节点自动携带 session_id）。"""
+    from app import chainlog
+
+    chainlog.set_fields(session_id=session_id)
+    return chainlog.payload_trace()
+
+
 router = APIRouter()
 
 
@@ -152,7 +166,28 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id, body.directory)
     _sync_session_model(service, user_id, session_id, body.model)
 
+    from app import chainlog
+    chainlog.set_fields(session_id=session_id, user_id=user_id)
+    chainlog.info(
+        "http", "chat.multi_agent", "chat.received",
+        message=f"非流式请求：{body.message[:80]}",
+        data={
+            "stream": False, "session_id": session_id, "user_id": user_id,
+            "model": body.model, "agent_mode": body.agent_mode,
+            "use_vector_db": body.use_vector_db, "directory": session_dir,
+            "file_count": len(body.files or []),
+            "has_voice": bool(body.voice),
+            "message_chars": len(body.message),
+        },
+    )
+    _chainlog_trace_fields(session_id)
+
     compressed = await _build_compressed_history(service, user_id, session_id)
+    chainlog.info(
+        "session", "chat.multi_agent", "history.ready",
+        message=f"装配历史 {len(compressed)} 条",
+        data={"history_messages": len(compressed)},
+    )
 
     # 请求级事件收集器：非流式路径无 SSE 消费端，但必须注入 _event_queue，
     # 否则子 Agent 触发 NeedsPermission 时会因「无事件队列」直接拒绝（连弹窗/审批都没有）。
@@ -163,6 +198,12 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
 
     # 登记子任务会话（kind='task'）+ AgentBus thread
     child_id, thread_id = _begin_task_session(service, user_id, session_id, body.message)
+    chainlog.info(
+        "session", "chat.multi_agent", "task.registered",
+        message=f"登记子任务会话 {child_id}",
+        data={"child_id": child_id, "thread_id": thread_id,
+              "parent_session_id": session_id},
+    )
 
     # [文件改动] 请求开始前拍快照（before tree），完成后 diff 出本次变更文件
     before_hash = _before_hash(request)
@@ -173,6 +214,8 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         target_agent = "supervisor"
         if body.agent_mode == "plan":
             target_agent = body.agent_mode
+        # 把 trace 上下文注入 payload，随消息透传到 supervisor 与全部子 Agent
+        _trace = _chainlog_trace_fields(session_id, child_id)
 
         reply = await agent_bus.send_and_wait(
             AgentMessage(
@@ -191,6 +234,8 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
                     "user_id": user_id,
                     "directory": session_dir,
                     "_event_queue": collector,
+                    "agent_mode": body.agent_mode,
+                    chainlog.TRACE_PAYLOAD_KEY: _trace,
                 },
                 thread_id=thread_id,
             ),
@@ -203,6 +248,11 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
             abort(thread_id)
         task_bridge.unregister(child_id)
         service.update(user_id, child_id, status="interrupted")
+        chainlog.warning(
+            "http", "chat.multi_agent", "chat.cancelled",
+            message="客户端断开（499）",
+            data={"child_id": child_id, "thread_id": thread_id},
+        )
         _abort_turn()
         raise HTTPException(status_code=499, detail="Request cancelled")
     except Exception as e:
@@ -210,6 +260,15 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         service.update(user_id, child_id, status="error")
         logger.exception("multi-agent request failed: user=%s session=%s classified=%s",
                          user_id, session_id, classify_error(e))
+        chainlog.error(
+            "http", "chat.multi_agent", "chat.error",
+            message=f"请求失败: {friendly_chat_error(e, model=body.model)}",
+            data={
+                "child_id": child_id, "thread_id": thread_id,
+                "error": str(e), "error_type": type(e).__name__,
+                "classified": classify_error(e),
+            },
+        )
         _abort_turn()
         raise HTTPException(status_code=500, detail=friendly_chat_error(e, model=body.model))
 
@@ -219,6 +278,16 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         _err_detail = (reply.payload or {}).get("error", "")
         logger.error("multi-agent reply error: user=%s session=%s detail=%s",
                      user_id, session_id, _err_detail)
+        chainlog.error(
+            "agent", "chat.multi_agent", "agent.reply_error",
+            message=f"子 Agent 返回错误: {_err_detail}",
+            data={
+                "child_id": child_id,
+                "error": _err_detail,
+                "error_type": (reply.payload or {}).get("error_type"),
+                "completed_steps": (reply.payload or {}).get("completed_steps", []),
+            },
+        )
         _abort_turn()
         raise HTTPException(status_code=500, detail=friendly_chat_error(
             RuntimeError(_err_detail) if _err_detail else None, model=body.model,
@@ -229,6 +298,16 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
     sources = payload.get("sources", [])
     steps = payload.get("steps", [])
     routed_to = payload.get("routed_to")
+    chainlog.info(
+        "agent", "chat.multi_agent", "agent.reply",
+        message=f"子 Agent 回复（路由到 {routed_to}，{len(answer)} 字）",
+        data={
+            "routed_to": routed_to, "answer_chars": len(answer),
+            "sources": len(sources), "steps": len(steps),
+            "tokens": payload.get("tokens") or {},
+            "cost": payload.get("cost") or 0.0,
+        },
+    )
 
     # [文件改动] 完成后对比 before/after，得到本次轮次的变更文件 + 行数 + 恢复描述
     files_changed, snapshot_restore = _files_changed(request, before_hash)
@@ -244,6 +323,20 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         snapshot_restore=snapshot_restore,
     )
     task_bridge.unregister(child_id)
+    chainlog.info(
+        "persist", "chat.multi_agent", "persist.done",
+        message="消息已落库",
+        data={
+            "user_msg_id": user_msg_id, "assistant_msg_id": assistant_msg_id,
+            "files_changed": files_changed,
+        },
+    )
+    chainlog.info(
+        "http", "chat.multi_agent", "chat.done",
+        message="非流式请求完成",
+        data={"answer_chars": len(answer), "routed_to": routed_to,
+              "files_changed": len(files_changed or [])},
+    )
 
     return MultiAgentChatResponse(
         answer=answer,
@@ -284,7 +377,28 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     user_id = _get_user_id(request)
     service, session_id, session_dir = _resolve_multi_agent_parent(request, user_id, body.conversation_id, body.directory)
 
+    from app import chainlog
+    chainlog.set_fields(session_id=session_id, user_id=user_id)
+    chainlog.info(
+        "http", "chat.stream", "chat.received",
+        message=f"流式请求：{body.message[:80]}",
+        data={
+            "stream": True, "session_id": session_id, "user_id": user_id,
+            "model": body.model, "agent_mode": body.agent_mode,
+            "use_vector_db": body.use_vector_db, "directory": session_dir,
+            "file_count": len(body.files or []),
+            "has_voice": bool(body.voice),
+            "message_chars": len(body.message),
+        },
+    )
+    _chainlog_trace_fields(session_id)
+
     compressed = await _build_compressed_history(service, user_id, session_id)
+    chainlog.info(
+        "session", "chat.stream", "history.ready",
+        message=f"装配历史 {len(compressed)} 条",
+        data={"history_messages": len(compressed)},
+    )
 
     event_queue: asyncio.Queue = asyncio.Queue()
     sem = _get_agent_semaphore()
@@ -295,6 +409,12 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
 
     # 登记子任务会话（kind='task'）+ AgentBus thread
     child_id, thread_id = _begin_task_session(service, user_id, session_id, body.message)
+    chainlog.info(
+        "session", "chat.stream", "task.registered",
+        message=f"登记子任务会话 {child_id}",
+        data={"child_id": child_id, "thread_id": thread_id,
+              "parent_session_id": session_id},
+    )
 
     async def run_multi_agent():
         """通过 Supervisor 运行多 Agent 系统，结果推送到 event_queue。"""
@@ -321,6 +441,13 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     "type": "queued",
                     "queue_position": queued_position,
                 })
+                chainlog.warning(
+                    "http", "chat.stream", "request.queued",
+                    message=f"并发已满，排队第 {queued_position} 位",
+                    data={"queue_position": queued_position,
+                          "max_concurrent_agents": MAX_CONCURRENT_AGENTS,
+                          "max_queue_size": MAX_QUEUE_SIZE},
+                )
 
             async with sem:
                 if queued_position is not None:
@@ -340,6 +467,8 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
 
                     # [文件改动] 请求开始前拍快照（before tree），完成后 diff 变更文件
                     before_hash = _before_hash(request)
+                    # 把 trace 上下文注入 payload，随消息透传到 supervisor 与全部子 Agent
+                    _trace = _chainlog_trace_fields(session_id, child_id)
 
                     reply = await agent_bus.send_and_wait(
                         AgentMessage(
@@ -358,6 +487,8 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                                 "user_id": user_id,
                                 "directory": session_dir,
                                 "_event_queue": collector,
+                                "agent_mode": body.agent_mode,
+                                chainlog.TRACE_PAYLOAD_KEY: _trace,
                             },
                             thread_id=thread_id,
                         ),
@@ -370,6 +501,15 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                                      session_id, _err_detail)
                         generic_error = friendly_chat_error(
                             RuntimeError(_err_detail) if _err_detail else None, model=body.model,
+                        )
+                        chainlog.error(
+                            "agent", "chat.stream", "agent.reply_error",
+                            message=f"子 Agent 返回错误: {generic_error}",
+                            data={
+                                "child_id": child_id, "error": _err_detail,
+                                "error_type": (reply.payload or {}).get("error_type"),
+                                "completed_steps": (reply.payload or {}).get("completed_steps", []),
+                            },
                         )
                         _abort_turn()
                         collector.fail_running(generic_error)
@@ -389,6 +529,22 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     steps = payload.get("steps", [])
                     routed_to = payload.get("routed_to")
                     agents = collector.agents_snapshot()
+                    chainlog.info(
+                        "agent", "chat.stream", "agent.reply",
+                        message=f"子 Agent 回复（路由到 {routed_to}，{len(answer)} 字）",
+                        data={
+                            "routed_to": routed_to, "answer_chars": len(answer),
+                            "sources": len(sources), "steps": len(steps),
+                            "agents": [
+                                {"agent_id": a.get("agent_id"),
+                                 "status": a.get("status"),
+                                 "steps": len(a.get("steps") or [])}
+                                for a in agents
+                            ],
+                            "tokens": payload.get("tokens") or {},
+                            "cost": payload.get("cost") or 0.0,
+                        },
+                    )
 
                     # [文件改动] 完成后对比 before/after，得到本次轮次的变更文件 + 行数 + 恢复描述
                     files_changed, snapshot_restore = _files_changed(request, before_hash)
@@ -402,6 +558,16 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         voice=body.voice.model_dump() if body.voice else None,
                         files_changed=files_changed,
                         snapshot_restore=snapshot_restore,
+                    )
+
+                    chainlog.info(
+                        "persist", "chat.stream", "persist.done",
+                        message="消息已落库",
+                        data={
+                            "user_msg_id": user_msg_id,
+                            "assistant_msg_id": assistant_msg_id,
+                            "files_changed": files_changed,
+                        },
                     )
 
                     await event_queue.put({
@@ -423,10 +589,26 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         "cost": payload.get("cost") or 0.0,
                         "files_changed": files_changed,
                     })
+                    chainlog.info(
+                        "http", "chat.stream", "chat.done",
+                        message="流式请求完成",
+                        data={
+                            "answer_chars": len(answer), "routed_to": routed_to,
+                            "files_changed": len(files_changed or []),
+                        },
+                    )
 
                 except asyncio.TimeoutError:
                     _abort_turn()
                     collector.fail_running("请求超时，请重试")
+                    chainlog.error(
+                        "http", "chat.stream", "chat.timeout",
+                        message=f"supervisor 超时（{settings.supervisor_timeout:.0f}s）",
+                        data={
+                            "supervisor_timeout": settings.supervisor_timeout,
+                            "child_id": child_id, "thread_id": thread_id,
+                        },
+                    )
                     await event_queue.put({
                         "type": "error",
                         "error": "请求超时，请重试",
@@ -439,6 +621,11 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     service.update(user_id, child_id, status="interrupted")
                     _abort_turn()
                     collector.fail_running("请求已取消")
+                    chainlog.warning(
+                        "http", "chat.stream", "chat.cancelled",
+                        message="请求已取消",
+                        data={"child_id": child_id, "thread_id": thread_id},
+                    )
                     await event_queue.put({
                         "type": "error",
                         "detail": "cancelled",
@@ -453,6 +640,15 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     _abort_turn()
                     generic_error = friendly_chat_error(e, model=body.model)
                     collector.fail_running(generic_error)
+                    chainlog.error(
+                        "http", "chat.stream", "chat.error",
+                        message=f"流式请求失败: {generic_error}",
+                        data={
+                            "child_id": child_id, "thread_id": thread_id,
+                            "error": str(e), "error_type": type(e).__name__,
+                            "classified": classify_error(e),
+                        },
+                    )
                     await event_queue.put({
                         "type": "error",
                         "error": generic_error,
@@ -531,6 +727,15 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                 agents = collector.agents_snapshot()
                 partial_answer = "\n\n".join(
                     a.get("content", "") for a in agents if a.get("content")
+                )
+                chainlog.warning(
+                    "http", "chat.stream", "chat.client_disconnect",
+                    message="SSE 未走到 done/error（客户端断开），兜底落库部分结果",
+                    data={
+                        "child_id": child_id,
+                        "partial_answer_chars": len(partial_answer),
+                        "agents": len(agents),
+                    },
                 )
                 if partial_answer or agents:
                     try:

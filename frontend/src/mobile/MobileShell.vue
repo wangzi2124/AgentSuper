@@ -32,6 +32,7 @@ const menu = [
   { name: 'Vectors', path: '/vectors', title: '向量库', vanIcon: 'cluster-o', color: '#10b981', soft: 'rgba(16,185,129,.12)' },
   { name: 'Generated', path: '/generated', title: '生成文件', vanIcon: 'file-o', color: '#f97316', soft: 'rgba(249,115,22,.12)' },
   { name: 'Monitoring', path: '/monitoring', title: '系统监控', vanIcon: 'chart-trending-o', color: '#f59e0b', soft: 'rgba(245,158,11,.12)' },
+  { name: 'Logs', path: '/logs', title: '日志管理', vanIcon: 'records', color: '#0ea5e9', soft: 'rgba(14,165,233,.12)' },
 ]
 
 // 当前激活的 TabBar 项

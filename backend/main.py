@@ -7,9 +7,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config, weather, auth as auth_api, custom_tools as custom_tools_api, voice as voice_api, models as models_api
+from app.api import documents, chat, skills, plugins, vectors, generated, permission as perm_api, config, weather, auth as auth_api, custom_tools as custom_tools_api, voice as voice_api, models as models_api, logs as logs_api
 from app.api.responses import ApiError, error_response
 from app.auth import AuthMiddleware
+from app.chainlog import ChainLogMiddleware
 from app.config import settings
 from app.monitor import RequestLogMiddleware, get_stats
 from app.runtime import ensure_runtime_state
@@ -68,6 +69,17 @@ async def lifespan(app: FastAPI):
         cleanup_turn_archives()
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).warning("Turn snapshot archives cleanup failed: %s", e)
+    # 全链路日志：启动后台批量写入线程 + 按 TTL/行数上限裁剪历史日志。
+    # start() 幂等且任何异常都被吞掉 —— 日志不可用绝不能阻断服务启动。
+    if settings.chain_log_enabled:
+        try:
+            from app.chainlog.tracer import store as chain_log_store
+
+            chain_log_store().start()
+            removed = chain_log_store().cleanup()
+            logging.getLogger(__name__).info("Chain log cleanup on startup: %s", removed)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning("Chain log startup failed: %s", e)
     # 定时 TTL 清理：VECTOR_STORE_TTL_DAYS>0 时按间隔定期清理过期文档；
     # 后台维护循环同时执行知识库自愈（D2：index_state!=ready 的文档重放建索引）。
     _maintenance_task = None
@@ -94,6 +106,16 @@ async def lifespan(app: FastAPI):
                     logger.info("Scheduled KB repair: %s", result)
             except Exception as e:  # noqa: BLE001
                 logger.warning("Scheduled KB repair failed: %s", e)
+            # 全链路日志按同周期裁剪（TTL 天数 / 最大行数），避免日志库无限增长
+            if settings.chain_log_enabled:
+                try:
+                    from app.chainlog.tracer import store as chain_log_store
+
+                    removed = chain_log_store().cleanup()
+                    if any(removed.values()):
+                        logger.info("Scheduled chain log cleanup: %s", removed)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Scheduled chain log cleanup failed: %s", e)
 
     _maintenance_task = asyncio.create_task(_maintenance_loop())
 
@@ -130,6 +152,13 @@ async def lifespan(app: FastAPI):
                 await asyncio.to_thread(vsvc.shutdown)
         except Exception as e:  # noqa: BLE001
             logging.getLogger(__name__).warning("voice worker shutdown failed: %s", e)
+        # 全链路日志：关停时 flush 剩余缓冲（stop 内部已吞异常）
+        try:
+            from app.chainlog.tracer import store as chain_log_store
+
+            chain_log_store().stop(flush=True)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning("Chain log shutdown failed: %s", e)
 
 
 app = FastAPI(
@@ -149,6 +178,10 @@ app.add_middleware(
 
 app.add_middleware(RequestLogMiddleware)  # type: ignore
 app.add_middleware(AuthMiddleware)  # type: ignore
+# 全链路日志：生成/透传 X-Trace-Id 并记录 HTTP 边界。
+# Starlette 的 add_middleware 是「后加的在外层」，所以放在 AuthMiddleware 之后
+# 才能包住整条链路 —— 即便鉴权失败（401）也会留下 http.error 节点。
+app.add_middleware(ChainLogMiddleware)  # type: ignore
 
 
 # ── 统一异常 → 统一响应体 {code, message, data, detail} ─────────────────────
@@ -184,6 +217,7 @@ app.include_router(config.router, prefix="/api/config", tags=["Config"])
 app.include_router(weather.router, prefix="/api", tags=["Weather"])
 app.include_router(models_api.router, prefix="/api", tags=["Models"])
 app.include_router(voice_api.router, prefix="/api/voice", tags=["Voice"])
+app.include_router(logs_api.router)
 
 
 @app.get("/")

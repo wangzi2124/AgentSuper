@@ -110,7 +110,7 @@ def test_database_url_prefers_db_url():
 
 
 def test_alembic_upgrade_head_creates_all_subsystems(tmp_path):
-    """Alembic 迁移链在空库建出四个子系统的全部表（跨后端共享同一数据库）。"""
+    """Alembic 迁移链在空库建出五个子系统的全部表（跨后端共享同一数据库）。"""
     import alembic.config
     import alembic.command
 
@@ -123,7 +123,6 @@ def test_alembic_upgrade_head_creates_all_subsystems(tmp_path):
 
     conn = sqlite3.connect(str(db))
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    conn.close()
     assert tables == {
         "alembic_version",
         "projects", "workspaces", "sessions", "session_messages", "message_parts",
@@ -131,7 +130,19 @@ def test_alembic_upgrade_head_creates_all_subsystems(tmp_path):
         "catalog_settings", "providers", "catalog_entries",
         "chapters",
         "tasks",
+        "chain_logs",
     }
+    # chain_logs 的查询索引必须随表建出（trace/会话/时间/级别/阶段/Agent 六个）
+    idx = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chain_logs'"
+        )
+    }
+    conn.close()
+    assert {
+        "idx_chain_logs_trace", "idx_chain_logs_session", "idx_chain_logs_ts",
+        "idx_chain_logs_level", "idx_chain_logs_stage", "idx_chain_logs_agent",
+    } <= idx
 
 
 def test_alembic_run_migrations_runner(tmp_path):

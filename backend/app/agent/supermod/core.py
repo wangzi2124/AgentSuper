@@ -20,6 +20,8 @@ import logging
 
 import uuid
 
+import time as tmod
+
 from typing import AsyncIterator, Optional
 
 
@@ -77,6 +79,18 @@ class SupervisorAgentCore(SupervisorAgentBase):
             # 期间持续 touch，让上层（endpoint send_and_wait 的 grace 续期）能看见
             # supervisor 仍存活，避免其被误判超时；收尾时取消。
             beat = self._start_heartbeat()
+            from app import chainlog
+            chainlog.info(
+                "routing", "supervisor", "supervisor.received",
+                message=f"supervisor 受理请求（{len(payload.get('history') or [])} 条历史）",
+                data={
+                    "action": action, "thread_id": msg.thread_id,
+                    "use_vector_db": payload.get("use_vector_db"),
+                    "agent_mode": payload.get("agent_mode"),
+                    "directory": payload.get("directory"),
+                    "has_files": bool(payload.get("files")),
+                },
+            )
             try:
                 # ── 尝试任务分解 ──
                 subtasks = await self._decompose(question)
@@ -85,6 +99,19 @@ class SupervisorAgentCore(SupervisorAgentBase):
                 subtasks = [st for st in subtasks if st.get("agent") in self.ROUTABLE_AGENTS]
                 if not subtasks:
                     subtasks = [{"agent": "build", "question": question}]
+
+                chainlog.info(
+                    "routing", "supervisor", "routing.decision",
+                    message=f"路由决策：{' + '.join(st.get('agent', '') for st in subtasks)}",
+                    data={
+                        "subtasks": [
+                            {"agent": st.get("agent"), "question": st.get("question")}
+                            for st in subtasks
+                        ],
+                        "routable": sorted(self.ROUTABLE_AGENTS),
+                        "parallel": len(subtasks) > 1,
+                    },
+                )
 
                 if len(subtasks) > 1:
                     logger.info(
@@ -137,6 +164,17 @@ class SupervisorAgentCore(SupervisorAgentBase):
         """
         sub_thread_id = f"{original_thread_id}:sub:{uuid.uuid4().hex[:8]}"
         timeout = self._timeout_for(target_agent)
+        from app import chainlog
+        chainlog.info(
+            "agent", "supervisor", "route.start", agent_id=target_agent,
+            message=f"路由到 {target_agent}（超时 {timeout:.0f}s）",
+            data={
+                "target": target_agent, "timeout": timeout,
+                "sub_thread_id": sub_thread_id,
+                "question": str(payload.get("question", ""))[:500],
+            },
+        )
+        route_started = tmod.time()
 
         try:
             reply = await self._bus.send_and_wait(
@@ -156,6 +194,18 @@ class SupervisorAgentCore(SupervisorAgentBase):
                 if getattr(self, "_usage", None) is not None:
                     _merge_usage(self._usage, reply.payload.get("tokens") or {})
                     self._cost = getattr(self, "_cost", 0.0) + float(reply.payload.get("cost", 0) or 0)
+                chainlog.info(
+                    "agent", "supervisor", "route.done", agent_id=target_agent,
+                    message=f"{target_agent} 返回结果",
+                    data={
+                        "target": target_agent,
+                        "answer_chars": len(str(reply.payload.get("answer", ""))),
+                        "tokens": reply.payload.get("tokens") or {},
+                        "cost": reply.payload.get("cost", 0) or 0,
+                        "plan_path": reply.payload.get("plan_path") or "",
+                    },
+                    duration_ms=round((tmod.time() - route_started) * 1000, 1),
+                )
                 yield AgentMessage(
                     source=self._id,
                     target="user",  # 由 bus.send 路由回 original 的调用者
@@ -172,6 +222,17 @@ class SupervisorAgentCore(SupervisorAgentBase):
             elif reply.type == "error":
                 # bus 现在以 AgentMessage(type="error") 交付子 Agent 错误，
                 # 透传 error payload（含 completed_steps 等上下文）。
+                chainlog.error(
+                    "agent", "supervisor", "route.failed", agent_id=target_agent,
+                    message=f"{target_agent} 返回错误: {reply.payload.get('error', '')}",
+                    data={
+                        "target": target_agent,
+                        "error": reply.payload.get("error"),
+                        "error_type": reply.payload.get("error_type"),
+                        "completed_steps": reply.payload.get("completed_steps", []),
+                    },
+                    duration_ms=round((tmod.time() - route_started) * 1000, 1),
+                )
                 yield AgentMessage(
                     source=self._id, target="user",
                     type="error", action="chat",
@@ -197,6 +258,13 @@ class SupervisorAgentCore(SupervisorAgentBase):
                 f"如果任务仍在执行（如代码脚手架/构建），可提高 SUB_AGENT_TIMEOUT "
                 f"或 SUB_AGENT_TIMEOUT_EXTENDED，或改用普通对话模式重试。"
             )
+            chainlog.error(
+                "agent", "supervisor", "route.timeout", agent_id=target_agent,
+                message=f"{target_agent} 路由超时",
+                data={"target": target_agent, "timeout": timeout,
+                      "completed_steps": completed, "suggestion": suggestion},
+                duration_ms=round((tmod.time() - route_started) * 1000, 1),
+            )
             yield AgentMessage(
                 source=self._id, target="user",
                 type="error", action="chat",
@@ -215,6 +283,13 @@ class SupervisorAgentCore(SupervisorAgentBase):
             )
         except Exception as e:
             logger.exception("Supervisor error routing to %s", target_agent)
+            chainlog.error(
+                "agent", "supervisor", "route.error", agent_id=target_agent,
+                message=f"路由到 {target_agent} 失败: {e}",
+                data={"target": target_agent, "error": str(e),
+                      "error_type": type(e).__name__},
+                duration_ms=round((tmod.time() - route_started) * 1000, 1),
+            )
             yield AgentMessage(
                 source=self._id, target="user",
                 type="error", action="chat",

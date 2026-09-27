@@ -143,10 +143,13 @@ class AgentBus:
         Raises:
             asyncio.TimeoutError: 超时（含宽限延长）仍无回复
         """
+        from app import chainlog
+
         assert msg.type == "request", "send_and_wait 只能用于 request 消息"
         if grace_window is None:
             grace_window = max(10.0, timeout / 2)
         loop = asyncio.get_running_loop()
+        wait_started = tmod.time()
         # [A3] 下次使用前先清理已完成的遗留 Future（防止异常路径残留导致内存泄漏）
         self.prune_done_pending()
         fut = loop.create_future()
@@ -178,6 +181,18 @@ class AgentBus:
                         )
                         remaining = deadline - loop.time()
                     else:
+                        chainlog.error(
+                            "agent", f"bus.{msg.target}", "agent.wait_timeout",
+                            agent_id=msg.target,
+                            message=f"等待 {msg.target} 回复超时（{timeout:.0f}s）",
+                            data={
+                                "target": msg.target, "timeout": timeout,
+                                "thread_id": msg.thread_id, "action": msg.action,
+                                "grace_extensions": extensions,
+                                "completed_steps": self.agent_progress(msg.target),
+                            },
+                            duration_ms=round((tmod.time() - wait_started) * 1000, 1),
+                        )
                         raise asyncio.TimeoutError(
                             f"No reply from '{msg.target}' within {timeout}s "
                             f"(thread={msg.thread_id}, action={msg.action})"
@@ -323,17 +338,50 @@ class AgentBus:
         """把一条消息交给 agent 处理并路由其回复；错误以结构化消息交付。
 
         独立协程（由 run_agent create_task），便于 abort_work 单独取消。
+
+        [全链路日志] 事件循环 task 启动于应用初始化，contextvar 拿不到请求侧
+        的 trace 上下文，因此这里从消息 payload（`_chain_trace`，由 endpoint /
+        supervisor 逐层透传）重新绑定，使子 Agent 内部的工具调用、LLM 调用、
+        二次委派（tool_task）都落在同一条链路上。
         """
+        from app import chainlog
+
         agent = self._agents.get(agent_id)
         if agent is None:
             return
+        token = chainlog.bind_from_payload(msg.payload)
+        started = tmod.time()
+        chainlog.info(
+            "agent", f"bus.{agent_id}", "agent.dispatch",
+            agent_id=agent_id,
+            message=f"{agent_id} 开始处理 {msg.action}",
+            data={
+                "action": msg.action, "msg_type": msg.type,
+                "source": msg.source, "thread_id": msg.thread_id,
+            },
+        )
         try:
             async for reply in agent.handle_message(msg):
                 self.touch(agent_id)
                 await self.send(reply)
         except asyncio.CancelledError:
+            chainlog.warning(
+                "agent", f"bus.{agent_id}", "agent.cancelled", agent_id=agent_id,
+                message=f"{agent_id} 处理被中断",
+                data={"action": msg.action, "thread_id": msg.thread_id},
+                duration_ms=round((tmod.time() - started) * 1000, 1),
+            )
             raise
         except Exception as e:
+            chainlog.error(
+                "agent", f"bus.{agent_id}", "agent.exception", agent_id=agent_id,
+                message=f"{agent_id} 处理失败: {e}",
+                data={
+                    "action": msg.action, "thread_id": msg.thread_id,
+                    "error": str(e), "error_type": type(e).__name__,
+                },
+                duration_ms=round((tmod.time() - started) * 1000, 1),
+            )
             logger.error(
                 "Agent '%s' error handling %s/%s: %s",
                 agent_id, msg.action, msg.type, e, exc_info=True,
@@ -355,6 +403,14 @@ class AgentBus:
                         },
                         thread_id=msg.thread_id,
                     ))
+        finally:
+            chainlog.info(
+                "agent", f"bus.{agent_id}", "agent.replied", agent_id=agent_id,
+                message=f"{agent_id} 处理结束",
+                data={"action": msg.action, "thread_id": msg.thread_id},
+                duration_ms=round((tmod.time() - started) * 1000, 1),
+            )
+            chainlog.reset(token)
 
     def start_all(self):
         """启动所有已注册 Agent 的事件循环（非阻塞，返回 task 列表）。"""

@@ -32,6 +32,7 @@ const navItems = [
   { path: '/vectors', label: '向量库', icon: '🔢' },
   { path: '/generated', label: '生成文件', icon: '📝' },
   { path: '/monitoring', label: '系统监控', icon: '📊' },
+  { path: '/logs', label: '日志管理', icon: '🧾' },
   { path: '/model-manager', label: '模型管理', icon: '🧬' },
 ]
 

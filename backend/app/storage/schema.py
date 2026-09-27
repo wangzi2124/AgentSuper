@@ -1,11 +1,12 @@
 """统一存储 schema（单一声明来源）。
 
-四个 SQLite 子系统的表全部在此以 SQLAlchemy Core Table 声明，作为单一事实来源：
+五个 SQLite 子系统的表全部在此以 SQLAlchemy Core Table 声明，作为单一事实来源：
 - `session.db`   → projects / workspaces / sessions / session_messages / message_parts /
                     session_context_epoch / session_inputs / session_tasks
 - `model_catalog.db` → catalog_settings / providers / catalog_entries
 - `chapter_store.db` → chapters
 - `tasks.db`     → tasks
+- `chain_logs.db` → chain_logs（全链路日志，见 app/chainlog/）
 
 用途：
 - **sqlite**：`derive_sqlite_ddl()` 从 metadata 编译 `CREATE TABLE IF NOT EXISTS` /
@@ -217,6 +218,41 @@ tasks = Table(
     Column("updated_at", String(64), nullable=False),
 )
 
+# ── chain_logs.db ───────────────────────────────────────────────────────────
+# 全链路日志（app/chainlog/）：一次请求 = 一个 trace_id，链路上每个节点一行。
+# seq 为 trace 内自增序号（前端按 seq 还原链路顺序），parent_id 记录父子 span
+# 归属（http → routing → agent → tool/llm），构成可下钻的调用树。
+# 所有可过滤维度都建索引：按 trace 拉链路、按 session 查会话、按时间/级别/阶段筛选。
+# 字符串列一律 NOT NULL + server_default=''（MySQL TEXT 不能有默认值）。
+
+chain_logs = Table(
+    "chain_logs", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("trace_id", String(64), nullable=False),
+    Column("parent_id", String(64), nullable=False, server_default=""),
+    Column("seq", Integer, nullable=False, server_default=text("0")),
+    Column("ts", BigInteger, nullable=False),
+    Column("level", String(16), nullable=False, server_default="INFO"),
+    Column("stage", String(32), nullable=False, server_default=""),
+    Column("component", String(64), nullable=False, server_default=""),
+    Column("event", String(128), nullable=False, server_default=""),
+    Column("agent_id", String(64), nullable=False, server_default=""),
+    Column("session_id", String(64), nullable=False, server_default=""),
+    Column("user_id", String(64), nullable=False, server_default=""),
+    Column("path", String(512), nullable=False, server_default=""),
+    Column("message", Text().with_variant(LONGTEXT(), "mysql"), nullable=False,
+           server_default=""),
+    Column("data", Text().with_variant(LONGTEXT(), "mysql"), nullable=False,
+           server_default=""),
+    Column("duration_ms", Float, nullable=True),
+    Index("idx_chain_logs_trace", "trace_id", "seq"),
+    Index("idx_chain_logs_session", "session_id", "ts"),
+    Index("idx_chain_logs_ts", "ts"),
+    Index("idx_chain_logs_level", "level"),
+    Index("idx_chain_logs_stage", "stage"),
+    Index("idx_chain_logs_agent", "agent_id"),
+)
+
 # 各子系统在 sqlite 路径下负责建表/建索引的表名集合
 SESSION_TABLES = (
     projects.name, workspaces.name, sessions.name, session_messages.name,
@@ -226,6 +262,7 @@ SESSION_TABLES = (
 CATALOG_TABLES = (catalog_settings.name, providers.name, catalog_entries.name)
 CHAPTER_TABLES = (chapters.name,)
 TASK_TABLES = (tasks.name,)
+CHAIN_LOG_TABLES = (chain_logs.name,)
 
 
 def derive_sqlite_ddl(table_names: tuple[str, ...]) -> str:
