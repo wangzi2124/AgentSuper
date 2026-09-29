@@ -215,8 +215,6 @@ class Settings(BaseSettings):
     # ── 弱模型鲁棒性（本地/小参数模型）──
     # 弱模型识别：逗号分隔的模型名（`ollama/` 前缀始终视为弱模型）
     weak_models: str = ""
-    # 弱模型始终挂载全部技能/自定义工具脚本（不再仅按意图关键词挂载）
-    weak_model_mount_all_tools: bool = True
     # 弱模型使用精简系统提示（更短、少工具说明，降低空输出/乱调工具）
     weak_model_simple_prompt: bool = True
     # 最终回答为空（含 `{}`）时自动重试：同模型重试一次，再回退默认模型

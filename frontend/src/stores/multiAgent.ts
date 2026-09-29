@@ -589,6 +589,18 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           return
         }
 
+        // [model_switched] 会话模型被切换。必须排在下面的 running 转换**之前**：
+        // 后端在队列检查之前就发这个事件，若在此处落到转换逻辑会先把
+        // streamPhase 置为 running 并清空 queuePosition，随后 queued 事件再改回来 →
+        // 排队请求的表头闪一下。这里提前 return 即可（同时消掉该事件此前的静默丢弃）。
+        if (event.type === 'model_switched') {
+          const ref = event.model_ref
+          if (ref?.id) {
+            assistantMsg.model = ref.name || ref.id
+          }
+          return
+        }
+
         // 收到任何执行事件 → 运行阶段
         if (session.streamPhase !== 'running') {
           session.streamPhase = 'running'
@@ -617,13 +629,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             else agent.steps.push(event.step)
             // [parts] 工具调用按真实输出顺序追加/原位更新（同一 step_id 不重复插入）
             appendAgentToolPart(agent, event.step)
-            assistantMsg.agents = Object.values(agentsMap)
-          }
-        } else if (event.type === 'agent_stream') {
-          const agent = agentsMap[event.agent_id]
-          if (agent && event.content) {
-            agent.content += event.content
-            appendAgentTextPart(agent, event.content)
             assistantMsg.agents = Object.values(agentsMap)
           }
         } else if (event.type === 'text_delta') {
@@ -692,6 +697,12 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           if (typeof event.cost === 'number' && event.cost > 0) assistantMsg.cost = event.cost
           // [文件改动] 本轮改动的文件 + 行数（快照 diff）
           if (event.files_changed && event.files_changed.length) assistantMsg.files_changed = event.files_changed
+          // [plan→build] 计划已成但执行出错：正文（含「## 实施计划」）必须保留，
+          // 追加一行出错提示并标记 isError。走 error 事件会把正文覆盖成错误文案。
+          if (event.partial_error) {
+            assistantMsg.isError = true
+            assistantMsg.content = `${assistantMsg.content}\n\n> ⚠ 执行出错：${event.partial_error}`
+          }
           // 回填服务器生成的消息 id，保证删除/撤销能命中真实消息
           if (event.assistant_msg_id) assistantMsg.id = event.assistant_msg_id
           if (event.user_msg_id) {

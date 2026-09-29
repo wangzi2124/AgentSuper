@@ -43,6 +43,15 @@ def _merge_usage(acc: dict, other: dict) -> None:
         acc[k] = int(acc.get(k, 0)) + int(other.get(k, 0) or 0)
 
 
+def _sub_usage(curr: dict, before: dict) -> dict:
+    """usage 差值（curr - before），五键口径，负数归零。
+
+    [_route_to 需要发「本轮增量」而非累计值]：plan→build 会先路由 plan 再路由 build，
+    两次 yield 的都是累计快照时，合并方把 P 与 P+B 相加 → 计划用量被计两次。
+    """
+    return {k: max(0, int(curr.get(k, 0)) - int(before.get(k, 0))) for k in _USAGE_KEYS}
+
+
 # ── 类分块（verbatim，继承链切片）──
 class SupervisorAgentCore(SupervisorAgentBase):
 
@@ -175,6 +184,11 @@ class SupervisorAgentCore(SupervisorAgentBase):
             },
         )
         route_started = tmod.time()
+        # [C2] 本轮派发前的累计用量/成本快照：yield 的是**本轮增量**。
+        # 原实现发累计值 —— 单路由时两者相等，但 plan→build 会把 P 与 P+B 相加，
+        # 计划那段用量被重复计入落库的 tokens/cost。
+        usage_before = dict(getattr(self, "_usage", None) or {})
+        cost_before = float(getattr(self, "_cost", 0.0) or 0.0)
 
         try:
             reply = await self._bus.send_and_wait(
@@ -214,8 +228,8 @@ class SupervisorAgentCore(SupervisorAgentBase):
                     payload={
                         **reply.payload,
                         "routed_to": target_agent,
-                        "tokens": dict(getattr(self, "_usage", {"input": 0, "output": 0})),
-                        "cost": round(getattr(self, "_cost", 0.0), 6),
+                        "tokens": _sub_usage(getattr(self, "_usage", None) or {}, usage_before),
+                        "cost": round(float(getattr(self, "_cost", 0.0) or 0.0) - cost_before, 6),
                     },
                     thread_id=original_thread_id,  # 🔧 使用原始 thread_id 回复
                 )

@@ -65,6 +65,13 @@ async def _collect(agen, msg):
     return [r async for r in agen.handle_message(msg)]
 
 
+async def _collect_one(agen):
+    """取异步生成器的第一条（_route_to 单条回复场景）。"""
+    out = [r async for r in agen]
+    assert len(out) == 1
+    return out[0]
+
+
 # ── base ───────────────────────────────────────────────────────────────────
 
 def test_timeout_for(agent, monkeypatch):
@@ -518,3 +525,65 @@ async def test_handle_plan_error_propagates(agent, monkeypatch):
     assert len(replies) == 1
     assert replies[0].type == "error"
     assert "plan 挂了" in replies[0].payload["error"]
+
+
+# ── [C2] _route_to 必须发「本轮增量」而非累计值 ─────────────────────────────
+
+class _TokenBus:
+    """按目标 Agent 返回不同 usage 的假 bus（走真实 _route_to）。"""
+
+    def __init__(self, by_target):
+        self._by_target = by_target
+        self.calls = []
+
+    async def send_and_wait(self, msg, timeout=None):
+        self.calls.append(msg.target)
+        return self._by_target[msg.target]
+
+
+def _usage_reply(answer, tokens, cost=0.0, routed_to="x", plan_path=""):
+    return AgentMessage(source="sub", target="supervisor", type="response", action="chat",
+                        payload={"answer": answer, "tokens": tokens, "cost": cost,
+                                 "routed_to": routed_to, "sources": [], "steps": [],
+                                 "plan_path": plan_path},
+                        thread_id="sub-thread")
+
+
+@pytest.mark.asyncio
+async def test_route_to_emits_per_route_usage_delta(monkeypatch):
+    """两条回复的 tokens 必须能相加得到总量，而不是 P 与 P+B（计划被计两次）。"""
+    plan_usage = {"input": 100, "output": 10}
+    build_usage = {"input": 500, "output": 50}
+    bus = _TokenBus({
+        "plan": _usage_reply("计划", plan_usage, cost=0.1, routed_to="plan", plan_path="/p.md"),
+        "build": _usage_reply("执行", build_usage, cost=0.9, routed_to="build"),
+    })
+    sup = SupervisorAgent(bus)
+    sup._usage = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
+    sup._cost = 0.0
+
+    plan_reply = await _collect_one(sup._route_to("plan", {"question": "q"}, "t1"))
+    build_reply = await _collect_one(sup._route_to("build", {"question": "q"}, "t1"))
+
+    assert plan_reply.payload["tokens"]["input"] == 100, "第一条应是 plan 自身的用量"
+    assert build_reply.payload["tokens"]["input"] == 500, "第二条应是 build 自身的用量"
+    assert plan_reply.payload["cost"] == 0.1
+    assert build_reply.payload["cost"] == 0.9
+
+    merged = SupervisorAgent._merge_plan_build_reply(plan_reply, build_reply)
+    assert merged.payload["tokens"]["input"] == 600, "合并后应是 100+500，不能是 100+600"
+    assert merged.payload["tokens"]["output"] == 60
+    assert merged.payload["cost"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_route_to_single_route_delta_matches_subagent(monkeypatch):
+    """单路由时增量必须恰好等于子 Agent 上报的用量（回归保护）。"""
+    bus = _TokenBus({"rag": _usage_reply("答案", {"input": 7, "output": 3}, cost=0.25)})
+    sup = SupervisorAgent(bus)
+    sup._usage = {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0}
+    sup._cost = 0.0
+    reply = await _collect_one(sup._route_to("rag", {"question": "q"}, "t1"))
+    assert reply.payload["tokens"]["input"] == 7
+    assert reply.payload["tokens"]["output"] == 3
+    assert reply.payload["cost"] == 0.25

@@ -197,13 +197,7 @@ class SkillLoader:
         """
         try:
             content = path.read_text(encoding="utf-8")
-            parts = content.split("---", 2)
-            if len(parts) >= 3:
-                meta = yaml.safe_load(parts[1]) or {}
-            else:
-                meta = {}
-            if not isinstance(meta, dict):
-                meta = {}
+            meta, _body = _split_frontmatter(content)
 
             name = str(meta.get("name") or fallback_name or path.stem).strip()
             description = meta.get("description", "") or content[:200].strip()
@@ -268,14 +262,7 @@ class SkillLoader:
             raise PermissionError(f"外部技能源的技能不可编辑: {name}（{skill.path}）")
         path = Path(skill.path)
         raw = path.read_text(encoding="utf-8")
-        parts = raw.split("---", 2)
-        if len(parts) >= 3:
-            meta = yaml.safe_load(parts[1]) or {}
-            body = parts[2].lstrip("\n")
-        else:
-            meta, body = {}, raw
-        if not isinstance(meta, dict):
-            meta = {}
+        meta, body = _split_frontmatter(raw)
 
         if description is not None:
             meta["description"] = description
@@ -360,15 +347,7 @@ class SkillLoader:
         """将技能的元信息（含启用状态）写回其Markdown文件的YAML frontmatter。"""
         path = Path(skill.path)
         content = path.read_text(encoding="utf-8")
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            body = parts[2].lstrip("\n")
-            meta = yaml.safe_load(parts[1]) or {}
-        else:
-            body = content
-            meta = {}
-        if not isinstance(meta, dict):
-            meta = {}
+        meta, body = _split_frontmatter(content)
 
         meta["name"] = skill.name
         meta["description"] = skill.description
@@ -401,10 +380,30 @@ class SkillLoader:
         raw = self.get_skill_content(name)
         if raw is None:
             return None
-        parts = raw.split("---", 2)
-        if len(parts) >= 3 and parts[0].strip() == "":
-            return parts[2].lstrip("\n")
-        return raw
+        _meta, body = _split_frontmatter(raw)
+        return body
+
+
+def _split_frontmatter(content: str) -> tuple[dict, str]:
+    """把 Markdown 拆成 (YAML frontmatter 字典, 正文)。
+
+    只在**首行就是 `---` 分隔线**时才认为存在 frontmatter —— 仅靠
+    `content.split("---", 2)` 的片段数判断是不够的：正文里出现 `---`
+    （markdown 分隔线、YAML 风格的 `key: value` 段落）时会把正文误当 frontmatter
+    解析，进而在 `_save_skill_file` / `update_skill` 回写时损坏用户正文。
+
+    任何异常形态（无 frontmatter、YAML 非法、顶层不是映射）都退回 (空字典, 全文)。
+    """
+    parts = content.split("---", 2)
+    if len(parts) < 3 or parts[0].strip() != "":
+        return {}, content
+    try:
+        meta = yaml.safe_load(parts[1]) or {}
+    except yaml.YAMLError:
+        return {}, content
+    if not isinstance(meta, dict):
+        return {}, content
+    return meta, parts[2].lstrip("\n")
 
 
 def _safe_resolve(p: Path) -> str:

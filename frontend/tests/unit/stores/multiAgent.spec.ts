@@ -436,6 +436,52 @@ describe('permission_request 事件 → 权限 store 转发', () => {
   })
 })
 
+describe('model_switched 事件 → 助手消息模型标记', () => {
+  it('读 model_ref 更新 assistantMsg.model（与后端字段名一致）', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({
+        type: 'model_switched',
+        model_ref: { id: 'deepseek/deepseek-v4-flash', provider: 'deepseek', name: 'DeepSeek V4 Flash' },
+      }))
+      onEvent(ev({ type: 'done', conversation_id: 'c1', answer: 'ok' }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('hi')
+    const assistant = store.messages.find(m => m.role === 'assistant')
+    expect(assistant?.model).toBe('DeepSeek V4 Flash')
+  })
+
+  it('model_ref 缺失时安全忽略（不抛错、不写脏值）', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'model_switched' }))
+      onEvent(ev({ type: 'done', conversation_id: 'c1', answer: 'ok' }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('hi')
+    const assistant = store.messages.find(m => m.role === 'assistant')
+    expect(assistant?.model).toBeUndefined()
+    expect(assistant?.content).toBe('ok')
+  })
+})
+
+describe('partial_error 事件（plan→build 部分失败）', () => {
+  it('done 带 partial_error 时标记 isError 并把错误文案追加到答案', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({
+        type: 'done',
+        conversation_id: 'c1',
+        answer: '## 实施计划\n步骤一',
+        partial_error: '执行失败',
+      }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('hi')
+    const assistant = store.messages.find(m => m.role === 'assistant')
+    expect(assistant?.content).toContain('## 实施计划')
+    expect(assistant?.isError).toBe(true)
+  })
+})
+
 describe('手动重试（S2 幂等）', () => {
   it('manualRetry 复用原 clientMsgId + 附件，先裁旧消息再重发', async () => {
     mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {

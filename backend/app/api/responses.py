@@ -39,6 +39,21 @@ def ok(data: Any = None, message: str = "ok") -> dict:
 
 
 def fail(code: int = 1, message: str = "error", data: Any = None) -> dict:
+    """构造失败响应（code 不得为 0）。
+
+    防御：code 必须是整数。历史上出现过 `fail(<错误文案>)` 的位置参数误用，把文案
+    塞进了 code 字段 —— 而前端 `apiRequest` 只在 ``typeof body.code === 'number'``
+    时才把它当错误信封，字符串 code 会让整个错误响应被当成成功数据返回
+    （见 frontend/src/api/errors.ts）。这里对非整数 code 兜底：视为误传的
+    message，code 归一为 1，保证错误不会被静默吞掉。
+    """
+    if not isinstance(code, int) or isinstance(code, bool):
+        if code and message == "error":
+            message = str(code)
+        code = 1
+    if code == 0:
+        # code=0 是「成功」语义；fail() 不得产出成功信封，否则调用方会静默忽略错误。
+        code = 1
     return api_result(code, message, data)
 
 

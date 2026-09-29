@@ -176,6 +176,75 @@ async def test_stream_reply_error(env, monkeypatch):
     assert events[-1]["error_type"] == "AgentError"
 
 
+# ── [D3] model_switched 事件字段契约 ────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_stream_model_switched_uses_model_ref_key(env, monkeypatch):
+    """前端 store 读 `event.model_ref`；后端必须发同名键（曾误发 `model`）。"""
+    bus = FakeBus(_ok_reply())
+    monkeypatch.setattr(ep, "_sync_session_model", lambda *a, **k: True)
+    monkeypatch.setattr(ep, "model_ref_dict", lambda m: {"id": m, "provider": "p", "name": "N"})
+
+    resp = await ep.chat_multi_agent_stream(_req(bus, object()), _body(model="deepseek/deepseek-v4-flash"))
+    events = _parse_sse(await _drain_stream(resp))
+
+    switched = [e for e in events if e["type"] == "model_switched"]
+    assert len(switched) == 1, "切模型时应发一次 model_switched"
+    assert switched[0]["model_ref"] == {
+        "id": "deepseek/deepseek-v4-flash", "provider": "p", "name": "N",
+    }
+    assert "model" not in switched[0], "旧键 model 会让前端读不到（契约漂移的根因）"
+
+
+@pytest.mark.asyncio
+async def test_stream_no_model_switched_when_model_unchanged(env, monkeypatch):
+    bus = FakeBus(_ok_reply())
+    monkeypatch.setattr(ep, "_sync_session_model", lambda *a, **k: False)
+    resp = await ep.chat_multi_agent_stream(_req(bus, object()), _body(model="x/y"))
+    events = _parse_sse(await _drain_stream(resp))
+    assert not [e for e in events if e["type"] == "model_switched"]
+
+
+# ── [C1] plan→build 失败：计划正文必须保留，不得被静默丢弃 ──────────────────
+
+def _partial_error_reply():
+    """模拟 supervisor 合并 plan→build 后 build 失败：payload 里带着完整计划。"""
+    return AgentMessage(
+        source="supervisor", target="user", type="error", action="chat",
+        payload={
+            "error": "执行失败", "error_type": "sub_agent_error",
+            "answer": "## 实施计划\n\n步骤一\n\n## 执行结果（出错）\n执行失败",
+            "routed_to": "plan→build", "plan_path": "/data/plans/s1/plan.md",
+            "sources": [], "steps": [],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_multi_agent_reply_error_with_plan_keeps_plan(env, monkeypatch):
+    """错误但带部分答案（计划已成）→ 走正常返回路径，不能抛 500 把计划丢掉。"""
+    bus = FakeBus(_partial_error_reply())
+    resp = await ep.chat_multi_agent(_req(bus, object()), _body())
+    assert "## 实施计划" in resp.answer
+    assert "步骤一" in resp.answer
+    assert resp.routed_to == "plan→build"
+    assert resp.plan_path == "/data/plans/s1/plan.md"
+
+
+@pytest.mark.asyncio
+async def test_stream_partial_error_emits_done_with_plan(env, monkeypatch):
+    """流式：带计划的错误走 done + partial_error（走 error 事件会覆盖正文）。"""
+    bus = FakeBus(_partial_error_reply())
+    resp = await ep.chat_multi_agent_stream(_req(bus, object()), _body())
+    events = _parse_sse(await _drain_stream(resp))
+    assert events[-1]["type"] == "done", "带计划的错误不应退化成 error 事件"
+    assert "## 实施计划" in events[-1]["answer"]
+    assert events[-1]["partial_error"] == "执行失败"
+    assert events[-1]["plan_path"] == "/data/plans/s1/plan.md"
+    # 正文必须真的落库，刷新后不丢
+    assert events[-1]["assistant_msg_id"] == "am1"
+
+
 @pytest.mark.asyncio
 async def test_stream_timeout(env, monkeypatch):
     async def boom_send(msg, timeout=None):

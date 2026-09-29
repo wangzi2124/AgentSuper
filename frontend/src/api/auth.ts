@@ -121,11 +121,16 @@ function storeSession(data: {
   if (data.token && data.expires_at) storeToken(data.token, Number(data.expires_at))
 }
 
+// [D7] 登出/失效时**删除** localStorage 键，而不是写入空串。
+// 写空串会留下 5 个 `key=""` 残骸：hasStoredSession 靠 getUserId() !== 'anonymous' +
+// token/expires 判空，虽不至于误判为已登录，但 getUsername() 会回落到 userId、
+// expires_at 的 '0' 也可能被外部代码当成有效值解析，且共享设备上残留旧身份信息。
+const SESSION_KEYS = [STORAGE_KEY, USERNAME_KEY, ACCOUNT_TYPE_KEY, TOKEN_KEY, TOKEN_EXPIRES_KEY] as const
+
 function clearSessionLocal(): void {
-  setUserId('')
-  setUsername('')
-  setStoredAccountType('')
-  storeToken('', 0)
+  try {
+    for (const key of SESSION_KEYS) localStorage.removeItem(key)
+  } catch { /* noop */ }
 }
 
 // 启动初始化：探测后端是否启用身份签名；启用时校验并恢复本地会话。

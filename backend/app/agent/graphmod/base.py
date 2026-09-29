@@ -115,126 +115,10 @@ class RAGAgentBase:
         self.api_key = settings.llm_api_key
         self.api_base = settings.llm_api_base
 
-        self.tools: list[ToolDef] = []
-        self.tools.extend(create_filesystem_tools())
-        # [opencode build 合并] 网络搜索内建为 build 的工具（Tavily→DuckDuckGo 引擎），
-        # 取代独立 web_search 子 Agent 承载实时信息搜索的能力。
-        self.tools.append(ToolDef(
-            name="tool_web_search",
-            description=(
-                "Search the web / internet for realtime, news or out-of-knowledge information "
-                "(engines: Tavily if API key set, else DuckDuckGo). Returns numbered results with "
-                "title/snippet/URL. Use when the user asks for current events, live data, "
-                "recent releases, or anything not reliably in your training data or the knowledge base."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "搜索关键词/问题（中文或英文均可）"},
-                    "max_results": {"type": "integer", "description": "最多返回结果数（默认 5，最大 10）"},
-                },
-                "required": ["query"],
-            },
-            fn=web_search_tool,
-        ))
-        if skill_loader:
-            self.tools.extend(create_skill_tools(skill_loader))
-        if plugin_loader:
-            self.tools.extend(create_plugin_tools(plugin_loader))
-        # [opencode task tool] 主 Agent 自主委派子 Agent（explore / plan）。
-        # fn 仅为 schema 占位：实际执行在 _execute_tool 中特判（需注入任务深度与事件队列）。
-        self.tools.append(ToolDef(
-            name="tool_task",
-            description=_TASK_TOOL_SCHEMA["function"]["description"],
-            parameters=_TASK_TOOL_SCHEMA["function"]["parameters"],
-            fn=self._task_tool_placeholder,
-        ))
-        # [opencode memory] 主 Agent 记忆读写工具：模型可主动记忆/回忆关键信息。
-        # 仅在注入了共享记忆管理器时注册（fn 为占位，实际执行在 _execute_tool 特判）。
-        if memory is not None:
-            self.tools.append(ToolDef(
-                name="tool_memory_set",
-                description=(
-                    "记住一条需要跨轮次可靠保留的稳定事实（会话内有效）。"
-                    "仅存值得长期保留的信息：用户明确表达的偏好、项目关键决策/结论、"
-                    "重要的标识符/数值。克制使用——临时信息（可当场说完的、很快过期不用的）"
-                    "不要存；对话历史本身已能覆盖的内容不要重复记忆。"
-                    "可指定标签便于后续按主题检索。"
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "key": {"type": "string", "description": "记忆键（如 'user_language_preference'）"},
-                        "value": {"type": "string", "description": "要记住的内容（尽量简洁）"},
-                        "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签，用于按主题检索"},
-                    },
-                    "required": ["key", "value"],
-                },
-                fn=self._memory_tool_placeholder,
-            ))
-            self.tools.append(ToolDef(
-                name="tool_memory_get",
-                description=(
-                    "按 key 读取一条已记住的信息。用于回忆之前 tool_memory_set 保存的内容。"
-                    "未找到或已过期时返回空。"
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {"key": {"type": "string", "description": "要读取的记忆键"}},
-                    "required": ["key"],
-                },
-                fn=self._memory_tool_placeholder,
-            ))
-            self.tools.append(ToolDef(
-                name="tool_memory_search",
-                description=(
-                    "按标签检索所有相关的已记住信息。用于在本会话内按主题查找记忆"
-                    "（如标签 'project'、'user_preference'）。返回匹配的键值对。"
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {"tag": {"type": "string", "description": "要检索的标签"}},
-                    "required": ["tag"],
-                },
-                fn=self._memory_tool_placeholder,
-            ))
-
-        # [语音] 主 Agent 语音合成/转写工具：仅当注入了启用状态的本地 Qwen3-TTS 服务。
-        # fn 为占位，实际执行在 _execute_tool 特判（与 tool_memory_* 同机制）。
-        if voice_service is not None and getattr(voice_service, "enabled", False):
-            self.tools.append(ToolDef(
-                name="tool_tts_synthesize",
-                description=(
-                    "将一段文本合成为语音文件（本地 Qwen3-TTS 预设音色），保存到 data/generated/ 下，"
-                    "返回文件路径。用于用户要求生成语音/配音/朗读内容时，把答复文本转成可下载/可播放的 wav。"
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string", "description": "要合成的文本（中文优先，建议简洁完整句）"},
-                        "speaker": {"type": "string", "description": "可选音色：Vivian/Serena/Uncle_fu/Dylan/Eric/Ryan/Aiden/Ono_anna/Sohee"},
-                        "language": {"type": "string", "description": "语言：Auto/Chinese/English/Japanese/Korean/...（默认 Auto）"},
-                        "instruct": {"type": "string", "description": "可选风格/情绪指令，如 'speak happily'（英文）"},
-                    },
-                    "required": ["text"],
-                },
-                fn=self._voice_tool_placeholder,
-            ))
-            self.tools.append(ToolDef(
-                name="tool_voice_transcribe",
-                description=(
-                    "将一段本地音频文件转写为文本（Whisper ASR）。"
-                    "用于用户提供了音频文件（.wav/.mp3 等）并要求转成文字/听懂内容时。"
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "audio_path": {"type": "string", "description": "本地音频文件路径（绝对路径或相对工作目录）"},
-                    },
-                    "required": ["audio_path"],
-                },
-                fn=self._voice_tool_placeholder,
-            ))
+        # 工具全集由 _compose_tools() 统一构建。refresh_tools() 复用同一入口，
+        # 保证技能/插件热更新后 web_search / tool_task / tool_memory_* / tool_tts_*
+        # 这些固定工具不会被覆盖丢失（详见 _compose_tools 的注释）。
+        self.tools: list[ToolDef] = self._compose_tools()
 
         # 子 Agent 消息总线（runtime.py 注入）：供 tool_task 委派使用
         self.task_bus: object | None = None
@@ -259,6 +143,153 @@ class RAGAgentBase:
         self._conv_tool_cache_max = 200
 
         self.graph = self._build_graph()
+
+    def _static_tools_head(self) -> list[ToolDef]:
+        """动态工具（技能/插件）**之前**注册的固定工具：文件系统 + 内建 web 搜索。"""
+        tools = list(create_filesystem_tools())
+        # [opencode build 合并] 网络搜索内建为 build 的工具（Tavily→DuckDuckGo 引擎），
+        # 取代独立 web_search 子 Agent 承载实时信息搜索的能力。
+        tools.append(ToolDef(
+            name="tool_web_search",
+            description=(
+                "Search the web / internet for realtime, news or out-of-knowledge information "
+                "(engines: Tavily if API key set, else DuckDuckGo). Returns numbered results with "
+                "title/snippet/URL. Use when the user asks for current events, live data, "
+                "recent releases, or anything not reliably in your training data or the knowledge base."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词/问题（中文或英文均可）"},
+                    "max_results": {"type": "integer", "description": "最多返回结果数（默认 5，最大 10）"},
+                },
+                "required": ["query"],
+            },
+            fn=web_search_tool,
+        ))
+        return tools
+
+    def _dynamic_tools(self) -> list[ToolDef]:
+        """随技能/插件开关变化而变化的部分 —— 每次 refresh 都要重新生成。"""
+        tools: list[ToolDef] = []
+        if self.skill_loader:
+            tools.extend(create_skill_tools(self.skill_loader))
+        if self.plugin_loader:
+            tools.extend(create_plugin_tools(self.plugin_loader))
+        return tools
+
+    def _static_tools_tail(self) -> list[ToolDef]:
+        """动态工具**之后**注册的固定工具：task 委派 + 记忆 + 语音。
+
+        记忆工具仅在注入了共享记忆管理器时注册；语音工具仅在注入了启用状态的本地
+        Qwen3-TTS 服务时注册。两者的 fn 都是占位，实际执行在 _execute_tool 特判。
+        """
+        # [opencode task tool] 主 Agent 自主委派子 Agent（explore / plan）。
+        # fn 仅为 schema 占位：实际执行在 _execute_tool 中特判（需注入任务深度与事件队列）。
+        tools = [ToolDef(
+            name="tool_task",
+            description=_TASK_TOOL_SCHEMA["function"]["description"],
+            parameters=_TASK_TOOL_SCHEMA["function"]["parameters"],
+            fn=self._task_tool_placeholder,
+        )]
+        # [opencode memory] 主 Agent 记忆读写工具：模型可主动记忆/回忆关键信息。
+        if self.memory is not None:
+            tools.append(ToolDef(
+                name="tool_memory_set",
+                description=(
+                    "记住一条需要跨轮次可靠保留的稳定事实（会话内有效）。"
+                    "仅存值得长期保留的信息：用户明确表达的偏好、项目关键决策/结论、"
+                    "重要的标识符/数值。克制使用——临时信息（可当场说完的、很快过期不用的）"
+                    "不要存；对话历史本身已能覆盖的内容不要重复记忆。"
+                    "可指定标签便于后续按主题检索。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string", "description": "记忆键（如 'user_language_preference'）"},
+                        "value": {"type": "string", "description": "要记住的内容（尽量简洁）"},
+                        "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签，用于按主题检索"},
+                    },
+                    "required": ["key", "value"],
+                },
+                fn=self._memory_tool_placeholder,
+            ))
+            tools.append(ToolDef(
+                name="tool_memory_get",
+                description=(
+                    "按 key 读取一条已记住的信息。用于回忆之前 tool_memory_set 保存的内容。"
+                    "未找到或已过期时返回空。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {"key": {"type": "string", "description": "要读取的记忆键"}},
+                    "required": ["key"],
+                },
+                fn=self._memory_tool_placeholder,
+            ))
+            tools.append(ToolDef(
+                name="tool_memory_search",
+                description=(
+                    "按标签检索所有相关的已记住信息。用于在本会话内按主题查找记忆"
+                    "（如标签 'project'、'user_preference'）。返回匹配的键值对。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {"tag": {"type": "string", "description": "要检索的标签"}},
+                    "required": ["tag"],
+                },
+                fn=self._memory_tool_placeholder,
+            ))
+
+        # [语音] 主 Agent 语音合成/转写工具：仅当注入了启用状态的本地 Qwen3-TTS 服务。
+        voice = self.voice_service
+        if voice is not None and getattr(voice, "enabled", False):
+            tools.append(ToolDef(
+                name="tool_tts_synthesize",
+                description=(
+                    "将一段文本合成为语音文件（本地 Qwen3-TTS 预设音色），保存到 data/generated/ 下，"
+                    "返回文件路径。用于用户要求生成语音/配音/朗读内容时，把答复文本转成可下载/可播放的 wav。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "要合成的文本（中文优先，建议简洁完整句）"},
+                        "speaker": {"type": "string", "description": "可选音色：Vivian/Serena/Uncle_fu/Dylan/Eric/Ryan/Aiden/Ono_anna/Sohee"},
+                        "language": {"type": "string", "description": "语言：Auto/Chinese/English/Japanese/Korean/...（默认 Auto）"},
+                        "instruct": {"type": "string", "description": "可选风格/情绪指令，如 'speak happily'（英文）"},
+                    },
+                    "required": ["text"],
+                },
+                fn=self._voice_tool_placeholder,
+            ))
+            tools.append(ToolDef(
+                name="tool_voice_transcribe",
+                description=(
+                    "将一段本地音频文件转写为文本（Whisper ASR）。"
+                    "用于用户提供了音频文件（.wav/.mp3 等）并要求转成文字/听懂内容时。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "audio_path": {"type": "string", "description": "本地音频文件路径（绝对路径或相对工作目录）"},
+                    },
+                    "required": ["audio_path"],
+                },
+                fn=self._voice_tool_placeholder,
+            ))
+        return tools
+
+    def _compose_tools(self) -> list[ToolDef]:
+        """构建工具全集：固定头 + 动态（技能/插件）+ 固定尾。
+
+        `__init__` 与 `refresh_tools()` 共用这一个入口。此前 refresh_tools 只重建
+        「文件系统 + 技能 + 插件」并整体覆盖 self.tools，导致开/关一次技能后
+        tool_web_search / tool_task / tool_memory_* / tool_tts_* 从此永久消失。
+
+        顺序即注册序，`_build_tool_defs` 的技能播种与 pin 逻辑依赖它保持确定性。
+        """
+        return self._static_tools_head() + self._dynamic_tools() + self._static_tools_tail()
+
     def rebuild_system_prompt(self):
         """仅重建系统提示词（不重建图），用于工作区/技能/插件变化后的热更新。
 
@@ -404,8 +435,9 @@ class RAGAgentBase:
     _WEATHER_TOOL_PREFIXES = ("plugin_weather", "plugin_weather-alert")
     _WEATHER_RESULT_LIMIT = 1500  # 字符
     # 意图关键词 → 需要挂载的工具名前缀（任一词命中即挂载该类工具）
-    # 仅用于**插件**与少数 tool_*：load_skill_* 已常驻（见 _RESIDENT_SKILL_PREFIXES），
-    # 原先挂在这些规则下的技能前缀已移除，避免留下看似生效实则无效的死规则。
+    # 仅用于 *插件*：tool_* 已被 _CORE_TOOL_PREFIXES 无条件挂载、load_skill_* 已常驻
+    # （见 _RESIDENT_SKILL_PREFIXES），所以本表里任何 tool_* / load_skill_* 前缀
+    # 都是走不到的死规则（[A6] 原「语音」规则即如此，已删）。
     _INTENT_RULES: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
         (("天气", "台风", "气象", "温度", "降雨", "下雪", "weather", "typhoon", "forecast"),
          ("plugin_weather", "plugin_weather-alert")),
@@ -413,8 +445,6 @@ class RAGAgentBase:
          ("plugin_docx-generator", "plugin_pdf-generator", "plugin_excel-generator", "plugin_pptx-generator")),
         (("搜索", "查一下", "新闻", "资讯", "上网", "search", "news", "internet"),
          ("plugin_internet-search_",)),
-        (("语音", "声音", "配音", "克隆", "合成", "朗读", "voice", "audio", "speech"),
-         ("tool_tts_synthesize", "tool_voice_transcribe")),
         (("角色", "人物", "对话", "台词", "character", "dialogue"),
          ("plugin_character-analysis_",)),
         (("知识库", "kb", "导出"),

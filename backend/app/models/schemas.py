@@ -120,6 +120,9 @@ class MultiAgentChatResponse(BaseModel):
     routed_to: Optional[str] = None
     # [文件改动] 本次轮次改动的文件 + 行数（快照 diff，聊天框展示）
     files_changed: list = Field(default_factory=list)
+    # [plan] plan Agent 落盘的计划文件路径（<data>/plans/<conversation_id>/plan.md）。
+    # 此前只出现在 AgentMessage.payload 里，两端点都不下发 —— 加进来才真正可达。
+    plan_path: Optional[str] = None
 
 
 class RestoreSnapshotRequest(BaseModel):

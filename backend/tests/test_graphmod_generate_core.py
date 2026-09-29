@@ -1040,6 +1040,52 @@ async def test_generate_max_steps_injects_and_disables_tools(gen_env, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_generate_max_steps_is_the_binding_cap(gen_env, monkeypatch):
+    """[C3] MAX_STEPS 必须真的作为循环边界。
+
+    旧实现的循环上界写死 `rounds < max_tool_rounds`，只用 max_steps 决定何时注入
+    收尾提示 → MAX_STEPS < MAX_TOOL_ROUNDS 时完全失效（多跑的工具轮无人约束）。
+    """
+    monkeypatch.setattr(settings, "max_steps", 2)
+    monkeypatch.setattr(settings, "max_tool_rounds", 8)
+
+    async def spy(name, args, state=None):
+        return "R"
+    agent, llm = _setup_generate(
+        gen_env,
+        [FakeLLM().response(tool_calls=[("tool_probe", '{"a":"1"}')])] * 2
+        + [FakeLLM().response(content="forced-final"),
+           FakeLLM().response(content="forced-final")],
+        exec_spy=spy,
+    )
+    out = await agent._generate(make_state())
+    assert out["answer"] == "forced-final"
+    # 上限 2：第 1、2 轮在循环内，第 3 轮是收尾调用（工具已禁用）
+    assert len(llm.calls) == 3, f"MAX_STEPS=2 时不应跑满 MAX_TOOL_ROUNDS=8，实际 {len(llm.calls)} 次 LLM 调用"
+    assert llm.calls[-1][2] is None
+
+
+@pytest.mark.asyncio
+async def test_generate_max_steps_above_tool_rounds_keeps_tool_rounds_cap(gen_env, monkeypatch):
+    """MAX_STEPS > MAX_TOOL_ROUNDS 时仍以 MAX_TOOL_ROUNDS 为上限（取小语义）。"""
+    monkeypatch.setattr(settings, "max_steps", 24)
+    monkeypatch.setattr(settings, "max_tool_rounds", 2)
+
+    async def spy(name, args, state=None):
+        return "R"
+    agent, llm = _setup_generate(
+        gen_env,
+        [FakeLLM().response(tool_calls=[("tool_probe", '{"a":"1"}')])] * 2
+        + [FakeLLM().response(content="forced-final"),
+           FakeLLM().response(content="forced-final")],
+        exec_spy=spy,
+    )
+    out = await agent._generate(make_state())
+    assert out["answer"] == "forced-final"
+    assert len(llm.calls) == 3, "min(24, 2) = 2 → 2 轮循环 + 1 次收尾"
+
+
+@pytest.mark.asyncio
 async def test_generate_max_tool_rounds_forced_final(gen_env, monkeypatch, caplog):
     monkeypatch.setattr(settings, "max_tool_rounds", 1)
 

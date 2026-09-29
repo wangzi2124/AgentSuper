@@ -272,7 +272,8 @@ export interface FileChange {
 }
 
 export interface MultiAgentSSEEvent {
-  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_stream' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'error' | 'queued' | 'text_delta' | 'model_switched'
+  // 注：后端从不发 'agent_stream'（子 Agent 增量文本走 text_delta），故此处不列。
+  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'error' | 'queued' | 'text_delta' | 'model_switched'
   agent_id: string
   agent_name?: string
   agent_avatar?: string
@@ -303,6 +304,12 @@ export interface MultiAgentSSEEvent {
   expires_at?: string
   /** [文件改动] 本次轮次改动的文件 + 行数（快照 diff，done 事件携带） */
   files_changed?: FileChange[]
+  /** [model_switched] 会话模型被切换时后端下发的 ModelRef */
+  model_ref?: { id?: string; provider?: string; name?: string }
+  /** [plan] plan Agent 落盘的计划文件路径（done 事件携带） */
+  plan_path?: string
+  /** [plan→build] 计划已成、执行出错：done 事件携带的出错原因（非空即表示正文需提示） */
+  partial_error?: string | null
 }
 
 export interface MultiAgentChatRequest {

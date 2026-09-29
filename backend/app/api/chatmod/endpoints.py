@@ -272,26 +272,44 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         _abort_turn()
         raise HTTPException(status_code=500, detail=friendly_chat_error(e, model=body.model))
 
+    # [plan→build] build 失败时 _merge_plan_build_reply 会把已生成的计划塞进 payload["answer"]。
+    # 该分支不得丢弃它 —— 否则用户只剩一句「执行失败」，规划成果凭空消失。
+    _partial_answer = str((reply.payload or {}).get("answer", "") or "")
     if reply.type == "error":
-        task_bridge.unregister(child_id)
+        if not _partial_answer:
+            task_bridge.unregister(child_id)
+            service.update(user_id, child_id, status="error")
+            _err_detail = (reply.payload or {}).get("error", "")
+            logger.error("multi-agent reply error: user=%s session=%s detail=%s",
+                         user_id, session_id, _err_detail)
+            chainlog.error(
+                "agent", "chat.multi_agent", "agent.reply_error",
+                message=f"子 Agent 返回错误: {_err_detail}",
+                data={
+                    "child_id": child_id,
+                    "error": _err_detail,
+                    "error_type": (reply.payload or {}).get("error_type"),
+                    "completed_steps": (reply.payload or {}).get("completed_steps", []),
+                },
+            )
+            _abort_turn()
+            raise HTTPException(status_code=500, detail=friendly_chat_error(
+                RuntimeError(_err_detail) if _err_detail else None, model=body.model,
+            ))
+        # 计划已成、执行出错：回滚执行阶段的文件改动，但保留计划正文走正常落库/返回路径
         service.update(user_id, child_id, status="error")
-        _err_detail = (reply.payload or {}).get("error", "")
-        logger.error("multi-agent reply error: user=%s session=%s detail=%s",
-                     user_id, session_id, _err_detail)
-        chainlog.error(
-            "agent", "chat.multi_agent", "agent.reply_error",
-            message=f"子 Agent 返回错误: {_err_detail}",
+        _abort_turn()
+        chainlog.warning(
+            "agent", "chat.multi_agent", "agent.reply_partial_error",
+            message="子 Agent 返回错误但带有部分答案（已保留）",
             data={
                 "child_id": child_id,
-                "error": _err_detail,
+                "error": (reply.payload or {}).get("error"),
                 "error_type": (reply.payload or {}).get("error_type"),
-                "completed_steps": (reply.payload or {}).get("completed_steps", []),
+                "answer_chars": len(_partial_answer),
+                "plan_path": (reply.payload or {}).get("plan_path"),
             },
         )
-        _abort_turn()
-        raise HTTPException(status_code=500, detail=friendly_chat_error(
-            RuntimeError(_err_detail) if _err_detail else None, model=body.model,
-        ))
 
     payload = reply.payload
     answer = payload.get("answer", "")
@@ -345,6 +363,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         steps=[StepEvent(**s) if isinstance(s, dict) else s for s in steps],
         routed_to=routed_to,
         files_changed=files_changed,
+        plan_path=payload.get("plan_path") or None,
     )
 
 
@@ -405,7 +424,10 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
     # 请求级事件收集器：子 Agent 的实时事件经此转发到 SSE + 记录副本（落库）
     collector = AgentEventCollector(event_queue)
     if _sync_session_model(service, user_id, session_id, body.model):
-        await event_queue.put({"type": "model_switched", "model": model_ref_dict(body.model)})
+        # [D3] 字段名与前端 store 对齐：`model_ref`（{id, provider, name}）。
+        # 旧写法发 `model`，而 frontend/src/stores/multiAgent.ts 读的是
+        # `event.model_ref` → 切模型后 store 里的 currentModel 永远不会更新。
+        await event_queue.put({"type": "model_switched", "model_ref": model_ref_dict(body.model)})
 
     # 登记子任务会话（kind='task'）+ AgentBus thread
     child_id, thread_id = _begin_task_session(service, user_id, session_id, body.message)
@@ -495,8 +517,12 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         timeout=settings.supervisor_timeout,
                     )
 
-                    if reply.type == "error":
-                        _err_detail = (reply.payload or {}).get("error", "")
+                    # [plan→build] build 失败但计划已生成：payload["answer"] 带着完整计划。
+                    # 旧实现把它连同 plan_path 一起丢掉，用户只剩一句「执行失败」。
+                    _err_payload = reply.payload or {}
+                    _partial_answer = str(_err_payload.get("answer", "") or "")
+                    if reply.type == "error" and not _partial_answer:
+                        _err_detail = _err_payload.get("error", "")
                         logger.error("multi-agent reply error: session=%s detail=%s",
                                      session_id, _err_detail)
                         generic_error = friendly_chat_error(
@@ -507,8 +533,8 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                             message=f"子 Agent 返回错误: {generic_error}",
                             data={
                                 "child_id": child_id, "error": _err_detail,
-                                "error_type": (reply.payload or {}).get("error_type"),
-                                "completed_steps": (reply.payload or {}).get("completed_steps", []),
+                                "error_type": _err_payload.get("error_type"),
+                                "completed_steps": _err_payload.get("completed_steps", []),
                             },
                         )
                         _abort_turn()
@@ -528,6 +554,23 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     sources = payload.get("sources", [])
                     steps = payload.get("steps", [])
                     routed_to = payload.get("routed_to")
+                    # 执行出错但有部分答案 → 计划正文同样要落库，刷新后不丢
+                    partial_error = bool(reply.type == "error")
+                    if partial_error:
+                        service.update(user_id, child_id, status="error")
+                        _abort_turn()
+                        collector.fail_running(str(_err_payload.get("error") or "执行出错"))
+                        chainlog.warning(
+                            "agent", "chat.stream", "agent.reply_partial_error",
+                            message="子 Agent 返回错误但带有部分答案（已保留并落库）",
+                            data={
+                                "child_id": child_id,
+                                "error": _err_payload.get("error"),
+                                "error_type": _err_payload.get("error_type"),
+                                "answer_chars": len(answer),
+                                "plan_path": _err_payload.get("plan_path"),
+                            },
+                        )
                     agents = collector.agents_snapshot()
                     chainlog.info(
                         "agent", "chat.stream", "agent.reply",
@@ -588,6 +631,10 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         "tokens": payload.get("tokens") or {},
                         "cost": payload.get("cost") or 0.0,
                         "files_changed": files_changed,
+                        "plan_path": payload.get("plan_path") or None,
+                        # [plan→build] 计划已成、执行出错：正文里已含「## 执行结果（出错）」，
+                        # 带上 partial_error 让前端能标红提示，但**不**走 error 事件（否则正文被覆盖）。
+                        "partial_error": _err_payload.get("error") if partial_error else None,
                     })
                     chainlog.info(
                         "http", "chat.stream", "chat.done",

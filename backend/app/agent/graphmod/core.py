@@ -47,9 +47,6 @@ from app.config import settings
 from app.agent.tools import (
     ToolDef,
     LONG_CONTENT_FILE_RULE,
-    create_filesystem_tools,
-    create_skill_tools,
-    create_plugin_tools,
     build_system_prompt_no_kb,
 )
 
@@ -584,14 +581,13 @@ class RAGAgent(RAGAgentGenerate):
         """刷新工具列表和系统提示，用于热更新技能和插件。
 
         加锁避免与并发请求中的 graph 使用竞态（技能/插件切换时原子替换）。
+
+        走 _compose_tools() 重建**全集**（与 __init__ 同一入口）：只重建「文件系统 +
+        技能 + 插件」并覆盖 self.tools 会让 tool_web_search / tool_task /
+        tool_memory_* / tool_tts_* 永久消失，故此处不再局部拼装。
         """
         async with self._refresh_lock:
-            self.tools = []
-            self.tools.extend(create_filesystem_tools())
-            if self.skill_loader:
-                self.tools.extend(create_skill_tools(self.skill_loader))
-            if self.plugin_loader:
-                self.tools.extend(create_plugin_tools(self.plugin_loader))
+            self.tools = self._compose_tools()
             self.rebuild_system_prompt()
             self.graph = self._build_graph()
     async def invoke(self, question: str, model: str | None = None, history: list[dict] | None = None, use_vector_db: bool = False, files: list[dict] | None = None, event_queue: asyncio.Queue | None = None, conversation_id: str = "", on_activity: Callable[[str], None] | None = None, directory: str = "", task_depth: int = 0) -> dict:

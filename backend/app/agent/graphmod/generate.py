@@ -350,7 +350,10 @@ class RAGAgentGenerate(RAGAgentTools):
 
         # 硬兜底：单次请求内最多 LLM 调用轮数（每轮 = 一次完整 LLM 调用）
         max_tool_rounds = settings.max_tool_rounds
-        # 主步骤上限（对齐 opencode agent.steps）：生效上限 = min(MAX_STEPS, MAX_TOOL_ROUNDS)
+        # 主步骤上限（对齐 opencode agent.steps）：生效上限 = min(MAX_STEPS, MAX_TOOL_ROUNDS)。
+        # [C3] 该上限必须真正作为循环边界使用。旧实现只拿它判断何时注入 MAX_STEPS_PROMPT，
+        # 循环上界仍是 rounds < max_tool_rounds —— 默认 max_steps=24 > max_tool_rounds=8 时
+        # MAX_STEPS 完全是 no-op（提示在第 8 轮注入，24 永远到不了），配置项形同虚设。
         effective_max_steps = min(max_tool_rounds, max(1, settings.max_steps))
         # Doom-loop：连续相同指纹 N 轮注入提示；升级到 doom_loop_max_strikes 次后强制收尾
         doom_threshold = max(2, settings.doom_loop_threshold)
@@ -364,7 +367,7 @@ class RAGAgentGenerate(RAGAgentTools):
         used_tools: set[str] = set()
         while (
             msg.tool_calls or finish_reason == "tool-calls"
-        ) and rounds < max_tool_rounds:
+        ) and rounds < effective_max_steps:
             rounds += 1
 
             # [opencode background] 每轮吸收本会话已完成的后台任务结果（合成 assistant 消息）
@@ -551,7 +554,11 @@ class RAGAgentGenerate(RAGAgentTools):
 
         # If tool calls remain (max rounds reached) or content is empty, force a final answer
         if msg.tool_calls:
-            logger.warning("Max tool rounds (%d) reached, executing final batch and forcing answer", max_tool_rounds)
+            logger.warning(
+                "Max tool rounds reached (effective_max_steps=%d = min(MAX_STEPS=%d, MAX_TOOL_ROUNDS=%d)), "
+                "executing final batch and forcing answer",
+                effective_max_steps, settings.max_steps, max_tool_rounds,
+            )
             # Must include tool_calls in assistant message for DeepSeek/OpenAI compatibility
             messages.append({
                 "role": "assistant",
