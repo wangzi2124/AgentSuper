@@ -4,13 +4,13 @@
 - 范围：技能子系统、模型目录与模型 API、多 Agent 执行链路、后端↔前端接线
 - 方法：4 个并行审计 agent，每个结论均由 `rg` 实际调用点或代码原文佐证；无佐证的猜测一律不写
 - 仓库：`E:\AgentSuper`
-- 状态：审计阶段为只读；**批次 1 + 批次 2 已于同日实施完毕**，逐项修复记录见文末
-  [修复实施记录](#修复实施记录)。批次 3 待产品决策，尚未动。
+- 状态：审计阶段为只读；**批次 1 + 批次 2 + 批次 3 已于同日实施完毕**，逐项修复记录见文末
+  [修复实施记录](#修复实施记录)。批次 3 的 10 个决策点全部按推荐方案落地。
 
 ### 图例
 
 - ✅ 已修复
-- ⏳ 待产品决策（批次 3）
+- ⏳ 待产品决策（批次 3）—— **本轮已全部决策并修复**
 - ○ 未处理（批次 1/2 之外、判定为无需动作）
 
 ## 严重度定义
@@ -44,19 +44,19 @@
 
 建议：以「base 工具集 + 动态工具集」的并集重建，不要覆盖式赋值；补一条回归测试断言 `tool_web_search` / `tool_task` / `tool_memory_*` 在 `refresh_tools()` 之后仍存在。
 
-### ⏳ A2 · MED · `backend/app/skills/registry.py:132` · `seed_bundled()` 会把用户自建的同名技能标成「内置」
+### ✅ A2 · MED · `backend/app/skills/registry.py:132` · `seed_bundled()` 会把用户自建的同名技能标成「内置」
 
 播种时只按**目录名**判断是否已存在。若用户自己在受管库建了 `tdd/`，与内置 `tdd/` 同名，播种会把用户目录写进 `.bundled.json` 的 `seeded` 名单，该技能随即被打上「内置」徽章 —— 而它其实是用户自己写的。当前测试反而锁定了这个行为。
 
 建议：`seed_bundled` 只对「本次确实从包内复制过去、且此前受管库不存在该目录」的情况记账；已存在同名目录一律不记账、不覆盖、不标徽章。
 
-### ⏳ A3 · MED · `backend/app/skills/registry.py:45,143` · `BUNDLED_VERSION` 是死状态
+### ✅ A3 · MED · `backend/app/skills/registry.py:45,143` · `BUNDLED_VERSION` 是死状态
 
 `BUNDLED_VERSION` 被写入 `.bundled.json` 并在播种时比较，但**没有任何功能读取它来触发重新播种或迁移**。写它、读它都无副作用，等于给未来的播种策略埋了一个假的「已播种版本」标记。
 
 建议：要么让 `seed_bundled` 真的按版本做增量播种（版本不同则补齐新内置技能、保留用户改动），要么删掉该字段，别留一个看起来在起作用其实没有的开关。
 
-### ⏳ A4 · MED · `backend/app/skills/registry.py`（`_discover_bundled`）vs `loader.py` · 内置名录与技能加载器的 key 不一致
+### ✅ A4 · MED · `backend/app/skills/registry.py`（`_discover_bundled`）vs `loader.py` · 内置名录与技能加载器的 key 不一致
 
 `_discover_bundled()` 按**目录名**建名录，`SkillLoader` 按 **frontmatter `name`** 建 `_skills` 字典键。两者只在「目录名 == frontmatter name」时一致。任一内置技能的 frontmatter name 与目录名不同（或被用户改过），该技能的「内置」标记就丢；反过来用户自建的技能可能被误标（见 A2）。
 
@@ -74,7 +74,7 @@
 
 建议：确认这两类工具的挂载策略后，删除规则 #4 或调整前缀判定顺序；无论哪种都不应保留一条永不执行的意图规则。
 
-### ⏳ A7 · MED · `backend/app/agent/graphmod/base.py:409-424` vs `backend/app/agent/tools.py:330` · 提示词广告了 `plugin_http-client_*` 但无规则挂载
+### ✅ A7 · MED · `backend/app/agent/graphmod/base.py:409-424` vs `backend/app/agent/tools.py:330` · 提示词广告了 `plugin_http-client_*` 但无规则挂载
 
 系统提示词告诉模型存在 HTTP 客户端插件工具，但 `_INTENT_RULES` 里没有对应规则，工具在未命中其他意图时不会被挂载给模型。模型看得见描述、却调不到工具。
 
@@ -120,13 +120,13 @@ return fail(str(e))                             # 同上
 
 建议：加 `dependencies=[Depends(require_admin)]`。
 
-### ⏳ B5 · MED · `models` 写入但不消费 · `context_length`
+### ✅ B5 · MED · `models` 写入但不消费 · `context_length`
 
 模型条目可写入 `context_length`，但 LLM 调用点读取的是 `.env` 的 `MAX_CONTEXT_TOKENS` / `OLLAMA_NUM_CTX`，没有任何代码读条目里的这个字段。用户改了没有任何效果。
 
 建议：二选一 —— 让 `litellm_extra_kwargs` / `provider_api` 真的消费它，或在模型管理 UI 上把它标为只读/未接入。
 
-### ⏳ B6 · MED · `models` 写入但不消费 · `limits.max_output_tokens`
+### ✅ B6 · MED · `models` 写入但不消费 · `limits.max_output_tokens`
 
 输出上限实际取 `settings.llm_max_tokens`（`LLM_MAX_TOKENS`，`graphmod/core.py:_llm_call`），条目里的 `limits.max_output_tokens` 从未被读取。
 
@@ -137,6 +137,12 @@ return fail(str(e))                             # 同上
 模型 API 一条 HTTP 级测试都没有，B1（`fail` 参数误用导致错误被当成功）正是因此长期未被发现。也没有覆盖 B2/B3 的鉴权行为。
 
 建议：补「校验失败返回可识别的错误信封」「无 admin 凭证时 `/models/config` 返回 403」两条测试。
+
+> **已实施（2026-09-29）**：`tests/test_api_integration.py` 新增 `models_client` fixture（只挂 `models` router + catalog 桩，不启动后端运行时）+ 4 条 HTTP 级用例：
+> `test_models_list_is_public_and_enveloped`（公开目录 `code=0`；`estimate-tokens` 空 body → **非 0 错误码**，B1 复发防线）、
+> `test_models_validation_error_returns_error_envelope`（`upsert_custom` 的 `ValueError` 分支 → `code != 0` + `message` 可见 + `data is None`）、
+> `test_models_config_requires_admin_token`（`ADMIN_TOKEN` 已配时 config/export/catalog-full/reload 无凭证或错凭证一律 401，响应体不含 token）、
+> `test_models_admin_endpoint_blocks_remote_when_token_unset`（未配 token 时局域网来源 403，公开 `/models` 不受影响）。
 
 ---
 
@@ -162,7 +168,7 @@ return fail(str(e))                             # 同上
 
 建议：让循环真正以 `effective_max_steps` 为界（`max_tool_rounds` 仍参与 `min()`），或者把 `MAX_STEPS` 默认值降到 8 以下并在文档里写清两者的取小关系。
 
-### ⏳ C4 · MED · `supermod/decompose.py:43-77` · 并行分解是死代码
+### ✅ C4 · MED · `supermod/decompose.py:43-77` · 并行分解是死代码
 
 `_decompose` 的三条分支（`:70/:74/:77`）**都只返回 1 个子任务**，因此 `len(subtasks) > 1` 永不成立，`parallel.py:48` 的 `_execute_parallel`（其唯一生产调用点 `core.py:122`）不可达。
 
@@ -170,7 +176,7 @@ return fail(str(e))                             # 同上
 
 建议：二选一并明确写进文档 —— 要么在关键词路径无法定夺时真正调用 `_llm_decompose` 恢复扇出，要么删掉 `_execute_parallel` / `_llm_decompose` / `sub_task_fresh_history` 及其不可达的测试。后者能让代码诚实，前者才能对上 `opencode-plan-parallel-explore-design.md`。
 
-### ⏳ C5 · MED · `graphmod/generate.py:637` + `config.py:229,233` · `WEAK_MODEL_TWO_STAGE` 永不可达
+### ✅ C5 · MED · `graphmod/generate.py:637` + `config.py:229,233` · `WEAK_MODEL_TWO_STAGE` 永不可达
 
 该分支条件是 `settings.weak_model_two_stage and settings.weak_model_strong_fallback and rounds > 0 and is_weak_model(model)`。三重不可达：
 
@@ -200,13 +206,13 @@ return fail(str(e))                             # 同上
 
 建议：把 `plan_path` 加进 schema + `done` 事件 + 前端展示，或从各层 payload 里删掉。
 
-### ⏳ C9 · LOW · `agent/bus.py:128-130,175-177` · 宽限期静默把超时翻倍
+### ✅ C9 · LOW · `agent/bus.py:128-130,175-177` · 宽限期静默把超时翻倍
 
 `grace_extensions=1` 是默认值且所有生产调用点都接受它，但扩展逻辑是 `deadline = loop.time() + timeout` —— 重置为一个**完整的额外超时**。于是 `SUPERVISOR_TIMEOUT=300` 最长可阻塞约 600s，而 `core.py:273` 给用户的超时提示只报基础值。
 
 建议：`deadline += min(timeout, grace_window)`，或在提示与 chainlog 中写出实际截止时间。
 
-### ⏳ C10 · LOW · `config.py:200-201` · `SUBAGENT_DEPTH` 守卫不可达且默认值与自身提示矛盾
+### ✅ C10 · LOW · `config.py:200-201` · `SUBAGENT_DEPTH` 守卫不可达且默认值与自身提示矛盾
 
 接线是完整的（`rag_wrapper.py:75` → `core.py:635` → `state.py:75` → `graphmod/tools.py:315` → `_tool_task(depth=…)`），但最深链路只有一跳，且 `explore` 的只读 allowlist（`sub_tools.py:155-160`）不含 `tool_task`，无法嵌套。`max_depth=4` 永不触发；错误文案硬编码 "(default 1)"，而 `config.py` 注释写的是「仅 1 层」，默认值却是 4。
 
@@ -216,7 +222,7 @@ return fail(str(e))                             # 同上
 
 ## D. API ↔ 前端接线
 
-### ⏳ D1 · MED · 11 个后端路由没有任何调用者
+### ✅ D1 · MED · 11 个后端路由没有任何调用者
 
 | 路由 | 位置 | 状态 |
 | --- | --- | --- |
@@ -232,7 +238,7 @@ return fail(str(e))                             # 同上
 
 建议：对每个路由明确二选一 —— 要么接上 UI（fork/compact/status/context 都很有用），要么删掉路由与前端包装函数。现在这种「路由齐全但没人调」的状态，无法区分「有意的手工接口」和「漏接的功能」。
 
-### ⏳ D2 · MED · 10 个前端导出函数没有任何调用者
+### ✅ D2 · MED · 10 个前端导出函数没有任何调用者
 
 - `api/sessions.ts`：`createSession`(:105)、`forkSession`(:168)、`getSessionContext`(:184)、`compactSession`(:190)、`getSessionChildren`(:235)、`getSessionStatus`(:239) —— 全部 0 调用
 - `api/voice.ts`：`ttsHealth`(:15) —— 0 调用（它包的路由被 `scripts/smoke_voice_api.py:35` 用着，所以是前端侧死代码）
@@ -337,7 +343,7 @@ B1 正是踩在两套契约的缝里炸的。
 | **C1** | 计划正文不再被丢弃：`endpoints.py` 非流式遇 `type="error"` 且 `payload["answer"]` 非空时走正常返回（并把 `status="error"` 记入会话）；流式改为发 `done` + `partial_error` 而非 `error`，同时落库；`MultiAgentChatResponse` 新增可选 `plan_path` | `test_chat_multi_agent_reply_error_with_plan_keeps_plan`、`test_stream_partial_error_emits_done_with_plan`（断言 `assistant_msg_id` 存在 → 正文真的落库）+ 前端 `partial_error` 事件用例 |
 | **A5** | `skills/loader.py` 新增 `_split_frontmatter()`：要求 `parts[0].strip() == ""`，YAML 解析失败或结果非映射时回退为「无 frontmatter」；`load_all` / `update_skill` / `save_skill` / `get_skill_body` 全部改走它 | 6 条 frontmatter 边界用例（`test_audit_batch1_regressions.py`） |
 
-### 批次 2：数据正确性与不可达分支 —— 4/5 已修复
+### 批次 2：数据正确性与不可达分支 —— 全部已修复
 
 | 项 | 改动 | 回归测试 |
 | --- | --- | --- |
@@ -372,7 +378,7 @@ B1 正是踩在两套契约的缝里炸的。
 
 ### 未改动的审计结论
 
-以下项经复核判定**无需动作**：B7（缺 HTTP 测试，属测试投入而非缺陷）、C6（`AgentSpec.mode` 声明式，与实际行为一致）、D6（信封覆盖率）、D8/D9（注释与文档不符）。A2/A3/A4/A7/B5/B6/C4/C5/C8/C9/C10/D1/D2 已在本轮修复，见上表。
+以下项经复核判定**无需动作**：C6（`AgentSpec.mode` 声明式，与实际行为一致）、D6（信封覆盖率）、D8/D9（注释与文档不符）。A2/A3/A4/A7/B5/B6/C4/C5/C8/C9/C10/D1/D2 已在本轮修复，见上表；B7 的 HTTP 测试亦已补齐（见 B7 条目下的实施记录）。
 
 ---
 

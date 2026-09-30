@@ -1217,3 +1217,86 @@ def test_custom_tool_store_slug_and_pins(tmp_path):
     assert store.remove("tool_ls")
     assert store.remove("nope") is False
     assert store.list() == []
+
+
+# ── [B7] /api/models/* HTTP 级测试（只挂 models router，不启动后端运行时）────
+
+
+@pytest.fixture()
+def models_client(monkeypatch):
+    """TestClient：只挂载 models router。
+
+    catalog 读取用 monkeypatch 桩，避免真实 DB/网络；ADMIN_TOKEN 默认置空，
+    `client=("127.0.0.1", …)` 让 require_admin 判定为「本机 = 管理员」。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import models as models_api
+    from app.models import catalog
+
+    monkeypatch.setattr(settings, "admin_token", "")
+    monkeypatch.setattr(catalog, "get_catalog", lambda: [{"id": "deepseek/x"}])
+    monkeypatch.setattr(catalog, "provider_models_source", lambda: [])
+    monkeypatch.setattr(catalog, "default_model", lambda: "deepseek/x")
+    monkeypatch.setattr(catalog, "small_model", lambda: "deepseek/x")
+    monkeypatch.setattr(catalog, "image_caption_model", lambda: None)
+    monkeypatch.setattr(catalog, "voice_model_size", lambda: "0.6B")
+    monkeypatch.setattr(catalog, "catalog_db_path", lambda: "data/model_catalog.db")
+
+    app = FastAPI()
+    app.include_router(models_api.router, prefix="/api")
+    with TestClient(app, client=("127.0.0.1", 54321)) as c:
+        yield c
+
+
+def test_models_list_is_public_and_enveloped(models_client):
+    """B7/B1：公开目录路由返回统一信封，且失败分支不会「code=0 被当成功」。"""
+    r = models_client.get("/api/models")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["code"] == 0 and body["data"]["default_model"] == "deepseek/x"
+
+    # 无 body 的 estimate-tokens → 校验失败：必须是非 0 错误码（B1 的回归防线）
+    r = models_client.post("/api/models/estimate-tokens", json={})
+    assert r.status_code == 200
+    assert r.json()["code"] != 0
+    assert r.json()["message"]
+
+
+def test_models_validation_error_returns_error_envelope(models_client):
+    """B7/B1：upsert_custom 的 ValueError 分支返回可识别的错误信封。"""
+    r = models_client.post("/api/models/custom", json={"id": "  "})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["code"] != 0, "校验失败被当成成功响应（B1 复发）"
+    assert "model id" in body["message"]
+    assert body["data"] is None
+
+
+def test_models_config_requires_admin_token(models_client, monkeypatch):
+    """B7/B2：ADMIN_TOKEN 已配置时，无/错凭证一律 401 —— 明文 api_key 不得外泄。"""
+    monkeypatch.setattr(settings, "admin_token", "tok-models")
+    for path in ("/api/models/config", "/api/models/export", "/api/models/catalog-full"):
+        r = models_client.get(path)
+        assert r.status_code == 401, path
+        assert "tok-models" not in r.text
+        r = models_client.get(path, headers={"Authorization": "Bearer wrong"})
+        assert r.status_code == 401, path
+    r = models_client.post("/api/models/reload")  # B4：写路由同样受保护
+    assert r.status_code == 401
+
+
+def test_models_admin_endpoint_blocks_remote_when_token_unset(models_client, monkeypatch):
+    """B7/B2：ADMIN_TOKEN 未配置时仅放行本机，局域网来源 403。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import models as models_api
+
+    monkeypatch.setattr(settings, "admin_token", "")
+    app = FastAPI()
+    app.include_router(models_api.router, prefix="/api")
+    with TestClient(app, client=("10.0.0.9", 54321)) as remote:
+        assert remote.get("/api/models/config").status_code == 403
+        assert remote.get("/api/models").status_code == 200  # 公开目录不受影响
