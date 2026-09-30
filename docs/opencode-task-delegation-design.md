@@ -61,7 +61,7 @@
 | 委派执行 | `tool_loop_chat`（`sub_tools.py:365`）只做**单一会话内的工具 loop**，
   **不 spawn 子会话**（无 parent_id/child session 创建） | 无真正的「子 Agent」运行时 |
 | 权限隔离 | explore 只读 allowlist 已存在（`agent_specs.py` `_READONLY_TOOL_NAMES` + schema 裁剪 + 运行时硬拒绝） | ✅ 已对齐，无需改 |
-| 并行 | `supermod/parallel.py` 有 `_execute_parallel`（build/explore/plan 三个 Agent 并行） | 已有基建，但非「模型自主多 task」 |
+| 并行 | ~~`supermod/parallel.py` 的 `_execute_parallel`~~ **[C4 已删除]**（恒不可达的死代码）；并行现在由主 Agent 的 `tool_task` 委派链承担 | 已诚实化：并行不再假装在 supervisor 层 |
 | 触发者 | **前端手动选** `agentMode`（`multiAgent.ts:92`）+ supervisor 关键词路由 decompose（`supermod/decompose.py`） | **模型不自主** —— 是关键词规则改谁进 explore，不是模型决定 |
 | 子会话基建 | `sessions.parent_id` 列 + `parent_id IS NULL` 根过滤已存在（`session/repository.py:174,224-240`） | ✅ 表结构已就位，缺「写」的运行时 |
 
@@ -144,7 +144,7 @@
 
 - `MAX_SUBAGENT_DEPTH` 默认 1（build → explore 一层），超链返回错误（防子 Agent 无限 spawn）。
 - 子 Agent 超时沿用 `_extended_timeout_agents`（build 延长），explore/plan 保持短超时。
-- 并行 spawn 复用 `_execute_parallel` 的并发控制 + `max_concurrent_agents`。
+- 并行 spawn 依赖 `max_concurrent_agents` + AgentBus 的并发派发（[C4] 原计划复用 `_execute_parallel`，该实现已删除）。
 
 ## 四、分阶段实施
 

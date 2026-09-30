@@ -39,8 +39,11 @@ function classifyStatus(status: number): boolean {
   return status === 429 || status >= 500
 }
 
+// [D2] `parseErrorResponse` / `toApiError` 不再导出：本模块内私有（只有 `apiRequest`
+// 用它们构造异常）。外部要捕获统一错误请 `catch (e) { if (e instanceof ApiError) ... }`。
+
 // 解析任意非 2xx 响应为 ApiError（兼容统一 {code,message,data,detail} 与旧 detail/纯文本）。
-export async function parseErrorResponse(res: Response): Promise<ApiError> {
+async function parseErrorResponse(res: Response): Promise<ApiError> {
   let body: any = null
   try {
     body = await res.json()
@@ -58,7 +61,7 @@ export async function parseErrorResponse(res: Response): Promise<ApiError> {
 }
 
 // 网络/超时等异常 → ApiError
-export function toApiError(err: unknown): ApiError {
+function toApiError(err: unknown): ApiError {
   if (err instanceof ApiError) return err
   const msg = err instanceof Error ? err.message : String(err)
   const lower = msg.toLowerCase()

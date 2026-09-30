@@ -136,7 +136,7 @@
 ### 现状问题
 - `bus.send_and_wait` 超时/无回复返回错误消息，但**取消不会穿透到子任务**：
   `event_generator` finally `task.cancel()` 只取消端点侧等待，子 Agent 仍在跑。
-- supervisor 的 `_execute_parallel` 也各自等待，abort 后留下僵尸子任务。
+- supervisor 并行扇出（`_execute_parallel`，[C4 已删除]）与 `_route_to` 也各自等待，abort 后留下僵尸子任务。
 
 ### 落地设计
 1. **thread → task 注册**：`bus.py` 的 `send_and_wait` 在 `_pending[thread_id]` 存入

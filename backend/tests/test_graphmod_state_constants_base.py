@@ -16,6 +16,7 @@ attachment_loader` 在 graphmod 子包下不存在 → 含非图片附件的请�
 """
 import asyncio
 import os
+import re
 import sys
 from types import SimpleNamespace
 
@@ -366,6 +367,53 @@ def test_build_tool_defs_core_and_intent():
     assert "tool_write_file" in names
     assert "plugin_pdf-generator_tool_create_pdf" in names  # 意图命中
     assert all(d["type"] == "function" for d in defs)
+
+
+class _EmptySkills:
+    """build_system_prompt_no_kb 的最小 skill_loader / plugin_loader 替身。"""
+
+    def get_enabled_skills(self):
+        return []
+
+    def get_enabled_plugins(self):
+        return []
+
+
+def test_build_tool_defs_mounts_advertised_http_client():
+    """[A7] 系统提示词广告的 plugin_http-client_* 必须真的会被挂载。
+
+    原先 _INTENT_RULES 无对应规则 → 模型看得见描述、schema 却没随请求下发。
+    """
+    agent = build_agent()
+    from app.agent.tools import ToolDef
+    agent.tools.append(ToolDef(
+        name="plugin_http-client_tool_http_get",
+        description="HTTP GET", parameters={}, fn=lambda: "",
+    ))
+
+    names = {d.get("function", {}).get("name")
+             for d in agent._build_tool_defs("帮我调一下这个 api 接口", model="deepseek/deepseek-v4-flash")}
+    assert "plugin_http-client_tool_http_get" in names
+
+    # 提示词里广告的工具名，必须存在于至少一条意图规则的前缀里
+    prefixes = {p for _, ps in agent._INTENT_RULES for p in ps}
+    assert "plugin_http-client_" in prefixes
+
+
+def test_intent_rules_cover_every_prompt_advertised_plugin():
+    """[A7] tools.py 提示词里出现的 plugin_* 工具前缀，必须有对应挂载规则。"""
+    from app.agent.tools import build_system_prompt_no_kb
+    agent = build_agent()
+    prompt = build_system_prompt_no_kb(_EmptySkills(), _EmptySkills())
+    # 提示词里的写法是 plugin_<name>_<func>，规则里是前缀 plugin_<name>_
+    advertised = {m.rstrip("_") for m in re.findall(r"plugin_([A-Za-z0-9_-]+?)_", prompt)}
+    prefixes = {p[len("plugin_"):].rstrip("_") for _, ps in agent._INTENT_RULES for p in ps if p.startswith("plugin_")}
+
+    # plugin_ 本身是 catch-all（覆盖未知插件），不参与比对
+    advertised -= {"plugin"}
+    prefixes -= {""}
+    missing = advertised - prefixes
+    assert not missing, f"提示词广告但无挂载规则的插件前缀: {sorted(missing)}"
 
 
 def test_build_tool_defs_pinned_and_used():

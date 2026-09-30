@@ -8,6 +8,7 @@ send_and_wait（直投成功/超时/分级宽限延长）、run_agent 事件循�
 import asyncio
 import os
 import sys
+import time as tmod
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__))))
@@ -168,6 +169,33 @@ async def test_send_and_wait_custom_grace_params():
     bus.register(FakeAgent("idle"))
     with pytest.raises(asyncio.TimeoutError):
         await bus.send_and_wait(_req(target="idle"), timeout=0.1, grace_extensions=0, grace_window=5)
+
+
+@pytest.mark.asyncio
+async def test_grace_extension_does_not_double_the_timeout(caplog):
+    """[C9] 宽限期只追加一个有限窗口，不能把总等待静默翻倍。
+
+    旧实现 `deadline = loop.time() + timeout` → SUPERVISOR_TIMEOUT=300 最长阻塞 600s，
+    而上层提示只报 300s。这里用「宽限窗口远小于基础超时」的场景量出真实上界。
+    """
+    bus = AgentBus()
+    bus.register(FakeAgent("idle"))
+    bus.touch("idle")  # 保持活动，让宽限生效一次
+    timeout = 0.30
+    grace_window = 0.05  # min(timeout, grace_window) = 0.05
+    t0 = tmod.monotonic()
+    with caplog.at_level("WARNING"):
+        with pytest.raises(asyncio.TimeoutError) as ei:
+            await bus.send_and_wait(
+                _req(target="idle"), timeout=timeout,
+                grace_extensions=1, grace_window=grace_window,
+            )
+    elapsed = tmod.monotonic() - t0
+
+    # 真实上界 = timeout + min(timeout, grace_window) = 0.35s
+    # 旧实现会是 0.60s（timeout + timeout）
+    assert elapsed < timeout + 2 * grace_window, f"宽限把等待拉长到 {elapsed:.3f}s（应 ≤ {timeout + grace_window:.2f}s）"
+    assert f"max_with_grace={timeout + grace_window:.0f}s" in str(ei.value)
 
 
 @pytest.mark.asyncio

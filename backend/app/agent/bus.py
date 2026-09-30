@@ -135,7 +135,8 @@ class AgentBus:
             msg: 要发送的请求消息（type="request"）
             timeout: 基础超时秒数
             grace_extensions: 子 Agent 仍在活动时最多额外延长的次数（默认 1）
-            grace_window: 判定"仍在活动"的时间窗口（秒）；默认 max(10, timeout/2)
+            grace_window: 判定"仍在活动"的时间窗口（秒）；默认 max(10, timeout/2)。
+                每次延长实际追加 `min(timeout, grace_window)` 秒（[C9] 不再重置为完整超时）。
 
         Returns:
             回复消息（type="response"）
@@ -165,7 +166,12 @@ class AgentBus:
         await self.send(msg)
         try:
             deadline = loop.time() + timeout
+            base_timeout = timeout
             extensions = max(0, int(grace_extensions))
+            # [C9] 每次宽限只追加一个**有限**窗口，而不是重置为完整的基础超时。
+            # 旧实现 `deadline = loop.time() + timeout` 让总等待静默翻倍：
+            # SUPERVISOR_TIMEOUT=300 最长阻塞 600s，而上层超时提示/chainlog 只报 300s。
+            grace_grant = min(timeout, grace_window)
             while True:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
@@ -174,28 +180,33 @@ class AgentBus:
                     last_active = self._agent_activity.get(msg.target, 0.0)
                     if extensions > 0 and last_active >= loop.time() - grace_window:
                         extensions -= 1
-                        deadline = loop.time() + timeout
+                        deadline = loop.time() + grace_grant
                         logger.warning(
                             "Sub-agent '%s' still active, extending wait by %.0fs (thread=%s)",
-                            msg.target, timeout, msg.thread_id,
+                            msg.target, grace_grant, msg.thread_id,
                         )
                         remaining = deadline - loop.time()
                     else:
+                        # 真实最坏等待 = 基础超时 + 每次宽限实际追加的窗口
+                        max_total = base_timeout + max(0, int(grace_extensions)) * grace_grant
                         chainlog.error(
                             "agent", f"bus.{msg.target}", "agent.wait_timeout",
                             agent_id=msg.target,
-                            message=f"等待 {msg.target} 回复超时（{timeout:.0f}s）",
+                            message=f"等待 {msg.target} 回复超时（{base_timeout:.0f}s）",
                             data={
-                                "target": msg.target, "timeout": timeout,
+                                "target": msg.target, "timeout": base_timeout,
                                 "thread_id": msg.thread_id, "action": msg.action,
-                                "grace_extensions": extensions,
+                                "grace_extensions": max(0, int(grace_extensions)),
+                                "grace_grant": round(grace_grant, 1),
+                                "max_total_wait": round(max_total, 1),
                                 "completed_steps": self.agent_progress(msg.target),
                             },
                             duration_ms=round((tmod.time() - wait_started) * 1000, 1),
                         )
                         raise asyncio.TimeoutError(
-                            f"No reply from '{msg.target}' within {timeout}s "
-                            f"(thread={msg.thread_id}, action={msg.action})"
+                            f"No reply from '{msg.target}' within {base_timeout}s "
+                            f"(thread={msg.thread_id}, action={msg.action}, "
+                            f"max_with_grace={max_total:.0f}s)"
                         )
                 done, _ = await asyncio.wait({fut}, timeout=remaining)
                 if fut in done:

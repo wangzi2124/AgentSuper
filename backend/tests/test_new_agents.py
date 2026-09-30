@@ -5,7 +5,7 @@
   - ExploreAgent：chat 动作、非 request 消息忽略、异常兜底、记忆读写
   - PlanAgent：chat 动作、非 request 消息忽略、异常兜底、记忆读写、LLM 调用
   - stream_events：explore/plan 的 label/avatar
-  - supermod/constants：DECOMPOSE_SYSTEM_PROMPT 包含新 agent
+  - supermod/constants：[C4] 分解提示词已随并行分解删除
   - runtime：注册 explore/plan agent
 
 运行：pytest tests/test_new_agents.py
@@ -368,14 +368,15 @@ def test_new_agents_in_labels_and_avatars():
     assert "plan" in AGENT_AVATARS
 
 
-# ── supermod/constants：DECOMPOSE_SYSTEM_PROMPT 包含新 agent ───────────
+# ── supermod/constants：[C4] 分解提示词已随并行分解删除 ───────────────
 
-def test_decompose_prompt_includes_new_agents():
-    from app.agent.supermod.constants import DECOMPOSE_SYSTEM_PROMPT
-    # 顶层只有 build/plan 两个命令；explore 是委派目标，不在路由提示词里
-    assert "explore" not in DECOMPOSE_SYSTEM_PROMPT
-    assert "plan" in DECOMPOSE_SYSTEM_PROMPT
-    assert "规划" in DECOMPOSE_SYSTEM_PROMPT
+def test_decompose_prompt_removed_with_parallel_path():
+    """[C4] DECOMPOSE_SYSTEM_PROMPT 只服务于已删除的 `_llm_decompose`。"""
+    from app.agent.supermod import constants
+
+    assert not hasattr(constants, "DECOMPOSE_SYSTEM_PROMPT")
+    assert not hasattr(constants, "SYNTHESIS_SYSTEM_PROMPT")
+    assert not hasattr(constants, "SUB_RESULT_TRUNC")
 
 
 def test_routable_agents_includes_new():

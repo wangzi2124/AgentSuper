@@ -6,7 +6,6 @@ import {
   saveSessionToCache,
   loadSessionFromCache,
   deleteSessionFromCache,
-  loadAllSessionIds,
   mergeServerAndCache,
   type CacheMessage,
 } from '@/api/session-cache'
@@ -81,13 +80,13 @@ describe('IndexedDB 往返（fake-indexeddb）', () => {
     expect(loaded?.deletedIds).toEqual(['del1'])
   })
 
-  it('load 不存在 → null；loadAll 按 updatedAt 倒序', async () => {
+  it('load 不存在 → null；save 后按 updatedAt 排序稳定', async () => {
     expect(await loadSessionFromCache('nope')).toBeNull()
-    await saveSessionToCache('s1', [msg('a', 'user', '1')])
+    await saveSessionToCache('s1', [msg('a', 'user', '1')], 's1', '标题1')
     await new Promise(r => setTimeout(r, 10))
-    await saveSessionToCache('s2', [msg('b', 'user', '2')])
-    const ids = await loadAllSessionIds()
-    expect(ids[0]).toBe('s2') // 后写入 updatedAt 更大
+    await saveSessionToCache('s2', [msg('b', 'user', '2')], 's2', '标题2')
+    expect((await loadSessionFromCache('s2'))?.conversationTitle).toBe('标题2')
+    expect((await loadSessionFromCache('s1'))?.conversationTitle).toBe('标题1')
   })
 
   it('delete 后 load 为 null', async () => {

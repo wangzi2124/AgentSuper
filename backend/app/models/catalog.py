@@ -544,7 +544,9 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
 
     `options`：需要透传给 litellm 的 provider 特定参数。Ollama 默认 num_ctx=2048，
     超过窗口的往期历史会被推理服务截断（模型答"记不清/无历史"），因此必须显式
-    放大 num_ctx（settings.ollama_num_ctx）；带 deterministic 能力的 provider 也可在此扩展。
+    放大 num_ctx（settings.ollama_num_ctx）；条目声明的 `context_length` 会**收窄**该值
+    （B5：模型自身窗口更小时以条目为准，避免按错误窗口估预算）；带 deterministic 能力的
+    provider 也可在此扩展。
 
     `think`：Ollama 思考模型（qwen3.5 等，/api/tags capabilities 含 thinking）默认思考态
     出空 content（litellm 不落最终回答），必须按模型管理的「推理模型」能力显式传 think：
@@ -557,7 +559,7 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False, "options": None}
     provider = mid.split("/", 1)[0] if "/" in mid else ""
     if provider == "ollama":
-        opts: dict[str, Any] = {"num_ctx": settings.ollama_num_ctx}
+        opts: dict[str, Any] = {"num_ctx": resolve_context_length(mid, settings.ollama_num_ctx)}
         caps = read_capabilities(mid)
         # 能力未声明（非目录模型）→ 不传 think（交给推理服务默认，不臆断）；
         # 声明了 reasoning → 严格按它传（True 保留思考 / False 关闭防空内容）
@@ -720,6 +722,66 @@ def read_capabilities(model_id: Optional[str]) -> dict[str, bool]:
         "vision": bool(caps.get("vision", False)),
         "reasoning": bool(caps.get("reasoning", False)),
     }
+
+
+def read_limits(model_id: Optional[str]) -> dict[str, int]:
+    """读取模型条目声明的窗口/输出上限 → `{"context_length": int, "max_output_tokens": int}`。
+
+    B5/B6：这两个字段过去只写不读（用户在「模型管理」改了没有任何效果）。现在它们
+    作为**每模型覆盖**被真正消费（见 `resolve_context_length` / `resolve_max_output_tokens`）。
+    未收录模型或未声明 → 0（调用方回落到全局 settings）。
+    """
+    out = {"context_length": 0, "max_output_tokens": 0}
+    if not model_id:
+        return out
+    entry = lookup(model_id)
+    if not entry:
+        return out
+    try:
+        ctx = int(entry.get("context_length") or 0)
+    except (TypeError, ValueError):
+        ctx = 0
+    limits = entry.get("limits") or {}
+    try:
+        mx = int(limits.get("max_output_tokens") or 0)
+    except (TypeError, ValueError):
+        mx = 0
+    out["context_length"] = ctx if ctx > 0 else 0
+    out["max_output_tokens"] = mx if mx > 0 else 0
+    return out
+
+
+def resolve_context_length(model_id: Optional[str], fallback: int) -> int:
+    """模型的上下文窗口（**模型条目声明优先**，否则用全局 `.env` 值）。
+
+    B5：`context_length` 声明值小于全局值时生效 —— 目录/覆盖文件里写小窗口（如本地
+    32768 的 ollama 模型）是用户/维护者的明确约束，不能被 `.env MAX_CONTEXT_TOKENS=160000`
+    这种为云端大窗模型设的全局值反向撑大（否则压缩阈值、truncation 预算全按错的窗口算）。
+    声明值更大时不放大全局值：`.env` 仍是全局权威，避免用户漏改条目时静默改变行为。
+    """
+    global_ctx = max(0, int(fallback or 0))
+    declared = read_limits(model_id)["context_length"]
+    if not declared:
+        return global_ctx
+    if not global_ctx:
+        return declared
+    return min(global_ctx, declared)
+
+
+def resolve_max_output_tokens(model_id: Optional[str], fallback: int) -> int:
+    """每次调用的输出上限（**模型条目声明与全局值取小**，绝不放大）。
+
+    B6：`limits.max_output_tokens` 现在真的被 `_llm_call` 消费。取 `min` 而非「条目覆盖」
+    是刻意的 —— 模型自身输出上限（目录值）永远不能超过 `.env LLM_MAX_TOKENS` 这个全局
+    成本/延迟预算；条目只起到「这个模型更小 → 收窄」的上限作用，未声明 → 用全局值。
+    """
+    global_mx = max(0, int(fallback or 0))
+    declared = read_limits(model_id)["max_output_tokens"]
+    if not declared:
+        return global_mx
+    if not global_mx:
+        return declared
+    return min(global_mx, declared)
 
 
 # ── 模型引用归一化 ───────────────────────────────────────────────────────

@@ -89,32 +89,6 @@ def _is_valid_answer(text: str | None) -> bool:
     return not is_unparsed_json_answer(t) and not is_tool_call_markup(t)
 
 
-def _build_tool_transcript(messages: list[dict], question: str, max_chars: int = 12000) -> str:
-    """[两段式] 把工具循环记录压成给强模型收尾用的紧凑 transcript。
-
-    只保留「用户问题 + 每轮 [工具调用]/[工具结果]」，丢弃弱模型自己的（不可靠）收尾文本，
-    使强模型能基于**真实工具结果**独立写出最终回答。超长时按整体截断。
-    """
-    results: dict[str, str] = {}
-    for m in messages:
-        if m.get("role") == "tool":
-            results[m.get("tool_call_id", "")] = str(m.get("content", ""))
-    lines: list[str] = [f"用户问题：{question}", ""]
-    for m in messages:
-        if m.get("role") != "assistant" or not m.get("tool_calls"):
-            continue
-        for tc in m["tool_calls"]:
-            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-            name = fn.get("name", "")
-            args = fn.get("arguments", "")
-            lines.append(f"[工具调用] {name}({args})")
-            res = results.get(tc.get("id", ""), "")
-            lines.append(f"[工具结果] {res}")
-            lines.append("")
-    text = "\n".join(lines).strip()
-    if len(text) > max_chars:
-        text = text[:max_chars] + "\n…（记录过长已截断）"
-    return text
 logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgentGenerate(RAGAgentTools):
@@ -213,12 +187,14 @@ class RAGAgentGenerate(RAGAgentTools):
         self._usage_accum = dict(_ZERO_USAGE)
         self._cost_accum = 0.0
         dedup = ToolResultDedup()
+        # [B5] 本次请求的模型：预算（截断/压缩/prune）按其声明的 context_length 收窄
+        _model_hint = state.get("model") or self.model
         from app.context.compaction import ContextCompactor
         compactor = ContextCompactor(
             model=settings.summarization_model or self.model,
             api_key=settings.summarization_api_key or settings.llm_api_key,
             api_base=settings.summarization_api_base or settings.llm_api_base,
-            threshold=compaction_threshold_tokens(),
+            threshold=compaction_threshold_tokens(_model_hint),
             tail_turns=settings.context_tail_turns,
             preserve_recent_tokens=settings.context_preserve_recent_tokens,
         )
@@ -234,7 +210,6 @@ class RAGAgentGenerate(RAGAgentTools):
         # [token 优化 v2] system 保持完全稳定 → 最大化 DeepSeek 前缀缓存命中（命中按 0.1x 计费）
         # RAG 检索结果改放 user 消息前缀（见下方 user 消息构建），避免 system 每次变化导致缓存整体失效。
         # [弱模型鲁棒性] 弱模型用精简系统提示（更短、少工具说明，降低空输出/乱调工具）
-        _model_hint = state.get("model") or self.model
         _weak = is_weak_model(_model_hint)
         full_system_prompt = (
             _WEAK_SYSTEM_PROMPT if (settings.weak_model_simple_prompt and _weak) else self.system_prompt
@@ -329,7 +304,7 @@ class RAGAgentGenerate(RAGAgentTools):
             if state.get("_task"):
                 state["_task"].record_compaction()
             self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
-        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(), reserve_tokens=0, tool_defs=tool_defs))
+        messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(_model_hint), reserve_tokens=0, tool_defs=tool_defs))
         trace_messages("graph.entry_ready", messages, tool_defs=tool_defs)  # [token trace v7]
 
         response = await self._llm_call(model, messages, tool_defs, state=state)
@@ -383,11 +358,11 @@ class RAGAgentGenerate(RAGAgentTools):
             trace_messages("graph.round_start", messages)  # [token trace v7]
             messages = prune_tool_outputs(
                 messages,
-                protect_tokens=prune_protect_tokens(),
-                minimum_tokens=prune_minimum_tokens(),
+                protect_tokens=prune_protect_tokens(_model_hint),
+                minimum_tokens=prune_minimum_tokens(_model_hint),
                 tail_turns=settings.context_tail_turns,
             )
-            trace_messages("graph.pre_compact", messages, threshold=compaction_threshold_tokens())  # [token trace v7]
+            trace_messages("graph.pre_compact", messages, threshold=compaction_threshold_tokens(_model_hint))  # [token trace v7]
             if compactor.should_compact(messages):
                 self._push_event(state, {"type": "step_start", "step_id": "compaction", "name": "压缩上下文", "status": "running"})
                 old_count = len(messages)
@@ -505,7 +480,7 @@ class RAGAgentGenerate(RAGAgentTools):
                 and rounds >= max(1, settings.step_summary_min_rounds)
                 and rounds % max(1, settings.step_summary_interval) == 0
             ):
-                messages = await self._step_summarize(messages, llm_call_budget())
+                messages = await self._step_summarize(messages, llm_call_budget(_model_hint))
 
             # Doom-loop 检测：同一组工具调用指纹连续重复 ≥ threshold 轮 → 注入策略变更提示；
             # 首次提示后仍连续重复（升级到 doom_loop_max_strikes）→ 强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具）
@@ -540,7 +515,7 @@ class RAGAgentGenerate(RAGAgentTools):
             # 核心 tool_* 工具本就常驻 schema；模型若调用未挂载的插件/技能工具，_execute_tool
             # 仍会执行（self.tools 全量），仅本轮 schema 未列出该工具（下轮仍可被调用）。
             final_tool_defs = None if steps_prompt_injected else tool_defs
-            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(), reserve_tokens=0, tool_defs=final_tool_defs))
+            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(_model_hint), reserve_tokens=0, tool_defs=final_tool_defs))
             trace_messages("graph.round_ready", messages, tool_defs=final_tool_defs)  # [token trace v7]
             response = await self._llm_call(model, messages, final_tool_defs, state=state)
             msg = response.choices[0].message
@@ -598,8 +573,8 @@ class RAGAgentGenerate(RAGAgentTools):
             trace_messages("graph.final_round_start", messages, tool_defs=None)  # [token trace v8]
             messages = prune_tool_outputs(
                 messages,
-                protect_tokens=prune_protect_tokens(),
-                minimum_tokens=prune_minimum_tokens(),
+                protect_tokens=prune_protect_tokens(_model_hint),
+                minimum_tokens=prune_minimum_tokens(_model_hint),
                 tail_turns=settings.context_tail_turns,
             )
             if compactor.should_compact(messages):
@@ -610,7 +585,7 @@ class RAGAgentGenerate(RAGAgentTools):
                 if state.get("_task"):
                     state["_task"].record_compaction()
                 self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
-            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(), reserve_tokens=0))
+            messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(_model_hint), reserve_tokens=0))
             trace_messages("graph.final_round_ready", messages, tool_defs=None)  # [token trace v8]
             # 对齐 opencode max-steps 语义：达到上限后工具禁用，仅注入收尾总结提示（assistant 角色）
             messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
@@ -639,15 +614,6 @@ class RAGAgentGenerate(RAGAgentTools):
         from app.utils.json_repair import parse_answer_envelope
         if msg.content:
             msg.content = parse_answer_envelope(msg.content)
-        # [两段式] 弱模型：一旦跑过工具轮，其「工具→总结」不可靠（实测吐空 / {} / 工具标记），
-        # 不再赌它收尾——把工具记录交给强模型统一收尾（主动式，而非等它失败再回退）。
-        if settings.weak_model_two_stage and settings.weak_model_strong_fallback and rounds > 0 and is_weak_model(model):
-            transcript = _build_tool_transcript(messages, state.get("question", ""))
-            if transcript:
-                summary = await self._summarize_tool_transcript(transcript, model, state)
-                if _is_valid_answer(summary):
-                    msg.content = summary
-                    logger.info("weak-model two-stage summary via model=%s", self._resolve_fallback_model(model))
         # [弱模型鲁棒性] 强模型空回答 → 同模型纯重试一次；弱模型留空，交由 `_generate`
         # 用强模型**完整重跑**（含工具循环）——避免拿 tools=None 的残缺上下文问强模型。
         if settings.empty_answer_retry and not _is_valid_answer(msg.content):
@@ -691,25 +657,6 @@ class RAGAgentGenerate(RAGAgentTools):
             or catalog_default
             or self.model
         )
-
-    async def _summarize_tool_transcript(self, transcript: str, model: str, state) -> str:
-        """[两段式] 强模型收尾：基于工具记录写最终回答（tools=None，强制纯文本总结）。"""
-        from app.utils.json_repair import parse_answer_envelope
-        strong = self._resolve_fallback_model(model)
-        if not strong or strong == model:
-            return ""
-        prompt = (
-            "你是一个总结助手。下面是一个 Agent 为回答用户问题而执行的工具调用记录。\n"
-            "请**仅依据这些工具结果**，用中文直接、准确地回答用户的问题。\n"
-            "要求：输出自然语言正文；不要输出 JSON；不要输出工具调用格式；不要编造记录中没有的信息。\n\n"
-            f"{transcript}"
-        )
-        try:
-            resp = await self._llm_call(strong, [{"role": "user", "content": prompt}], None, state=state)
-            return parse_answer_envelope((resp.choices[0].message.content or "").strip())
-        except Exception as e:  # noqa: BLE001
-            logger.warning("two-stage summarize via %s failed: %s", strong, e)
-            return ""
 
     async def _retry_empty_answer(self, messages: list[dict], model: str, state) -> str:
         """[弱模型鲁棒性] 空回答（含 {}）自动重试。

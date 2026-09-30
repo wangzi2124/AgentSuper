@@ -9,10 +9,11 @@
 
 const RAW_BASE = (import.meta.env.VITE_API_BASE as string) || ''
 export const API_BASE = RAW_BASE.replace(/\/+$/, '')
-export const ADMIN_TOKEN = (import.meta.env.VITE_ADMIN_TOKEN as string) || ''
+// [D2] ADMIN_TOKEN / apiUrl 不再导出：仅 `installApiFetch` 使用（main.ts 只调安装函数）。
+const ADMIN_TOKEN = (import.meta.env.VITE_ADMIN_TOKEN as string) || ''
 
 /** 给相对路径加上 API_BASE 前缀（绝对 URL 原样返回）。 */
-export function apiUrl(path: string): string {
+function apiUrl(path: string): string {
   if (!API_BASE || !path.startsWith('/')) return path
   return API_BASE + path
 }

@@ -122,7 +122,7 @@
 
 | 配置项 | 值 | 语义 | 行号 |
 |---|---|---|---|
-| `sub_task_fresh_history` | True | v15：并行分解子任务用 fresh context（防 N 个子 Agent 各自 prefill ≤16K 历史） | :203 |
+| ~~`sub_task_fresh_history`~~ | — | **[C4 已删除]** 唯一读取点在恒不可达的并行分解 `_execute_parallel`；并行改由 `tool_task` 委派链承担 | — |
 | `memory_persist_path` / `memory_ttl_seconds` | data/agent_memory.json / 300 | 共享记忆落盘 + 5 分钟 TTL | :207/:209 |
 | `max_concurrent_agents` | 4 | 全局 Agent 任务信号量（SQLite/ChromaDB 锁竞争权衡） | :155 |
 | `llm_max_tokens` | 8_192 | 对齐 `transform.ts:maxOutputTokens`「默认给足」（v9 16K→8K 压低兜底成本） | :63 |
@@ -132,7 +132,7 @@
 | # | 维度 | opencode | AgentSuper 选择 | 性质 |
 |---|---|---|---|---|
 | K1 | Agent 阵容 | 7 内置：build/plan/general/explore/compaction/title/summary | 注册 4 个：build/explore/plan/supervisor。rag/web_search/code 能力已并入 build；general 的能力由主 Agent 的 `task_bus` + `tool_task` 委派承担；compaction/title 为内置机制而非独立 agent | 收敛简化（D1） |
-| K2 | 模式切换 | `question`/`plan_enter`/`plan_exit` 显式模式流 | 不做。以 supervisor 自动路由（关键词快速路径 + `_llm_decompose`）+ 请求级 `agent_mode: plan\|explore` 直连替代 | 明确不做 |
+| K2 | 模式切换 | `question`/`plan_enter`/`plan_exit` 显式模式流 | 不做。以 supervisor 自动路由（关键词快速路径）+ 请求级 `agent_mode: plan\|explore` 直连替代（[C4] `_llm_decompose` 扇出已随并行分解删除） | 明确不做 |
 | K3 | plan→build 交接 | `build-switch`：plan_exit 后**征询用户**再执行 | 无审批自动版：`_PLAN_HANDOFF_KEYWORDS` + `_should_handoff_to_build` 命中执行意图 → 自动产出计划并合成执行消息，合并单条回复（`## 实施计划` + `## 执行结果`），失败仍保留计划并透传错误 | 自动化增强（D4） |
 | K4 | plan 是否先派 explore | plan 先 explore 收集上下文 | 不做。plan 纯 LLM（温度 0.3 / ≤8 条历史），上下文由 supervisor 分解或问题自带 | 明确不做 |
 | K5 | task 生命周期 | 持久 session | 进程内 `TaskRegistry`（重启即失）；resume 依赖当前进程 registry | 刻意差异（C②） |

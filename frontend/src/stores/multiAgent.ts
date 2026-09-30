@@ -20,7 +20,11 @@ import {
   deleteSessionFromCache,
   mergeServerAndCache,
 } from '../api/session-cache'
-import { interruptSession, revertSession, deleteSessionMessage, updateSession as apiUpdateSession } from '../api/sessions'
+import {
+  interruptSession, revertSession, deleteSessionMessage, updateSession as apiUpdateSession,
+  forkSession as apiForkSession, compactSession as apiCompactSession, getSessionStatus as apiGetSessionStatus,
+  type SessionStatus,
+} from '../api/sessions'
 import { loadModelCache, saveModelCache } from '../api/model-cache'
 import { classifyNetworkError } from '../api/errors'
 import { usePermissionStore } from './permission'
@@ -311,6 +315,9 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         cost: (m as any).cost,
         files_changed: (m as any).files_changed || [],
         snapshotRestored: !!((m as any).snapshot_restored),
+        // [C8] 计划文件路径（plan Agent 落盘产物）——历史回放也要能看到「查看计划」入口
+        plan_path: (m as any).plan_path || undefined,
+        partial_error: (m as any).partial_error ?? null,
         timestamp: new Date(),
       }))
       // 从 IndexedDB 加载本地缓存（SSE 中断时可能有未同步消息）
@@ -341,6 +348,47 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       const idx = conversations.value.findIndex(c => c.id === id)
       if (idx >= 0) conversations.value[idx].title = title
     } catch (e) { console.error('Failed to rename:', e) }
+  }
+
+  // --- 会话运维操作（D1/D2：接入此前无人调用的 fork / compact / status 路由）---
+
+  /** 分叉会话：可选 `messageId` 作为分叉点（截断到该条），返回新会话 id。 */
+  async function forkConversation(id: string, messageId?: string): Promise<string | null> {
+    try {
+      const forked = await apiForkSession(id, messageId)
+      await loadConversations()
+      return forked.id
+    } catch (e) {
+      console.error('Failed to fork conversation:', e)
+      notice.value = '分叉会话失败'
+      return null
+    }
+  }
+
+  /** 手动压缩上下文（落 compaction checkpoint + tail 快照），完成后重载消息。 */
+  async function compactConversation(id: string): Promise<boolean> {
+    const serverId = sessions.value[id]?.conversationId || id
+    try {
+      await apiCompactSession(serverId)
+      await loadConversations()
+      notice.value = '已压缩上下文'
+      return true
+    } catch (e) {
+      console.error('Failed to compact conversation:', e)
+      notice.value = '压缩失败'
+      return false
+    }
+  }
+
+  /** 查询后端会话状态（idle/running/…）——列表徽标与服务端对齐的依据。 */
+  async function fetchSessionStatus(id: string): Promise<SessionStatus | null> {
+    const serverId = sessions.value[id]?.conversationId || id
+    try {
+      return await apiGetSessionStatus(serverId)
+    } catch (e) {
+      console.error('Failed to fetch session status:', e)
+      return null
+    }
   }
 
   function newChat(dir?: string) {
@@ -701,8 +749,11 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           // 追加一行出错提示并标记 isError。走 error 事件会把正文覆盖成错误文案。
           if (event.partial_error) {
             assistantMsg.isError = true
+            assistantMsg.partial_error = event.partial_error
             assistantMsg.content = `${assistantMsg.content}\n\n> ⚠ 执行出错：${event.partial_error}`
           }
+          // [C8] plan Agent 落盘的计划文件（前端展示「查看计划」入口，可复制路径）
+          if (event.plan_path) assistantMsg.plan_path = event.plan_path
           // 回填服务器生成的消息 id，保证删除/撤销能命中真实消息
           if (event.assistant_msg_id) assistantMsg.id = event.assistant_msg_id
           if (event.user_msg_id) {
@@ -868,6 +919,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     retryCountdown, notice, setNotice,
     send, cancel, clear, undoMessage, restoreSnapshot, deleteMessage, deleteConversation,
     loadConversations, loadConversation, newChat, renameConversation,
+    forkConversation, compactConversation, fetchSessionStatus,
     retryLastMessage, manualRetry, cancelAutoRetry,
   }
 })

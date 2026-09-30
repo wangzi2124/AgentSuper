@@ -109,42 +109,39 @@ class SupervisorAgentCore(SupervisorAgentBase):
                 if not subtasks:
                     subtasks = [{"agent": "build", "question": question}]
 
+                # [C4] supervisor 不做 fan-out：`_decompose` 恒返回单个子任务
+                # （顶层命令只有 build/plan，探索由 build 的 tool_task 委派 explore，
+                #   对齐 opencode —— 并行由子 Agent 的委派链承担，不在 supervisor 层）。
+                # 原 `len(subtasks) > 1 → _execute_parallel` 分支连同整套并行实现
+                # （_execute_parallel / _synthesize / _llm_decompose / _validate_subtasks /
+                #   sub_task_fresh_history）已删除 —— 它恒不可达，只是让代码看起来支持并行。
+                target_agent = subtasks[0]["agent"]
+
                 chainlog.info(
                     "routing", "supervisor", "routing.decision",
-                    message=f"路由决策：{' + '.join(st.get('agent', '') for st in subtasks)}",
+                    message=f"路由决策：{target_agent}",
                     data={
                         "subtasks": [
                             {"agent": st.get("agent"), "question": st.get("question")}
                             for st in subtasks
                         ],
                         "routable": sorted(self.ROUTABLE_AGENTS),
-                        "parallel": len(subtasks) > 1,
+                        "parallel": False,
                     },
                 )
 
-                if len(subtasks) > 1:
-                    logger.info(
-                        "Supervisor decomposed into %d subtasks (thread=%s)",
-                        len(subtasks), msg.thread_id,
-                    )
-                    # 并行执行分解后的子任务
-                    result = await self._execute_parallel(subtasks, payload, msg.thread_id)
-                    yield result
+                logger.info(
+                    "Supervisor routing to '%s' (thread=%s)",
+                    target_agent, msg.thread_id,
+                )
+                if target_agent == "plan" and self._should_handoff_to_build(question):
+                    # [opencode 对齐] plan→build 顺序交接：plan 产出计划文件后
+                    # supervisor 直接把计划交给 build 执行（对应 build-switch 语义）
+                    async for reply in self._route_plan_then_build(payload, msg.thread_id):
+                        yield reply
                 else:
-                    # 只有一个子任务 → 走简单路由
-                    target_agent = subtasks[0]["agent"] if subtasks else "build"
-                    logger.info(
-                        "Supervisor routing to '%s' (thread=%s)",
-                        target_agent, msg.thread_id,
-                    )
-                    if target_agent == "plan" and self._should_handoff_to_build(question):
-                        # [opencode 对齐] plan→build 顺序交接：plan 产出计划文件后
-                        # supervisor 直接把计划交给 build 执行（对应 build-switch 语义）
-                        async for reply in self._route_plan_then_build(payload, msg.thread_id):
-                            yield reply
-                    else:
-                        async for reply in self._route_to(target_agent, payload, msg.thread_id):
-                            yield reply
+                    async for reply in self._route_to(target_agent, payload, msg.thread_id):
+                        yield reply
             finally:
                 if beat is not None:
                     beat.cancel()
@@ -266,7 +263,10 @@ class SupervisorAgentCore(SupervisorAgentBase):
                 )
 
         except asyncio.TimeoutError:
-            logger.warning("Sub-agent '%s' timed out after %.0fs (thread=%s)", target_agent, timeout, original_thread_id)
+            # [C9] 报实际等待上限（含一次宽限追加），不再只报基础值让用户以为只等了 timeout。
+            grace_grant = min(timeout, max(10.0, timeout / 2))
+            max_total = timeout + grace_grant
+            logger.warning("Sub-agent '%s' timed out after ~%.0fs (thread=%s)", target_agent, max_total, original_thread_id)
             completed = self._bus.agent_progress(target_agent)
             suggestion = (
                 f"如果任务仍在执行（如代码脚手架/构建），可提高 SUB_AGENT_TIMEOUT "
@@ -276,6 +276,7 @@ class SupervisorAgentCore(SupervisorAgentBase):
                 "agent", "supervisor", "route.timeout", agent_id=target_agent,
                 message=f"{target_agent} 路由超时",
                 data={"target": target_agent, "timeout": timeout,
+                      "max_total_wait": round(max_total, 1),
                       "completed_steps": completed, "suggestion": suggestion},
                 duration_ms=round((tmod.time() - route_started) * 1000, 1),
             )
@@ -284,12 +285,14 @@ class SupervisorAgentCore(SupervisorAgentBase):
                 type="error", action="chat",
                 payload={
                     "error": (
-                        f"Agent '{target_agent}' did not respond in time (waited {timeout:.0f}s). "
+                        f"Agent '{target_agent}' did not respond in time "
+                        f"(waited up to {max_total:.0f}s = {timeout:.0f}s + 宽限 {grace_grant:.0f}s). "
                         f"已完成步骤: {(' → '.join(completed) if completed else '无可获取的处理进度')}. "
                         f"{suggestion}"
                     ),
                     "error_type": "sub_agent_timeout",
                     "timeout": timeout,
+                    "max_total_wait": round(max_total, 1),
                     "completed_steps": completed,
                     "suggestion": suggestion,
                 },

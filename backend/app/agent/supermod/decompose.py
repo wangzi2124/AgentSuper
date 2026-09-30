@@ -1,45 +1,39 @@
-"""拆分模块 `decompose`（含 SupervisorAgentDecompose）。
+"""拆分模块 `decompose`（含 SupervisorAgentDecompose 与最终的 SupervisorAgent）。
 
 原文件 docstring: Supervisor Agent — 多 Agent 系统的编排者。
 
 核心职责:
   1. 接收用户的 "chat" 请求
-  2. 用 LLM 判断用户意图，决定路由到哪个子 Agent
-  3. 支持任务分解：将复杂问题拆成多个子任务并行执行
-  4. 通过 AgentBus 转发请求并等待回复
-  5. 将子 Agent 的回答包装后返回给用户
+  2. 按意图关键词决定路由到哪个顶层子 Agent（build / plan）
+  3. 通过 AgentBus 转发请求并等待回复
+  4. 将子 Agent 的回答包装后返回给用户
+
+[C4 · 2026-09-29] 本模块同时是继承链的**末级切片**（原第 4 级 `parallel.py`
+已删除 —— 它的 `_execute_parallel` / `_synthesize` 因 `_decompose` 恒返回单个
+子任务而永不可达）。`_llm_decompose` / `_validate_subtasks` 与
+`DECOMPOSE_SYSTEM_PROMPT` 随之删除：supervisor 层不做 fan-out，
+并行由主 Agent 的 `tool_task` 委派链承担（对齐 opencode）。
 
 修复的 Bug:
-  - thread_id 覆盖: 子请求使用独立 thread_id，防止覆盖调用方的 Future"""
+  - thread_id 覆盖: 子请求使用独立 thread_id，防止覆盖调用方的 Future
+"""
 # ── 复制自原模块的顶层 import ──
 
 import logging
 
 import re
 
-import time as tmod
-
-
-
-import litellm
-
-
-
-
-
-from app.monitor import record_model_call
-
-from app.utils.json_repair import parse_json_value
 from .core import SupervisorAgentCore
-from .core import _merge_usage
-# ── 跨子模块依赖（自动生成）──
-from .constants import DECOMPOSE_SYSTEM_PROMPT
+
 logger = logging.getLogger(__name__)
+
+
 # ── 类分块（verbatim，继承链切片）──
 class SupervisorAgentDecompose(SupervisorAgentCore):
     def _is_greeting(self, q: str) -> bool:
         """[B6] 判断是否为简短的寒暄/闲聊（用于 ≤24 字符快速路径）。"""
         return any(k in q for k in self._GREETING_KEYWORDS)
+
     async def _decompose(self, question: str) -> list[dict]:
         """将请求路由到合适的 Agent。
 
@@ -47,7 +41,10 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
         （知识库 + 代码/文件 + 内建 web 搜索），故不再按 kb/code/web 关键词拆分；
         顶层只有 build/plan 两个命令（对齐 opencode）：明确的"规划/出方案"意图走 plan，
         其余统一由 build 处理（探索代码库等由 build 的 tool_task 委派 explore 子 Agent）。
-        返回格式: [{"agent": "build" | "plan", "question": "..."}]
+        返回格式: [{"agent": "build" | "plan", "question": "..."}]（恒为单元素）
+
+        [C4] 本方法恒返回**单个**子任务 —— 顶层不做并行分解（原 `_llm_decompose`
+        扇出路径已删除）。要多部分并行请让 build/plan 经 `tool_task` 委派子 Agent。
         """
         q = question.strip().lower()
 
@@ -75,134 +72,14 @@ class SupervisorAgentDecompose(SupervisorAgentCore):
 
         # ── 其余情况：build 全能力覆盖，直接路由，不再逐请求 LLM 拆分 ──
         return [{"agent": "build", "question": question}]
-    async def _llm_decompose(self, question: str, available: list[str]) -> list[dict]:
-        """使用 LLM 判断如何分解任务。
 
-        - 输出先做 JSON 解析 + schema 校验（agent 必须在白名单且可用、question 非空）
-        - 解析/校验失败时带错误信息与格式样例做一次 few-shot 修复重试
-        - 仍失败才回退 build（记录原因，便于排查路由漂移）
-        """
-        routable = [a for a in available if a in self.ROUTABLE_AGENTS] or ["build"]
 
-        # [模型管理] 子任务 LLM 分类属内部轻量任务 → 用 small_model；
-        # 未配置 small_model 时回落本 Agent 的主模型。
-        from app.models.catalog import provider_api as _provider_api
-        from app.models.catalog import small_model as _small_model
-        from app.models.catalog import litellm_extra_kwargs
-        from app.models.catalog import provider_config_hint
-        clf_model = _small_model() or self._model
-        _creds = _provider_api(clf_model)
-        _hint = provider_config_hint(clf_model, creds=_creds)
-        if _hint:
-            raise RuntimeError(_hint)
-        _ckey = "ollama" if _creds["is_ollama"] else _creds["api_key"]
-        _cbase = None if _creds["is_ollama"] else _creds["api_base"]
+class SupervisorAgent(SupervisorAgentDecompose):
+    """SupervisorAgent —— 继承链末级（原 `parallel` 切片，现已无并行职责）。
 
-        async def _request(messages: list[dict]) -> tuple[str, dict]:
-            response = await litellm.acompletion(
-                model=clf_model,
-                api_key=_ckey,
-                api_base=_cbase,
-                messages=messages,
-                max_tokens=1024,
-                temperature=0.1,
-                cache_prompt=True,
-                **litellm_extra_kwargs(_creds),
-            )
-            usage = getattr(response, "usage", None)
-            usage_dict = {
-                "prompt_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
-                "completion_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
-            }
-            # [token 优化 v9] 分解调用的用量计入本次请求汇总
-            if getattr(self, "_usage", None) is not None:
-                _merge_usage(self._usage, {"input": usage_dict.get("prompt_tokens", 0),
-                                           "output": usage_dict.get("completion_tokens", 0)})
-                from app.models.catalog import resolve_cost
-                self._cost = getattr(self, "_cost", 0.0) + resolve_cost(
-                    clf_model,
-                    input_tokens=usage_dict.get("prompt_tokens", 0),
-                    output_tokens=usage_dict.get("completion_tokens", 0))
-            content = response.choices[0].message.content
-            # [reasoning 方言] 分类模型若为思考模型（ollama think=True）、content 为空，
-            # 回退 reasoning_content（对齐 sub_tools/plan_agent 的 reasoning 回退）
-            if not (content or "").strip():
-                reasoning = getattr(response.choices[0].message, "reasoning_content", None) or ""
-                if reasoning.strip():
-                    content = reasoning
-            return content, usage_dict
+    [C4] 保留此类是为了维持「facade 从 `.supermod` 导出唯一 SupervisorAgent」的
+    契约与既有导入路径 `from app.agent.supermod.decompose import SupervisorAgent`。
+    """
 
-        start = tmod.time()
-        attempts = []
-        for attempt in range(2):  # [token 优化] 首次 + 1 次 few-shot 修复重试，仍失败才回退 build
-            try:
-                if attempt == 0:
-                    messages = [
-                        {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
-                        {"role": "user", "content": f"可用的 Agent: {', '.join(routable)}\n\n用户问题: {question}"},
-                    ]
-                else:
-                    # few-shot 修复：带上一次的错误与合法格式样例
-                    messages = [
-                        {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
-                        {"role": "user", "content": f"可用的 Agent: {', '.join(routable)}\n\n用户问题: {question}"},
-                        {
-                            "role": "assistant",
-                            "content": "抱歉，我需要先输出子任务分解。",
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                "你上一次的输出无法解析，原因如下：\n"
-                                f"{attempts[-1]}\n\n"
-                                "请严格按照以下 JSON 数组格式重新输出（不要 markdown 代码块标记），"
-                                "且 agent 字段只能取 " + ", ".join(routable) + "：\n"
-                                '[\n  {"agent": "build", "question": "第一个子任务的问题描述"},\n'
-                                '  {"agent": "plan", "question": "第二个子任务的问题描述"}\n]\n'
-                            ),
-                        },
-                    ]
-                text, usage = await _request(messages)
-                if attempt == 0:
-                    dur = (tmod.time() - start) * 1000
-                    record_model_call(
-                        clf_model,
-                        prompt_tokens=usage.get("prompt_tokens", 0),
-                        completion_tokens=usage.get("completion_tokens", 0),
-                        duration_ms=dur,
-                    )
-                text = text.strip()
-                text = text.replace("```json", "").replace("```", "").strip()
-                subtasks = parse_json_value(text)
-                validated = self._validate_subtasks(subtasks, routable)
-                if validated:
-                    return validated
-                attempts.append("schema 校验未通过：返回了空/非法的子任务列表")
-            except Exception as e:  # noqa: BLE001
-                attempts.append(f"{type(e).__name__}: {e}")
 
-        logger.warning(
-            "LLM decomposition failed after %d attempt(s): %s; falling back to build",
-            len(attempts), attempts[-1] if attempts else "unknown",
-        )
-        return [{"agent": "build", "question": question}]
-    @staticmethod
-    def _validate_subtasks(data, routable: list[str]) -> list[dict]:
-        """校验并规范化 LLM 分解输出，返回合法子任务列表（白名单过滤 + 最多 3 个）。"""
-        if not isinstance(data, list):
-            return []
-        validated: list[dict] = []
-        for st in data:
-            if not isinstance(st, dict):
-                continue
-            agent = st.get("agent")
-            q = st.get("question")
-            if not isinstance(agent, str) or not isinstance(q, str) or not q.strip():
-                continue
-            if agent in routable:
-                validated.append({"agent": agent, "question": q.strip()})
-            if len(validated) >= 3:
-                break
-        return validated
-
-__all__ = ['SupervisorAgentDecompose']
+__all__ = ['SupervisorAgentDecompose', 'SupervisorAgent']

@@ -341,7 +341,7 @@ class RAGAgent(RAGAgentGenerate):
         self._last_call_estimate = estimate_tokens_messages(messages) + estimate_tools(tool_defs)
         # 参照 settings.llm_api_base/key 作为兜底；注册过 providers 的自定义模型
         # （前端模型管理写入 model_catalog.json）按 model 的 provider 解析 api_base/api_key。
-        from app.models.catalog import provider_api, litellm_extra_kwargs
+        from app.models.catalog import provider_api, litellm_extra_kwargs, resolve_max_output_tokens
         _creds = provider_api(model)
         _is_ollama = _creds["is_ollama"]
         _api_key = _creds["api_key"]
@@ -351,6 +351,9 @@ class RAGAgent(RAGAgentGenerate):
         _hint = provider_config_hint(model, creds=_creds)
         if _hint:
             raise RuntimeError(_hint)
+        # [B6] 输出上限取「模型声明 limits.max_output_tokens」与「.env LLM_MAX_TOKENS」的
+        # 较小值（小窗模型收窄，全局成本预算不被条目放大）
+        _max_tokens = resolve_max_output_tokens(model, settings.llm_max_tokens)
         try:
             stream = await litellm.acompletion(
                 model=model,
@@ -359,7 +362,7 @@ class RAGAgent(RAGAgentGenerate):
                 api_key=_api_key,
                 api_base=_api_base,
                 temperature=0.1,
-                max_tokens=settings.llm_max_tokens,
+                max_tokens=_max_tokens,
                 timeout=500,
                 num_retries=2,
                 stream=True,
@@ -377,7 +380,7 @@ class RAGAgent(RAGAgentGenerate):
                     api_key=_api_key,
                     api_base=_api_base,
                     temperature=0.1,
-                    max_tokens=settings.llm_max_tokens,
+                    max_tokens=_max_tokens,
                     timeout=500,
                     num_retries=2,
                     cache_prompt=True,

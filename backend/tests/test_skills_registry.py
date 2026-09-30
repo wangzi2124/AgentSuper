@@ -163,14 +163,74 @@ def test_seed_bundled_respects_deletion(tmp_path, fake_bundled):
 
 
 def test_seed_bundled_preserves_preexisting_same_name(tmp_path, fake_bundled):
-    """受管库里已存在的同名内容（自建技能）不覆盖，但仍标记为已处理以免每次重试。"""
+    """受管库里已存在的同名内容（自建技能）不覆盖，且**不记账**（不标「内置」）。"""
     managed = tmp_path / "data" / "skills"
     (managed / "alpha").mkdir(parents=True)
     (managed / "alpha" / "SKILL.md").write_text(
         "---\nname: alpha\ndescription: 我自己写的\n---\nx", encoding="utf-8")
     assert registry.seed_bundled(managed) == ["beta", "gamma"]
     assert "我自己写的" in (managed / "alpha" / "SKILL.md").read_text("utf-8")
-    assert "alpha" in registry.bundled_names(managed)
+    # A2：用户自建的同名技能绝不能被打上「内置」徽章
+    assert "alpha" not in registry.bundled_names(managed)
+    assert registry.bundled_names(managed) == {"beta", "gamma"}
+    # 未记账 → 每次启动都跳过（不覆盖、不复活），新增技能仍正常补种
+    assert registry.seed_bundled(managed) == []
+    assert "我自己写的" in (managed / "alpha" / "SKILL.md").read_text("utf-8")
+
+
+def test_seed_bundled_uses_frontmatter_name_as_identity(tmp_path, fake_bundled):
+    """A4：身份键 = frontmatter name（目录名只定位），改名后徽章不丢。"""
+    d = fake_bundled / "engineering" / "alpha"
+    (d / "SKILL.md").write_text(
+        "---\nname: alpha-renamed\ndescription: a\n---\n# a", encoding="utf-8")
+    managed = tmp_path / "data" / "skills"
+    assert registry.seed_bundled(managed) == ["alpha-renamed", "beta", "gamma"]
+    assert (managed / "alpha" / "SKILL.md").is_file()   # 目录名沿用包内布局
+    assert registry.bundled_names(managed) == {"alpha-renamed", "beta", "gamma"}
+    # 与 SkillLoader 的键空间一致 → bundled 标记能落到技能上
+    from app.skills.loader import SkillLoader
+    loader = SkillLoader(str(managed), create=False,
+                         bundled_names=registry.bundled_names(managed))
+    loader.load_all()
+    assert loader.get("alpha-renamed").bundled is True
+
+
+def test_seed_bundled_version_bump_refreshes_unmodified(tmp_path, fake_bundled, monkeypatch):
+    """A3：版本递增刷新用户**未改动**的已播种技能（上游内容变化才动）。"""
+    managed = tmp_path / "data" / "skills"
+    registry.seed_bundled(managed)
+    src = fake_bundled / "engineering" / "alpha" / "SKILL.md"
+    src.write_text("---\nname: alpha\ndescription: 上游更新\n---\n# 上游 v2", encoding="utf-8")
+    monkeypatch.setattr(registry, "BUNDLED_VERSION", registry.BUNDLED_VERSION + 1)
+    registry.seed_bundled(managed)
+    after = (managed / "alpha" / "SKILL.md").read_text("utf-8")
+    assert "上游 v2" in after
+    assert (managed / "alpha" / "helper.md").is_file()   # 整个目录被刷新
+
+
+def test_seed_bundled_version_bump_keeps_user_edits(tmp_path, fake_bundled, monkeypatch):
+    """A3：用户改过的技能即使版本递增也不被上游内容覆盖。"""
+    managed = tmp_path / "data" / "skills"
+    registry.seed_bundled(managed)
+    (managed / "alpha" / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: 我改过的\n---\n我的内容", encoding="utf-8")
+    src = fake_bundled / "engineering" / "alpha" / "SKILL.md"
+    src.write_text("---\nname: alpha\ndescription: 上游更新\n---\n# 上游 v2", encoding="utf-8")
+    monkeypatch.setattr(registry, "BUNDLED_VERSION", registry.BUNDLED_VERSION + 1)
+    assert registry.seed_bundled(managed) == []
+    after = (managed / "alpha" / "SKILL.md").read_text("utf-8")
+    assert "我改过的" in after and "上游 v2" not in after
+
+
+def test_seed_bundled_migrates_legacy_list_manifest(tmp_path, fake_bundled):
+    """旧版清单（seeded 是名字列表）可读：保留「尊重删除」，digest 空 → 不参与刷新。"""
+    import json
+    managed = tmp_path / "data" / "skills"
+    registry.seed_bundled(managed)
+    (managed / ".bundled.json").write_text(
+        json.dumps({"version": 1, "seeded": ["alpha", "beta", "gamma"]}), encoding="utf-8")
+    assert registry.seed_bundled(managed) == []
+    assert registry.bundled_names(managed) == {"alpha", "beta", "gamma"}
 
 
 def test_seed_bundled_version_bump_adds_new_only(tmp_path, fake_bundled, monkeypatch):

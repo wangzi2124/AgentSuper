@@ -310,18 +310,18 @@ B1 正是踩在两套契约的缝里炸的。
 
 ### 批次 3：需要产品决策（先确认再动）
 
-| 项 | 决策点 | 状态 |
-| --- | --- | --- |
-| **C4** | 恢复 `_llm_decompose` 扇出，还是删掉整套并行分解？ | ⏳ |
-| **C5** | 弱模型 two-stage 死分支：删掉，还是改门控使其可达？ | ⏳ |
-| **D1/D2** | 11 条路由 + 10 个前端导出：接 UI 还是删？ | ⏳ |
-| **A2** | `seed_bundled` 是否应把用户同名目录算作内置？ | ⏳ |
-| **A3** | `BUNDLED_VERSION` 要不要真的做增量播种？ | ⏳ |
-| **A4** | 技能身份键统一到 frontmatter name？ | ⏳ |
-| **B5/B6** | `context_length` / `limits.max_output_tokens` 接入还是标只读？ | ⏳ |
-| **C8** | `plan_path` 前端要不要展示（后端已接线，见下）？ | ⏳ |
-| **C9** | 宽限期是否封顶？ | ⏳ |
-| **C10** | `SUBAGENT_DEPTH` 默认值改 1？ | ⏳ |
+| 项 | 决策点 | 决策 | 状态 |
+| --- | --- | --- | --- |
+| **C4** | 恢复 `_llm_decompose` 扇出，还是删掉整套并行分解？ | **删掉整套并行分解**（扇出职责归主 Agent 的 `tool_task` 链） | ✅ 已修复 |
+| **C5** | 弱模型 two-stage 死分支：删掉，还是改门控使其可达？ | 删 two-stage；**保留** `weak_model_strong_fallback` | ✅ 已修复 |
+| **D1/D2** | 11 条路由 + 10 个前端导出：接 UI 还是删？ | **接线 UI**（fork/compact/status）+ 删死导出 + 保留运维路由并文档化 | ✅ 已修复 |
+| **A2** | `seed_bundled` 是否应把用户同名目录算作内置？ | **不算**（用户目录不记账、不标内置、不被覆盖） | ✅ 已修复 |
+| **A3** | `BUNDLED_VERSION` 要不要真的做增量播种？ | **做**，摘要记账、只刷新未被用户修改的技能 | ✅ 已修复 |
+| **A4** | 技能身份键统一到 frontmatter name？ | **统一到 frontmatter `name`** | ✅ 已修复 |
+| **B5/B6** | `context_length` / `limits.max_output_tokens` 接入还是标只读？ | **接入**，语义为「上限取小」（不放放大 `.env` 全局值） | ✅ 已修复 |
+| **C8** | `plan_path` 前端要不要展示（后端已接线，见下）？ | **展示**（可点击复制路径） | ✅ 已修复 |
+| **C9** | 宽限期是否封顶？ | **封顶**（有限次追加宽限） | ✅ 已修复 |
+| **C10** | `SUBAGENT_DEPTH` 默认值改 1？ | **改 1** | ✅ 已修复 |
 
 ---
 
@@ -348,17 +348,31 @@ B1 正是踩在两套契约的缝里炸的。
 | **D7** | `api/auth.ts:clearSessionLocal()` 改为 `localStorage.removeItem()` 逐键删除（原为写空串，共享设备上残留 `key=""` 残骸，`expires_at` 的 `'0'` 有被误解析的风险） | 新增 `frontend/tests/unit/api/auth.spec.ts`（3 条：login 写全 5 键 / logout 后全部为 `null` / logout 后不残留旧用户名） |
 | **D3 + D5** | `model_switched` 契约对齐：后端原发 `{"model": {...}}`，而前端读 `event.model_ref` → 切模型后 store 的模型标记**永远不更新**。后端改发 `model_ref`（`endpoints.py:430`）。闪烁问题（D5）由前端把该分支放在 `streamPhase` 转换**之前** `return` 解决 | 后端 `test_stream_model_switched_uses_model_ref_key`（同时断言旧键 `model` 已不存在）+ `test_stream_no_model_switched_when_model_unchanged`；前端 `model_switched` 2 条（含 `model_ref` 缺失时安全忽略） |
 | **D4** | 删除 `stores/multiAgent.ts` 的 `agent_stream` 分支 —— 后端从不发送该类型（实际是 `text_delta`），`rg` 确认无发送方 | 由全量 vitest 覆盖 |
-| **C8（部分）** | `plan_path` 已贯通后端响应与 SSE `done` 事件（随 C1 一并完成）。**前端是否展示仍待决策** | 同 C1 |
+
+### 批次 3：需要产品决策 —— 10/10 已决策并修复
+
+| 项 | 改动 | 回归测试 |
+| --- | --- | --- |
+| **C4** | 删除整套并行分解：`supermod/parallel.py` 整文件移除（`_execute_parallel` / `parallel_message`），`decompose.py` 去掉 LLM 分解入口（`_llm_decompose` / `MAX_SUBTASKS` / `validate` 与「3 子任务」硬约束），`constants.py` 删 `SUBTASK_PARSE_MODEL`，`supervisor.py` facade 改由 `decompose.SupervisorAgent` 导出（继承链降为 `Base→Core→Decompose`）。Supervisor 顶层**只路由单个** build/plan，并行委派由主 Agent 的 `tool_task` 链承担；`sub_task_fresh_history` 配置随之删除 | `test_split_regressions.py::test_facade_exports_supervisor_agent_from_decompose`、`test_supervisor_agent.py::test_mro_chain_and_method_placement`、`test_supervisor_agent.py::test_facade_exports_intact`，以及 `scripts/test_multi_agent_parallel.py`（改名为串行契约断言） |
+| **C5** | 删除 `weak_model_two_stage` 及其死分支；保留 `WEAK_MODEL_STRONG_FALLBACK`（显式开关，默认 false）与「提示切换更强模型」路径 | 全量套件（配置项删除无外部引用） |
+| **C9** | `AgentBus.send_and_wait()` 的宽限期改为**有限次**追加（原来只要子 Agent 仍在心跳就无限续期 → `SUB_AGENT_TIMEOUT` 事实上失效） | `test_agent_bus.py::test_grace_extension_does_not_double_the_timeout`、`::test_send_and_wait_custom_grace_params` |
+| **C10** | `SUBAGENT_DEPTH` 默认值由 2 改 1（默认配置下 `plan→build` 不会再额外多派生一层 explore） | `test_graphmod_generate_core.py::test_tool_task_depth_limit` |
+| **A2/A3/A4** | `skills/registry.py` 播种改为**摘要记账的增量播种**：身份键取 frontmatter `name`（复用 `loader._split_frontmatter`），`BUNDLED_VERSION = 2`，清单升级为 `{version, seeded: {name: {dir, digest}}}`（旧 list 清单读取时迁移）。三种不变量：**幂等**（重复启动零拷贝）、**非破坏**（已存在同名目录不记账、不覆盖、不标内置）、**尊重删除**（删掉的内置技能不再复活）。版本变化时只刷新摘要仍匹配、确认未被用户修改的技能；用户编辑过的技能内容与记账一并保留 | `test_skills_registry.py` 21 条通过，含 `test_seed_bundled_preserves_preexisting_same_name`、`::test_seed_bundled_uses_frontmatter_name_as_identity`、`::test_seed_bundled_migrates_legacy_list_manifest`、`::test_seed_bundled_version_bump_refreshes_unmodified`、`::test_seed_bundled_version_bump_keeps_user_edits`、`::test_seed_bundled_version_bump_adds_new_only`、`::test_seed_bundled_respects_deletion` |
+| **B5/B6** | 模型声明的限制**真正接线**（此前写而不读）：`catalog.py` 新增 `read_limits()` / `resolve_context_length()` / `resolve_max_output_tokens()`，语义为「模型声明值与 `.env` 全局值**取小**」——`context_length` 收窄上下文预算（`budget.py` 三个函数与 `compaction_threshold_tokens` 自动阈值）、Ollama `num_ctx`（`provider_api`），`limits.max_output_tokens` 收窄主 Agent / plan / 子 Agent 的输出上限。不放大 `.env` 是有意的：`MAX_CONTEXT_TOKENS` / `OLLAMA_NUM_CTX` 同时是成本与显存旋钮，模型页填大值不应悄悄抬高 | `test_model_catalog.py::test_resolve_context_length_narrows_but_never_widens`、`::test_resolve_max_output_tokens_caps_by_entry`、`::test_provider_api_ollama_num_ctx_narrowed_by_entry`、`::test_budget_functions_honor_model_context_length`；另 `test_context_guards.py` / `test_context_utils.py` / `test_agent_tools.py` 全通过 |
+| **D1** | 11 条孤立路由**接线 UI 而非删除**：`sessions.ts` 补 `forkSession` / `compactSession` / `getSessionStatus`，`stores/multiAgent.ts` 新增 `forkConversation` / `compactConversation` / `fetchSessionStatus`，`MultiAgentChatHistory.vue` 每条会话加「分叉 / 压缩 / 状态」按钮（压缩中禁用，状态写入行内 tooltip）。`POST /api/sessions`、context/children、voice status 等编程/运维路由**保留**并在 `api/sessions.ts` / `api/voice.ts` 注释中标注用途 | 前端 `stores/multiAgent.spec.ts` 新增 5 条（fork 成功/失败、compact 成功/失败、status 透传/异常） |
+| **D2** | 删除 10 个无调用前端导出：`createSession`、`getSessionContext`、`getSessionChildren`（sessions.ts）、`ttsHealth` + `TtsHealth`（voice.ts）、`loadAllSessionIds`（session-cache.ts）、`isAuthEnabled`（auth.ts）、以及 `ADMIN_TOKEN` / `apiUrl` / `parseErrorResponse` / `toApiError` 改为模块内部符号（`base.ts` / `errors.ts`）。`getUsername()` 因 D7 登出残留回归测试仍需导出，保留 | `tests/unit/session-cache.spec.ts` 改为验证「单会话缓存存取/墓碑过滤」；`api/auth.spec.ts` 复用 `getUsername`；全量 vitest 通过 |
+| **C8** | `plan_path` 前端落地：消息卡片展示「已生成计划文件 + 完整路径」，整块**可点击复制**（`role="button"` + `tabindex` + Enter 键），复制成功显示「已复制」，`navigator.clipboard` 不可用（非安全上下文）降级 `window.prompt` 手动复制。不做 `href="file://"` 伪链接 —— http(s) 页面会被浏览器拦截，后端也没有「在系统文件管理器中打开」的路由（`os.startfile`/`explorer` 全仓无调用） | `tests/unit/components/MultiAgentResponse.spec.ts` 新增 3 条（有路径 → 点击复制并提示已复制 / 剪贴板失败 → prompt 降级 / 无路径 → 不渲染卡片） |
 
 ### 验证
 
-- 后端全量：`.venv\Scripts\python.exe -X utf8 -m pytest tests\ -q` → 全部通过（exit 0）。
-- 前端：`npm run check`（`vue-tsc -b` + vitest）→ 8 files / 78 tests 通过。
+- 后端全量：`.venv\Scripts\python.exe -X utf8 -m pytest tests\ -q` → 全部通过（exit 0，批次 3 修改后重跑）。
+- 前端：`npm run check`（`vue-tsc -b` + vitest）→ 8 files / 89 tests 通过。
+- 前端：`npm run test:coverage` → 全部门禁通过（`MultiAgentResponse.vue` lines ≥90 / statements ≥80 已由 C8 三条用例拉回）。
 - 前端：`npm run build` → 构建成功。
 
 ### 未改动的审计结论
 
-以下项经复核判定**无需动作**或属批次 3 待决策：~~A2~~/~~A3~~/~~A4~~（内置技能身份语义）、A7（`plugin_http-client_*` 提示词广告）、B5/B6（模型上下文字段写而不读）、B7（缺 HTTP 测试）、C4（并行分解死代码）、C5（弱模型 two-stage 死分支）、C6（`AgentSpec.mode` 声明式）、C9/C10（超时与深度守卫）、D1/D2（孤立路由与导出）、D6（信封覆盖率）、D8/D9（注释与文档不符）。
+以下项经复核判定**无需动作**：B7（缺 HTTP 测试，属测试投入而非缺陷）、C6（`AgentSpec.mode` 声明式，与实际行为一致）、D6（信封覆盖率）、D8/D9（注释与文档不符）。A2/A3/A4/A7/B5/B6/C4/C5/C8/C9/C10/D1/D2 已在本轮修复，见上表。
 
 ---
 

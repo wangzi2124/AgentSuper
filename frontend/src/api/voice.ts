@@ -5,24 +5,8 @@ import { fetchWithTimeout } from './fetch'
 const TTS_BASE = (import.meta.env.VITE_TTS_BASE as string) || '/api/voice'
 const TTS_SPEAKER = (import.meta.env.VITE_TTS_SPEAKER as string) || 'Vivian'
 
-export interface TtsHealth {
-  ok: boolean
-  enabled?: boolean
-  speakers?: string[]
-  languages?: string[]
-}
-
-export async function ttsHealth(): Promise<TtsHealth> {
-  try {
-    const res = await fetchWithTimeout(`${TTS_BASE}/status`, {}, 3000)
-    if (!res.ok) return { ok: false }
-    const body = await res.json()
-    const data = body?.data ?? {}
-    return { ok: body?.code === 0, enabled: !!data.enabled, speakers: data.speakers, languages: data.languages }
-  } catch {
-    return { ok: false }
-  }
-}
+// [D2] `ttsHealth()` 包装已删除（前端零调用）。后端 `GET /api/voice/status` 保留：
+// `backend/scripts/smoke_voice_api.py:35` 等自检脚本直接打这条路由做运维探活。
 
 // ASR 转写：音频 Blob → 文本（后端 subprocess → 本地 Whisper）。文件名后缀决定后端临时文件格式（wav/webm/mp3…）
 export async function transcribeAudio(blob: Blob, filename = 'record.webm'): Promise<string> {

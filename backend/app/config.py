@@ -197,15 +197,17 @@ class Settings(BaseSettings):
     sub_agent_timeout_extended: float = 300.0
     # 使用 extended 超时的子 Agent 列表（逗号分隔）
     extended_timeout_agents: str = "build"
-    # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth；当前 build 委派 explore 仅 1 层）
-    subagent_depth: int = 4
+    # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth）。
+    # [C10] 默认 1 = 与「实际可达深度」一致：build/plan 委派 explore 仅 1 跳，
+    # 且 explore 的只读 allowlist 不含 tool_task，无法再嵌套 → 原默认值 4 永不触发，
+    # 且与 graphmod/tools.py 的错误文案「(default 1)」自相矛盾。
+    # 放开到 >1 需要同时给子 Agent 挂上 tool_task，否则该守卫仍是不可达代码。
+    subagent_depth: int = 1
     # [opencode task 授权] 委派规则（对齐 permission.task）：如 {"*":"allow","plan":"ask"}。
     # 空 = 白名单内全部 allow（保持现状）；deny 的子类型从 tool_task enum 移除，ask 走审批。
     task_permission_rules: dict = {}
-    # [token 优化 v15] 并行分解的子任务使用 fresh context（不转发整份 history）。
-    # 并行子问题由 LLM 分解时已自含全部必要信息；history 仅对"单路由连续对话"
-    # 有意义。清空 history 可避免 N 个并行子 Agent 各自重复 prefill ≤16K 历史。
-    sub_task_fresh_history: bool = True
+    # [C4 已删除] sub_task_fresh_history：并行分解的子任务 fresh context 开关，
+    # 唯一读取点在已删除的 `_execute_parallel`（supermod/parallel.py）。
 
     # Ollama 上下文窗口（num_ctx，传给本地推理服务的 options）。Ollama 默认 2048，
     # 超出窗口的 prompt 会被服务器截断 -> 历史/长上下文静默丢失（模型答"记不清/无历史"）。
@@ -222,13 +224,15 @@ class Settings(BaseSettings):
     empty_answer_fallback_model: bool = True
     # 回退用的模型名（空 = 用 LLM_MODEL；若 LLM_MODEL 本身就是弱模型，建议显式指定强模型）
     empty_answer_fallback_model_name: str = ""
-    # [两段式] 弱模型：工具轮之后不信任其收尾总结，改为把工具调用记录交给强模型统一收尾
-    # （弱模型擅长「调工具」、不擅长「工具→总结」；开启后从根上避免 {} / 空 / 工具标记泄漏）
-    weak_model_two_stage: bool = True
     # 弱模型工具调用无效（空 / {} / 自造 JSON / 工具标记等）时是否回退默认强模型兜底
-    # （两段式强模型收尾 + _generate 完整重跑都受此开关控制）。
-    # False（默认）= 不用默认强模型悄悄兜底，直接返回提示让用户手动切换更强模型。
+    # （控制 _retry_empty_answer 的强模型完整重跑）。False（默认）= 不用默认强模型
+    # 悄悄兜底，直接返回提示让用户手动切换更强模型（见 _WEAK_MODEL_SWITCH_HINT）。
     weak_model_strong_fallback: bool = False
+    # [C5 已删除] weak_model_two_stage：曾用于「工具轮之后把记录交给强模型统一收尾」，
+    # 但该分支三重不可达 —— ① 依赖已删的 weak_model_strong_fallback 门控；② 弱模型
+    # _build_tool_defs 返回 None（tool-free 纯 QA）→ 工具循环根本不进入，rounds 恒为 0；
+    # ③ 即便 ①② 都放开，② 仍独立排除一切弱模型。现由 empty_answer_retry +
+    # _WEAK_MODEL_SWITCH_HINT 覆盖弱模型空回答场景。
 
     # ── 共享记忆持久化 ──
     # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失

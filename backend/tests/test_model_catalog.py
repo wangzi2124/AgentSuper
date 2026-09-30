@@ -370,6 +370,78 @@ def test_is_weak_model_falls_back_to_ollama_prefix(monkeypatch):
     assert is_weak_model("deepseek/deepseek-v4-flash") is False
 
 
+def _entry(ctx=None, max_out=None):
+    e = {"id": "x/y", "provider": "x", "name": "y"}
+    if ctx is not None:
+        e["context_length"] = ctx
+    if max_out is not None:
+        e["limits"] = {"max_output_tokens": max_out}
+    return e
+
+
+def test_resolve_context_length_narrows_but_never_widens(monkeypatch):
+    """B5：条目声明的 context_length 只**收窄**全局窗口，绝不放大。"""
+    monkeypatch.setattr(catalog, "lookup", lambda mid: _entry(ctx=32768))
+    assert catalog.resolve_context_length("x/y", 131_072) == 32_768
+    # 声明值更大 → 仍以 .env 全局值为准（漏改条目不改变既有行为）
+    monkeypatch.setattr(catalog, "lookup", lambda mid: _entry(ctx=400_000))
+    assert catalog.resolve_context_length("x/y", 131_072) == 131_072
+    # 未声明 / 未收录 → 纯全局值
+    monkeypatch.setattr(catalog, "lookup", lambda mid: _entry())
+    assert catalog.resolve_context_length("x/y", 131_072) == 131_072
+    monkeypatch.setattr(catalog, "lookup", lambda mid: None)
+    assert catalog.resolve_context_length("nope", 8_192) == 8_192
+    assert catalog.read_limits("nope") == {"context_length": 0, "max_output_tokens": 0}
+
+
+def test_resolve_max_output_tokens_caps_by_entry(monkeypatch):
+    """B6：limits.max_output_tokens 收窄全局 LLM_MAX_TOKENS，不放大。"""
+    monkeypatch.setattr(catalog, "lookup", lambda mid: _entry(ctx=32768, max_out=4096))
+    assert catalog.resolve_max_output_tokens("x/y", 8192) == 4096
+    monkeypatch.setattr(catalog, "lookup", lambda mid: _entry(max_out=16384))
+    assert catalog.resolve_max_output_tokens("x/y", 8192) == 8192
+    monkeypatch.setattr(catalog, "lookup", lambda mid: None)
+    assert catalog.resolve_max_output_tokens("nope", 8192) == 8192
+    # 非法值不炸，回落全局
+    monkeypatch.setattr(catalog, "lookup", lambda mid: _entry(ctx="oops", max_out="nope"))
+    assert catalog.read_limits("x/y") == {"context_length": 0, "max_output_tokens": 0}
+
+
+def test_provider_api_ollama_num_ctx_narrowed_by_entry(monkeypatch):
+    """B5：ollama 的 num_ctx 受模型声明 context_length 收窄。"""
+    monkeypatch.setattr(settings, "ollama_num_ctx", 8192)
+    monkeypatch.setattr(catalog, "read_capabilities", lambda m: {})
+    monkeypatch.setattr(catalog, "lookup", lambda mid: _entry(ctx=4096))
+    assert catalog.provider_api("ollama/qwen2.5:7b")["options"]["num_ctx"] == 4096
+    # 声明窗口大于 .env → 保持 .env（不因目录值放大显存/延迟）
+    monkeypatch.setattr(catalog, "lookup", lambda mid: _entry(ctx=131_072))
+    assert catalog.provider_api("ollama/qwen2.5:7b")["options"]["num_ctx"] == 8192
+
+
+def test_budget_functions_honor_model_context_length(monkeypatch):
+    """B5 贯通到预算：本地 32K 模型不再按 .env 131072 估预算（否则压缩永不触发）。"""
+    from app.context import budget
+    monkeypatch.setattr(settings, "max_context_tokens", 131_072)
+    monkeypatch.setattr(settings, "context_reserve_tokens", 4000)
+    monkeypatch.setattr(settings, "compaction_threshold_tokens", 0)
+    monkeypatch.setattr(catalog, "lookup", lambda mid: _entry(ctx=32768) if mid == "ollama/x" else None)
+    assert budget.usable_context_tokens("ollama/x") == 28_768
+    assert budget.compaction_threshold_tokens("ollama/x") < \
+        budget.compaction_threshold_tokens("unknown/y")
+    # 不传 model → 纯全局值（既有行为不变）
+    assert budget.usable_context_tokens() == 127_072
+
+
+def test_llm_call_uses_resolved_max_tokens(monkeypatch):
+    """B6：主 Agent 的 max_tokens 取解析后的值（小窗模型收窄）。"""
+    from app.agent.graphmod import core as core_mod
+    import inspect
+    src = inspect.getsource(core_mod)
+    assert "resolve_max_output_tokens" in src
+    assert "max_tokens=_max_tokens" in src
+    assert "max_tokens=settings.llm_max_tokens" not in src
+
+
 def test_provider_api_ollama_think_from_reasoning_capability(monkeypatch):
     # ollama + 声明推理 → think=True；未声明推理 → 不传 think（不臆断）
     monkeypatch.setattr(catalog, "read_capabilities", lambda m: {"tool_use": True, "vision": False, "reasoning": True})

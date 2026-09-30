@@ -114,7 +114,8 @@ class RAGAgentTools(RAGAgentBase):
 
         - subagent_type 白名单为 explore/plan（build 自身已含全部能力，supervisor 是
           编排者，均不需也不应委派），防自递归
-        - 嵌套深度受 settings.subagent_depth 限制（默认 1 = 主 Agent 只能再委派一层，对齐 opencode）
+        - 嵌套深度受 settings.subagent_depth 限制（默认 1 = 主 Agent 只能再委派一层，对齐 opencode；
+          注意 explore 的只读 allowlist 不含 tool_task，故 >1 目前仍不可达）
         - 子 Agent 以全新上下文执行（对齐 opencode task 工具 "fresh context" 语义），
           事件队列仅当来自 multi-agent 流时才透传（单 Agent 流不推子 Agent 面板事件）；
           会话工作目录（directory）透传给子 Agent，文件工具落在会话目录而非 git worktree
@@ -144,9 +145,10 @@ class RAGAgentTools(RAGAgentBase):
             return "Error: sub-agent bus is unavailable (tool_task disabled)."
         max_depth = max(1, settings.subagent_depth)
         if depth >= max_depth:
+            # [C10] 报错带出实际生效上限（不再硬编码 "(default 1)"，与 config 脱节）
             return (
                 f"Error: sub-agent depth limit reached ({max_depth}). "
-                f"Increase SUBAGENT_DEPTH (default 1) to allow nested sub-agents."
+                f"Increase SUBAGENT_DEPTH (current {max_depth}) to allow nested sub-agents."
             )
 
         # [opencode task 授权] ask → 复用 permission_request 审批桥（有队列才能审批）

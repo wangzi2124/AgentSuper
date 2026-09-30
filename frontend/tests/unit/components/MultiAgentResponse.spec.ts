@@ -2,7 +2,7 @@
  * MultiAgentResponse 组件：按 agent 输出顺序交错渲染正文块与极简工具卡片
  * （对齐 opencode Part 渲染：text ↔ tool 交替，工具无参数/结果详情，最终答案在正文尾部）。
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import MultiAgentResponse from '@/components/MultiAgentResponse.vue'
 import type { MultiAgentMessage } from '@/types'
@@ -167,5 +167,49 @@ describe('MultiAgentResponse 输出部件渲染', () => {
     expect(btn.text()).toBe('已撤回')
     expect(btn.attributes('disabled')).toBeDefined()
     expect(btn.classes()).toContain('restored')
+  })
+
+  // [C8] 计划文件卡片：展示路径 + 点击复制（浏览器无法直接打开后端本地文件）
+  it('plan_path 渲染计划文件卡片，点击复制路径并提示已复制', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const message = base({})
+    message.plan_path = 'E:/AgentSuper/backend/data/plans/ses_1/plan.md'
+    const wrapper = mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+    const card = wrapper.find('.plan-file')
+    expect(card.exists()).toBe(true)
+    expect(card.text()).toContain('已生成计划文件')
+    expect(card.find('.pf-path').text()).toBe(message.plan_path)
+    expect(card.text()).toContain('点击复制路径')
+    await card.trigger('click')
+    expect(writeText).toHaveBeenCalledWith(message.plan_path)
+    expect(card.text()).toContain('已复制')
+  })
+
+  it('剪贴板不可用（非安全上下文）→ 降级 prompt 手动复制', async () => {
+    const prompt = vi.fn()
+    vi.stubGlobal('prompt', prompt)
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
+    const message = base({})
+    message.plan_path = '/tmp/plan.md'
+    const wrapper = mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+    await wrapper.find('.plan-file').trigger('click')
+    expect(prompt).toHaveBeenCalledWith(expect.stringContaining('计划文件路径'), '/tmp/plan.md')
+    expect(wrapper.find('.plan-file').text()).toContain('点击复制路径')
+    vi.unstubAllGlobals()
+  })
+
+  it('无 plan_path 不渲染计划文件卡片', () => {
+    const wrapper = mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message: base({}) },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+    expect(wrapper.find('.plan-file').exists()).toBe(false)
   })
 })

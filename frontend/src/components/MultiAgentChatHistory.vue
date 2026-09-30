@@ -114,6 +114,29 @@ function startRename(c: ConversationMeta) { editingId.value = c.id; editingTitle
 function saveRename() { if (editingId.value && editingTitle.value.trim()) { agent.renameConversation(editingId.value, editingTitle.value.trim()) }; editingId.value = null }
 function cancelRename() { editingId.value = null }
 function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.conversationId === id) { agent.newChat(); router.push({ name: 'MultiAgent' }) }; apiDelete(id).then(() => agent.loadConversations()) }
+
+// [D1/D2] fork / compact / status：把后端此前无人调用的三条会话路由接进历史列表
+async function handleFork(e: Event, id: string) {
+  e.stopPropagation()
+  const newId = await agent.forkConversation(id)
+  if (newId) selectConversation(newId)
+}
+async function handleCompact(e: Event, id: string) {
+  e.stopPropagation()
+  const s = agent.sessions[id]
+  if (s?.streamPhase === 'running' || s?.streamPhase === 'queued') {
+    agent.setNotice('会话运行中，请先停止后再压缩')
+    return
+  }
+  await agent.compactConversation(id)
+  if (agent.conversationId === id) await agent.loadConversation(id)
+}
+const statusOf = ref<Record<string, string>>({})
+async function handleStatus(e: Event, c: ConversationMeta) {
+  e.stopPropagation()
+  const st = await agent.fetchSessionStatus(c.id)
+  statusOf.value = { ...statusOf.value, [c.id]: st?.status || 'unknown' }
+}
 </script>
 
 <template>
@@ -155,6 +178,15 @@ function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.con
           </template>
         </div>
         <div class="item-actions">
+          <button class="action-btn" @click.stop="handleFork($event, c.id)" title="分叉会话">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v6a3 3 0 0 0 3 3h6"/></svg>
+          </button>
+          <button class="action-btn" @click.stop="handleCompact($event, c.id)" title="压缩上下文">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h16M4 16h10"/><path d="M18 13l3 3-3 3"/></svg>
+          </button>
+          <button class="action-btn" @click.stop="handleStatus($event, c)" :title="statusOf[c.id] ? `状态：${statusOf[c.id]}` : '查询状态'">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          </button>
           <button class="action-btn" @click.stop="startRename(c)">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
           </button>

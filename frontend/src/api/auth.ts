@@ -11,9 +11,7 @@ const ACCOUNT_TYPE_KEY = 'agent_super_account_type'
 const TOKEN_KEY = 'agent_super_auth_token'
 const TOKEN_EXPIRES_KEY = 'agent_super_auth_token_expires_at'
 
-let enabledCache: boolean | null = null
 let initPromise: Promise<AuthInitInfo> | null = null
-
 export interface AuthSessionInfo {
   user_id: string
   username: string
@@ -94,11 +92,9 @@ export function getAuthToken(): string {
   return storedToken()
 }
 
-export async function isAuthEnabled(): Promise<boolean> {
-  if (enabledCache !== null) return enabledCache
-  const info = await getAuthInitInfo()
-  return info.enabled
-}
+// [D2] `isAuthEnabled()` 包装已删除（前端零调用）：`stores/auth.ts` 通过共享的
+// `getAuthInitInfo()` 一次性拿到 `enabled`，不需要第二条并发探测路径。
+// 后端 `GET /api/auth/status` 保留（getAuthInitInfo 与路由守卫都在用）。
 
 // 本地是否已持有有效会话（账号登录或历史设备身份）
 export function hasStoredSession(): boolean {
@@ -142,7 +138,6 @@ async function doInit(): Promise<AuthInitInfo> {
   } catch {
     enabled = false
   }
-  enabledCache = enabled
 
   if (!enabled) return { enabled, session: null }
   if (hasStoredSession()) {

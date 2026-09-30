@@ -24,7 +24,7 @@
 | 子会话往返（send_and_wait / 子 thread / 用量独立核算） | `bus.py:21 AgentBus` | ✅ 完整 |
 | 子 Agent 规格注册表（build 全量 / explore 只读 / plan 纯 LLM） | `agent_specs.py:45-65` | ✅ 完整 |
 | 子 Agent 工具循环 + allowlist 裁剪 + 运行时硬拒绝 | `sub_tools.py:334 run_tool` / `:365 tool_loop_chat` | ✅ 完整 |
-| supervisor 并行子任务执行（asyncio.gather） | `supermod/parallel.py:53 _execute_parallel`（gather 于 `:140`） | ✅ 完整 |
+| ~~supervisor 并行子任务执行（asyncio.gather）~~ | **[C4 已删除]** `_execute_parallel` 恒不可达（`_decompose` 只返 1 个子任务） | ❌ 无（本设计未实施，见下） |
 | 顺序路由到单个子 Agent（收唯一回复） | `supermod/core.py:236 _collect_route` | ✅ 完整 |
 
 ### 1.2 缺口：plan→build 交接是「串行且 plan 盲探」

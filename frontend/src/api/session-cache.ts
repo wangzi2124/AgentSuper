@@ -120,26 +120,8 @@ export async function loadSessionFromCache<M extends CacheMessage>(sessionId: st
   }
 }
 
-/** 从 IndexedDB 加载所有会话的 sessionId 列表（按 updatedAt 倒序） */
-export async function loadAllSessionIds(): Promise<string[]> {
-  try {
-    const db = await openDB()
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readonly')
-      const store = tx.objectStore(STORE_NAME)
-      const req = store.getAll()
-      req.onsuccess = () => {
-        const results = req.result as CachedSession<CacheMessage>[]
-        results.sort((a, b) => b.updatedAt - a.updatedAt)
-        resolve(results.map(r => r.sessionId))
-      }
-      req.onerror = () => reject(req.error)
-    })
-  } catch (e) {
-    console.warn('Failed to load sessions from IndexedDB:', e)
-    return []
-  }
-}
+// [D2] `loadAllSessionIds()` 已删除：会话列表以服务端 `/api/sessions` 为准（store
+// `loadConversations`），IndexedDB 只做单会话缓存与离线合并，列全量 id 无人调用。
 
 /** 删除 IndexedDB 中的会话缓存 */
 export async function deleteSessionFromCache(sessionId: string): Promise<void> {

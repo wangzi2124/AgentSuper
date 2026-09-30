@@ -445,6 +445,11 @@ class RAGAgentBase:
          ("plugin_docx-generator", "plugin_pdf-generator", "plugin_excel-generator", "plugin_pptx-generator")),
         (("搜索", "查一下", "新闻", "资讯", "上网", "search", "news", "internet"),
          ("plugin_internet-search_",)),
+        # [A7] tools.py 的系统提示词向模型广告了 plugin_http-client_*，但原先没有任何
+        # 规则会挂载它 → 模型看得见描述却调不到（schema 未随请求下发）。
+        # 这里补挂载规则，让提示词与实际可调用性一致。
+        (("http", "https", "api", "接口", "请求", "抓取", "爬", "crawl", "fetch", "webhook"),
+         ("plugin_http-client_",)),
         (("角色", "人物", "对话", "台词", "character", "dialogue"),
          ("plugin_character-analysis_",)),
         (("知识库", "kb", "导出"),

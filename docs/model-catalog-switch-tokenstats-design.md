@@ -132,7 +132,7 @@ ModelEntry = {
 1. **主 Agent 归一化**（`graphmod/generate.py` `_llm_call` 同步 + 流式累积）：
    - 累计 `reasoning`：litellm usage 的 `completion_tokens_details.reasoning_tokens`（无则 0）。
    - 计算 `cost`（目录价格 → `resolve_cost`），塞进 `_generate` 返回 dict（新增 `"cost"` 键）。
-2. **supervisor 汇总**（`supermod/parallel.py` / `core.py` `_merge_plan_build_reply`）：
+2. **supervisor 汇总**（`core.py` `_merge_plan_build_reply`；[C4] 原 `supermod/parallel.py` 的多子任务汇总已随并行分解删除）：
    `tokens` 合并改为**逐键求和**（现只保留第一份）；`cost` 一并求和，进 reply payload `{"tokens":..., "cost":...}`。
 3. **持久化**（`_persist_multi_agent` / `_ensure_child_pair`）：
    - assistant 消息 `data` 增加 `cost` 字段（与 opencode message.cost 对齐）。

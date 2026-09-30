@@ -17,6 +17,9 @@ const mocks = vi.hoisted(() => ({
   loadCache: vi.fn(),
   deleteCache: vi.fn(),
   fetchModels: vi.fn(),
+  forkSession: vi.fn(),
+  compactSession: vi.fn(),
+  getSessionStatus: vi.fn(),
   mergeServerAndCache: (s: any[], c: any[], d?: string[]) =>
     [...(s || []), ...(c || [])].filter(m => !m?.live && !(d || []).includes(m?.id)),
 }))
@@ -31,6 +34,9 @@ vi.mock('@/api/sessions', () => ({
   revertSession: mocks.revertSession,
   deleteSessionMessage: mocks.deleteSessionMessage,
   updateSession: vi.fn(),
+  forkSession: mocks.forkSession,
+  compactSession: mocks.compactSession,
+  getSessionStatus: mocks.getSessionStatus,
 }))
 vi.mock('@/api/models', () => ({
   fetchModels: mocks.fetchModels,
@@ -315,6 +321,20 @@ describe('会话加载', () => {
     expect(serverMsg?.files_changed).toEqual([{ file: 'docs/a.md', status: 'modified', additions: 5, deletions: 2 }])
   })
 
+  it('[C8] 回放映射 plan_path（历史消息也要有「查看计划」入口）', async () => {
+    mocks.getConversation.mockResolvedValue({
+      id: 'c9', title: '标题', directory: '/work',
+      messages: [{
+        id: 'm9', role: 'assistant', content: '## 实施计划', agents: [], files: [],
+        plan_path: 'backend/data/plans/c9/plan.md',
+      }],
+    })
+    mocks.loadCache.mockResolvedValue({ messages: [], deletedIds: [] })
+    const store = useMultiAgentStore()
+    await store.loadConversation('c9')
+    expect(store.messages.find(m => m.id === 'm9')?.plan_path).toBe('backend/data/plans/c9/plan.md')
+  })
+
   it('[撤回改动] 回放映射 snapshot_restored → snapshotRestored', async () => {
     mocks.getConversation.mockResolvedValue({
       id: 'c2', title: '标题', directory: '/work',
@@ -479,6 +499,35 @@ describe('partial_error 事件（plan→build 部分失败）', () => {
     const assistant = store.messages.find(m => m.role === 'assistant')
     expect(assistant?.content).toContain('## 实施计划')
     expect(assistant?.isError).toBe(true)
+    // [C8] 同时落到消息字段，历史回放不必从正文里反解析
+    expect(assistant?.partial_error).toBe('执行失败')
+  })
+})
+
+describe('plan_path 事件（C8 计划文件展示）', () => {
+  it('done 带 plan_path 时附加到 assistant 消息', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({
+        type: 'done',
+        conversation_id: 'c1',
+        answer: '## 实施计划\n步骤一',
+        plan_path: 'backend/data/plans/c1/plan.md',
+      }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('先规划')
+    const assistant = store.messages.find(m => m.role === 'assistant')
+    expect(assistant?.plan_path).toBe('backend/data/plans/c1/plan.md')
+  })
+
+  it('done 无 plan_path 时不设置该字段（不产生空入口）', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'done', conversation_id: 'c1', answer: 'ok' }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('hi')
+    const assistant = store.messages.find(m => m.role === 'assistant')
+    expect(assistant?.plan_path).toBeUndefined()
   })
 })
 
@@ -592,5 +641,54 @@ describe('model config 前端缓存（启动加载 + 离线兜底）', () => {
     expect(loadModelCache()).toBeNull()
     localStorage.setItem('agentsuper:model-config-cache:v1', JSON.stringify({ foo: 1 }))
     expect(loadModelCache()).toBeNull()
+  })
+})
+
+// [D1/D2] 此前无人调用的 fork / compact / status 路由接进 store 后的行为
+describe('会话运维操作（fork / compact / status）', () => {
+  beforeEach(() => {
+    mocks.listConversations.mockResolvedValue([])
+    mocks.forkSession.mockReset()
+    mocks.compactSession.mockReset()
+    mocks.getSessionStatus.mockReset()
+  })
+
+  it('forkConversation 返回新会话 id 并刷新列表', async () => {
+    mocks.forkSession.mockResolvedValue({ id: 'ses_fork' })
+    const store = useMultiAgentStore()
+    expect(await store.forkConversation('ses_a')).toBe('ses_fork')
+    expect(mocks.forkSession).toHaveBeenCalledWith('ses_a', undefined)
+    expect(mocks.listConversations).toHaveBeenCalled()
+  })
+
+  it('fork 失败 → 返回 null 并提示', async () => {
+    mocks.forkSession.mockRejectedValue(new Error('boom'))
+    const store = useMultiAgentStore()
+    expect(await store.forkConversation('ses_a')).toBeNull()
+    expect(store.notice).toBe('分叉会话失败')
+  })
+
+  it('compactConversation 用服务端 id 调用并刷新列表', async () => {
+    mocks.compactSession.mockResolvedValue(undefined)
+    const store = useMultiAgentStore()
+    store.sessions['local1'] = { messages: [], conversationId: 'ses_server' } as any
+    expect(await store.compactConversation('local1')).toBe(true)
+    expect(mocks.compactSession).toHaveBeenCalledWith('ses_server')
+    expect(store.notice).toBe('已压缩上下文')
+  })
+
+  it('compact 失败 → false', async () => {
+    mocks.compactSession.mockRejectedValue(new Error('nope'))
+    const store = useMultiAgentStore()
+    expect(await store.compactConversation('ses_a')).toBe(false)
+    expect(store.notice).toBe('压缩失败')
+  })
+
+  it('fetchSessionStatus 透传服务端状态；异常 → null', async () => {
+    mocks.getSessionStatus.mockResolvedValue({ session_id: 'ses_a', status: 'running' })
+    const store = useMultiAgentStore()
+    expect(await store.fetchSessionStatus('ses_a')).toEqual({ session_id: 'ses_a', status: 'running' })
+    mocks.getSessionStatus.mockRejectedValue(new Error('500'))
+    expect(await store.fetchSessionStatus('ses_a')).toBeNull()
   })
 })

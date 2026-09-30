@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""多 Agent 并发处理单问题的快速回归用例（离线，无需 LLM/知识库）。
+"""AgentBus 层并发 + 分级超时的离线回归（无需 LLM/知识库）。
 
-壁钟计时证明「并发」而非「串行」：真实 AgentBus + 事件循环 + 会真实 sleep
-的假子 Agent。单例耗时 ~2.5s，阈值取 2×max_delay 为并行的上界（串行会是
-3×max_delay，分离度足够，避免 CI 抖动误报）。
+[C4] 原文件同时覆盖 supervisor 的并行 fan-out（`_execute_parallel` /
+`_synthesize` / 多子任务错误隔离），这些实现已删除 —— fan-out 恒不可达。
+保留并改写的是**仍然有效**的两类保障：
+  1. 总线层并发：多个 Agent 各自真实 sleep，并发总耗时 ≈ 单个 delay
+  2. 分级超时：silent Agent 超时 + 一次宽限 → 错误按期交付，不悬挂整个请求
 
 对应可执行脚本注意它的长延时版：scripts/test_multi_agent_parallel.py
 """
@@ -12,7 +14,6 @@ import time
 
 from app.agent.base import BaseAgent, AgentMessage
 from app.agent.bus import AgentBus
-from app.agent.supervisor import SupervisorAgent
 
 
 class _FakeSubAgent(BaseAgent):
@@ -50,66 +51,13 @@ class _FakeSubAgent(BaseAgent):
         )
 
 
-class _TestSupervisor(SupervisorAgent):
-    """离线 supervisor：固定 `_decompose` 输出 + 无 LLM `_synthesize`，可收紧超时。"""
-
-    def __init__(self, bus, subtasks=None, timeout_override=None):
-        super().__init__(bus)
-        self._forced_subtasks = subtasks
-        self._timeout_override = timeout_override
-        self.synthesize_called = False
-
-    async def _decompose(self, question):
-        if self._forced_subtasks is not None:
-            return [dict(s) for s in self._forced_subtasks]
-        return await super()._decompose(question)
-
-    async def _synthesize(self, question, results):
-        self.synthesize_called = True
-        return "并行汇总：\n" + "\n".join(f"- [{r['agent']}] {r['answer']}" for r in results)
-
-    def _timeout_for(self, agent_id):
-        return self._timeout_override if self._timeout_override is not None else super()._timeout_for(agent_id)
-
-
-async def _drive(spv: _TestSupervisor) -> list:
-    msg = AgentMessage(type="request", action="chat",
-                       payload={"question": "对比 A/B/C 三套实现方案，检索资料并产出文档"},
-                       source="user", target="supervisor", thread_id="t-main")
-    return [r async for r in spv.handle_message(msg)]
-
-
-async def _run(subtasks, agents: dict, timeout_override=None, direct=False):
-    """起总线+子 Agent 循环 → 驱动 supervisor bootstrap 一个请求 → 清理。
-
-    direct=True 时直接调 `_execute_parallel`（绕过 handle_message 的顶层白名单过滤，
-    以便用任意 agent 名测并发机制本身）。
-    """
-    bus = AgentBus()
-    for a in agents.values():
-        bus.register(a)
-    bus.start_all()
-    spv = _TestSupervisor(bus, subtasks=subtasks, timeout_override=timeout_override)
-    try:
-        start = time.perf_counter()
-        if direct:
-            reply = await spv._execute_parallel(subtasks, {"question": "q"}, "t-main")
-            replies = [reply]
-        else:
-            replies = await _drive(spv)
-        return spv, agents, replies, time.perf_counter() - start
-    finally:
-        bus.stop_all()
-        await asyncio.sleep(0.02)
-
-
 def _start_gap(agents: dict) -> float:
     starts = [a.started_at for a in agents.values() if a.started_at]
     return (max(starts) - min(starts)) if starts else 99.0
 
 
 async def test_bus_level_concurrency():
-    """3 个独立事件循环的 Agent 同时各睡 0.3s → 总耗时 ~0.3s（串行应 ≈0.9s）。"""
+    """3 个 Agent 同时各睡 0.3s → 总耗时 ~0.3s（串行应 ≈0.9s）。"""
     agents = {
         "rag": _FakeSubAgent("rag", 0.3, "KB 答案"),
         "web_search": _FakeSubAgent("web_search", 0.3, "网络答案"),
@@ -121,7 +69,7 @@ async def test_bus_level_concurrency():
     bus.start_all()
     try:
         start = time.perf_counter()
-        await asyncio.gather(*[
+        results = await asyncio.gather(*[
             bus.send_and_wait(
                 AgentMessage(type="request", action="chat", payload={"question": f"Q{i}"},
                              source="user", target=aid, thread_id=f"bus-{i}"),
@@ -135,91 +83,74 @@ async def test_bus_level_concurrency():
 
     assert 0.25 < elapsed < 0.6, f"总耗时 {elapsed:.2f}s（并行应≈0.3s，串行应≈0.9s）"
     assert _start_gap(agents) < 0.3, "三个 Agent 未同时开始执行"
+    assert {r.payload["answer"] for r in results} == {"KB 答案", "网络答案", "代码答案"}
 
 
-async def test_supervisor_parallel_fanout():
-    """supervisor 分解→_execute_parallel：3 子任务并行且起始时刻互相重叠。"""
-    agents = {
-        "build": _FakeSubAgent("build", 0.3, "主答案"),
-        "explore": _FakeSubAgent("explore", 0.3, "探索答案"),
-        "plan": _FakeSubAgent("plan", 0.3, "规划答案"),
-    }
-    spv, _, replies, elapsed = await _run(
-        [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
-         {"agent": "plan", "question": "Q3"}], agents, direct=True)
-
-    reply = replies[0]
-    assert reply.type == "response"
-    assert reply.payload["routed_to"] == "build+explore+plan"
-    assert spv.synthesize_called
-    assert "并行汇总" in reply.payload["answer"]
-    assert 0.25 < elapsed < 0.6, f"总耗时 {elapsed:.2f}s（并行应≈0.3s，串行应≈0.9s）"
-    assert _start_gap(agents) < 0.3
-
-
-async def test_error_isolation():
-    """build 成功、explore 业务失败、plan 崩溃 → 其余不受影响仍产出答案。"""
+async def test_error_isolation_at_bus_level():
+    """一个 Agent 业务失败 / 一个崩溃 → 其余不受影响，仍各自拿到答案。"""
     agents = {
         "build": _FakeSubAgent("build", 0.2, "KB 答案"),
         "explore": _FakeSubAgent("explore", 0.2, "", outcome="error"),
         "plan": _FakeSubAgent("plan", 0.2, "", outcome="raise"),
     }
-    spv, _, replies, elapsed = await _run(
-        [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
-         {"agent": "plan", "question": "Q3"}], agents)
+    bus = AgentBus()
+    for a in agents.values():
+        bus.register(a)
+    bus.start_all()
+    try:
+        replies = await asyncio.gather(*[
+            bus.send_and_wait(
+                AgentMessage(type="request", action="chat", payload={"question": f"Q{i}"},
+                             source="user", target=aid, thread_id=f"bus-{i}"),
+                timeout=5,
+            ) for i, aid in enumerate(agents)
+        ], return_exceptions=True)
+    finally:
+        bus.stop_all()
+        await asyncio.sleep(0.02)
 
-    reply = replies[0]
-    assert reply.type == "response"
-    assert reply.payload["routed_to"] == "build"
-    assert reply.payload["answer"] == "KB 答案"
-    assert not spv.synthesize_called
-    assert elapsed < 0.6
-
-
-async def test_partial_failure_note():
-    """2 成功 + 1 失败 → 多结果汇总且带 ⚠️ 部分 Agent 执行出错 说明。"""
-    agents = {
-        "build": _FakeSubAgent("build", 0.2, "主答案"),
-        "explore": _FakeSubAgent("explore", 0.2, "探索答案"),
-        "plan": _FakeSubAgent("plan", 0.2, "", outcome="error"),
-    }
-    spv, _, replies, _ = await _run(
-        [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
-         {"agent": "plan", "question": "Q3"}], agents, direct=True)
-
-    reply = replies[0]
-    assert reply.payload["routed_to"] == "build+explore"
-    assert spv.synthesize_called
-    assert "⚠️ 部分 Agent 执行出错" in reply.payload["answer"]
-    assert "explore" in reply.payload["answer"] and "plan" in reply.payload["answer"]
+    by_target = {r.source: r for r in replies if not isinstance(r, BaseException)}
+    assert by_target["build"].payload["answer"] == "KB 答案"
+    # 崩溃与业务失败都归一为 error 消息交付（不裸抛、不污染其余 Agent）
+    assert by_target["explore"].type == "error"
+    assert "业务失败" in by_target["explore"].payload["error"]
+    assert by_target["plan"].type == "error"
+    assert "crashed" in by_target["plan"].payload["error"]
 
 
 async def test_graded_timeout_no_hang():
-    """不回复的 silent Agent：0.4s 超时 + 一次 0.4s 宽限 → 错误交付，不悬挂整个请求。"""
-    agents = {
-        "build": _FakeSubAgent("build", 0.2, "主答案"),
-        "explore": _FakeSubAgent("explore", 0.2, "探索答案"),
-        "plan": _FakeSubAgent("plan", 30, "", outcome="silent"),
-    }
-    _, _, replies, elapsed = await _run(
-        [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"},
-         {"agent": "plan", "question": "Q3"}], agents, timeout_override=0.4, direct=True)
+    """silent Agent：0.4s 超时 + 一次 0.4s 宽限 → 错误按期交付，不悬挂整个请求。"""
+    silent = _FakeSubAgent("silent", 30, "", outcome="silent")
+    fast = _FakeSubAgent("fast", 0.2, "主答案")
+    bus = AgentBus()
+    bus.register(silent)
+    bus.register(fast)
+    bus.start_all()
+    try:
+        start = time.perf_counter()
+        replies = await asyncio.gather(
+            bus.send_and_wait(
+                AgentMessage(type="request", action="chat", payload={"question": "Q1"},
+                             source="user", target="silent", thread_id="b1"),
+                timeout=0.4,
+            ),
+            bus.send_and_wait(
+                AgentMessage(type="request", action="chat", payload={"question": "Q2"},
+                             source="user", target="fast", thread_id="b2"),
+                timeout=0.4,
+            ),
+            return_exceptions=True,
+        )
+        elapsed = time.perf_counter() - start
+    finally:
+        bus.stop_all()
+        await asyncio.sleep(0.02)
 
-    reply = replies[0]
-    assert reply.type == "response"
-    assert "did not respond in time" in reply.payload["answer"]
-    assert "⚠️" in reply.payload["answer"] and "plan" in reply.payload["answer"]
-    assert elapsed < 2.2, f"超时路径总耗时 {elapsed:.2f}s（应≈1.0s：0.4s 超时 + 0.4s 宽限）"
-
-
-async def test_single_subtask_direct_route():
-    """只拆出 1 个子任务 → 直接路由该 Agent，不调用 _synthesize。"""
-    agents = {"build": _FakeSubAgent("build", 0.2, "单一答案")}
-    spv, _, replies, _ = await _run(
-        [{"agent": "build", "question": "只拆出一个"}], agents)
-
-    reply = replies[0]
-    assert reply.type == "response"
-    assert reply.payload["routed_to"] == "build"
-    assert reply.payload["answer"] == "单一答案"
-    assert not spv.synthesize_called
+    silent_reply, fast_reply = replies
+    # [C9] 超时以异常交付（消息含真实最坏等待），调用方据此归一成中文错误
+    assert isinstance(silent_reply, asyncio.TimeoutError)
+    assert "No reply from 'silent' within 0.4s" in str(silent_reply)
+    assert "max_with_grace=1s" in str(silent_reply)  # 0.4s + 一次 0.4s 宽限，而非翻倍到 0.8s 超时值
+    assert not isinstance(fast_reply, BaseException)
+    assert fast_reply.payload["answer"] == "主答案"
+    assert elapsed < 2.0, f"超时路径总耗时 {elapsed:.2f}s（应≈0.8s：0.4s 超时 + 一次 ≤0.4s 宽限）"

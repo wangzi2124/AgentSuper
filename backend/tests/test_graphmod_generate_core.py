@@ -795,33 +795,42 @@ async def test_generate_empty_answer_falls_back_to_default_model(gen_env, monkey
 
 
 @pytest.mark.asyncio
-async def test_generate_weak_model_two_stage_summary(gen_env, monkeypatch):
-    """[两段式·强兜底] 弱模型跑完工具轮后，最终回答交给强模型基于工具记录收尾（不等它失败）。"""
-    monkeypatch.setattr(settings, "weak_model_two_stage", True)
-    monkeypatch.setattr(settings, "weak_model_strong_fallback", True)
+async def test_weak_model_never_enters_tool_loop(gen_env, monkeypatch):
+    """[C5] 弱模型 tool-free 纯 QA —— 永不进入工具循环（这正是旧 two-stage 分支不可达的原因）。
+
+    旧实现有一个「工具轮之后把记录交给强模型统一收尾」的两段式分支，其门控含 `rounds > 0`
+    且要求 `is_weak_model(model)`。因弱模型 `_build_tool_defs` 返回 None（不挂工具），
+    rounds 恒为 0 → 该分支对一切弱模型恒不可达，已随 WEAK_MODEL_TWO_STAGE 一并删除。
+    """
     monkeypatch.setattr(settings, "empty_answer_retry", True)
-    monkeypatch.setattr(settings, "empty_answer_fallback_model", True)
-    monkeypatch.setattr(settings, "empty_answer_fallback_model_name", "")
     import app.models.catalog as catalog_mod
     monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
 
     async def spy(name, args, state=None):
         return "文件内容是 print(1)"
     agent, llm = _setup_generate(gen_env, [
-        FakeLLM().response(tool_calls=[("tool_read_file", '{"path": "main.py"}')]),  # 弱模型调工具
-        FakeLLM().response(content="{}"),                                            # 弱模型收尾（垃圾）
-        FakeLLM().response(content="main.py 第一行是 print(1)。"),                    # 强模型两段式收尾
+        # 模型即便无视「无工具」而硬吐 tool_call 标记，也拿不到任何 tool_defs
+        FakeLLM().response(content="main.py 第一行是 print(1)。"),
     ], exec_spy=spy)
     state = make_state()
     state["model"] = "ollama/qwen2.5:3b"
     out = await agent._generate(state)
+
+    # 只 1 次调用、0 次工具执行 → rounds 恒 0
+    assert len(llm.calls) == 1
+    assert llm.calls[0][2] is None, "弱模型不应挂载任何工具 schema"
     assert out["answer"] == "main.py 第一行是 print(1)。"
-    assert len(llm.calls) == 3
-    strong_model, msgs, tool_defs = llm.calls[2]
-    assert strong_model == "deepseek/deepseek-v4-flash"
-    assert tool_defs is None
-    assert "tool_read_file" in msgs[-1]["content"]
-    assert "print(1)" in msgs[-1]["content"]
+    # 且不存在「跑完工具轮后交给强模型收尾」的第二次调用
+    assert all(c[0] != "deepseek/deepseek-v4-flash" for c in llm.calls)
+
+
+def test_weak_model_two_stage_config_removed():
+    """[C5] WEAK_MODEL_TWO_STAGE 及其实现已删除，避免后人照着文档/注释复活死代码。"""
+    from app.config import Settings
+    assert not hasattr(Settings, "weak_model_two_stage"), "WEAK_MODEL_TWO_STAGE 应已删除"
+    import app.agent.graphmod.generate as gen
+    assert not hasattr(gen, "_build_tool_transcript"), "_build_tool_transcript 应已删除"
+    assert not hasattr(gen.RAGAgentGenerate, "_summarize_tool_transcript"), "_summarize_tool_transcript 应已删除"
 
 
 @pytest.mark.asyncio
@@ -860,66 +869,12 @@ async def test_generate_weak_model_invalid_hints_switch(gen_env, monkeypatch):
     assert all(c[0] != "deepseek/deepseek-v4-flash" for c in llm.calls)
 
 
-@pytest.mark.asyncio
-async def test_generate_weak_model_tool_rounds_invalid_hints_switch(gen_env, monkeypatch):
-    """[默认·不兜底] 弱模型调用工具后收尾仍无效：跳过两段式强模型收尾，直接提示切换更强模型。"""
-    monkeypatch.setattr(settings, "weak_model_two_stage", True)  # 即使两段式开启，强兜底关闭则不触发
-    monkeypatch.setattr(settings, "empty_answer_retry", True)
-    import app.models.catalog as catalog_mod
-    monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
-
-    async def spy(name, args, state=None):
-        return "文件内容是 print(1)"
-    agent, llm = _setup_generate(gen_env, [
-        FakeLLM().response(tool_calls=[("tool_read_file", '{"path": "main.py"}')]),  # 弱模型调工具
-        FakeLLM().response(content="{}"),                                            # 弱模型收尾（无效）
-    ], exec_spy=spy)
-    state = make_state()
-    state["model"] = "ollama/qwen2.5:3b"
-    out = await agent._generate(state)
-    assert "切换" in out["answer"] and "更强" in out["answer"]
-    assert len(llm.calls) == 2
-    assert all(c[0] != "deepseek/deepseek-v4-flash" for c in llm.calls)
-
-
 def test_is_weak_model():
     from app.agent.graphmod.base import is_weak_model
     assert is_weak_model("ollama/qwen2.5:3b") is True
     assert is_weak_model("ollama/mistral:latest") is True
     assert is_weak_model("deepseek/deepseek-v4-flash") is False
     assert is_weak_model("") is False
-
-
-def test_build_tool_transcript():
-    from app.agent.graphmod.generate import _build_tool_transcript
-    messages = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "读取 main.py"},
-        {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "c1", "type": "function", "function": {"name": "tool_read_file", "arguments": '{"path": "main.py"}'}},
-        ]},
-        {"role": "tool", "tool_call_id": "c1", "tool_name": "tool_read_file", "content": "print(1)"},
-        {"role": "assistant", "content": "{}"},
-    ]
-    t = _build_tool_transcript(messages, "读取 main.py")
-    assert "用户问题：读取 main.py" in t
-    assert "[工具调用] tool_read_file" in t
-    assert "[工具结果] print(1)" in t
-    # 弱模型自己的不可靠收尾（{}）不应进入 transcript
-    assert "{}" not in t
-
-
-def test_build_tool_transcript_truncates():
-    from app.agent.graphmod.generate import _build_tool_transcript
-    messages = [
-        {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "c1", "type": "function", "function": {"name": "tool_x", "arguments": "{}"}},
-        ]},
-        {"role": "tool", "tool_call_id": "c1", "tool_name": "tool_x", "content": "A" * 50000},
-    ]
-    t = _build_tool_transcript(messages, "q", max_chars=500)
-    assert len(t) <= 520
-    assert "已截断" in t
 
 
 @pytest.mark.asyncio

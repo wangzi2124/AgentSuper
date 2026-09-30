@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""supermod base/core/decompose/parallel 剩余分支用例（mock LLM/bus）。
+"""supermod base/core/decompose 剩余分支用例（mock LLM/bus）。
+
+[C4] `parallel` 切片已删除（并行分解恒不可达），相应用例一并移除；
+    `_llm_decompose` / `_validate_subtasks` 亦已删除，故不再 monkeypatch 它们。
 
 覆盖：
   - base：_timeout_for 分级、_start_heartbeat 心跳 touch 与取消
-  - core：handle_message 全分支（非 request/未知动作/单子任务路由/多子任务并行/
-    白名单过滤回退 rag/心跳收尾）、_route_to（response/error/unexpected/超时/异常）
-  - decompose：_decompose 关键词路由/多意图 LLM/寒暄/短问题、_llm_decompose
-    （合法/非法重试/双失败回退 rag/用量汇总）
-  - parallel：_execute_parallel（单成功/多成功/error/超时/异常/用量汇总）、
-    _synthesize（截断/失败回退）
+  - core：handle_message 全分支（非 request/未知动作/单子任务路由/
+    白名单过滤回退 build/心跳收尾）、_route_to（response/error/unexpected/超时/异常）
+  - decompose：_decompose 关键词路由（plan/寒暄/其余 build，恒返回单个子任务）
 运行：pytest tests/test_supermod_extra.py
 """
 import asyncio
@@ -22,10 +22,9 @@ if __package__ in (None, ""):
 import pytest
 
 import app.agent.supermod.decompose as dec
-import app.agent.supermod.parallel as par
 from app.agent.base import AgentMessage
 from app.agent.bus import AgentBus
-from app.agent.supermod.parallel import SupervisorAgent
+from app.agent.supermod.decompose import SupervisorAgent
 from app.config import settings
 
 
@@ -95,8 +94,7 @@ async def test_heartbeat_touches_and_cancels(agent):
 # ── decompose ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_decompose_keyword_single(agent, monkeypatch):
-    monkeypatch.setattr(agent, "_llm_decompose", lambda q, a: (_ for _ in ()).throw(AssertionError("不应调用 LLM")))
+async def test_decompose_keyword_single(agent):
     # kb/code/web 关键词都合并到 build（单一默认主 Agent）
     assert await agent._decompose("帮我找文档里的情节") == [{"agent": "build", "question": "帮我找文档里的情节"}]
     assert await agent._decompose("写一个 python 函数") == [{"agent": "build", "question": "写一个 python 函数"}]
@@ -104,9 +102,8 @@ async def test_decompose_keyword_single(agent, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_decompose_explore_intent_goes_build(agent, monkeypatch):
+async def test_decompose_explore_intent_goes_build(agent):
     """顶层只有 build/plan：探索意图不再路由 explore（explore 由 build 委派），统一走 build。"""
-    monkeypatch.setattr(agent, "_llm_decompose", lambda q, a: (_ for _ in ()).throw(AssertionError("不应调用 LLM")))
     assert await agent._decompose("帮我看看这个项目的目录结构") == \
         [{"agent": "build", "question": "帮我看看这个项目的目录结构"}]
     assert await agent._decompose("后端代码库有哪些文件") == \
@@ -114,9 +111,8 @@ async def test_decompose_explore_intent_goes_build(agent, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_decompose_plan_intent(agent, monkeypatch):
+async def test_decompose_plan_intent(agent):
     """规划/出方案意图走 plan（真实数据回归：'设计一个实施方案'曾漏配关键词→错投 build）。"""
-    monkeypatch.setattr(agent, "_llm_decompose", lambda q, a: (_ for _ in ()).throw(AssertionError("不应调用 LLM")))
     for q in (
         "请为『给 /api/monitor/stats 增加实时推送能力』设计一个实施方案",
         "给上传功能做一个方案",
@@ -127,93 +123,30 @@ async def test_decompose_plan_intent(agent, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_decompose_no_llm_split_anymore(agent, monkeypatch):
+async def test_decompose_no_llm_split_anymore(agent):
     """build 已合并全部能力，默认不再逐请求 LLM 拆子 Agent。"""
-    called = []
-
-    async def fake_llm(q, a):
-        called.append((q, a))
-        return [{"agent": "build", "question": q}]
-    monkeypatch.setattr(agent, "_llm_decompose", fake_llm)
     assert await agent._decompose("帮我写代码并搜索新闻") == \
         [{"agent": "build", "question": "帮我写代码并搜索新闻"}]
-    assert not called
 
 
 @pytest.mark.asyncio
-async def test_decompose_greeting_short(agent, monkeypatch):
-    monkeypatch.setattr(agent, "_llm_decompose", lambda q, a: (_ for _ in ()).throw(AssertionError("不应调用 LLM")))
+async def test_decompose_greeting_short(agent):
     assert await agent._decompose("你好") == [{"agent": "build", "question": "你好"}]
     assert agent._is_greeting("你好呀") is True
 
 
 @pytest.mark.asyncio
-async def test_decompose_short_non_greeting_goes_build(agent, monkeypatch):
-    called = []
-
-    async def fake_llm(q, a):
-        called.append(q)
-        return [{"agent": "build", "question": q}]
-    monkeypatch.setattr(agent, "_llm_decompose", fake_llm)
+async def test_decompose_short_non_greeting_goes_build(agent):
     assert await agent._decompose("写个爬虫") == [{"agent": "build", "question": "写个爬虫"}]
-    assert not called
 
 
 @pytest.mark.asyncio
-async def test_llm_decompose_valid(agent, monkeypatch):
-    async def fake_acompletion(**kw):
-        return SimpleNamespace(
-            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
-            choices=[SimpleNamespace(message=SimpleNamespace(
-                content='[{"agent": "build", "question": "q1"}, {"agent": "plan", "question": "q2"}]'))],
-        )
-    monkeypatch.setattr(dec.litellm, "acompletion", fake_acompletion)
-    agent._usage = {"input": 0, "output": 0}
-    out = await agent._llm_decompose("问题", ["build", "plan"])
-    assert [s["agent"] for s in out] == ["build", "plan"]
-    assert agent._usage["input"] == 10 and agent._usage["output"] == 5
-
-
-@pytest.mark.asyncio
-async def test_llm_decompose_retry_then_valid(agent, monkeypatch):
-    responses = [
-        SimpleNamespace(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
-                        choices=[SimpleNamespace(message=SimpleNamespace(content="not json"))]),
-        SimpleNamespace(usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
-                        choices=[SimpleNamespace(message=SimpleNamespace(content='[{"agent": "build", "question": "ok"}]'))]),
-    ]
-    async def fake_acompletion(**kw):
-        return responses.pop(0)
-    monkeypatch.setattr(dec.litellm, "acompletion", fake_acompletion)
-    agent._usage = {"input": 0, "output": 0}
-    out = await agent._llm_decompose("问题", ["build"])
-    assert out == [{"agent": "build", "question": "ok"}]
-
-
-@pytest.mark.asyncio
-async def test_llm_decompose_fallback_build(agent, monkeypatch):
-    async def boom(**kw):
-        raise RuntimeError("provider down")
-    monkeypatch.setattr(dec.litellm, "acompletion", boom)
-    agent._usage = {"input": 0, "output": 0}
-    out = await agent._llm_decompose("问题", [])
-    assert out == [{"agent": "build", "question": "问题"}]
-
-
-def test_validate_subtasks():
-    assert SupervisorAgent._validate_subtasks("nope", ["build"]) == []
-    assert SupervisorAgent._validate_subtasks([{"agent": "supervisor", "question": "x"}], ["build"]) == []
-    assert SupervisorAgent._validate_subtasks([
-        {"agent": "build", "question": "  q1  "},
-        {"agent": "evil", "question": "q2"},
-        "not-dict",
-        {"agent": "explore", "question": "q3"},
-        {"agent": "plan", "question": "q4"},
-    ], ["build", "explore", "plan"]) == [
-        {"agent": "build", "question": "q1"},
-        {"agent": "explore", "question": "q3"},
-        {"agent": "plan", "question": "q4"},
-    ]  # 白名单过滤 + 最多 3 个
+async def test_decompose_returns_single_subtask_always(agent):
+    """[C4] 恒返回单个子任务 —— 并行分支不可达的根因，改动此处必须同步回归。"""
+    for q in ("帮我查资料然后顺便改改代码", "先规划再执行这个重构", "随便聊聊", "run the tests"):
+        out = await agent._decompose(q)
+        assert len(out) == 1, f"_decompose({q!r}) -> {out}"
+        assert out[0]["question"] == q
 
 
 # ── core handle_message ────────────────────────────────────────────────────
@@ -244,16 +177,22 @@ async def test_handle_single_route(agent, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_multi_parallel(agent, monkeypatch):
-    async def fake_parallel(subtasks, payload, tid):
-        return AgentMessage(source="supervisor", target="user", type="response", action="chat",
-                            payload={"answer": "P", "routed_to": "build+plan"}, thread_id=tid)
+async def test_handle_multi_subtasks_uses_first(agent, monkeypatch):
+    """[C4] supervisor 不再 fan-out：即便 `_decompose` 返回多个，也只路由第一个
+    （真机恒返回 1 个；此处是防御性契约，确保并行分支不会复活）。"""
+    seen = []
+
+    async def fake_route(target, payload, tid):
+        seen.append(target)
+        yield AgentMessage(source="supervisor", target="user", type="response", action="chat",
+                           payload={"answer": "A", "routed_to": target}, thread_id=tid)
     async def fake_decompose(q):
         return [{"agent": "build", "question": "a"}, {"agent": "plan", "question": "b"}]
     monkeypatch.setattr(agent, "_decompose", fake_decompose)
-    monkeypatch.setattr(agent, "_execute_parallel", fake_parallel)
+    monkeypatch.setattr(agent, "_route_to", fake_route)
     replies = await _collect(agent, _msg(payload={"question": "q"}))
-    assert replies[0].payload["routed_to"] == "build+plan"
+    assert seen == ["build"]
+    assert replies[0].payload["routed_to"] == "build"
 
 
 @pytest.mark.asyncio
@@ -321,96 +260,6 @@ async def test_route_to_exception(agent):
     agent._bus.send_and_wait = boom
     replies = [r async for r in agent._route_to("build", {}, "t1")]
     assert replies[0].payload["error_type"] == "sub_agent_error"
-
-
-# ── parallel ───────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_execute_parallel_single(agent):
-    agent._bus.reply = _reply(payload={"answer": "A", "tokens": {"input": 1}})
-    agent._usage = {"input": 0, "output": 0}
-    msg = await agent._execute_parallel([{"agent": "build", "question": "q"}], {"question": "q"}, "t1")
-    assert msg.payload["routed_to"] == "build"
-    assert msg.payload["answer"] == "A"
-
-
-@pytest.mark.asyncio
-async def test_execute_parallel_multi_synthesize(agent, monkeypatch):
-    async def fake_synth(question, results):
-        return "合成"
-    monkeypatch.setattr(agent, "_synthesize", fake_synth)
-    agent._bus.reply = _reply(payload={"answer": "X", "sources": [{"document_id": "d"}]})
-    agent._usage = {"input": 0, "output": 0}
-    msg = await agent._execute_parallel(
-        [{"agent": "build", "question": "a"}, {"agent": "explore", "question": "b"}],
-        {"question": "q"}, "t1",
-    )
-    assert msg.payload["routed_to"] == "build+explore"
-    assert "合成" in msg.payload["answer"]
-
-
-@pytest.mark.asyncio
-async def test_execute_parallel_error_and_timeout(agent):
-    replies = iter([
-        _reply(type="error", payload={"error": "sub failed", "completed_steps": ["s1"]}),
-    ])
-    async def fake_send(msg, timeout=None):
-        return next(replies)
-    agent._bus.send_and_wait = fake_send
-    agent._usage = {"input": 0, "output": 0}
-    msg = await agent._execute_parallel([{"agent": "build", "question": "a"}], {}, "t1")
-    assert "部分 Agent 执行出错" in msg.payload["answer"]
-    assert "[build] sub failed" in msg.payload["answer"]
-
-
-@pytest.mark.asyncio
-async def test_execute_parallel_timeout_error(agent):
-    async def boom(msg, timeout=None):
-        raise asyncio.TimeoutError()
-    agent._bus.send_and_wait = boom
-    agent._usage = {"input": 0, "output": 0}
-    msg = await agent._execute_parallel([{"agent": "build", "question": "a"}], {}, "t1")
-    assert "did not respond in time" in msg.payload["answer"]
-    # 已完成步骤随错误回传（suggestion 字段保留在结果 dict 中，未进汇总文案）
-    assert "已完成: 步骤1" in msg.payload["answer"]
-
-
-@pytest.mark.asyncio
-async def test_synthesize_empty_and_truncation(agent, monkeypatch):
-    assert await agent._synthesize("q", []) == "抱歉，所有 Agent 都未能返回结果。"
-    # 超长截断（mock LLM 避免真实调用；截断发生在发给 LLM 的 prompt 中）
-    seen = {}
-
-    async def fake_acompletion(**kw):
-        seen["messages"] = kw["messages"]
-        return SimpleNamespace(
-            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
-            choices=[SimpleNamespace(message=SimpleNamespace(content="合成"))],
-        )
-    monkeypatch.setattr(par.litellm, "acompletion", fake_acompletion)
-    r = {"agent": "build", "original_question": "x", "answer": "y" * 5000}
-    out = await agent._synthesize("q", [r])
-    assert "已截断" in seen["messages"][1]["content"]
-    assert out == "合成"
-
-
-@pytest.mark.asyncio
-async def test_synthesize_llm_and_fallback(agent, monkeypatch):
-    async def fake_acompletion(**kw):
-        return SimpleNamespace(
-            usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1),
-            choices=[SimpleNamespace(message=SimpleNamespace(content="  合成结果  "))],
-        )
-    monkeypatch.setattr(par.litellm, "acompletion", fake_acompletion)
-    agent._usage = {"input": 0, "output": 0}
-    out = await agent._synthesize("q", [{"agent": "build", "original_question": "a", "answer": "ans"}])
-    assert out == "合成结果"
-    # 失败回退
-    async def boom(**kw):
-        raise RuntimeError("llm down")
-    monkeypatch.setattr(par.litellm, "acompletion", boom)
-    out2 = await agent._synthesize("q", [{"agent": "build", "original_question": "a", "answer": "ans"}])
-    assert "以下是多个来源的信息汇总" in out2
 
 
 # ── plan→build 顺序交接（opencode build-switch 语义）──────────────────────────

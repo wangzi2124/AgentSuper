@@ -65,16 +65,6 @@ export interface RevertResult {
   messages: SessionMessage[]
 }
 
-interface SessionCreateBody {
-  project_id?: string
-  parent_id?: string
-  agent?: string
-  model?: SessionModelRef
-  kind?: string
-  title?: string
-  directory?: string
-}
-
 interface SessionUpdateBody {
   title?: string
   archived?: number
@@ -101,14 +91,8 @@ async function request<T>(path: string, init?: RequestInit, timeout = 10000): Pr
 }
 
 // ===== 会话 CRUD =====
-
-export async function createSession(body: SessionCreateBody): Promise<SessionInfo> {
-  return request<SessionInfo>(BASE, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  }, 10000)
-}
+// [D2] 不再导出 `createSession`：会话由后端在首条消息时自动创建（`chat.py:_resolve_multi_agent_parent`），
+// 前端只用客户端 genId 占位，故此包装函数无调用者。后端 `POST /api/sessions` 保留为编程/运维接口。
 
 export async function listSessions(opts?: {
   project_id?: string
@@ -181,12 +165,6 @@ export async function getSessionMessages(
   })}`, { method: 'GET' }, 15000)
 }
 
-export async function getSessionContext(sessionId: string): Promise<{ session_id: string; epoch?: unknown; history: unknown[] }> {
-  return request<{ session_id: string; epoch?: unknown; history: unknown[] }>(
-    `${BASE}/${encodeURIComponent(sessionId)}/context`, { method: 'GET' }, 10000,
-  )
-}
-
 export async function compactSession(sessionId: string, checkpoint?: string): Promise<void> {
   const res = await fetchWithTimeout(
     `${BASE}/${encodeURIComponent(sessionId)}/compact${qs({ checkpoint })}`,
@@ -232,9 +210,9 @@ export async function interruptSession(sessionId: string): Promise<void> {
   }
 }
 
-export async function getSessionChildren(sessionId: string): Promise<SessionInfo[]> {
-  return request<SessionInfo[]>(`${BASE}/${encodeURIComponent(sessionId)}/children`, { method: 'GET' }, 10000)
-}
+// [D2] `getSessionContext` / `getSessionChildren` / `createSession` 三个包装函数已删除（零调用者）。
+// 后端 `GET /{id}/context`、`GET /{id}/children`、`POST /api/sessions` 保留为编程/运维接口
+// （上下文 epoch 排障、子任务树排查、脚本化建会话），不再在前端暴露同名包装。
 
 export async function getSessionStatus(sessionId: string): Promise<SessionStatus> {
   return request<SessionStatus>(`${BASE}/${encodeURIComponent(sessionId)}/status`, { method: 'GET' }, 10000)

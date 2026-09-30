@@ -260,7 +260,7 @@ class PlanAgent(BaseAgent):
         log_prompt("plan_agent.generate_plan", messages, model=self._model)
 
         start = tmod.time()
-        from app.models.catalog import provider_config_hint
+        from app.models.catalog import provider_config_hint, resolve_max_output_tokens
         _hint = provider_config_hint(self._model)
         if _hint:
             raise RuntimeError(_hint)
@@ -269,7 +269,8 @@ class PlanAgent(BaseAgent):
             api_key=self._api_key,
             api_base=self._api_base,
             messages=messages,
-            max_tokens=settings.llm_max_tokens,
+            # [B6] 与主 Agent 同口径：模型声明的 limits.max_output_tokens 可收窄全局值
+            max_tokens=resolve_max_output_tokens(self._model, settings.llm_max_tokens),
             temperature=0.3,
             cache_prompt=True,
             **self._llm_extra,

@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
-"""SupervisorAgent 拆分锁定用例（A3 补全：supervisor.py → supermod/{constants,base,core,decompose,parallel}）。
+"""SupervisorAgent 拆分锁定用例（supervisor.py → supermod/{constants,base,core,decompose}）。
+
+[C4] `parallel` 切片已删除（`_execute_parallel` / `_synthesize` 恒不可达），
+    继承链由 4 级收敛为 3 级；末级 `SupervisorAgent` 迁到 `supermod/decompose.py`。
+    `DECOMPOSE_SYSTEM_PROMPT` / `SYNTHESIS_SYSTEM_PROMPT` / `SUB_RESULT_TRUNC`
+    与 `_llm_decompose` / `_validate_subtasks` 随并行分解一并删除。
 
 验证 OOTB 契约：
-  - facade 仍导出 SupervisorAgent / DECOMPOSE_SYSTEM_PROMPT / SYNTHESIS_SYSTEM_PROMPT / SUB_RESULT_TRUNC / logger
+  - facade 仍导出 SupervisorAgent / logger（并行相关的三个常量已随 C4 移除）
   - 继承切片 MRO：SupervisorAgent -> SupervisorAgentDecompose -> SupervisorAgentCore -> SupervisorAgentBase -> BaseAgent
-  - 跨块方法/类属性经 MRO 正确解析（_route_to/_decompose/_synthesize/_execute_parallel 等）
-  - 行为不变：_is_greeting / _validate_subtasks 白名单+上限 / _timeout_for 分级超时 /
-    _decompose 关键词快速路径 / _llm_decompose 失败回退 rag（两次尝试）
+  - 跨块方法/类属性经 MRO 正确解析（_route_to/_decompose/_is_greeting）
+  - 行为不变：_is_greeting / _timeout_for 分级超时 / _decompose 关键词快速路径（恒单子任务）
 运行：pytest tests/test_supervisor_agent.py
 """
 import asyncio
@@ -15,8 +19,6 @@ import sys
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__))))
-
-import litellm
 
 import app.agent.supervisor as sv
 from app.agent.base import AgentMessage
@@ -55,11 +57,11 @@ def _resp(answer="A", sources=None, tokens=None, is_error=False, error=""):
 
 
 def test_facade_exports_intact():
-    for name in ("SupervisorAgent", "DECOMPOSE_SYSTEM_PROMPT",
-                 "SYNTHESIS_SYSTEM_PROMPT", "SUB_RESULT_TRUNC", "logger"):
+    for name in ("SupervisorAgent", "logger"):
         assert hasattr(sv, name), name
-    assert sv.SUB_RESULT_TRUNC > 0
-    assert "build" in sv.DECOMPOSE_SYSTEM_PROMPT
+    # [C4] 并行分解相关的三个常量已删除
+    for gone in ("DECOMPOSE_SYSTEM_PROMPT", "SYNTHESIS_SYSTEM_PROMPT", "SUB_RESULT_TRUNC"):
+        assert not hasattr(sv, gone), gone
 
 
 def test_mro_chain_and_method_placement():
@@ -67,30 +69,15 @@ def test_mro_chain_and_method_placement():
     assert mro.index("SupervisorAgent") < mro.index("SupervisorAgentDecompose") < \
         mro.index("SupervisorAgentCore") < mro.index("SupervisorAgentBase") < \
         mro.index("BaseAgent")
-    for m in ("handle_message", "_route_to", "_decompose", "_is_greeting",
-              "_llm_decompose", "_validate_subtasks", "_execute_parallel", "_synthesize"):
+    for m in ("handle_message", "_route_to", "_decompose", "_is_greeting"):
         assert callable(getattr(SupervisorAgent, m)), m
+    # [C4] 并行/分解实现已移除
+    for gone in ("_llm_decompose", "_validate_subtasks",
+                 "_execute_parallel", "_synthesize"):
+        assert not hasattr(SupervisorAgent, gone), gone
     # 类属性经 MRO 可达（rag/code/web_search 已合并为 build）
     assert SupervisorAgent.ROUTABLE_AGENTS == {"build", "plan"}
     assert len(SupervisorAgent._GREETING_KEYWORDS)  # 非空
-
-
-def test_validate_subtasks_whitelist_and_cap():
-    routable = ["build", "explore"]
-    data = [
-        {"agent": "build", "question": "  Q1  "},
-        {"agent": "supervisor", "question": "self"},
-        {"agent": "code", "question": "not-routable"},
-        {"agent": "explore", "question": "Q2"},
-        {"agent": "build", "question": "Q3"},
-        {"agent": "build", "question": "Q4"},
-        None,
-        {"question": "no-agent"},
-    ]
-    got = SupervisorAgent._validate_subtasks(data, routable)
-    assert got == [{"agent": "build", "question": "Q1"},
-                   {"agent": "explore", "question": "Q2"},
-                   {"agent": "build", "question": "Q3"}]
 
 
 def test_is_greeting_and_timeout_for():
@@ -111,39 +98,19 @@ def test_decompose_keyword_fast_path():
         assert web_only == [{"agent": "build", "question": "查一下今天的最新新闻"}]
         greet_short = await ag._decompose("你好呀")
         assert greet_short == [{"agent": "build", "question": "你好呀"}]
+        plan_intent = await ag._decompose("请先出一个实施方案")
+        assert plan_intent == [{"agent": "plan", "question": "请先出一个实施方案"}]
 
     asyncio.run(main())
 
 
-def test_llm_decompose_fallback_to_build(monkeypatch):
-    async def boom(*args, **kwargs):
-        raise RuntimeError("llm unreachable")
-
-    monkeypatch.setattr(litellm, "acompletion", boom)
-
+def test_decompose_never_fans_out():
+    """[C4] supervisor 不做并行分解：恒返回单个子任务。"""
     async def main():
         ag = SupervisorAgent(_StubBus())
-        got = await ag._llm_decompose("一个足够复杂到必然走 LLM 的问题", ["build", "explore", "plan"])
-        assert got == [{"agent": "build", "question": "一个足够复杂到必然走 LLM 的问题"}]
-
-    asyncio.run(main())
-
-
-def test_execute_parallel_one_success_plus_error():
-    async def send(msg, timeout):
-        if msg.target == "explore":
-            return _resp(is_error=True, error="插件不可用")
-        return _resp(answer="知识库答案", sources=[{"t": "s1"}])
-
-    async def main():
-        ag = SupervisorAgent(_StubBus(send=send))
-        out = await ag._execute_parallel(
-            [{"agent": "build", "question": "Q1"}, {"agent": "explore", "question": "Q2"}],
-            {"question": "origin"}, "thr1",
-        )
-        assert out.type == "response"
-        assert out.payload["answer"] == "知识库答案"
-        assert out.payload["routed_to"] == "build"
+        for q in ("查资料顺便改代码", "先规划再执行", "写个函数", "跑一下测试"):
+            out = await ag._decompose(q)
+            assert len(out) == 1, f"_decompose({q!r}) -> {out}"
 
     asyncio.run(main())
 

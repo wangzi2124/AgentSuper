@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { MultiAgentMessage, AgentStep, AgentOutputPart } from '../types'
 import MarkdownContent from './MarkdownContent.vue'
 
@@ -10,6 +10,24 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ undo: []; restore: [] }>()
+
+// [C8] 计划文件路径：整块可点击（点一下即复制，便于粘到编辑器/资源管理器打开），
+// 浏览器无法直接打开后端本地文件，故用「点击复制 + 显式提示」而非伪链接
+// （href="file://" 在 http(s) 页面会被浏览器拦截）。navigator.clipboard 在非安全
+// 上下文可能不可用 → 降级为 prompt 让用户手动复制。
+const copied = ref(false)
+async function copyPlanPath(): Promise<void> {
+  const path = props.message.plan_path
+  if (!path) return
+  try {
+    await navigator.clipboard.writeText(path)
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 1500)
+  } catch {
+    copied.value = false
+    window.prompt('请复制计划文件路径：', path)
+  }
+}
 
 // 单 Agent 路由时，最终答案与 Agent 面板内容完全一致，
 // 再渲染一遍会造成"两条最终答案"的重复。仅在内容有新增信息时才展示。
@@ -134,6 +152,15 @@ function statusLabel(status: string): string {
     <!-- final answer -->
     <div v-if="showFinalAnswer" class="text"><MarkdownContent :text="message.content" /></div>
 
+    <!-- [C8] 计划文件（plan Agent 落盘产物）：点击路径即复制，便于在编辑器/资源管理器打开 -->
+    <div v-if="message.plan_path" class="plan-file" role="button" tabindex="0"
+         title="点击复制计划文件路径" @click="copyPlanPath" @keyup.enter="copyPlanPath">
+      <span class="pf-icon">📋</span>
+      <span class="pf-label">已生成计划文件</span>
+      <code class="pf-path">{{ message.plan_path }}</code>
+      <span class="pf-copy">{{ copied ? '已复制' : '点击复制路径' }}</span>
+    </div>
+
     <!-- files changed（快照 diff：本次轮次改动了哪些文件 + 行数） -->
     <div v-if="message.files_changed?.length" class="files-changed">
       <div class="fc-title">
@@ -168,6 +195,49 @@ function statusLabel(status: string): string {
 <style scoped src="../styles/chat/multiAgentResponse.css"></style>
 
 <style scoped>
+.plan-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: 12px;
+  background: var(--surface-elevated);
+  font-size: 13px;
+  cursor: pointer;
+}
+.plan-file:hover {
+  border-color: var(--primary);
+}
+.pf-label {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.pf-path {
+  flex: 1 1 240px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-primary);
+  user-select: all;
+}
+.pf-copy {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--primary);
+  font-size: 12px;
+}
+.plan-file:hover .pf-copy {
+  border-color: var(--primary);
+}
+
 .files-changed {
   margin-top: 10px;
   padding: 10px 12px;

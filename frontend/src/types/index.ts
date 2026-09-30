@@ -355,6 +355,10 @@ export interface MultiAgentMessage {
   files_changed?: FileChange[]
   /** [撤回改动] 该轮次的文件改动是否已撤回（restore-snapshot 成功后置 true） */
   snapshotRestored?: boolean
+  /** [C8] plan Agent 落盘的计划文件路径（from done 事件 / 历史回放 data.plan_path） */
+  plan_path?: string
+  /** [plan→build] 计划已成但执行出错（历史回放用；实时由 done 事件内联进 content） */
+  partial_error?: string | null
 }
 
 // 技能信息（受管库 data/skills + 用户在「技能」页追加的外部技能源）

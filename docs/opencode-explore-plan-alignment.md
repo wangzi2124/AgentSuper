@@ -47,8 +47,8 @@
   工具集 `_TOOL_SCHEMAS`（`sub_tools.py:114-274`）含 write/append/edit/delete/rename/execute/apply_patch 全套，
   与 build 无异 → 模型不自律就可能改文件。
 - **plan 无产物、无触发路径**：`plan_agent.py` 纯单次 LLM 调用，计划只内联回聊天；
-  `supermod/decompose.py:49-79` 快速路径只返回 `[explore]` 或 `[build]`，`_llm_decompose` 无调用方（死代码），
-  plan Agent 只能靠前端强选才可达。
+  `supermod/decompose.py` 快速路径只返回 `[build]` 或 `[plan]`，`_llm_decompose` 无调用方
+  （[C4 已删除] 恒不可达的死代码），plan Agent 只能靠前端强选才可达。
 
 ## 三、落地实现（规则集化重设计，非补丁式强制）
 

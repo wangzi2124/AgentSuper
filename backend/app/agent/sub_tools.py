@@ -574,12 +574,14 @@ async def tool_loop_chat(
     messages.append({"role": "user", "content": user_message})
 
     def _llm_call(with_tools: bool, max_tokens: int = 4096) -> dict:
+        # [B6] 输出上限再经模型声明收窄（limits.max_output_tokens，取小不放大）
+        from app.models.catalog import resolve_max_output_tokens as _resolve_max_out
         kwargs: dict = {
             "model": model,
             "api_key": api_key,
             "api_base": api_base,
             "messages": messages,
-            "max_tokens": max_tokens,
+            "max_tokens": _resolve_max_out(model, max_tokens),
             "temperature": 0.2,
             "cache_prompt": True,
             **_llm_extra,
