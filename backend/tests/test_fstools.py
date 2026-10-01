@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.tools.fstools import writer, reader, search, patch, common
+from app.tools.fstools import writer, reader, search, patch, common, workspace
 from app.tools.fstools.workspace import _ensure_safe, _resolve, _is_read_allowed
 
 
@@ -311,6 +311,43 @@ class TestReader:
         assert any(r.endswith("f.txt") and r.startswith("f") for r in rows)
         assert any(r.rstrip().endswith("dir2") for r in rows)
 
+    # 「不存在」必须与「是文件」分开报：is_dir() 对两者都是 False，混报会让模型
+    # 误以为路径「是个文件 / 格式有问题」而绕开 mkdir（实测 D:\AgentSuper 死循环）。
+
+    def test_ls_missing_directory_reports_not_found(self, ws):
+        out = reader.tool_ls("nope")
+        assert out["metadata"]["error"] is True
+        assert "Directory not found" in out["output"]
+        assert "is not a directory" not in out["output"]
+
+    def test_ls_missing_directory_names_missing_segment(self, ws):
+        out = reader.tool_ls("gone/deeper")
+        assert "Directory not found" in out["output"]
+        assert "Missing path segment" in out["output"]
+        assert "gone" in out["output"].split("Missing path segment:")[1].splitlines()[0]
+
+    def test_ls_missing_directory_suggests_similar_sibling(self, ws, monkeypatch):
+        monkeypatch.setattr(workspace, "_is_read_allowed", lambda p: True)
+        (ws / "stores").mkdir()
+        out = reader.tool_ls("store")
+        assert "Did you mean one of these?" in out["output"]
+        assert "stores" in out["output"]
+
+    def test_ls_missing_directory_short_name_no_suggestion_noise(self, ws, monkeypatch):
+        monkeypatch.setattr(workspace, "_is_read_allowed", lambda p: True)
+        for name in ("index.html", ".env.example", "app.tsx"):
+            (ws / name).write_text("x")
+        out = reader.tool_ls("x")
+        assert "Did you mean one of these?" not in out["output"]
+
+    def test_ls_existing_file_still_reports_not_a_directory(self, ws):
+        (ws / "plain.txt").write_text("x")
+        out = reader.tool_ls("plain.txt")
+        assert out["metadata"]["error"] is True
+        assert "is not a directory" in out["output"]
+        assert "tool_read_file" in out["output"]
+        assert "Directory not found" not in out["output"]
+
 
 # ---------------------------------------------------------------------------
 # search
@@ -332,6 +369,18 @@ class TestSearch:
         assert out["metadata"]["error"] is True
         assert "is not a directory" in out["output"]
         assert "undefined" not in out["output"]
+
+    def test_glob_missing_directory_reports_not_found(self, ws):
+        out = search.tool_glob("*", path="nope")
+        assert out["metadata"]["error"] is True
+        assert "Directory not found" in out["output"]
+        assert "is not a directory" not in out["output"]
+
+    def test_grep_missing_directory_reports_not_found(self, ws):
+        out = search.tool_grep("foo", path="nope")
+        assert out["metadata"]["error"] is True
+        assert "Directory not found" in out["output"]
+        assert "is not a directory" not in out["output"]
 
     def test_glob_recent_first(self, ws):
         for i in range(3):

@@ -30,6 +30,8 @@ from .common import _MULTIMODAL_EXTS
 from .common import _coerce_bool
 from .common import _coerce_int
 from .common import _env
+from .common import dir_not_found_message
+from .common import not_a_directory_message
 from .workspace import _ensure_safe
 from .workspace import _gitignore_matcher
 from .workspace import _is_read_allowed
@@ -59,7 +61,10 @@ def tool_glob(pattern: str, path: str = ".") -> dict:
     root_path = _resolve(path)
     _ensure_safe(root_path, "read")
     if not root_path.is_dir():
-        return _env("glob", f"Error: '{root_path}' is not a directory", error=True)
+        # 同 tool_ls：不存在 ≠ 是文件，分开报（否则模型误判路径格式/类型后反复重试）
+        if not root_path.exists():
+            return _env("glob", dir_not_found_message(path, root_path), error=True, path=str(root_path))
+        return _env("glob", not_a_directory_message(path), error=True, path=str(root_path))
     matcher = _gitignore_matcher()
     if matcher is not None:
         raw = list(matcher.glob(pattern, top=root_path))
@@ -102,7 +107,9 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
     root_path = _resolve(path)
     _ensure_safe(root_path, "read")
     if not root_path.is_dir():
-        return _env("grep", f"Error: '{path}' is not a directory", error=True)
+        if not root_path.exists():
+            return _env("grep", dir_not_found_message(path, root_path), error=True, path=str(root_path))
+        return _env("grep", not_a_directory_message(path), error=True, path=str(root_path))
     use_re = re.compile(pattern, re.MULTILINE | re.DOTALL)
     file_pattern = include if include else "**/*"
     file_matches: list[tuple[Path, list[int]]] = []

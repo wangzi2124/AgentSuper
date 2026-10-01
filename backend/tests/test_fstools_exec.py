@@ -473,6 +473,32 @@ async def test_tool_execute_deny(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tool_execute_missing_workdir_reports_not_found(monkeypatch, tmp_path):
+    """workdir 指向不存在的目录 → 明确报「不存在」，别让 subprocess 抛底层路径错误。"""
+    _tool_execute_env(monkeypatch, tmp_path)
+    missing = tmp_path / "gone" / "deeper"
+    monkeypatch.setattr("app.tools.fstools.exec._resolve", lambda wd: missing)
+    monkeypatch.setattr(ex, "_validate_shell_command", lambda c, cwd, ask: None)
+    out = ex.tool_execute("echo hi", workdir="gone/deeper")
+    assert out["metadata"].get("error") is True
+    assert "Directory not found" in out["output"]
+    assert "Missing path segment" in out["output"]
+    assert "is not a directory" not in out["output"]
+
+
+@pytest.mark.asyncio
+async def test_tool_execute_workdir_is_file(monkeypatch, tmp_path):
+    _tool_execute_env(monkeypatch, tmp_path)
+    f = tmp_path / "plain.txt"
+    f.write_text("x")
+    monkeypatch.setattr("app.tools.fstools.exec._resolve", lambda wd: f)
+    monkeypatch.setattr(ex, "_validate_shell_command", lambda c, cwd, ask: None)
+    out = ex.tool_execute("echo hi", workdir="plain.txt")
+    assert "is not a directory" in out["output"]
+    assert "Directory not found" not in out["output"]
+
+
+@pytest.mark.asyncio
 async def test_tool_execute_ask_raises(monkeypatch, tmp_path):
     _tool_execute_env(monkeypatch, tmp_path, decision="ask")
     monkeypatch.setattr(ex, "_validate_shell_command", lambda c, cwd, ask: None)

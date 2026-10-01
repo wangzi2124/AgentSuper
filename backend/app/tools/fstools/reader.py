@@ -36,6 +36,8 @@ from .common import _MULTIMODAL_EXTS
 from .common import _TEXT_EXTS
 from .common import _coerce_int
 from .common import _env
+from .common import dir_not_found_message
+from .common import not_a_directory_message
 from .workspace import _ensure_safe
 from .workspace import _resolve
 from .workspace import _scan_cache
@@ -51,7 +53,11 @@ def tool_ls(path: str = ".") -> dict:
     target = _resolve(path)
     _ensure_safe(target, "read")
     if not target.is_dir():
-        return _env("ls", f"Error: '{path}' is not a directory", error=True)
+        # 「不存在」与「是文件」必须分开报：is_dir() 对两者都是 False，
+        # 混报会让模型以为路径「是个文件 / 格式有问题」而绕开 mkdir（实测死循环）。
+        if not target.exists():
+            return _env("ls", dir_not_found_message(path, target), error=True, path=str(target))
+        return _env("ls", not_a_directory_message(path), error=True, path=str(target))
     rows = []
     for node in _scan_cache.list_dir(target):
         if node.ignored:

@@ -28,6 +28,8 @@ from app.permission import get_manager as get_perm_mgr, NeedsPermission, current
 
 from .common import _coerce_int
 from .common import _env
+from .common import dir_not_found_message
+from .common import not_a_directory_message
 from .execv import _needs_shell
 from .execv import _validate_shell_command
 from .lexcmd import _check_redirect_targets_permission
@@ -208,6 +210,12 @@ def tool_execute(command: str, timeout: int = 300, workdir: str = ".") -> dict:
     if os.name == "nt":
         command = _strip_trailing_backslash(command)
     resolved_cwd = _resolve(workdir)
+    # workdir 指向不存在的目录 → 明确报「不存在」，别让 subprocess 抛
+    # "The system cannot find the path specified"（模型分不清是自己路径写错还是命令失败）
+    if workdir not in (".", "", None) and not resolved_cwd.is_dir():
+        if not resolved_cwd.exists():
+            return _env("execute", dir_not_found_message(workdir, resolved_cwd), error=True, path=str(resolved_cwd))
+        return _env("execute", not_a_directory_message(workdir), error=True, path=str(resolved_cwd))
     try:
         _validate_shell_command(command, cwd=resolved_cwd, ask=True)
     except ValueError as e:
