@@ -97,6 +97,16 @@ class Settings(BaseSettings):
     context_tail_turns: int = 2
     # 尾部保留的 token 预算（对齐 opencode preserve_recent_tokens，默认 8_000）
     context_preserve_recent_tokens: int = 8_000
+    # [自动压缩落水位] 多 Agent 端点每轮加载历史时，若 SummarizationMiddleware 真的
+    # 产出了 LLM 摘要（本轮历史超过触发阈值），把摘要作为 checkpoint 落库
+    # （compaction 消息 + epoch baseline + time_compacted）——此前只有前端手动点
+    # 「压缩」或 scripts/compact_session.py 会写水位，每轮压缩都是内存里的临时值、
+    # 反复重算。关掉即退回旧行为（只临时压缩，不落水位）。
+    compaction_auto_persist: bool = True
+    # 自动压缩时保留的最近消息条数（原文进模型视角，落在 checkpoint 之上）。
+    # 必须有界：手动压缩保留「当前全部可见历史」作 tail，重复点不会变短；自动压缩
+    # 若同样全留，视图只增不减，水位就形同虚设。0 = 按 context_tail_turns × 2 折算。
+    compaction_tail_messages: int = 0
     # 回溯式工具输出清理：最近 N 轮之内累计工具输出超过该值时，清理更旧输出。
     # 注意：这里只是「原始配置值」，实际生效值由 budget.py 与压缩阈值联动钳制
     # （protect = min(配置值, compaction_threshold_tokens()//2)，minimum = protect//2），

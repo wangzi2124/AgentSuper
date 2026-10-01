@@ -18,6 +18,16 @@ from .models import ContextEpoch, Message, SessionInfo, SessionStatus
 logger = logging.getLogger(__name__)
 
 
+def _auto_tail_limit() -> int:
+    """自动压缩时保留的最近消息条数（compaction_tail_messages，0 → 按轮次折算）。"""
+    from app.config import settings
+
+    n = settings.compaction_tail_messages
+    if n > 0:
+        return n
+    return max(2, settings.context_tail_turns * 2)
+
+
 class SessionService:
     """会话门面。"""
 
@@ -164,11 +174,17 @@ class SessionService:
     def initialize_context(self, session_id: str, baseline: str, snapshot: dict) -> ContextEpoch:
         return session_history.initialize_epoch(session_id, baseline, snapshot)
 
-    async def compact(self, user_id: str, session_id: str, checkpoint: str = "") -> None:
+    async def compact(self, user_id: str, session_id: str, checkpoint: str = "",
+                     mode: str = "manual", tail_messages: int | None = None) -> None:
         """写压缩水位：落一条 compaction 消息并重建 epoch baseline。
 
         checkpoint 为空时用占位文案；落库后把 session.time_compacted 置为当前时间，
         使压缩基线持久化（重启/恢复后 history.load 仍能定位水位）。
+
+        mode="manual"（前端按钮）：保留「当前可见的全部历史」作 tail（既有语义不变）。
+        mode="auto"（请求内自动压缩）：tail 收敛为最近 `tail_messages` 条消息 ——
+        全留会让模型视角只增不减（history.load 的 tail 回放会把水位之下的原文再拉回来），
+        水位就等于没写。
         """
         self._authorized(user_id, session_id)
         async with self.write_lock(session_id):
@@ -178,11 +194,15 @@ class SessionService:
             # [checkpoint] + [tail 原文] + [压缩后新增]（与脚本/executor 路径一致）
             tail_snapshot: dict = {}
             load = session_history.load(session_id)
-            for m in load.messages:
-                if m.type != "compaction":
-                    tail_snapshot = {"tail_start_id": m.id, "tail_start_seq": m.seq}
-                    break
-            repository.append_message(session_id, "compaction", {"content": checkpoint, "mode": "manual"})
+            tail_msgs = [m for m in load.messages if m.type != "compaction"]
+            if mode == "auto":
+                limit = tail_messages if tail_messages is not None else _auto_tail_limit()
+                if limit > 0 and len(tail_msgs) > limit:
+                    tail_msgs = tail_msgs[-limit:]
+            for m in tail_msgs:
+                tail_snapshot = {"tail_start_id": m.id, "tail_start_seq": m.seq}
+                break
+            repository.append_message(session_id, "compaction", {"content": checkpoint, "mode": mode})
             session_history.replace_epoch_after_compaction(session_id, checkpoint, tail_snapshot)
             repository.update_session(session_id, time_compacted=int(tmod.time() * 1000))
 

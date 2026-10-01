@@ -145,14 +145,51 @@ async def _build_compressed_history(service, user_id: str, session_id: str) -> l
 
     启用 SummarizationMiddleware 时用 LLM 分层压缩，否则按 token 截断；
     最终统一 _sanitize_history 清洗。
+
+    [自动压缩落水位] 若压缩器真的产出了 LLM 摘要（本轮历史超阈值），把摘要作为
+    checkpoint **落库**（compaction 消息 + epoch baseline + time_compacted），
+    此前每轮压缩都只是内存里的临时值、下一轮从全量历史重算。落水位失败不影响本次请求。
     """
     history = _session_history_for(service, user_id, session_id)
     summarizer = _get_summarizer()
     if summarizer:
         compressed = await summarizer.apply(history)
+        await _auto_persist_compaction_watermark(service, user_id, session_id, compressed)
     else:
         compressed = _truncate_history(history)
     return _sanitize_history(compressed)
+
+
+# [Conversation summary]: 前缀 —— SummarizationMiddleware 压缩成功时写在首条 system 消息里；
+# 摘要失败时的兜底截断用的是 "[earlier history truncated]"，**不能**当 checkpoint 落水位
+# （那会让 history.load 丢掉水位之前的原文却没有任何摘要可替代，纯信息损失）。
+_SUMMARY_PREFIX = "[Conversation summary]: "
+
+
+async def _auto_persist_compaction_watermark(service, user_id: str, session_id: str,
+                                            compressed: list[dict]) -> bool:
+    """把本轮 LLM 摘要作为压缩水位落库；未压缩/无真摘要/落库失败 → 直接返回 False。"""
+    if not compressed:
+        return False
+    head = compressed[0] if isinstance(compressed[0], dict) else {}
+    text = str(head.get("content") or "")
+    if not text.startswith(_SUMMARY_PREFIX):
+        return False
+    summary = text[len(_SUMMARY_PREFIX):].strip()
+    if not summary:
+        return False
+
+    from app.config import settings
+    if not settings.compaction_auto_persist:
+        return False
+    try:
+        await service.compact(user_id, session_id, checkpoint=summary, mode="auto")
+        logger.info("auto compaction watermark persisted: session=%s summary_chars=%d",
+                    session_id, len(summary))
+        return True
+    except Exception as e:  # 落水位是优化，不是正确性前提
+        logger.warning("auto compaction watermark failed: %s", e)
+        return False
 
 def _begin_task_session(service, user_id: str, parent_id: str, question: str) -> tuple[str, str]:
     """创建 kind='task' 子会话并登记 thread（返回 child_id + thread_id）。"""

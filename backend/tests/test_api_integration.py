@@ -40,6 +40,7 @@ from app.api.config import SummarizationConfig, get_summarization_config, update
 from app.config import settings
 from app.permission import set_manager
 from app.session import db as session_db
+from app.session import history as session_history
 from app.session import repository as session_repo
 from app.session import router as session_router
 from app.session import service as session_service_mod
@@ -1072,6 +1073,110 @@ def test_session_parent_creation(session_fx):
 
     uid, pid = create_project_context(rq, None)
     assert uid == "u-test" and pid
+
+
+# ── [自动压缩落水位] persist._build_compressed_history + service.compact(mode=auto) ──
+
+
+class _StubSummarizer:
+    """最小摘要器桩：产出 [Conversation summary] 首条，或模拟摘要失败的兜底截断。"""
+
+    def __init__(self, summary: str, fallback: bool = False):
+        self.summary = summary
+        self.fallback = fallback
+
+    async def apply(self, history):
+        if self.fallback:
+            return [{"role": "system", "content": "[earlier history truncated]"}, *history[-2:]]
+        return [{"role": "system", "content": f"[Conversation summary]: {self.summary}"}, *history[-2:]]
+
+
+def _seed_turns(svc, sess_id, turns: int = 8):
+    for i in range(turns):
+        svc.append_message("u-test", sess_id, "user", {"content": f"问题{i} " + "细节" * 200})
+        svc.append_message("u-test", sess_id, "assistant", {"content": f"回答{i} " + "内容" * 200})
+
+
+def test_auto_compaction_persists_summary_watermark(session_fx, monkeypatch):
+    """有 LLM 摘要时把 checkpoint 落库：compaction 消息 + epoch + time_compacted。"""
+    svc, st, rq = session_fx
+    sess_id = _create(svc).id
+    _seed_turns(svc, sess_id)
+    from app.api.chatmod import persist as chat_persist
+
+    monkeypatch.setattr(chat_persist, "_get_summarizer", lambda: _StubSummarizer("要点：早期在讨论 alpha/beta"))
+    monkeypatch.setattr(settings, "compaction_auto_persist", True)
+    monkeypatch.setattr(settings, "compaction_tail_messages", 2)
+
+    out = asyncio.run(chat_persist._build_compressed_history(svc, "u-test", sess_id))
+    assert out[0]["role"] == "system" and "alpha/beta" in out[0]["content"]
+
+    msgs = svc.messages("u-test", sess_id)
+    last = msgs[-1]
+    assert last.type == "compaction"
+    assert "alpha/beta" in (last.data.get("content") or "")
+    assert last.data.get("mode") == "auto"
+    # 水位落库：time_compacted 有值 + epoch baseline 指向该 compaction 消息
+    assert svc.get("u-test", sess_id).time_compacted
+    epoch = session_repo.get_epoch(sess_id)
+    assert epoch and epoch.baseline_seq == last.seq
+    # tail 有界：只保留最近 2 条原文（否则视图只增不减，水位形同虚设）
+    assert epoch.snapshot and epoch.snapshot.get("tail_start_seq") == msgs[-3].seq
+    load = session_history.load(sess_id)
+    assert load.messages[0].type == "compaction"
+    assert len([m for m in load.messages if m.type != "compaction"]) == 2
+
+
+def test_auto_compaction_skips_when_no_real_summary(session_fx, monkeypatch):
+    """摘要失败时的兜底截断（[earlier history truncated]）不能落水位 —— 会丢原文。"""
+    svc, st, rq = session_fx
+    sess_id = _create(svc).id
+    _seed_turns(svc, sess_id)
+    from app.api.chatmod import persist as chat_persist
+
+    monkeypatch.setattr(chat_persist, "_get_summarizer", lambda: _StubSummarizer("", fallback=True))
+    monkeypatch.setattr(settings, "compaction_auto_persist", True)
+
+    asyncio.run(chat_persist._build_compressed_history(svc, "u-test", sess_id))
+    assert all(m.type != "compaction" for m in svc.messages("u-test", sess_id))
+    assert session_repo.get_epoch(sess_id) is None
+
+
+def test_auto_compaction_disabled_and_failure_are_non_fatal(session_fx, monkeypatch):
+    """开关关掉不落水位；落库抛异常也不影响本次请求（压缩是优化不是前提）。"""
+    svc, st, rq = session_fx
+    sess_id = _create(svc).id
+    _seed_turns(svc, sess_id, turns=2)
+    from app.api.chatmod import persist as chat_persist
+
+    stub = _StubSummarizer("摘要")
+    monkeypatch.setattr(chat_persist, "_get_summarizer", lambda: stub)
+
+    monkeypatch.setattr(settings, "compaction_auto_persist", False)
+    asyncio.run(chat_persist._build_compressed_history(svc, "u-test", sess_id))
+    assert all(m.type != "compaction" for m in svc.messages("u-test", sess_id))
+
+    monkeypatch.setattr(settings, "compaction_auto_persist", True)
+
+    async def boom(*a, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(svc, "compact", boom)
+    out = asyncio.run(chat_persist._build_compressed_history(svc, "u-test", sess_id))
+    assert out, "压缩结果仍要返回给模型"
+
+
+def test_manual_compaction_still_preserves_whole_view(session_fx, monkeypatch):
+    """mode=manual 语义不变：保留当前可见的全部历史作 tail（前端按钮行为不动）。"""
+    svc, st, rq = session_fx
+    sess_id = _create(svc).id
+    _seed_turns(svc, sess_id, turns=3)
+    monkeypatch.setattr(settings, "compaction_tail_messages", 1)
+    asyncio.run(svc.compact("u-test", sess_id, checkpoint="手动摘要"))
+    epoch = session_repo.get_epoch(sess_id)
+    msgs = svc.messages("u-test", sess_id)
+    assert epoch.snapshot.get("tail_start_seq") == msgs[0].seq  # 第一条原文仍被保留
+    assert svc.messages("u-test", sess_id)[-1].data.get("mode") == "manual"
 
 
 # ── services/task_manager.py（成功 + 失败路径）─────────────────────────────
