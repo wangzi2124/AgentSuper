@@ -711,7 +711,10 @@ async def tool_loop_chat(
                 sorted(f"{tc.function.name}:{tc.function.arguments}" for tc in tool_calls)
             )
             doom_fingerprints.append(fp)
-            if len(doom_fingerprints) >= doom_threshold and len(set(doom_fingerprints[-doom_threshold:])) == 1:
+            # 首次按 threshold 判定；注入过策略提示后只要**再重复 1 次**就升级
+            # 强制收尾（否则清空窗口要再等 threshold 轮，白烧几轮 LLM 调用）。
+            window = doom_threshold if doom_strikes == 0 else 1
+            if len(doom_fingerprints) >= window and len(set(doom_fingerprints[-window:])) == 1:
                 doom_strikes += 1
                 if doom_strikes >= doom_max_strikes:
                     logger.warning(
@@ -725,6 +728,7 @@ async def tool_loop_chat(
                 logger.warning("Sub-agent doom loop detected (%s), injecting strategy prompt", fp[:120])
                 messages.append({"role": "user", "content": DOOM_LOOP_PROMPT})
                 doom_fingerprints.clear()
+                doom_fingerprints.append(fp)
 
         # 达到最大轮数（或被对局升级强制收尾）：注入收尾提示并禁用工具强制总结（对齐 MAX_STEPS 语义）
         if not steps_prompt_injected:

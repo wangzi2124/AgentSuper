@@ -48,6 +48,7 @@ from .persist import _persist_interrupted_partial
 from .persist import _persist_multi_agent
 from .persist import _resolve_multi_agent_parent
 from .snapshot_diff import _abort_turn, _before_hash, _files_changed
+from app.snapshot import turn as snap_turn
 
 from app.session import repository as session_repo
 from app.snapshot.turn import diff_turn, restore_session_turn
@@ -237,6 +238,8 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
                     "_event_queue": collector,
                     "agent_mode": body.agent_mode,
                     chainlog.TRACE_PAYLOAD_KEY: _trace,
+                    # [轮次快照] 见 stream 端点同注释：跨事件循环 task 传递活跃 turn
+                    snap_turn.TURN_PAYLOAD_KEY: snap_turn.active_turn(),
                 },
                 thread_id=thread_id,
             ),
@@ -494,6 +497,9 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                     "_event_queue": turn_collector,
                     "agent_mode": turn_body.agent_mode,
                     chainlog.TRACE_PAYLOAD_KEY: _trace,
+                    # [轮次快照] 事件循环 task 在启动时创建，contextvar 传不进去
+                    # （同 chainlog），把活跃 turn 挂进 payload 由 bus._dispatch 重绑
+                    snap_turn.TURN_PAYLOAD_KEY: snap_turn.active_turn(),
                 },
                 thread_id=turn_thread_id,
             ),

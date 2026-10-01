@@ -354,6 +354,10 @@ class AgentBus:
         的 trace 上下文，因此这里从消息 payload（`_chain_trace`，由 endpoint /
         supervisor 逐层透传）重新绑定，使子 Agent 内部的工具调用、LLM 调用、
         二次委派（tool_task）都落在同一条链路上。
+
+        [轮次快照] 同理重新绑定活跃 turn（`_turn_snapshot`）：否则 Agent 内的
+        record_write / archive_external 全部静默 no-op，per-step 快照与工作区
+        外文件的 files_changed / 撤回恒为空。
         """
         from app import chainlog
 
@@ -361,6 +365,9 @@ class AgentBus:
         if agent is None:
             return
         token = chainlog.bind_from_payload(msg.payload)
+        from app.snapshot import turn as snap_turn
+
+        turn_token = snap_turn.bind_from_payload(msg.payload)
         started = tmod.time()
         chainlog.info(
             "agent", f"bus.{agent_id}", "agent.dispatch",
@@ -422,6 +429,7 @@ class AgentBus:
                 duration_ms=round((tmod.time() - started) * 1000, 1),
             )
             chainlog.reset(token)
+            snap_turn.reset(turn_token)
 
     def start_all(self):
         """启动所有已注册 Agent 的事件循环（非阻塞，返回 task 列表）。"""

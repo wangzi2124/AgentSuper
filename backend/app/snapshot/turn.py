@@ -24,7 +24,7 @@ import shutil
 import threading
 import time
 import uuid
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -311,6 +311,48 @@ def active_turn() -> Optional["TurnSnapshot"]:
     return _current.get()
 
 
+# ── 跨 Agent 边界传递活跃 turn ────────────────────────────────────────────
+#
+# 为什么需要：AgentBus 的每条 agent 事件循环 task 都**在应用初始化时创建**，其
+# contextvars 上下文是启动时的快照 —— 请求侧 `start_turn()` 设的 `_current` 永远
+# 传不进 `asyncio.create_task(self._dispatch(...))`（见 bus.py:run_agent 与
+# chainlog 同样的坑）。后果是 Agent 内部的 `record_write()` / `archive_external()`
+# 全部静默 no-op：per-step 快照 steps 恒为空、工作区外文件的 files_changed /
+# 撤回恒为空。
+#
+# 解法与 chainlog 一致（bus.py:_dispatch 里 `chainlog.bind_from_payload`）：
+# 请求侧把 turn 塞进 AgentMessage.payload，_dispatch 再从 payload 重新绑定。
+
+TURN_PAYLOAD_KEY = "_turn_snapshot"
+
+
+def payload_with_turn(payload: Optional[dict], turn: Optional["TurnSnapshot"]) -> dict:
+    """请求侧：把活跃 turn 挂进 payload（随消息逐层透传，返回同一 dict）。"""
+    if not isinstance(payload, dict):
+        payload = {}
+    if turn is not None:
+        payload[TURN_PAYLOAD_KEY] = turn
+    return payload
+
+
+def bind_from_payload(payload: Optional[dict]) -> Optional[Token]:
+    """Agent 侧：从 AgentMessage.payload 取出 turn 并绑定（返回 reset token）。"""
+    if not payload:
+        return None
+    turn = payload.get(TURN_PAYLOAD_KEY)
+    if turn is None:
+        return None
+    return _current.set(turn)
+
+
+def reset(token: Optional[Token]) -> None:
+    if token is not None:
+        try:
+            _current.reset(token)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def end_turn() -> None:
     _current.set(None)
 
@@ -540,11 +582,15 @@ def cleanup_turn_archives(ttl_days: int = 7, data_dir: Path | None = None) -> No
 __all__ = [
     "MAX_EXTERNAL_ARCHIVE_BYTES",
     "TURNS_ROOT_REL",
+    "TURN_PAYLOAD_KEY",
     "TurnSnapshot",
     "active_turn",
     "archive_external",
+    "bind_from_payload",
     "cleanup_turn_archives",
     "end_turn",
+    "payload_with_turn",
+    "reset",
     "restore_session_turn",
     "start_turn",
 ]

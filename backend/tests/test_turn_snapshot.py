@@ -23,6 +23,9 @@ from app.api.chatmod import snapshot_diff
 from app.snapshot import Snapshot
 from app.snapshot.turn import (
     active_turn,
+    bind_from_payload,
+    payload_with_turn,
+    reset,
     archive_external,
     cleanup_turn_archives,
     diff_turn,
@@ -497,3 +500,86 @@ def test_track_paths_accepts_relative_and_absolute(repo):
     assert snap.track_paths([work / "a.txt"]) != h0
     assert snap.track_paths(["a.txt"]) == snap.track_paths([str(work / "a.txt")])
     assert snap.track_paths([]) is None
+
+
+# ── 跨 Agent 事件循环的 turn 传递（bus 事件循环 task 在启动时创建，contextvar 传不进去）──
+
+
+def test_payload_roundtrip_restores_active_turn(repo, tmp_path):
+    """请求侧挂进 payload 的 turn，Agent 侧 bind 后 record_write / archive_external 生效。"""
+    work, snap = repo
+    outside = tmp_path / "outside" / "new.txt"
+
+    turn = start_turn(snap, "turn_payload")
+    payload = payload_with_turn({}, active_turn())
+    end_turn()  # 模拟「事件循环 task 看不到请求侧 contextvar」
+    assert active_turn() is None
+
+    token = bind_from_payload(payload)
+    try:
+        assert active_turn() is turn
+        archive_external(outside)          # 写前归档：文件不存在 → before=absent
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        outside.write_text("hi\n", encoding="utf-8")
+        record_write(outside)
+    finally:
+        reset(token)
+    assert active_turn() is None
+
+    files, desc = turn.finalize([])
+    assert [f["file"] for f in files] == [str(outside)]
+    assert files[0]["status"] == "added" and files[0]["external"] is True
+    assert desc["external"][0]["before"] == "absent"
+
+
+def test_bind_from_payload_noop_without_turn():
+    assert bind_from_payload(None) is None
+    assert bind_from_payload({}) is None
+    assert bind_from_payload({"_turn_snapshot": None}) is None
+    assert payload_with_turn(None, None) == {}
+
+
+def test_bus_dispatch_binds_turn_from_payload(repo):
+    """bus._dispatch 必须在 handler task 内重绑 turn（回归：per-step 快照恒空）。"""
+    import asyncio
+    import inspect
+
+    from app.agent.bus import AgentBus
+
+    work, snap = repo
+    src = inspect.getsource(AgentBus._dispatch)
+    assert "bind_from_payload" in src, "bus._dispatch 未重绑 turn"
+    assert "snap_turn.reset" in src, "bus._dispatch 未 reset turn token"
+
+    turn = start_turn(snap, "turn_bus")
+    payload = payload_with_turn({}, turn)
+    end_turn()
+
+    async def _handler_like():
+        token = bind_from_payload(payload)
+        try:
+            return active_turn() is turn
+        finally:
+            reset(token)
+
+    assert asyncio.run(_handler_like()) is True
+    assert active_turn() is None
+
+
+def test_external_created_file_appears_in_files_changed(repo, tmp_path):
+    """工作区外新建文件必须出现在 files_changed（此前因 contextvar 丢失恒为空）。"""
+    work, snap = repo
+    outside = tmp_path / "ext" / "f.txt"
+
+    turn = start_turn(snap, "turn_ext_changed")
+    turn.capture_before()
+    archive_external(outside)
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("a\nb\n", encoding="utf-8")
+    record_write(outside)
+    files, _desc = turn.finalize([])
+    end_turn()
+
+    assert len(files) == 1
+    assert files[0]["file"] == str(outside)
+    assert files[0]["additions"] == 2 and files[0]["external"] is True

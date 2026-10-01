@@ -514,7 +514,10 @@ class RAGAgentGenerate(RAGAgentTools):
                 delegated_tasks.add(fp)
 
             doom_fingerprints.append(fp)
-            if len(doom_fingerprints) >= doom_threshold and len(set(doom_fingerprints[-doom_threshold:])) == 1:
+            # 首次按 threshold 判定；注入过策略提示后只要**再重复 1 次**就升级
+            # 强制收尾（否则清空窗口要再等 threshold 轮，白烧几轮 LLM 调用）。
+            window = doom_threshold if doom_strikes == 0 else 1
+            if len(doom_fingerprints) >= window and len(set(doom_fingerprints[-window:])) == 1:
                 doom_strikes += 1
                 if doom_strikes >= doom_max_strikes:
                     logger.warning(
@@ -529,6 +532,8 @@ class RAGAgentGenerate(RAGAgentTools):
                     messages.append({"role": "user", "content": DOOM_LOOP_PROMPT})
                     self._push_event(state, {"type": "step_end", "step_id": "doom_loop", "name": "检测到重复工具调用", "status": "completed", "detail": "已注入策略变更提示"})
                 doom_fingerprints.clear()
+                if doom_strikes < doom_max_strikes:
+                    doom_fingerprints.append(fp)  # 保留本轮指纹：再重复一次即升级
 
             # MAX_STEPS：达到生效上限前的最后一轮注入收尾提示（对齐 opencode prompt.ts:1281，
             # 以 assistant 角色消息注入，模型据此收尾总结）
