@@ -53,7 +53,7 @@ from app.trace_log import trace, trace_messages  # [token trace v7]
 from .tools import RAGAgentTools
 # ── 跨子模块依赖（自动生成）──
 from .base import is_weak_model
-from .constants import DOOM_LOOP_PROMPT
+from .constants import DOOM_LOOP_PROMPT, REPEAT_DELEGATION_PROMPT
 from .constants import MAX_STEPS_PROMPT
 from .constants import _DEDUP_READONLY_TOOLS
 from .constants import _normalize_finish_reason
@@ -335,6 +335,11 @@ class RAGAgentGenerate(RAGAgentTools):
         doom_max_strikes = max(1, settings.doom_loop_max_strikes)
         doom_fingerprints: list[str] = []
         doom_strikes = 0
+        # 重复委派守卫：本轮已发起过的 tool_task 指纹（子 Agent 结论已回灌上下文，
+        # 原样重发必然白等一次完整子 Agent 运行 —— 实测 qwen3.5:4b 连续两轮把
+        # 「创建 React 游戏」原样委派给 plan，耗时 2.5 分钟且一个文件都没写）
+        delegated_tasks: set[str] = set()
+        repeat_delegation_strikes = 0
         steps_prompt_injected = False
         rounds = 0
         tool_calls_count = 0
@@ -487,6 +492,27 @@ class RAGAgentGenerate(RAGAgentTools):
             fp = "|".join(
                 sorted(f"{tc.function.name}:{tc.function.arguments}" for tc in msg.tool_calls)
             )
+            # 重复委派守卫：整轮只有 tool_task 且参数与本轮已发起过的完全一致 → 第 2 次即拦。
+            # 比通用 doom-loop（阈值 3）更早，因为子 Agent 结果已在上下文里，重发必然无新信息。
+            task_only = bool(msg.tool_calls) and all(
+                tc.function.name == "tool_task" for tc in msg.tool_calls
+            )
+            if task_only and fp in delegated_tasks:
+                repeat_delegation_strikes += 1
+                logger.warning(
+                    "Repeat delegation detected (%d): identical tool_task args re-sent (%s)",
+                    repeat_delegation_strikes, fp[:120],
+                )
+                if repeat_delegation_strikes >= doom_max_strikes or steps_prompt_injected:
+                    messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
+                    steps_prompt_injected = True
+                    self._push_event(state, {"type": "step_end", "step_id": "repeat_delegation", "name": "重复委派升级", "status": "completed", "detail": "已强制收尾总结"})
+                else:
+                    messages.append({"role": "user", "content": REPEAT_DELEGATION_PROMPT})
+                    self._push_event(state, {"type": "step_end", "step_id": "repeat_delegation", "name": "检测到重复委派", "status": "completed", "detail": "已注入直接执行提示"})
+            elif task_only:
+                delegated_tasks.add(fp)
+
             doom_fingerprints.append(fp)
             if len(doom_fingerprints) >= doom_threshold and len(set(doom_fingerprints[-doom_threshold:])) == 1:
                 doom_strikes += 1

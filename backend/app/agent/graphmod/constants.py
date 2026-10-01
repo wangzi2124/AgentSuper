@@ -71,6 +71,17 @@ DOOM_LOOP_PROMPT = (
     "或基于已有信息直接给出最终回答。"
 )
 
+REPEAT_DELEGATION_PROMPT = (
+    "系统提示：你刚刚用**完全相同的参数**再次委派了 tool_task，这是无效动作 —— "
+    "子 Agent 的结论已经作为 tool 结果回到上下文里，原样重发不会得到新信息，"
+    "只会白等一次子 Agent 运行。\n"
+    "重要：sub-agent（explore / plan）**没有写文件的能力**，把「创建/实现/编写」这类"
+    "任务委派给它们永远做不完。\n"
+    "请现在就改为直接动手：需要落地代码/文件就用 tool_write_file / tool_apply_patch / "
+    "tool_append_file，需要跑构建就用 tool_execute；只读调研才用 tool_task。"
+    "如果你已经拿到了子 Agent 的结论，就基于它继续执行或直接作答。"
+)
+
 
 # P4: finish_reason 归一化映射（对齐 opencode FinishReason 六值，llm/src/schema/ids.ts:39）
 
@@ -191,4 +202,4 @@ def _is_multi_agent_queue(q) -> bool:
 
 
 
-__all__ = ["DOOM_LOOP_PROMPT", "MAX_STEPS_PROMPT", "_DEDUP_READONLY_TOOLS", "_FINISH_REASON_MAP", "_TASK_TOOL_SCHEMA", "_TASK_TOOL_SUBAGENTS", "_is_multi_agent_queue", "_nearest_workspace_hint", "_normalize_finish_reason", "_permission_denied_msg"]
+__all__ = ["DOOM_LOOP_PROMPT", "MAX_STEPS_PROMPT", "REPEAT_DELEGATION_PROMPT", "_DEDUP_READONLY_TOOLS", "_FINISH_REASON_MAP", "_TASK_TOOL_SCHEMA", "_TASK_TOOL_SUBAGENTS", "_is_multi_agent_queue", "_nearest_workspace_hint", "_normalize_finish_reason", "_permission_denied_msg"]

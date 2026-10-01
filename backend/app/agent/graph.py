@@ -7,4 +7,4 @@ from .graphmod.core import RAGAgent
 import logging
 logger = logging.getLogger(__name__)
 
-__all__ = ["DOOM_LOOP_PROMPT", "MAX_STEPS_PROMPT", "_DEDUP_READONLY_TOOLS", "_FINISH_REASON_MAP", "_TASK_TOOL_SCHEMA", "_TASK_TOOL_SUBAGENTS", "_is_multi_agent_queue", "_nearest_workspace_hint", "_normalize_finish_reason", "_permission_denied_msg", "AgentState", "_ZERO_USAGE", "_attachment_parts", "_extract_cache_usage", "_find_attachment", "RAGAgent", "logger"]
+__all__ = ["DOOM_LOOP_PROMPT", "MAX_STEPS_PROMPT", "REPEAT_DELEGATION_PROMPT", "_DEDUP_READONLY_TOOLS", "_FINISH_REASON_MAP", "_TASK_TOOL_SCHEMA", "_TASK_TOOL_SUBAGENTS", "_is_multi_agent_queue", "_nearest_workspace_hint", "_normalize_finish_reason", "_permission_denied_msg", "AgentState", "_ZERO_USAGE", "_attachment_parts", "_extract_cache_usage", "_find_attachment", "RAGAgent", "logger"]

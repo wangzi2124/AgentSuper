@@ -272,7 +272,11 @@ def build_system_prompt_no_kb(
             "   - tool_task(description, prompt, subagent_type) - Delegate a focused, independent subtask "
             "to a sub-agent ('explore' for read-only codebase exploration, 'plan' for producing a structured "
             "plan) and get its final result back. The sub-agent starts with fresh context — include all details. "
-            "Use it for specialized or parallel work; do NOT delegate what you can do directly."
+            "Use it for specialized or parallel work; do NOT delegate what you can do directly.\n"
+            "     IMPORTANT: sub-agents CANNOT create/edit/delete files or run commands — 'explore' is "
+            "read-only and 'plan' only produces a plan. Any task that asks you to create, implement, write or "
+            "build something (code, files, projects, configs) MUST be executed by YOU with tool_write_file / "
+            "tool_append_file / tool_apply_patch / tool_execute. Delegating such a task can never finish it."
         )
 
     if has_memory:

@@ -974,6 +974,76 @@ async def test_generate_doom_escalation_forces_summary(gen_env, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generate_repeat_delegation_injects_direct_exec_prompt(gen_env, monkeypatch):
+    """重复原样委派 tool_task 在第 2 次即拦（子 Agent 结果已在上下文，重发无新信息）。
+
+    实测回归：qwen3.5:4b 把「创建 React 游戏」原样委派给 plan 两轮，
+    耗时 2.5 分钟且一个文件都没写。
+    """
+    monkeypatch.setattr(settings, "doom_loop_threshold", 3)
+    monkeypatch.setattr(settings, "doom_loop_max_strikes", 2)
+
+    async def spy(name, args, state=None):
+        return "SUBAGENT_RESULT"
+    task_args = '{"description": "d", "prompt": "p", "subagent_type": "plan"}'
+    agent, llm = _setup_generate(
+        gen_env,
+        [FakeLLM().response(tool_calls=[("tool_task", task_args)]),
+         FakeLLM().response(tool_calls=[("tool_task", task_args)]),
+         FakeLLM().response(content="done")],
+        exec_spy=spy,
+    )
+    out = await agent._generate(make_state())
+    assert out["answer"] == "done"
+    texts = "".join(m.get("content", "") or "" for _, msgs, _ in llm.calls for m in msgs)
+    # 阈值 3 的通用 doom-loop 不会触发，只有专用的重复委派守卫会
+    assert "系统提示：检测到连续多轮" not in texts
+    assert "完全相同的参数" in texts
+
+
+@pytest.mark.asyncio
+async def test_generate_repeat_delegation_escalates_to_summary(gen_env, monkeypatch):
+    monkeypatch.setattr(settings, "doom_loop_threshold", 3)
+    monkeypatch.setattr(settings, "doom_loop_max_strikes", 2)
+
+    async def spy(name, args, state=None):
+        return "SUBAGENT_RESULT"
+    task_args = '{"description": "d", "prompt": "p", "subagent_type": "plan"}'
+    agent, llm = _setup_generate(
+        gen_env,
+        [FakeLLM().response(tool_calls=[("tool_task", task_args)]),
+         FakeLLM().response(tool_calls=[("tool_task", task_args)]),
+         FakeLLM().response(tool_calls=[("tool_task", task_args)]),
+         FakeLLM().response(content="forced")],
+        exec_spy=spy,
+    )
+    out = await agent._generate(make_state())
+    assert out["answer"] == "forced"
+    texts = "".join(m.get("content", "") or "" for _, msgs, _ in llm.calls for m in msgs)
+    assert "MAXIMUM STEPS REACHED" in texts
+
+
+@pytest.mark.asyncio
+async def test_generate_distinct_delegations_not_flagged(gen_env, monkeypatch):
+    """参数不同的委派属于正常并行/分批调研，不触发重复委派守卫。"""
+    monkeypatch.setattr(settings, "doom_loop_threshold", 3)
+    monkeypatch.setattr(settings, "doom_loop_max_strikes", 2)
+
+    async def spy(name, args, state=None):
+        return "R"
+    agent, llm = _setup_generate(
+        gen_env,
+        [FakeLLM().response(tool_calls=[("tool_task", '{"prompt": "a"}')]),
+         FakeLLM().response(tool_calls=[("tool_task", '{"prompt": "b"}')]),
+         FakeLLM().response(content="done")],
+        exec_spy=spy,
+    )
+    await agent._generate(make_state())
+    texts = "".join(m.get("content", "") or "" for _, msgs, _ in llm.calls for m in msgs)
+    assert "完全相同的参数" not in texts
+
+
+@pytest.mark.asyncio
 async def test_generate_max_steps_injects_and_disables_tools(gen_env, monkeypatch):
     monkeypatch.setattr(settings, "max_steps", 2)
     monkeypatch.setattr(settings, "max_tool_rounds", 8)
