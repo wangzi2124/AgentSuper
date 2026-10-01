@@ -27,6 +27,7 @@ from .snapshot import (
     Snapshot,
     SnapshotError,
 )
+from .turn import diff_turn, restore_session_turn
 
 __all__ = [
     "DEFAULT_BIG_FILE_THRESHOLD",
@@ -34,4 +35,6 @@ __all__ = [
     "Patch",
     "Snapshot",
     "SnapshotError",
+    "diff_turn",
+    "restore_session_turn",
 ]

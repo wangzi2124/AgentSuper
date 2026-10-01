@@ -1,4 +1,5 @@
 import { fetchWithTimeout } from './fetch'
+import type { QueuedPrompt } from '../types'
 
 // ===== 类型（对齐后端 app/session/models.py）=====
 
@@ -144,6 +145,43 @@ export async function deleteSessionMessage(sessionId: string, messageId: string)
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`Delete session message error: ${err || res.statusText}`)
+  }
+}
+
+// ===== 待处理任务队列（执行中追加，新→旧执行）=====
+
+/** 执行中追加一条待处理任务；clientMsgId 幂等（重复投递只排一次） */
+export async function enqueueSessionPrompt(
+  sessionId: string,
+  prompt: Record<string, unknown>,
+  clientMsgId?: string,
+): Promise<QueuedPrompt> {
+  return request<QueuedPrompt>(
+    `${BASE}/${encodeURIComponent(sessionId)}/prompts`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, delivery: 'queue', client_msg_id: clientMsgId }),
+    },
+    15000,
+  )
+}
+
+/** 列出待处理任务（按将执行顺序：最新在前） */
+export async function listSessionPrompts(sessionId: string): Promise<QueuedPrompt[]> {
+  return request<QueuedPrompt[]>(`${BASE}/${encodeURIComponent(sessionId)}/prompts`, {}, 10000)
+}
+
+/** 移除一条待处理任务 */
+export async function removeSessionPrompt(sessionId: string, promptId: string): Promise<void> {
+  const res = await fetchWithTimeout(
+    `${BASE}/${encodeURIComponent(sessionId)}/prompts/${encodeURIComponent(promptId)}`,
+    { method: 'DELETE' },
+    10000,
+  )
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Remove prompt error: ${err || res.statusText}`)
   }
 }
 

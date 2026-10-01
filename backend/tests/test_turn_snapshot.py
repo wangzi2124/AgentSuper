@@ -25,7 +25,9 @@ from app.snapshot.turn import (
     active_turn,
     archive_external,
     cleanup_turn_archives,
+    diff_turn,
     end_turn,
+    record_write,
     restore_session_turn,
     start_turn,
 )
@@ -273,3 +275,225 @@ def test_cleanup_turn_archives(repo, tmp_path):
     # ttl=0 → 全部清理
     cleanup_turn_archives(ttl_days=0, data_dir=snap.data_dir)
     assert not turns_root.exists() or not list(turns_root.rglob("*.bin"))
+
+
+# ── diff 渲染（聊天 UI「本轮改了什么」可展开）─────────────────────────────
+
+
+def test_descriptor_carries_after_tree_for_diff(repo):
+    """descriptor 必须带 after_tree，否则事后无法渲染 before→after 的 diff。"""
+    work, snap = repo
+
+    def mutate():
+        (work / "a.txt").write_text("v2\n", encoding="utf-8")
+
+    _files, desc = _run_turn(repo, mutate)
+    assert desc["before_tree"]
+    assert desc["after_tree"]
+    assert desc["after_tree"] != desc["before_tree"]
+
+
+def test_diff_turn_renders_internal_unified_diff(repo):
+    work, snap = repo
+    (work / "a.txt").write_text("line1\nline2\n", encoding="utf-8")
+
+    def mutate():
+        (work / "a.txt").write_text("line1\nline2-changed\nline3\n", encoding="utf-8")
+        (work / "new.txt").write_text("hello\n", encoding="utf-8")
+
+    _files, desc = _run_turn(repo, mutate)
+    out = diff_turn(snap, desc)
+    assert out["reason"] == ""
+    assert out["truncated"] is False
+    by_file = {f["file"]: f["diff"] for f in out["files"]}
+    assert set(by_file) == {"a.txt", "new.txt"}
+    assert "-line2" in by_file["a.txt"]
+    assert "+line2-changed" in by_file["a.txt"]
+    assert "+line3" in by_file["a.txt"]
+    assert "+hello" in by_file["new.txt"]
+    # 真正的 unified diff 头
+    assert by_file["a.txt"].startswith("diff --git")
+
+
+def test_diff_turn_single_file_filter(repo):
+    work, snap = repo
+    (work / "a.txt").write_text("v1\n", encoding="utf-8")
+    (work / "b.txt").write_text("v1\n", encoding="utf-8")
+
+    def mutate():
+        (work / "a.txt").write_text("v2\n", encoding="utf-8")
+        (work / "b.txt").write_text("v2\n", encoding="utf-8")
+
+    _files, desc = _run_turn(repo, mutate)
+    out = diff_turn(snap, desc, path="a.txt")
+    assert [f["file"] for f in out["files"]] == ["a.txt"]
+    assert "+v2" in out["files"][0]["diff"]
+
+
+def test_diff_turn_external_file_uses_archive_blob(repo, tmp_path):
+    """外部文件没有 git tree，靠归档 blob 与当前内容做 difflib 对比。"""
+    work, snap = repo
+    ext = tmp_path / "outside" / "ext.py"
+    ext.parent.mkdir(parents=True)
+    ext.write_text("OLD-A\nOLD-B\n", encoding="utf-8")
+
+    def mutate():
+        archive_external(ext)
+        ext.write_text("OLD-A\nNEW-B\n", encoding="utf-8")
+
+    _files, desc = _run_turn(repo, mutate)
+    out = diff_turn(snap, desc)
+    entry = [f for f in out["files"] if f["file"] == str(ext)]
+    assert entry, "外部文件应出现在 diff 结果里"
+    assert "-OLD-B" in entry[0]["diff"]
+    assert "+NEW-B" in entry[0]["diff"]
+
+
+def test_diff_turn_old_descriptor_reports_reason(repo):
+    """旧消息没有 after_tree → 明确 reason，不抛错。"""
+    work, snap = repo
+    _files, desc = _run_turn(repo, lambda: (work / "a.txt").write_text("v2\n", encoding="utf-8"))
+    legacy = {k: v for k, v in desc.items() if k != "after_tree"}
+    out = diff_turn(snap, legacy)
+    assert out["files"] == []
+    assert "after_tree" in out["reason"]
+
+
+def test_diff_turn_empty_and_missing_inputs(repo):
+    assert diff_turn(None, {})["reason"]
+    assert diff_turn(None, {"internal": ["x"], "before_tree": "a" * 40, "after_tree": "b" * 40})["reason"]
+
+
+# ── 每 step 快照（对齐 opencode：每次写工具调用后一个增量 tree）────────────
+
+
+def test_record_write_after_each_write_keeps_one_step(repo):
+    """写前 archive_external、写后 record_write → 每个文件各记一步，路径存相对路径。"""
+    work, snap = repo
+    (work / "a.txt").write_text("v0\n", encoding="utf-8")
+
+    def mutate():
+        (work / "a.txt").write_text("v1\n", encoding="utf-8")
+        record_write(work / "a.txt")
+        (work / "a.txt").write_text("v2\n", encoding="utf-8")
+        record_write(work / "a.txt")
+
+    _files, desc = _run_turn(repo, mutate)
+    steps = desc["steps"]
+    assert [s["seq"] for s in steps] == [0, 1]
+    # 相对路径（与 internal 一致；绝对路径会随机器变化、不该落库）
+    assert all(s["files"] == ["a.txt"] for s in steps)
+    assert steps[0]["hash"] != steps[1]["hash"]
+
+
+def test_step_diff_is_incremental_between_consecutive_steps(repo):
+    """整轮只有净 diff，step diff 才能看出「中间那一版改了什么」。"""
+    work, snap = repo
+    (work / "a.txt").write_text("v0\n", encoding="utf-8")
+
+    def mutate():
+        # 与生产一致：先写、后 record_write（writer/patch 里都是写完才记 step）
+        for v in ("v1", "v2", "v3"):
+            (work / "a.txt").write_text(v + "\n", encoding="utf-8")
+            record_write(work / "a.txt")
+
+    _files, desc = _run_turn(repo, mutate)
+    assert len(desc["steps"]) == 3
+
+    s0 = diff_turn(snap, desc, step=0)["files"][0]["diff"]
+    s1 = diff_turn(snap, desc, step=1)["files"][0]["diff"]
+    s2 = diff_turn(snap, desc, step=2)["files"][0]["diff"]
+    assert "-v0" in s0 and "+v1" in s0
+    assert "-v1" in s1 and "+v2" in s1
+    assert "-v2" in s2 and "+v3" in s2
+    # 整轮净 diff 只剩首尾
+    full = diff_turn(snap, desc)["files"][0]["diff"]
+    assert "-v0" in full and "+v3" in full
+    assert "+v1" not in full and "+v2" not in full
+    assert diff_turn(snap, desc)["steps"] == 3
+
+
+def test_step_diff_only_touches_that_step_files(repo):
+    work, snap = repo
+    (work / "a.txt").write_text("v0\n", encoding="utf-8")
+    (work / "b.txt").write_text("w0\n", encoding="utf-8")
+
+    def mutate():
+        (work / "a.txt").write_text("v1\n", encoding="utf-8")
+        record_write(work / "a.txt")
+        (work / "b.txt").write_text("w1\n", encoding="utf-8")
+        record_write(work / "b.txt")
+
+    _files, desc = _run_turn(repo, mutate)
+    assert [f["file"] for f in diff_turn(snap, desc, step=0)["files"]] == ["a.txt"]
+    assert [f["file"] for f in diff_turn(snap, desc, step=1)["files"]] == ["b.txt"]
+
+
+def test_step_out_of_range_clamps_to_last(repo):
+    work, snap = repo
+
+    def mutate():
+        (work / "a.txt").write_text("v1\n", encoding="utf-8")
+        record_write(work / "a.txt")
+
+    _files, desc = _run_turn(repo, mutate)
+    assert diff_turn(snap, desc, step=99)["files"] == diff_turn(snap, desc, step=0)["files"]
+
+
+def test_step_diff_without_steps_reports_reason(repo):
+    """老消息没有 steps → 明确提示，不抛错。"""
+    work, snap = repo
+    _files, desc = _run_turn(repo, lambda: (work / "a.txt").write_text("v2\n", encoding="utf-8"))
+    legacy = {k: v for k, v in desc.items() if k != "steps"}
+    out = diff_turn(snap, legacy, step=0)
+    assert out["files"] == []
+    assert "逐步快照" in out["reason"]
+
+
+def test_record_write_ignores_external_paths(repo, tmp_path):
+    """工作区外的路径不进影子仓库（外部文件由归档 blob 负责），不产生 step。"""
+    work, snap = repo
+    ext = tmp_path / "outside" / "x.py"
+    ext.parent.mkdir(parents=True)
+    ext.write_text("a\n", encoding="utf-8")
+
+    def mutate():
+        ext.write_text("b\n", encoding="utf-8")
+        record_write(ext)
+        (work / "in.txt").write_text("c\n", encoding="utf-8")
+        record_write(work / "in.txt")
+
+    _files, desc = _run_turn(repo, mutate)
+    assert all("outside" not in f for s in desc["steps"] for f in s["files"])
+
+
+def test_record_write_without_active_turn_is_noop(repo):
+    """无活跃 turn → 静默返回（工具在 chat 之外被调用也不能炸）。"""
+    work, snap = repo
+    record_write(work / "a.txt")  # 不抛异常即通过
+    assert diff_turn(snap, {})["reason"]
+
+
+def test_steps_capped(repo):
+    """长任务写很多次也不让 descriptor 无限膨胀（只保留最近 N 步）。"""
+    from app.snapshot.turn import _MAX_STEPS
+
+    work, snap = repo
+
+    def mutate():
+        for i in range(_MAX_STEPS + 12):
+            (work / f"f{i}.txt").write_text(f"v{i}\n", encoding="utf-8")
+            record_write(work / f"f{i}.txt")
+
+    _files, desc = _run_turn(repo, mutate)
+    assert len(desc["steps"]) == _MAX_STEPS
+
+
+def test_track_paths_accepts_relative_and_absolute(repo):
+    work, snap = repo
+    (work / "a.txt").write_text("v0\n", encoding="utf-8")
+    h0 = snap.track()
+    (work / "a.txt").write_text("v1\n", encoding="utf-8")
+    assert snap.track_paths([work / "a.txt"]) != h0
+    assert snap.track_paths(["a.txt"]) == snap.track_paths([str(work / "a.txt")])
+    assert snap.track_paths([]) is None

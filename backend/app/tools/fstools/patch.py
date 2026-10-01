@@ -20,7 +20,7 @@
 
 from app.permission import get_manager as get_perm_mgr, NeedsPermission, current_session_workspace
 
-from app.snapshot.turn import archive_external  # [snapshot] 轮次级外部文件 before 归档
+from app.snapshot.turn import archive_external, record_write  # [snapshot] 轮次级外部文件 before 归档 + 每 step 快照
 
 # ── 跨子模块依赖（自动生成）──
 
@@ -198,6 +198,7 @@ def tool_apply_patch(patch_text: str) -> dict:
                 _write_text_raw(target, content_new, has_bom)
                 applied.append(f"M {rel_path}")
             _scan_cache.invalidate(target.parent)
+            record_write(target)  # [snapshot] 每 step 快照：patch 的每个 section 各记一步
     except NeedsPermission:
         raise
     except Exception as e:

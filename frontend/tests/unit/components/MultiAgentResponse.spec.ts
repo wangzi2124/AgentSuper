@@ -213,3 +213,148 @@ describe('MultiAgentResponse 输出部件渲染', () => {
     expect(wrapper.find('.plan-file').exists()).toBe(false)
   })
 })
+
+/** [查看改动] 文件改动卡片可展开 unified diff（按需拉取 + 行级着色） */
+describe('MultiAgentResponse 文件改动 diff 展开', () => {
+  const withFiles = (extra: Partial<MultiAgentMessage> = {}): MultiAgentMessage => {
+    const m = base({})
+    m.files_changed = [
+      { file: 'backend/app/x.py', status: 'modified', additions: 2, deletions: 1 },
+      { file: 'backend/app/logo.png', status: 'added', binary: true },
+      { file: 'E:/outside/y.py', status: 'modified', additions: 1, deletions: 0, external: true },
+    ]
+    return Object.assign(m, extra)
+  }
+
+  const mountIt = (
+    message: MultiAgentMessage,
+    loadDiff?: (id: string, step?: number) => Promise<unknown>,
+  ) =>
+    mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message, loadDiff },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+
+  it('默认收起；点击「查看 diff」才按需拉取并渲染行级着色', async () => {
+    const loadDiff = vi.fn().mockResolvedValue({ files: [], truncated: false, reason: '' })
+    const wrapper = mountIt(withFiles(), loadDiff)
+    expect(wrapper.find('.fc-diff').exists()).toBe(false)
+    expect(wrapper.find('.fc-restore').text()).toBe('撤回本轮改动')
+
+    await wrapper.find('.fc-toggle').trigger('click')
+    expect(loadDiff).toHaveBeenCalledWith('m1', undefined)
+    expect(wrapper.find('.fc-diff').exists()).toBe(true)
+    // 再次点击收起，且不重复请求
+    await wrapper.find('.fc-toggle').trigger('click')
+    expect(wrapper.find('.fc-diff').exists()).toBe(false)
+    expect(loadDiff).toHaveBeenCalledTimes(1)
+  })
+
+  it('已缓存 diffFiles 时展开不再请求', async () => {
+    const loadDiff = vi.fn()
+    const message = withFiles({
+      diffFiles: [{
+        file: 'backend/app/x.py',
+        diff: [
+          'diff --git a/backend/app/x.py b/backend/app/x.py',
+          'index 111..222 100644',
+          '--- a/backend/app/x.py',
+          '+++ b/backend/app/x.py',
+          '@@ -1,3 +1,4 @@',
+          ' line1',
+          '-line2',
+          '+line2-changed',
+          '+line3',
+        ].join('\n'),
+      }],
+      diffTruncated: false,
+      diffReason: '',
+    })
+    const wrapper = mountIt(message, loadDiff)
+    await wrapper.find('.fc-toggle').trigger('click')
+    expect(loadDiff).not.toHaveBeenCalled()
+    const lines = wrapper.findAll('.fc-dl')
+    expect(wrapper.find('.fc-diff-path').text()).toBe('backend/app/x.py')
+    const cls = lines.map(n => n.classes()[1])
+    expect(cls).toEqual(['meta', 'meta', 'meta', 'meta', 'hunk', 'ctx', 'del', 'add', 'add'])
+  })
+
+  it('老消息无 after_tree → 展示 diffReason 而非报错', async () => {
+    const wrapper = mountIt(withFiles({ diffReason: '该消息为旧版本记录，无 after_tree，无法渲染 diff' }))
+    await wrapper.find('.fc-toggle').trigger('click')
+    expect(wrapper.find('.fc-diff-hint').text()).toContain('after_tree')
+    expect(wrapper.find('.fc-diff-file').exists()).toBe(false)
+  })
+
+  it('只有 1 个写步骤时不显示步骤选择器', async () => {
+    const wrapper = mountIt(withFiles({ diffFiles: [], diffSteps: 1 }))
+    await wrapper.find('.fc-toggle').trigger('click')
+    expect(wrapper.find('.fc-steps').exists()).toBe(false)
+  })
+
+  it('多步骤 → 步骤选择器可切到单步并回传 step 下标', async () => {
+    const loadDiff = vi.fn().mockResolvedValue({ files: [], truncated: false, reason: '', steps: 3 })
+    const wrapper = mountIt(withFiles({ diffSteps: 3 }), loadDiff)
+    await wrapper.find('.fc-toggle').trigger('click')
+    // 整轮先拉一次（不带 step）
+    expect(loadDiff).toHaveBeenNthCalledWith(1, 'm1', undefined)
+
+    const steps = wrapper.findAll('.fc-step')
+    expect(steps.map(n => n.text())).toEqual(['整轮', '第 1 步', '第 2 步', '第 3 步'])
+    // 「整轮」默认高亮
+    expect(steps[0].classes()).toContain('active')
+
+    await steps[3].trigger('click') // [3] = 第 3 步 → step=2
+    expect(loadDiff).toHaveBeenNthCalledWith(2, 'm1', 2)
+
+    await wrapper.findAll('.fc-step')[0].trigger('click') // 回到整轮
+    expect(loadDiff).toHaveBeenNthCalledWith(3, 'm1', undefined)
+  })
+
+  it('步骤选择器：拉取失败显示错误且不崩', async () => {
+    const loadDiff = vi.fn()
+      .mockResolvedValueOnce({ files: [], truncated: false, reason: '', steps: 2 })
+      .mockRejectedValueOnce(new Error('该轮次缺少逐步快照'))
+    const wrapper = mountIt(withFiles({ diffSteps: 2 }), loadDiff)
+    await wrapper.find('.fc-toggle').trigger('click')
+    await wrapper.findAll('.fc-step')[1].trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.fc-diff-hint').text()).toContain('缺少逐步快照')
+  })
+
+  it('拉取失败 → 显示错误提示且不崩', async () => {    const loadDiff = vi.fn().mockRejectedValue(new Error('会话尚未在服务器创建'))
+    const wrapper = mountIt(withFiles(), loadDiff)
+    await wrapper.find('.fc-toggle').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.fc-diff-hint').text()).toContain('会话尚未在服务器创建')
+  })
+
+  it('无 loadDiff 注入时安全降级（不请求、不报错）', async () => {
+    const wrapper = mountIt(withFiles())
+    await wrapper.find('.fc-toggle').trigger('click')
+    expect(wrapper.find('.fc-diff').exists()).toBe(true)
+    expect(wrapper.find('.fc-diff-hint').text()).toBe('无可展示的 diff')
+  })
+
+  it('diff 截断提示 + 撤回后按钮禁用', async () => {
+    const wrapper = mountIt(withFiles({ diffTruncated: true, snapshotRestored: true }))
+    const restore = wrapper.find('.fc-restore')
+    expect(restore.text()).toBe('已撤回')
+    expect(restore.attributes('disabled')).toBeDefined()
+    await wrapper.find('.fc-toggle').trigger('click')
+    // 无 diffFiles 时先提示「无可展示的 diff」，截断提示作为附加说明一并渲染
+    const hints = wrapper.findAll('.fc-diff-hint').map(n => n.text())
+    expect(hints).toContain('无可展示的 diff')
+    expect(hints).toContain('diff 过长已截断')
+  })
+
+  it('文件行渲染状态徽标 / 二进制 / 外部路径标记', () => {
+    const wrapper = mountIt(withFiles())
+    const badges = wrapper.findAll('.fc-badge').map(n => n.text())
+    expect(badges).toEqual(['修改', '新增', '修改'])
+    expect(wrapper.find('.fc-lines.binary').exists()).toBe(true)
+    expect(wrapper.text()).toContain('外部路径')
+    expect(wrapper.text()).toContain('+2')
+    expect(wrapper.text()).toContain('-1')
+  })
+})

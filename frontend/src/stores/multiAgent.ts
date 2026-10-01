@@ -1,15 +1,18 @@
-import { defineStore } from 'pinia'
+﻿import { defineStore } from 'pinia'
 import { ref, computed, reactive, onScopeDispose } from 'vue'
-import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep, FileContent, AgentOutputPart, VoiceMessageData } from '../types'
+import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep, FileContent, AgentOutputPart, VoiceMessageData, QueuedPrompt } from '../types'
 import {
   sendMultiAgentStream,
   restoreSnapshot as apiRestoreSnapshot,
+  fetchTurnDiff as apiFetchTurnDiff,
 } from '../api/multiAgent'
 import {
   listConversations,
   getConversation,
   renameConversation as apiRenameConversation,
   deleteConversation as apiDeleteConversation,
+  enqueueSessionPrompt,
+  removeSessionPrompt,
   type ConversationMeta,
 } from '../api/sessions'
 import { SUPPORTED_MODELS } from '../config/models'
@@ -92,6 +95,8 @@ interface SessionState {
   streamPhase: 'idle' | 'queued' | 'running'
   queuePosition: number | null
   deletedIds: string[]
+  /** [队列] 本会话「执行中追加」的待处理任务（后端 session_inputs；新→旧执行） */
+  pendingPrompts: QueuedPrompt[]
 }
 
 export const useMultiAgentStore = defineStore('multiAgent', () => {
@@ -206,6 +211,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         streamPhase: 'idle',
         queuePosition: null,
         deletedIds: [],
+        pendingPrompts: [],
       }
     }
     return sessions.value[sessionId]
@@ -280,6 +286,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const loading = computed(() => currentSession.value?.loading || false)
   const streamPhase = computed(() => currentSession.value?.streamPhase || 'idle')
   const queuePosition = computed(() => currentSession.value?.queuePosition ?? null)
+  /** [队列] 当前会话的待处理任务（新→旧执行；已 drain 的会从这里移除） */
+  const pendingPrompts = computed(() => currentSession.value?.pendingPrompts ?? [])
 
   async function loadConversations() {
     loadModels()
@@ -553,6 +561,51 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (autoRetrySessionId.value === sessionId) autoRetrySessionId.value = serverId
   }
 
+  // [队列] 回合收尾：把权威答案/用量/改动/计划文件回填到该回合的助手消息。
+  // done 与 turn_done 共用（多回合 drain 时每个回合都要走一次）。
+  function finalizeTurn(
+    session: SessionState,
+    event: MultiAgentSSEEvent,
+    msg: MultiAgentMessage,
+    map: Record<string, AgentStreamData>,
+  ): void {
+    if (event.title) { session.conversationTitle = event.title; loadConversations() }
+    if (event.answer) msg.content = event.answer
+    else if (event.content) msg.content = event.content
+    // [模型目录] 回填本轮 model/token 用量/成本
+    if (event.model) msg.model = event.model
+    if (event.tokens) msg.tokens = event.tokens
+    if (typeof event.cost === 'number' && event.cost > 0) msg.cost = event.cost
+    // [文件改动] 本轮改动的文件 + 行数（快照 diff）
+    if (event.files_changed && event.files_changed.length) msg.files_changed = event.files_changed
+    // [plan→build] 计划已成但执行出错：正文（含「## 实施计划」）必须保留，
+    // 追加一行出错提示并标记 isError。走 error 事件会把正文覆盖成错误文案。
+    if (event.partial_error) {
+      msg.isError = true
+      msg.partial_error = event.partial_error
+      msg.content = `${msg.content}\n\n> ⚠ 执行出错：${event.partial_error}`
+    }
+    // [C8] plan Agent 落盘的计划文件（前端展示「查看计划」入口，可复制路径）
+    if (event.plan_path) msg.plan_path = event.plan_path
+    // 回填服务器生成的消息 id，保证删除/撤销能命中真实消息
+    if (event.assistant_msg_id) msg.id = event.assistant_msg_id
+    if (event.user_msg_id) {
+      for (let i = session.messages.length - 1; i >= 0; i--) {
+        const m = session.messages[i]
+        if (m.role === 'user' && m.id !== event.user_msg_id) {
+          m.id = event.user_msg_id
+          break
+        }
+      }
+    }
+    // 兜底：直播事件缺失时用后端快照回填 agent 面板（如重连/丢事件）
+    if (Object.keys(map).length === 0 && event.agents?.length) {
+      msg.agents = event.agents
+    } else {
+      msg.agents = Object.values(map)
+    }
+  }
+
   async function send(text: string, clientMsgId?: string, files?: FileContent[], voice?: VoiceMessageData): Promise<boolean> {
     let sessionId = activeSessionId.value
     if (!sessionId) {
@@ -563,10 +616,11 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
     const session = sessions.value[sessionId]
     if (!session) return false
-    // [S7] 防止同一会话并发发送导致消息/步骤竞态；loading 时给出可选排队提示
-    if (session.loading) {
-      setNotice('上一条消息仍在处理中，请稍候再发送')
-      return false
+    // [队列] 执行中（或本会话还有待处理任务）再次发送 → 不再拒绝，改为「追加排队任务」
+    // （对齐 opencode：执行中仍可发消息；顺序 = 新→旧 LIFO，后端当前轮结束后 drain）。
+    // pendingPrompts 用 ?. 兜底：历史缓存/测试里手工构造的 session 对象可能没有该字段。
+    if (session.loading || session.streamPhase !== 'idle' || (session.pendingPrompts?.length ?? 0) > 0) {
+      return enqueueWhileBusy(sessionId, session, text, files, voice)
     }
     // [S6] 发送前校验模型/目录有效性，避免带无效 model 触发后端 404
     if (!modelOptions.value.some(m => m.value === selectedModel.value)) {
@@ -604,8 +658,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     session.queuePosition = null
 
     const assistantMsgId = genId()
-    const agentsMap: Record<string, AgentStreamData> = {}
-    const assistantMsg: MultiAgentMessage = reactive({
+    let agentsMap: Record<string, AgentStreamData> = {}
+    let assistantMsg: MultiAgentMessage = reactive({
       id: assistantMsgId, role: 'assistant', content: '', agents: [], timestamp: new Date(),
     })
     session.messages = [...session.messages, assistantMsg]
@@ -731,50 +785,44 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           if (errorInfo.retryable && autoRetrySessionId.value === sessionId) {
             startAutoRetry(sessionId, text)
           }
-        } else if (event.type === 'done') {
-          completed = true
-          session.streamPhase = 'idle'
-          routingStatus.value = ''
-          session.conversationId = event.conversation_id
-          if (event.title) { session.conversationTitle = event.title; loadConversations() }
-          if (event.answer) assistantMsg.content = event.answer
-          else if (event.content) assistantMsg.content = event.content
-          // [模型目录] 回填本轮 model/token 用量/成本
-          if (event.model) assistantMsg.model = event.model
-          if (event.tokens) assistantMsg.tokens = event.tokens
-          if (typeof event.cost === 'number' && event.cost > 0) assistantMsg.cost = event.cost
-          // [文件改动] 本轮改动的文件 + 行数（快照 diff）
-          if (event.files_changed && event.files_changed.length) assistantMsg.files_changed = event.files_changed
-          // [plan→build] 计划已成但执行出错：正文（含「## 实施计划」）必须保留，
-          // 追加一行出错提示并标记 isError。走 error 事件会把正文覆盖成错误文案。
-          if (event.partial_error) {
-            assistantMsg.isError = true
-            assistantMsg.partial_error = event.partial_error
-            assistantMsg.content = `${assistantMsg.content}\n\n> ⚠ 执行出错：${event.partial_error}`
+        } else if (event.type === 'done' || event.type === 'turn_done') {
+          // [队列] turn_done = 本回合完成但还有排队任务（同一条 SSE 流继续跑下一个回合）；
+          // done = 队列已空，断流收尾。两者共用同一套「回合收尾」逻辑。
+          const moreComing = event.type === 'turn_done'
+          finalizeTurn(session, event, assistantMsg, agentsMap)
+          if (!moreComing) {
+            completed = true
+            session.streamPhase = 'idle'
+            routingStatus.value = ''
+            session.conversationId = event.conversation_id || session.conversationId
+            persistSession(sessionId)
+            migrateToServerId(sessionId)
+            cancelAutoRetry()
+            return
           }
-          // [C8] plan Agent 落盘的计划文件（前端展示「查看计划」入口，可复制路径）
-          if (event.plan_path) assistantMsg.plan_path = event.plan_path
-          // 回填服务器生成的消息 id，保证删除/撤销能命中真实消息
-          if (event.assistant_msg_id) assistantMsg.id = event.assistant_msg_id
-          if (event.user_msg_id) {
-            for (let i = session.messages.length - 1; i >= 0; i--) {
-              const m = session.messages[i]
-              if (m.role === 'user' && m.id !== event.user_msg_id) {
-                m.id = event.user_msg_id
-                break
+          // 还有排队任务：把「排队中」的气泡转为已回答，并新建一个助手占位接下一个回合
+          for (const m of session.messages) {
+            if (m.role === 'user' && m.queued) {
+              m.queued = false
+              const pid = m.queuePromptId || m.clientMsgId
+              if (pid) {
+                session.pendingPrompts = (session.pendingPrompts ?? []).filter(p => p.id !== pid)
+                m.queuePromptId = undefined
               }
             }
           }
-          // 兜底：直播事件缺失时用后端快照回填 agent 面板（如重连/丢事件）
-          if (Object.keys(agentsMap).length === 0 && event.agents?.length) {
-            assistantMsg.agents = event.agents
-          } else {
-            assistantMsg.agents = Object.values(agentsMap)
-          }
-          // 完成后持久化 + 内存 key 迁移（客户端 genId → 服务器 id）
+          session.streamPhase = 'running'
+          agentsMap = {}
+          assistantMsg = reactive({
+            id: genId(), role: 'assistant', content: '', agents: [], timestamp: new Date(),
+          })
+          session.messages = [...session.messages, assistantMsg]
           persistSession(sessionId)
-          migrateToServerId(sessionId)
-          cancelAutoRetry()
+        } else if (event.type === 'queue_drain') {
+          // [队列] 纯提示：当前轮之后还有 N 个排队任务（实际 drain 由 turn_done 驱动）
+          if (event.queue_size != null) {
+            session.queuePosition = event.queue_size
+          }
         }
       }, signal, (sid) => {
         // 后端在响应头 X-Session-Id 立即透出会话 id（先于任何 SSE 事件），
@@ -810,7 +858,76 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     return completed
   }
 
-  function cancel() {
+  // [队列] 执行中追加任务：落一条「排队中」用户消息 + POST /prompts。
+  // 后端在当前轮结束时按新→旧 drain；这里不建 SSE 流（复用正在跑的那条）。
+  async function enqueueWhileBusy(
+    sessionId: string,
+    session: SessionState,
+    text: string,
+    files?: FileContent[],
+    voice?: VoiceMessageData,
+  ): Promise<boolean> {
+    if (!session.conversationId) {
+      // 首条消息还在建会话（服务器 id 未回填）→ 无法入队，保持原提示
+      setNotice('上一条消息仍在处理中，请稍候再发送')
+      return false
+    }
+    if (!text.trim() && !(files && files.length) && !voice) return false
+
+    const messageClientId = genId()
+    const userMsg: MultiAgentMessage = {
+      id: genId(), role: 'user', content: text, agents: [], timestamp: new Date(),
+      clientMsgId: messageClientId,
+      queued: true,
+      files: files && files.length ? files : undefined,
+      voice: voice || undefined,
+    }
+    session.messages = [...session.messages, userMsg]
+
+    try {
+      const row = await enqueueSessionPrompt(
+        session.conversationId,
+        {
+          message: text,
+          files: files && files.length ? files : undefined,
+          voice: voice || undefined,
+          agent_mode: agentMode.value !== 'default' ? agentMode.value : undefined,
+        },
+        messageClientId,
+      )
+      userMsg.queuePromptId = row?.id || messageClientId
+      session.pendingPrompts = [...(session.pendingPrompts ?? []), { id: userMsg.queuePromptId, message: text }]
+      await persistSession(sessionId)
+      return true
+    } catch (e) {
+      // 入队失败（会话已被删除/无权/网络）：撤掉刚插入的气泡，不留假排队项
+      session.messages = session.messages.filter(m => m.id !== userMsg.id)
+      setNotice(`排队失败：${e instanceof Error ? e.message : String(e)}`)
+      await persistSession(sessionId)
+      return false
+    }
+  }
+
+  /** [队列] 移除一条待处理任务（用户后悔了 / 想插队到最前） */
+  async function removeQueuedPrompt(sessionId: string, promptId: string): Promise<void> {
+    const session = sessions.value[sessionId]
+    if (!session) return
+    if (session.conversationId) {
+      try {
+        await removeSessionPrompt(session.conversationId, promptId)
+      } catch (e) {
+        // 后端已 drain 或已删除 → 仍按本地移除（幂等），仅记录
+        console.warn('移除排队任务失败（已按本地移除）:', e)
+      }
+    }
+    session.pendingPrompts = (session.pendingPrompts ?? []).filter(p => p.id !== promptId)
+    session.messages = session.messages.filter(
+      m => !(m.role === 'user' && (m.queuePromptId === promptId || m.clientMsgId === promptId)),
+    )
+    await persistSession(sessionId)
+  }
+
+  async function cancel() {
     if (activeSessionId.value) {
       const session = sessions.value[activeSessionId.value]
       if (session) {
@@ -854,13 +971,43 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
   }
 
+  // [查看改动] 拉取某条 assistant 消息对应轮次的 diff 文本（展开文件改动时按需加载）
+  // 不落 IndexedDB：diff 体积大且可随时重取，只在内存里缓存到 message 上。
+  // step 省略 = 整轮净 diff；传 step=N = 只看第 N 步（每 step 快照）。
+  async function fetchMessageDiff(messageId: string, step?: number) {
+    const s = activeSessionId.value ? sessions.value[activeSessionId.value] : undefined
+    if (!s?.conversationId) throw new Error('会话尚未在服务器创建，无法查看改动')
+    const result = await apiFetchTurnDiff(s.conversationId, messageId, '', step)
+    const msg = s.messages.find(m => m.id === messageId)
+    if (msg) {
+      msg.diffFiles = result.files
+      msg.diffTruncated = result.truncated
+      msg.diffReason = result.reason
+      if (step == null) {
+        msg.diffSteps = result.steps
+        msg.diffStep = undefined
+      } else {
+        msg.diffStep = step
+      }
+    }
+    return result
+  }
+
   // [撤回改动] 恢复某条 assistant 消息对应轮次的文件改动（调后端 restore-snapshot）
   async function restoreSnapshot(messageId: string) {
     const s = activeSessionId.value ? sessions.value[activeSessionId.value] : undefined
     if (!s?.conversationId) throw new Error('会话尚未在服务器创建，无法撤回改动')
     const result = await apiRestoreSnapshot(s.conversationId, messageId)
     const msg = s.messages.find(m => m.id === messageId)
-    if (msg) msg.snapshotRestored = true
+    if (msg) {
+      msg.snapshotRestored = true
+      // 改动已被撤回 → 已展开的 diff 立刻失效，避免用户对着过期内容点「已撤回」
+      msg.diffFiles = undefined
+      msg.diffTruncated = false
+      msg.diffReason = ''
+      msg.diffSteps = 0
+      msg.diffStep = undefined
+    }
     await persistSession(activeSessionId.value!)
     return result
   }
@@ -916,8 +1063,9 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     imageCaptionModelId, imageCaptionModelInfo, voiceModelSize,
     sessionDirectory, setSessionDirectory, agentMode,
     messages, conversationId, conversationTitle, loading, streamPhase, queuePosition,
+    pendingPrompts, removeQueuedPrompt,
     retryCountdown, notice, setNotice,
-    send, cancel, clear, undoMessage, restoreSnapshot, deleteMessage, deleteConversation,
+    send, cancel, clear, undoMessage, restoreSnapshot, fetchMessageDiff, deleteMessage, deleteConversation,
     loadConversations, loadConversation, newChat, renameConversation,
     forkConversation, compactConversation, fetchSessionStatus,
     retryLastMessage, manualRetry, cancelAutoRetry,

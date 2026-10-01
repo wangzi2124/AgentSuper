@@ -40,6 +40,7 @@ from app.agent.stream_events import AgentEventCollector
 # ── 跨子模块依赖（自动生成）──
 
 from .helpers import _get_user_id
+from .helpers import _prompt_to_chat_request
 from .helpers import _validate_chat_message
 from .persist import _begin_task_session
 from .persist import _build_compressed_history
@@ -49,9 +50,9 @@ from .persist import _resolve_multi_agent_parent
 from .snapshot_diff import _abort_turn, _before_hash, _files_changed
 
 from app.session import repository as session_repo
-from app.snapshot.turn import restore_session_turn
+from app.snapshot.turn import diff_turn, restore_session_turn
 
-from app.models.schemas import RestoreSnapshotRequest
+from app.models.schemas import DiffRequest, RestoreSnapshotRequest
 
 logger = logging.getLogger(__name__)
 
@@ -438,8 +439,216 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
               "parent_session_id": session_id},
     )
 
+    class _TurnAborted(Exception):
+        """回合内部已发出终态事件（error），外层 drain 循环据此收场。"""
+
+    # [执行中追加任务] 当前回合的 collector / 子会话引用 —— 供 event_generator 的
+    # 断连兜底读取（drain 会逐轮替换成新回合的）。
+    turn_ref: dict = {"collector": collector}
+
+    async def _run_one_turn(turn_body, turn_child_id: str, turn_thread_id: str,
+                            turn_history: list, turn_collector):
+        """跑一个完整回合：routing → send_and_wait → 落库 → 发终态事件 → 认领下一个排队任务。
+
+        队列为空时发 `done` 让前端断流；有排队任务时发 `turn_done`，同一条 SSE 流继续
+        承载下一个排队回合。返回**已认领的下一个排队任务**（dict）或 None（队列空/本轮
+        非正常结束）。
+
+        [队列竞态] 这里刻意用「原子 pop」而不是「先 count 再 pop」：回合执行期间用户可能
+        追加任务，count-then-act 会在 count=0 与 pop 之间漏掉新入队任务（或反过来多发
+        一次 `done` 让前端断流、drain 出来的回合没人接收）。pop 是 repository 层单条
+        事务，pop 之后才到达的任务留给下一轮用户消息处理 —— 这与 opencode「本轮结束后
+        drain 期间入队的任务」语义一致，且不会丢任务。
+        """
+        await event_queue.put({
+            "type": "routing",
+            "detail": "正在分析问题并选择最合适的 Agent...",
+        })
+
+        # 如果指定了 agent_mode（顶层命令仅 plan），直接发送到 plan Agent
+        target_agent = "supervisor"
+        if turn_body.agent_mode == "plan":
+            target_agent = turn_body.agent_mode
+
+        # [文件改动] 请求开始前拍快照（before tree），完成后 diff 变更文件
+        before_hash = _before_hash(request)
+        # 把 trace 上下文注入 payload，随消息透传到 supervisor 与全部子 Agent
+        _trace = _chainlog_trace_fields(session_id, turn_child_id)
+
+        reply = await agent_bus.send_and_wait(
+            AgentMessage(
+                source="user",
+                target=target_agent,
+                type="request",
+                action="chat",
+                payload={
+                    "question": turn_body.message,
+                    "model": turn_body.model,
+                    "history": turn_history,
+                    "use_vector_db": turn_body.use_vector_db,
+                    "files": [f.model_dump() for f in turn_body.files],
+                    "voice": turn_body.voice.model_dump() if turn_body.voice else None,
+                    "conversation_id": session_id,
+                    "user_id": user_id,
+                    "directory": session_dir,
+                    "_event_queue": turn_collector,
+                    "agent_mode": turn_body.agent_mode,
+                    chainlog.TRACE_PAYLOAD_KEY: _trace,
+                },
+                thread_id=turn_thread_id,
+            ),
+            timeout=settings.supervisor_timeout,
+        )
+
+        # [plan→build] build 失败但计划已生成：payload["answer"] 带着完整计划。
+        # 旧实现把它连同 plan_path 一起丢掉，用户只剩一句「执行失败」。
+        _err_payload = reply.payload or {}
+        _partial_answer = str(_err_payload.get("answer", "") or "")
+        if reply.type == "error" and not _partial_answer:
+            _err_detail = _err_payload.get("error", "")
+            logger.error("multi-agent reply error: session=%s detail=%s",
+                         session_id, _err_detail)
+            generic_error = friendly_chat_error(
+                RuntimeError(_err_detail) if _err_detail else None, model=turn_body.model,
+            )
+            chainlog.error(
+                "agent", "chat.stream", "agent.reply_error",
+                message=f"子 Agent 返回错误: {generic_error}",
+                data={
+                    "child_id": turn_child_id, "error": _err_detail,
+                    "error_type": _err_payload.get("error_type"),
+                    "completed_steps": _err_payload.get("completed_steps", []),
+                },
+            )
+            _abort_turn()
+            turn_collector.fail_running(generic_error)
+            await event_queue.put({
+                "type": "error",
+                "error": generic_error,
+                "detail": generic_error,
+                "retryable": False,
+                "status_code": None,
+                "error_type": "AgentError",
+            })
+            raise _TurnAborted
+
+        payload = reply.payload
+        answer = payload.get("answer", "")
+        sources = payload.get("sources", [])
+        steps = payload.get("steps", [])
+        routed_to = payload.get("routed_to")
+        # 执行出错但有部分答案 → 计划正文同样要落库，刷新后不丢
+        partial_error = bool(reply.type == "error")
+        if partial_error:
+            service.update(user_id, turn_child_id, status="error")
+            _abort_turn()
+            turn_collector.fail_running(str(_err_payload.get("error") or "执行出错"))
+            chainlog.warning(
+                "agent", "chat.stream", "agent.reply_partial_error",
+                message="子 Agent 返回错误但带有部分答案（已保留并落库）",
+                data={
+                    "child_id": turn_child_id,
+                    "error": _err_payload.get("error"),
+                    "error_type": _err_payload.get("error_type"),
+                    "answer_chars": len(answer),
+                    "plan_path": _err_payload.get("plan_path"),
+                },
+            )
+        agents = turn_collector.agents_snapshot()
+        chainlog.info(
+            "agent", "chat.stream", "agent.reply",
+            message=f"子 Agent 回复（路由到 {routed_to}，{len(answer)} 字）",
+            data={
+                "routed_to": routed_to, "answer_chars": len(answer),
+                "sources": len(sources), "steps": len(steps),
+                "agents": [
+                    {"agent_id": a.get("agent_id"),
+                     "status": a.get("status"),
+                     "steps": len(a.get("steps") or [])}
+                    for a in agents
+                ],
+                "tokens": payload.get("tokens") or {},
+                "cost": payload.get("cost") or 0.0,
+            },
+        )
+
+        # [文件改动] 完成后对比 before/after，得到本次轮次的变更文件 + 行数 + 恢复描述
+        files_changed, snapshot_restore = _files_changed(request, before_hash)
+
+        # 落库：主会话 + 子任务会话（先落库以拿到消息 id）
+        user_msg_id, assistant_msg_id = await _persist_multi_agent(
+            service, user_id, session_id, turn_child_id, turn_body.message, answer, sources, steps,
+            agents=agents, model=turn_body.model, tokens=payload.get("tokens"),
+            cost=payload.get("cost") or 0.0, client_msg_id=turn_body.client_msg_id,
+            files=[f.model_dump() for f in turn_body.files],
+            voice=turn_body.voice.model_dump() if turn_body.voice else None,
+            files_changed=files_changed,
+            snapshot_restore=snapshot_restore,
+        )
+
+        # [队列竞态] 认领下一个排队任务（原子 pop）→ 决定发 done 还是 turn_done。
+        # 放在持久化之后、终态事件之前：此刻入队的任务也会被本轮流看到。
+        next_prompt = await service.pop_prompt(session_id)
+        final = next_prompt is None
+
+        chainlog.info(
+            "persist", "chat.stream", "persist.done",
+            message="消息已落库",
+            data={
+                "user_msg_id": user_msg_id,
+                "assistant_msg_id": assistant_msg_id,
+                "files_changed": files_changed,
+                "queued_turn": not final,
+            },
+        )
+
+        await event_queue.put({
+            "type": "done" if final else "turn_done",
+            "answer": answer,
+            "sources": [
+                {"document_id": s["document_id"], "content": s["content"], "score": s["score"]}
+                if isinstance(s, dict) else s
+                for s in sources
+            ],
+            "conversation_id": session_id,
+            "user_msg_id": user_msg_id,
+            "assistant_msg_id": assistant_msg_id,
+            "model": turn_body.model,
+            "steps": steps,
+            "routed_to": routed_to,
+            "agents": agents,
+            "tokens": payload.get("tokens") or {},
+            "cost": payload.get("cost") or 0.0,
+            "files_changed": files_changed,
+            "plan_path": payload.get("plan_path") or None,
+            # 排队任务续跑：该回合由队列 drain 出来，前端据此把徽标从「排队中」转为已回答
+            "queued_turn": not final,
+            # [队列竞态] 本回合认领到的下一个排队任务 id（None = 队列已空，发 done 断流）
+            "next_prompt_id": next_prompt.get("id") if next_prompt else None,
+            # [plan→build] 计划已成、执行出错：正文里已含「## 执行结果（出错）」，
+            # 带上 partial_error 让前端能标红提示，但**不**走 error 事件（否则正文被覆盖）。
+            "partial_error": _err_payload.get("error") if partial_error else None,
+        })
+        chainlog.info(
+            "http", "chat.stream", "chat.done",
+            message="流式请求完成" if final else "排队任务完成，继续 drain",
+            data={
+                "answer_chars": len(answer), "routed_to": routed_to,
+                "files_changed": len(files_changed or []),
+                "queued_turn": not final,
+            },
+        )
+        # 交回已认领的排队任务；None = 队列空（调用方 break）
+        return next_prompt
+
     async def run_multi_agent():
-        """通过 Supervisor 运行多 Agent 系统，结果推送到 event_queue。"""
+        """通过 Supervisor 运行多 Agent 系统，结果推送到 event_queue。
+
+        **[执行中追加任务]** 当前轮跑完后不立刻断流：按「后来居上」顺序（新→旧）
+        继续 drain 该会话的待处理任务队列（`service.pop_prompt`），每个排队任务跑一个
+        完整回合并发 `turn_done`；**队列空才发终态 `done`**（前端据此断流）。
+        语义 = opencode「执行中仍可发消息」+ 用户要求的后来居上插队。
+        """
         global _queue_counter
         # 仅当真正排队（进入前信号量已满）时才递增；进入后对称递减。
         # 避免直接进入（未排队）的请求也递减，导致计数失真/提前清零。
@@ -475,195 +684,109 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                 if queued_position is not None:
                     _queue_counter = max(0, _queue_counter - 1)
                 try:
-                    # 先推送路由事件
-                    await event_queue.put({
-                        "type": "routing",
-                        "detail": "正在分析问题并选择最合适的 Agent...",
-                    })
+                    turn_body = body
+                    turn_child_id, turn_thread_id = child_id, thread_id
+                    turn_history = compressed
+                    while True:
+                        # 开跑前的队列快照只用于「提示前端本轮之后还有活」，
+                        # 不再据此决定 done/turn_done —— 那个决定在回合末尾原子 pop 时做。
+                        pending_now = session_repo.count_pending(session_id)
+                        if pending_now > 0:
+                            await event_queue.put({
+                                "type": "queue_drain",
+                                "queue_size": pending_now,
+                                "detail": f"本轮完成后继续执行 {pending_now} 个排队任务",
+                            })
+                        turn_collector = AgentEventCollector(event_queue)
+                        turn_ref["collector"] = turn_collector
+                        try:
+                            nxt = await _run_one_turn(turn_body, turn_child_id, turn_thread_id,
+                                                       turn_history, turn_collector)
+                        except _TurnAborted:
+                            return
+                        except asyncio.TimeoutError:
+                            _abort_turn()
+                            turn_collector.fail_running("请求超时，请重试")
+                            chainlog.error(
+                                "http", "chat.stream", "chat.timeout",
+                                message=f"supervisor 超时（{settings.supervisor_timeout:.0f}s）",
+                                data={
+                                    "supervisor_timeout": settings.supervisor_timeout,
+                                    "child_id": turn_child_id, "thread_id": turn_thread_id,
+                                },
+                            )
+                            await event_queue.put({
+                                "type": "error",
+                                "error": "请求超时，请重试",
+                                "detail": "请求超时，请重试",
+                                "retryable": True,
+                                "status_code": None,
+                                "error_type": "TimeoutError",
+                            })
+                            return
+                        except asyncio.CancelledError:
+                            service.update(user_id, turn_child_id, status="interrupted")
+                            _abort_turn()
+                            turn_collector.fail_running("请求已取消")
+                            chainlog.warning(
+                                "http", "chat.stream", "chat.cancelled",
+                                message="请求已取消",
+                                data={"child_id": turn_child_id, "thread_id": turn_thread_id},
+                            )
+                            await event_queue.put({
+                                "type": "error",
+                                "detail": "cancelled",
+                                "retryable": False,
+                                "status_code": None,
+                                "error_type": "CancelledError",
+                            })
+                            return
+                        except Exception as e:
+                            logger.exception("multi-agent stream invocation failed: user=%s session=%s",
+                                             user_id, session_id)
+                            service.update(user_id, turn_child_id, status="error")
+                            _abort_turn()
+                            generic_error = friendly_chat_error(e, model=turn_body.model)
+                            turn_collector.fail_running(generic_error)
+                            chainlog.error(
+                                "http", "chat.stream", "chat.error",
+                                message=f"流式请求失败: {generic_error}",
+                                data={
+                                    "child_id": turn_child_id, "thread_id": turn_thread_id,
+                                    "error": str(e), "error_type": type(e).__name__,
+                                    "classified": classify_error(e),
+                                },
+                            )
+                            await event_queue.put({
+                                "type": "error",
+                                "error": generic_error,
+                                "detail": generic_error,
+                                **classify_error(e),
+                            })
+                            return
+                        finally:
+                            task_bridge.unregister(turn_child_id)
 
-                    # 通过 Supervisor 发送请求（_event_queue 经 payload 透传到子 Agent）
-                    # 如果指定了 agent_mode（顶层命令仅 plan），直接发送到 plan Agent
-                    target_agent = "supervisor"
-                    if body.agent_mode == "plan":
-                        target_agent = body.agent_mode
-
-                    # [文件改动] 请求开始前拍快照（before tree），完成后 diff 变更文件
-                    before_hash = _before_hash(request)
-                    # 把 trace 上下文注入 payload，随消息透传到 supervisor 与全部子 Agent
-                    _trace = _chainlog_trace_fields(session_id, child_id)
-
-                    reply = await agent_bus.send_and_wait(
-                        AgentMessage(
-                            source="user",
-                            target=target_agent,
-                            type="request",
-                            action="chat",
-                            payload={
-                                "question": body.message,
-                                "model": body.model,
-                                "history": compressed,
-                                "use_vector_db": body.use_vector_db,
-                                "files": [f.model_dump() for f in body.files],
-                                "voice": body.voice.model_dump() if body.voice else None,
-                                "conversation_id": session_id,
-                                "user_id": user_id,
-                                "directory": session_dir,
-                                "_event_queue": collector,
-                                "agent_mode": body.agent_mode,
-                                chainlog.TRACE_PAYLOAD_KEY: _trace,
-                            },
-                            thread_id=thread_id,
-                        ),
-                        timeout=settings.supervisor_timeout,
-                    )
-
-                    # [plan→build] build 失败但计划已生成：payload["answer"] 带着完整计划。
-                    # 旧实现把它连同 plan_path 一起丢掉，用户只剩一句「执行失败」。
-                    _err_payload = reply.payload or {}
-                    _partial_answer = str(_err_payload.get("answer", "") or "")
-                    if reply.type == "error" and not _partial_answer:
-                        _err_detail = _err_payload.get("error", "")
-                        logger.error("multi-agent reply error: session=%s detail=%s",
-                                     session_id, _err_detail)
-                        generic_error = friendly_chat_error(
-                            RuntimeError(_err_detail) if _err_detail else None, model=body.model,
+                        if nxt is None:
+                            break
+                        # 已在 _run_one_turn 末尾原子 pop 出 nxt（最新优先），按 ChatRequest
+                        # 重建一个回合；未指定的字段继承本轮请求（模型/向量库/工作目录等一致）。
+                        turn_body = _prompt_to_chat_request(body, nxt.get("prompt") or {})
+                        turn_child_id, turn_thread_id = _begin_task_session(
+                            service, user_id, session_id, turn_body.message,
                         )
-                        chainlog.error(
-                            "agent", "chat.stream", "agent.reply_error",
-                            message=f"子 Agent 返回错误: {generic_error}",
+                        # 重新装配历史：此时上一轮的回答已落库，排队任务要看到它
+                        turn_history = await _build_compressed_history(service, user_id, session_id)
+                        chainlog.info(
+                            "session", "chat.stream", "queue.drain",
+                            message=f"开始执行排队任务（后来居上）: {turn_body.message[:60]}",
                             data={
-                                "child_id": child_id, "error": _err_detail,
-                                "error_type": _err_payload.get("error_type"),
-                                "completed_steps": _err_payload.get("completed_steps", []),
+                                "prompt_id": nxt.get("id"),
+                                "child_id": turn_child_id,
+                                "thread_id": turn_thread_id,
+                                "remaining": session_repo.count_pending(session_id),
                             },
                         )
-                        _abort_turn()
-                        collector.fail_running(generic_error)
-                        await event_queue.put({
-                            "type": "error",
-                            "error": generic_error,
-                            "detail": generic_error,
-                            "retryable": False,
-                            "status_code": None,
-                            "error_type": "AgentError",
-                        })
-                        return
-
-                    payload = reply.payload
-                    answer = payload.get("answer", "")
-                    sources = payload.get("sources", [])
-                    steps = payload.get("steps", [])
-                    routed_to = payload.get("routed_to")
-                    # 执行出错但有部分答案 → 计划正文同样要落库，刷新后不丢
-                    partial_error = bool(reply.type == "error")
-                    if partial_error:
-                        service.update(user_id, child_id, status="error")
-                        _abort_turn()
-                        collector.fail_running(str(_err_payload.get("error") or "执行出错"))
-                        chainlog.warning(
-                            "agent", "chat.stream", "agent.reply_partial_error",
-                            message="子 Agent 返回错误但带有部分答案（已保留并落库）",
-                            data={
-                                "child_id": child_id,
-                                "error": _err_payload.get("error"),
-                                "error_type": _err_payload.get("error_type"),
-                                "answer_chars": len(answer),
-                                "plan_path": _err_payload.get("plan_path"),
-                            },
-                        )
-                    agents = collector.agents_snapshot()
-                    chainlog.info(
-                        "agent", "chat.stream", "agent.reply",
-                        message=f"子 Agent 回复（路由到 {routed_to}，{len(answer)} 字）",
-                        data={
-                            "routed_to": routed_to, "answer_chars": len(answer),
-                            "sources": len(sources), "steps": len(steps),
-                            "agents": [
-                                {"agent_id": a.get("agent_id"),
-                                 "status": a.get("status"),
-                                 "steps": len(a.get("steps") or [])}
-                                for a in agents
-                            ],
-                            "tokens": payload.get("tokens") or {},
-                            "cost": payload.get("cost") or 0.0,
-                        },
-                    )
-
-                    # [文件改动] 完成后对比 before/after，得到本次轮次的变更文件 + 行数 + 恢复描述
-                    files_changed, snapshot_restore = _files_changed(request, before_hash)
-
-                    # 落库：主会话 + 子任务会话（先落库以拿到消息 id）
-                    user_msg_id, assistant_msg_id = await _persist_multi_agent(
-                        service, user_id, session_id, child_id, body.message, answer, sources, steps,
-                        agents=agents, model=body.model, tokens=payload.get("tokens"),
-                        cost=payload.get("cost") or 0.0, client_msg_id=body.client_msg_id,
-                        files=[f.model_dump() for f in body.files],
-                        voice=body.voice.model_dump() if body.voice else None,
-                        files_changed=files_changed,
-                        snapshot_restore=snapshot_restore,
-                    )
-
-                    chainlog.info(
-                        "persist", "chat.stream", "persist.done",
-                        message="消息已落库",
-                        data={
-                            "user_msg_id": user_msg_id,
-                            "assistant_msg_id": assistant_msg_id,
-                            "files_changed": files_changed,
-                        },
-                    )
-
-                    await event_queue.put({
-                        "type": "done",
-                        "answer": answer,
-                        "sources": [
-                            {"document_id": s["document_id"], "content": s["content"], "score": s["score"]}
-                            if isinstance(s, dict) else s
-                            for s in sources
-                        ],
-                        "conversation_id": session_id,
-                        "user_msg_id": user_msg_id,
-                        "assistant_msg_id": assistant_msg_id,
-                        "model": body.model,
-                        "steps": steps,
-                        "routed_to": routed_to,
-                        "agents": agents,
-                        "tokens": payload.get("tokens") or {},
-                        "cost": payload.get("cost") or 0.0,
-                        "files_changed": files_changed,
-                        "plan_path": payload.get("plan_path") or None,
-                        # [plan→build] 计划已成、执行出错：正文里已含「## 执行结果（出错）」，
-                        # 带上 partial_error 让前端能标红提示，但**不**走 error 事件（否则正文被覆盖）。
-                        "partial_error": _err_payload.get("error") if partial_error else None,
-                    })
-                    chainlog.info(
-                        "http", "chat.stream", "chat.done",
-                        message="流式请求完成",
-                        data={
-                            "answer_chars": len(answer), "routed_to": routed_to,
-                            "files_changed": len(files_changed or []),
-                        },
-                    )
-
-                except asyncio.TimeoutError:
-                    _abort_turn()
-                    collector.fail_running("请求超时，请重试")
-                    chainlog.error(
-                        "http", "chat.stream", "chat.timeout",
-                        message=f"supervisor 超时（{settings.supervisor_timeout:.0f}s）",
-                        data={
-                            "supervisor_timeout": settings.supervisor_timeout,
-                            "child_id": child_id, "thread_id": thread_id,
-                        },
-                    )
-                    await event_queue.put({
-                        "type": "error",
-                        "error": "请求超时，请重试",
-                        "detail": "请求超时，请重试",
-                        "retryable": True,
-                        "status_code": None,
-                        "error_type": "TimeoutError",
-                    })
                 except asyncio.CancelledError:
                     service.update(user_id, child_id, status="interrupted")
                     _abort_turn()
@@ -680,30 +803,6 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                         "status_code": None,
                         "error_type": "CancelledError",
                     })
-                except Exception as e:
-                    logger.exception("multi-agent stream invocation failed: user=%s session=%s",
-                                     user_id, session_id)
-                    service.update(user_id, child_id, status="error")
-                    _abort_turn()
-                    generic_error = friendly_chat_error(e, model=body.model)
-                    collector.fail_running(generic_error)
-                    chainlog.error(
-                        "http", "chat.stream", "chat.error",
-                        message=f"流式请求失败: {generic_error}",
-                        data={
-                            "child_id": child_id, "thread_id": thread_id,
-                            "error": str(e), "error_type": type(e).__name__,
-                            "classified": classify_error(e),
-                        },
-                    )
-                    await event_queue.put({
-                        "type": "error",
-                        "error": generic_error,
-                        "detail": generic_error,
-                        **classify_error(e),
-                    })
-                finally:
-                    task_bridge.unregister(child_id)
         except asyncio.CancelledError:
             # 排队/获取信号量期间被取消：CancelledError 在 sem.acquire() 挂起点
             # 抛出，不经过内部取消分支（try 在其之后）。在此统一清理，避免
@@ -771,7 +870,10 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
             # 用后台 task 而非 await：finally 可能在 GeneratorExit 上下文中执行，
             # await 会抛 "async generator ignored GeneratorExit" 破坏流关闭。
             if reached_terminal is None:
-                agents = collector.agents_snapshot()
+                # [执行中追加任务] drain 时每个回合各有 collector，断连兜底要取
+                # **当前回合**的（turn_ref 由 drain 循环逐轮更新），否则排队回合的
+                # 部分结果会丢。
+                agents = turn_ref["collector"].agents_snapshot()
                 partial_answer = "\n\n".join(
                     a.get("content", "") for a in agents if a.get("content")
                 )
@@ -802,6 +904,43 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
         # 使"停止/撤销"按钮在任何时刻都能 POST /interrupt 真正打断后台 Agent 任务
         headers={"X-Session-Id": session_id},
     )
+
+
+@router.post("/multi-agent/diff")
+async def chat_multi_agent_diff(request: Request, body: DiffRequest):
+    """[查看改动] 渲染某条 assistant 消息对应轮次的 diff 文本（聊天 UI 展开用）。
+
+    body: {conversation_id, message_id, file?, step?}。file 为空返回本轮全部改动文件的
+    diff 文本（受上限截断，truncated=true）；指定 file 只返回该文件。
+    step=N 时只看第 N 步（每 step 快照）——「那一次写工具调用改了什么」。
+    内部文件用 git diff <before_tree> <after_tree>；外部文件（工作区外/被 gitignore）
+    用归档 blob 与当前内容做 difflib 对比。老消息没有 after_tree 时返回 reason 提示，
+    不报错。
+    """
+    user_id = _get_user_id(request)
+    try:
+        service, session_id, _ = _resolve_multi_agent_parent(request, user_id, body.conversation_id, "")
+    except session_repo.Forbidden:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    except HTTPException:
+        raise
+    target = None
+    try:
+        for m in service.messages(user_id, session_id):
+            if m.id == body.message_id and m.type == "assistant":
+                target = m
+                break
+    except Exception:
+        logger.exception("diff list messages failed: %s", session_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    descriptor = (dict(target.data or {})).get("snapshot") or {}
+    snap = getattr(request.app.state, "snapshot", None)
+    try:
+        return diff_turn(snap, descriptor, path=(body.file or ""), step=body.step)
+    except Exception:
+        logger.exception("diff render failed: %s", session_id)
+        return {"files": [], "truncated": False, "reason": "diff 渲染失败"}
 
 
 @router.post("/multi-agent/restore-snapshot")

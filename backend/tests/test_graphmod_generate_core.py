@@ -712,7 +712,7 @@ async def test_generate_content_filter(gen_env):
 
 
 @pytest.mark.asyncio
-async def test_generate_empty_content_default(gen_env, monkeypatch):
+async def test_generate_empty_content_default(gen_env, monkeypatch, offline_weak_catalog):
     """弱模型空回答 → 用强模型**完整重跑**（含工具循环）恢复。"""
     import app.models.catalog as catalog_mod
     monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
@@ -795,7 +795,7 @@ async def test_generate_empty_answer_falls_back_to_default_model(gen_env, monkey
 
 
 @pytest.mark.asyncio
-async def test_weak_model_never_enters_tool_loop(gen_env, monkeypatch):
+async def test_weak_model_never_enters_tool_loop(gen_env, monkeypatch, offline_weak_catalog):
     """[C5] 弱模型 tool-free 纯 QA —— 永不进入工具循环（这正是旧 two-stage 分支不可达的原因）。
 
     旧实现有一个「工具轮之后把记录交给强模型统一收尾」的两段式分支，其门控含 `rounds > 0`
@@ -854,7 +854,7 @@ async def test_generate_unparsed_json_answer_falls_back(gen_env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_generate_weak_model_invalid_hints_switch(gen_env, monkeypatch):
+async def test_generate_weak_model_invalid_hints_switch(gen_env, monkeypatch, offline_weak_catalog):
     """[默认·不兜底] 弱模型空回答：不回退默认强模型，直接提示切换更强模型。"""
     import app.models.catalog as catalog_mod
     monkeypatch.setattr(catalog_mod, "default_model", lambda: "deepseek/deepseek-v4-flash")
@@ -869,7 +869,7 @@ async def test_generate_weak_model_invalid_hints_switch(gen_env, monkeypatch):
     assert all(c[0] != "deepseek/deepseek-v4-flash" for c in llm.calls)
 
 
-def test_is_weak_model():
+def test_is_weak_model(offline_weak_catalog):
     from app.agent.graphmod.base import is_weak_model
     assert is_weak_model("ollama/qwen2.5:3b") is True
     assert is_weak_model("ollama/mistral:latest") is True
@@ -1093,6 +1093,20 @@ async def test_generate_task_progress(gen_env):
 
 
 # ── core.py ────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def offline_weak_catalog(monkeypatch):
+    """把弱模型判定与**真实模型目录**隔离。
+
+    `is_weak_model` 会读「模型管理」的 capabilities（线上 MySQL 活数据）。
+    用户在模型管理给 `ollama/qwen2.5:3b` 勾了「支持工具调用」后，它就不再是弱模型，
+    于是这些**验证弱模型降级行为**的用例会随环境数据漂移而失败。
+    这里让 catalog.lookup 一律落空 → 走 `ollama/` 前缀启发式（确定性）。
+    """
+    from app.models import catalog as catalog_mod
+    monkeypatch.setattr(catalog_mod, "lookup", lambda mid: None)
+    return monkeypatch
+
 
 @pytest.fixture
 def core_env(monkeypatch, tmp_path):

@@ -273,7 +273,8 @@ export interface FileChange {
 
 export interface MultiAgentSSEEvent {
   // 注：后端从不发 'agent_stream'（子 Agent 增量文本走 text_delta），故此处不列。
-  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'error' | 'queued' | 'text_delta' | 'model_switched'
+  // [队列] turn_done = 本回合完成但还有排队任务（同一条 SSE 流继续）；queue_drain = 队列提示。
+  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'turn_done' | 'queue_drain' | 'error' | 'queued' | 'text_delta' | 'model_switched'
   agent_id: string
   agent_name?: string
   agent_avatar?: string
@@ -310,6 +311,21 @@ export interface MultiAgentSSEEvent {
   plan_path?: string
   /** [plan→build] 计划已成、执行出错：done 事件携带的出错原因（非空即表示正文需提示） */
   partial_error?: string | null
+  /** [队列] 该回合是否由排队任务 drain 而来（前端据此把「排队中」徽标转为已回答） */
+  queued_turn?: boolean
+  /** [队列] 本回合认领到的下一个排队任务 id；null/undefined = 队列已空（发 done 断流） */
+  next_prompt_id?: string | null
+  /** [队列] queue_drain 事件携带的剩余排队任务数 */
+  queue_size?: number
+}
+
+/** [队列] 一条待处理任务（执行中追加的输入，后端 session_inputs 行） */
+export interface QueuedPrompt {
+  /** 入队 id（= 投递时的 client_msg_id，可直接用于移除） */
+  id: string
+  message: string
+  /** 入队时间戳（毫秒） */
+  enqueued_at?: number
 }
 
 export interface MultiAgentChatRequest {
@@ -355,6 +371,20 @@ export interface MultiAgentMessage {
   files_changed?: FileChange[]
   /** [撤回改动] 该轮次的文件改动是否已撤回（restore-snapshot 成功后置 true） */
   snapshotRestored?: boolean
+  /** [查看改动] 已按需拉取的 diff 文本（内存态，不落 IndexedDB；撤回后清空） */
+  diffFiles?: { file: string; diff: string }[]
+  /** [查看改动] diff 文本是否因过长被截断 */
+  diffTruncated?: boolean
+  /** [查看改动] 无法渲染的原因（老消息无 after_tree / 快照不可用）；空串表示可渲染 */
+  diffReason?: string
+  /** [逐步快照] 本轮记录的写步骤数（>1 才显示步骤选择器）；来自整轮 diff 响应 */
+  diffSteps?: number
+  /** [逐步快照] 当前查看的步骤下标；undefined = 整轮净 diff */
+  diffStep?: number
+  /** [队列] 该条用户消息是「执行中追加的排队任务」，尚未被回答 */
+  queued?: boolean
+  /** [队列] 该排队任务的后端入队 id（用于移除） */
+  queuePromptId?: string
   /** [C8] plan Agent 落盘的计划文件路径（from done 事件 / 历史回放 data.plan_path） */
   plan_path?: string
   /** [plan→build] 计划已成但执行出错（历史回放用；实时由 done 事件内联进 content） */

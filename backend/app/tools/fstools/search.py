@@ -37,6 +37,23 @@ from .workspace import _resolve
 
 # ── 拆分内语句（verbatim，含前置注释，保持原始顺序）──
 
+def _skipped_hint(skipped: list) -> str:
+    """被权限拦下的匹配项提示（不再静默丢弃）。
+
+    [外部目录不硬限制] 工作目录外的文件/子目录一律走前端审批弹窗；批准目录后
+    整棵子树生效（PermissionManager._under_any）。这里把「有多少条因未授权被跳过」
+    告诉模型，让它能改用具体路径再搜一次以触发审批弹窗，而不是看到空结果就以为
+    「目录里没有文件」。
+    """
+    if not skipped:
+        return ""
+    sample = ", ".join(str(s) for s in skipped[:3])
+    return (
+        "\n[skipped {} file(s) not authorized — re-run with one of these paths to "
+        "trigger an approval request: {}]".format(len(skipped), sample)
+    )
+
+
 def tool_glob(pattern: str, path: str = ".") -> dict:
     """在指定目录中按glob模式搜索文件，返回匹配路径列表（opencode glob 语义：绝对路径，No files found 表示无结果）。"""
     root_path = _resolve(path)
@@ -45,11 +62,14 @@ def tool_glob(pattern: str, path: str = ".") -> dict:
         return _env("glob", f"Error: '{root_path}' is not a directory", error=True)
     matcher = _gitignore_matcher()
     if matcher is not None:
-        matches = [m for m in matcher.glob(pattern, top=root_path) if _is_read_allowed(m)]
+        raw = list(matcher.glob(pattern, top=root_path))
     else:
-        matches = [m for m in root_path.glob(pattern) if _is_read_allowed(m)]
+        raw = list(root_path.glob(pattern))
+    matches = [m for m in raw if _is_read_allowed(m)]
+    skipped = [m for m in raw if not _is_read_allowed(m)]
     if not matches:
-        return _env("glob", "No files found", matches=0)
+        hint = _skipped_hint(skipped)
+        return _env("glob", "No files found" + hint, matches=0, skipped=len(skipped))
     matches.sort(key=lambda m: os.path.getmtime(m), reverse=True)
     # 对齐 opencode glob.ts：输出绝对路径
     lines = [str(m.resolve()) for m in matches[:100]]
@@ -57,12 +77,16 @@ def tool_glob(pattern: str, path: str = ".") -> dict:
     if truncated:
         lines.append("... and {} more".format(len(matches) - 100))
         lines.append("(Results are truncated. Consider using a more specific path or pattern.)")
+    hint = _skipped_hint(skipped)
+    if hint:
+        lines.append(hint)
     return _env(
         "glob",
         "\n".join(lines),
         matches=min(len(matches), 100),
         total_matches=len(matches),
         truncated=truncated,
+        skipped=len(skipped),
     )
 
 def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: bool = False, files_only: bool = False, path: str = ".") -> dict:
@@ -93,8 +117,10 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
     else:
         glob_rx = None
         candidates = (f for f in root_path.glob(file_pattern) if f.is_file())
+    skipped: list[Path] = []
     for f in candidates:
         if not _is_read_allowed(f):
+            skipped.append(f)
             continue
         if glob_rx is not None:
             try:
@@ -117,7 +143,8 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
         if found_positions:
             file_matches.append((f, found_positions))
     if not file_matches:
-        return _env("grep", "No files found", matches=0, total_matches=0)
+        return _env("grep", "No files found" + _skipped_hint(skipped),
+                    matches=0, total_matches=0, skipped=len(skipped))
     file_matches.sort(key=lambda t: os.path.getmtime(t[0]), reverse=True)
     output: list[str] = []
     total_matches = 0
@@ -171,6 +198,9 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
     if truncated:
         output.append(f"... and more. Showing first 100 matches.")
         output.append("(Results are truncated. Consider using a more specific path or pattern.)")
+    hint = _skipped_hint(skipped)
+    if hint:
+        output.append(hint.strip())
     body = "\n".join(output).rstrip()
     header = f"Found {total_matches} matches (more matches available)" if truncated else f"Found {total_matches} matches"
     return _env(
@@ -179,6 +209,7 @@ def tool_grep(pattern: str, include: str = "", context: int = 0, count_only: boo
         matches=total_matches,
         truncated=truncated,
         pattern=pattern,
+        skipped=len(skipped),
     )
 
 

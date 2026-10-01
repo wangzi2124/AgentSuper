@@ -4,9 +4,10 @@
 操作既有会话用 resolve_session_context 注入 SessionContext（隔离中间件）。
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 
 from . import repository
 from .deps import SessionContext, create_project_context, get_user_id, resolve_session_context
@@ -184,3 +185,51 @@ async def children(ctx: SessionContext = Depends(resolve_session_context)):
 @router.get("/{session_id}/status", response_model=SessionStatus)
 async def status(ctx: SessionContext = Depends(resolve_session_context)):
     return ctx.service.status(ctx.user_id, ctx.session_id)
+
+
+# ── 待处理任务队列（执行中追加，新→旧执行）────────────────────────────────
+
+
+class PromptEnqueue(BaseModel):
+    """入队一条待处理任务。
+
+    `client_msg_id` 用于幂等（同 id 重复投递只排一次）；prompt 载荷与 ChatRequest
+    的执行相关字段同构（message/files/model/use_vector_db/voice/agent_mode/
+    directory），drain 时按这些字段重建一次完整回合。
+    """
+    prompt: dict[str, Any]
+    delivery: str = "queue"
+    client_msg_id: Optional[str] = None
+
+
+@router.post("/{session_id}/prompts", response_model=dict)
+async def enqueue_prompt(
+    body: PromptEnqueue,
+    ctx: SessionContext = Depends(resolve_session_context),
+):
+    """会话正在执行时也能追加任务 —— 立即落库排队，不阻塞、不拒绝。
+
+    执行顺序为**最新优先**（后来居上）；当前轮结束后由该轮的执行器按新→旧 drain。
+    """
+    return await ctx.service.enqueue_prompt(
+        ctx.user_id, ctx.session_id, body.prompt,
+        delivery=body.delivery, client_msg_id=body.client_msg_id,
+    )
+
+
+@router.get("/{session_id}/prompts", response_model=list[dict])
+async def list_prompts(ctx: SessionContext = Depends(resolve_session_context)):
+    """列出待处理任务（按将执行顺序：steer 优先、最新在前）。"""
+    return await ctx.service.list_prompts(ctx.user_id, ctx.session_id)
+
+
+@router.delete("/{session_id}/prompts/{prompt_id}", response_model=dict)
+async def remove_prompt(
+    prompt_id: str,
+    ctx: SessionContext = Depends(resolve_session_context),
+):
+    """移除一条待处理任务（用户在待处理面板里删掉自己排的队）。"""
+    removed = await ctx.service.remove_prompt(ctx.user_id, ctx.session_id, prompt_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    return {"removed": True, "id": prompt_id}

@@ -64,8 +64,20 @@ class FakeBus:
 
 @pytest.fixture
 def env(monkeypatch):
-    """mock endpoints 依赖：resolve/build/persist/begin。"""
-    svc = SimpleNamespace(update=lambda *a, **k: None)
+    """mock endpoints 依赖：resolve/build/persist/begin。
+
+    队列：svc.prompts 是「pop_prompt 依次返回」的脚本（默认空 = 队列空），
+    记录 pop 调用次数用于断言「回合末尾原子 pop」而非 count-then-act。
+    """
+    async def _pop(session_id):
+        pops.append(session_id)
+        return prompts.pop(0) if prompts else None
+
+    svc = SimpleNamespace(update=lambda *a, **k: None, pop_prompt=_pop)
+    prompts: list = []          # 被 pop 出来的排队任务（按 pop 顺序）
+    pops: list = []             # pop_prompt 调用轨迹
+    svc._queue = prompts
+    svc._pops = pops
     monkeypatch.setattr(ep, "_resolve_multi_agent_parent",
                         lambda req, uid, cid, directory="": (svc, "s1", "/dir"))
     monkeypatch.setattr(ep, "_begin_task_session",
@@ -174,6 +186,82 @@ async def test_stream_reply_error(env, monkeypatch):
     events = _parse_sse(await _drain_stream(resp))
     assert events[-1]["type"] == "error"
     assert events[-1]["error_type"] == "AgentError"
+
+
+# ── [队列竞态] 回合末尾原子 pop：done/turn_done 的判定必须发生在回合结束时 ────
+
+def _queued(pid: str, message: str) -> dict:
+    return {"id": pid, "session_id": "s1", "prompt": {"message": message}}
+
+
+@pytest.mark.asyncio
+async def test_stream_drains_queued_prompts_before_done(env, monkeypatch):
+    """有排队任务 → 中间发 turn_done 继续跑，最后一个回合才发 done。"""
+    env._queue.extend([_queued("p1", "第二个"), _queued("p2", "第三个")])
+    sent: list[str] = []
+
+    async def fake_send_and_wait(msg, *a, **k):
+        sent.append(msg.payload.get("content") or msg.payload.get("message") or "")
+        return _ok_reply()
+
+    bus = FakeBus(_ok_reply())
+    monkeypatch.setattr(bus, "send_and_wait", fake_send_and_wait)
+    resp = await ep.chat_multi_agent_stream(_req(bus, object()), _body())
+    events = _parse_sse(await _drain_stream(resp))
+
+    types = [e["type"] for e in events]
+    assert types.count("turn_done") == 2, types
+    assert types[-1] == "done"
+    # turn_done 带回「下一条排队任务 id」，便于前端追踪 drain 进度
+    tds = [e for e in events if e["type"] == "turn_done"]
+    assert [t["next_prompt_id"] for t in tds] == ["p1", "p2"]
+    assert all(t["queued_turn"] for t in tds)
+    assert len(sent) == 3
+
+
+@pytest.mark.asyncio
+async def test_stream_pop_once_per_turn_not_count_then_act(env, monkeypatch):
+    """回归：回合开始前 count、回合结束后再 pop 会漏掉期间入队的任务。
+    现在每回合只在**结束时** pop 一次（原子认领），不做 count-then-act。"""
+    bus = FakeBus(_ok_reply())
+    resp = await ep.chat_multi_agent_stream(_req(bus, object()), _body())
+    _parse_sse(await _drain_stream(resp))
+    # 一个回合 → 恰好一次 pop（原来这里会先 count 再 pop，count 结果被丢弃）
+    assert len(env._pops) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_prompt_enqueued_during_turn_is_drained(env, monkeypatch):
+    """执行期间入队的任务：本轮结束后仍会被 drain 出来（而不是静默留在队列里）。"""
+    bus = FakeBus(_ok_reply())
+    original = bus.send_and_wait
+    state = {"n": 0}
+
+    async def send_and_wait(msg, *a, **k):
+        state["n"] += 1
+        if state["n"] == 1:                      # 第一轮跑的过程中用户又追加了任务
+            env._queue.append(_queued("late", "期间追加"))
+        return await original(msg, *a, **k)
+
+    monkeypatch.setattr(bus, "send_and_wait", send_and_wait)
+    resp = await ep.chat_multi_agent_stream(_req(bus, object()), _body())
+    events = _parse_sse(await _drain_stream(resp))
+    types = [e["type"] for e in events]
+    assert types.count("turn_done") == 1 and types[-1] == "done"
+    assert env._pops == ["s1", "s1"]
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_error_leaves_queue_untouched(env, monkeypatch):
+    """回合报错时不认领排队任务（留给下一轮用户消息），避免错误态下丢任务。"""
+    env._queue.append(_queued("p1", "排队的"))
+    bus = FakeBus(AgentMessage(source="supervisor", target="user", type="error", action="chat",
+                               payload={"error": "boom"}))
+    resp = await ep.chat_multi_agent_stream(_req(bus, object()), _body())
+    events = _parse_sse(await _drain_stream(resp))
+    assert events[-1]["type"] == "error"
+    assert env._pops == []                      # 没被 pop 走
+    assert len(env._queue) == 1                 # 仍在队列里
 
 
 # ── [D3] model_switched 事件字段契约 ────────────────────────────────────────

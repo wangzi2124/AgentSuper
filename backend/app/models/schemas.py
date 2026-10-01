@@ -129,3 +129,11 @@ class RestoreSnapshotRequest(BaseModel):
     """[撤回改动] 恢复某条 assistant 消息对应轮次文件改动的请求。"""
     conversation_id: str
     message_id: str
+
+
+class DiffRequest(BaseModel):
+    """[查看改动] 渲染某条 assistant 消息对应轮次 diff 文本的请求。"""
+    conversation_id: str
+    message_id: str
+    file: str = ""
+    step: Optional[int] = None  # 指定则只看第 N 步（每 step 快照），空=整轮

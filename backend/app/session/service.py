@@ -261,6 +261,62 @@ class SessionService:
             queue_position=queue,
         )
 
+    # ── 待处理任务队列（执行中追加，新→旧执行）────────────────────────────
+
+    async def enqueue_prompt(self, user_id: str, session_id: str, prompt: dict,
+                             delivery: str = "queue",
+                             client_msg_id: Optional[str] = None) -> dict:
+        """把一条新任务放进「待处理」队列，返回排队条目（含其 id）。
+
+        语义（对齐 opencode 的「执行中仍可发消息」+ 用户要求的后来居上）：
+          - 立即落库，不等当前轮结束 —— 刷新页面/换设备都还在队列里；
+          - 同一 client_msg_id 幂等（前端重试/双击不会排两次）；
+          - 执行顺序 = **最新优先**（LIFO 插队），steer 类仍整体优先于 queue。
+        """
+        self._authorized(user_id, session_id)
+        async with self.write_lock(session_id):
+            try:
+                input_id = repository.admit_input(
+                    session_id, prompt, delivery=delivery,
+                    input_id=client_msg_id or None,
+                )
+            except Exception:
+                # 主键冲突 = 同一 client_msg_id 已排队（幂等命中），回读即可
+                if not client_msg_id:
+                    raise
+                existing = next(
+                    (i for i in repository.list_inputs(session_id, limit=200)
+                     if i["id"] == client_msg_id), None,
+                )
+                if existing is None:
+                    raise
+                return existing
+        pending = repository.count_pending(session_id)
+        logger.info("prompt enqueued: session=%s id=%s delivery=%s pending=%d",
+                    session_id, input_id, delivery, pending)
+        return {
+            "id": input_id,
+            "prompt": prompt,
+            "delivery": delivery,
+            "queue_size": pending,
+        }
+
+    async def list_prompts(self, user_id: str, session_id: str) -> list[dict]:
+        """列出待处理任务，按「将要执行的顺序」（最新在前）。"""
+        self._authorized(user_id, session_id)
+        return repository.list_inputs(session_id)
+
+    async def remove_prompt(self, user_id: str, session_id: str, input_id: str) -> bool:
+        """移除一条待处理任务（用户在待处理面板里删掉自己排的队）。"""
+        self._authorized(user_id, session_id)
+        async with self.write_lock(session_id):
+            return repository.remove_input(session_id, input_id)
+
+    async def pop_prompt(self, session_id: str) -> Optional[dict]:
+        """服务端 drain：原子取出最新一条待处理任务并出队（不校验归属 —— 仅供执行器调用）。"""
+        async with self.write_lock(session_id):
+            return repository.promote_newest(session_id)
+
     # ── 内部 ─────────────────────────────────────────────────────────────
 
     def _authorized(self, user_id: str, session_id: str) -> SessionInfo:

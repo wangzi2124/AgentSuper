@@ -347,6 +347,23 @@ class PermissionManager:
             return True
         return False
 
+    def _under_any(self, p: Path, roots: list[str]) -> bool:
+        """p 是否等于或位于 roots 任一路径之下（含多级子目录）。
+
+        [外部目录授权] 以前临时授权只匹配「自身 + 直属父目录」一层，导致用户批准了
+        `E:\some\project` 后，其**子目录**里的文件仍被判为未授权 —— 在
+        tool_glob/tool_grep 里表现为结果被**静默丢弃**（既不能用也不提示）。
+        改为整棵子树命中：批准一个目录 = 批准它下面所有内容。
+        对文件路径无副作用（文件没有子路径，relative_to 只会匹配自身）。
+        """
+        for root in roots:
+            try:
+                p.relative_to(Path(root))
+                return True
+            except (ValueError, OSError):
+                continue
+        return False
+
     def check(self, path_str: str, operation: str) -> str:
         """检查指定路径的操作权限，返回allow/deny/ask。
 
@@ -355,6 +372,10 @@ class PermissionManager:
         .env/.db/permissions.json 的读走 ask → 前端弹审批对话框，用户允许后
         临时授权（add_temp_approval 后重试）；写/执行仍直接 deny，
         密钥/数据库文件绝不允许被模型改写（弹窗授权写入会暴露篡改风险）。
+
+        工作目录（workspace / 会话目录 / 额外工作区 / 项目 worktree）之外的路径
+        一律走 `external_default`（默认 ask → 前端弹窗询问是否操作），**不做硬限制**；
+        弹窗「允许本次」按整棵子树生效，「允许并记住」写入持久白名单。
         """
         p = Path(path_str).resolve()
         if self._is_git_path(p):
@@ -379,11 +400,12 @@ class PermissionManager:
         expired = [k for k, t in self._temp_approvals.items() if now - t > _TEMP_APPROVAL_TTL]
         for k in expired:
             del self._temp_approvals[k]
-        if str(p) in self._temp_approvals:
-            self._temp_approvals.move_to_end(str(p))
-            return "allow"
-        if str(p.parent) in self._temp_approvals:
-            self._temp_approvals.move_to_end(str(p.parent))
+        # [外部目录授权] 临时授权按**整棵子树**命中（批准目录 = 批准其下所有文件）
+        if self._under_any(p, list(self._temp_approvals.keys())):
+            for k in self._temp_approvals:
+                if self._under_any(p, [k]):
+                    self._temp_approvals.move_to_end(k)
+                    break
             return "allow"
         for allowed in self._whitelist:
             try:
@@ -445,11 +467,16 @@ class PermissionManager:
         return [str(self.workspace), *(str(w) for w in self.extra_workspaces)]
 
     def add_temp_approval(self, path_str: str):
-        """临时授权指定路径（及其父目录），TTL过期后自动失效。"""
+        """临时授权指定路径，TTL 过期后自动失效。
+
+        [外部目录授权] 只记录**被批准的那一个路径**，不再顺带记录父目录：
+        旧实现附带 `p.parent` 是为了配合「只匹配一层」的判定；改用整棵子树命中后
+        继续附带父目录会导致「批准一个文件 = 批准整个目录树」的越权。
+        批准目录 → 其下全部内容生效；批准文件 → 仅该文件生效。
+        """
         p = Path(path_str).resolve()
         now = time.time()
         self._temp_approvals[str(p)] = now
-        self._temp_approvals[str(p.parent)] = now
         # Evict oldest entries when over limit
         while len(self._temp_approvals) > _MAX_TEMP_APPROVALS:
             self._temp_approvals.popitem(last=False)

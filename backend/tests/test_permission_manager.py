@@ -258,6 +258,35 @@ def test_check_temp_approval_expired_cleaned(tmp_path):
     assert str(outside.resolve()) not in mgr._temp_approvals
 
 
+def test_check_temp_approval_covers_whole_subtree(tmp_path):
+    """[外部目录不硬限制] 批准一个工作目录外的目录 = 批准它下面**整棵子树**。
+
+    旧实现只匹配「自身 + 直属父目录」一层，导致批准目录后其子目录里的文件仍被判
+    未授权 —— 在 tool_glob/tool_grep 里表现为结果被静默丢弃（既不能用也不弹审批）。
+    """
+    mgr = _mgr(tmp_path, external_default="ask")
+    root = tmp_path / "elsewhere" / "project"
+    deep = root / "a" / "b" / "c" / "f.txt"
+    deep.parent.mkdir(parents=True)
+    assert mgr.check(str(deep), "read") == "ask"
+    mgr.add_temp_approval(str(root))
+    assert mgr.check(str(root / "top.txt"), "read") == "allow"
+    assert mgr.check(str(deep), "read") == "allow"
+    assert mgr.check(str(deep), "write") == "allow"
+    # 兄弟目录不受影响（授权不外溢）
+    assert mgr.check(str(tmp_path / "elsewhere" / "other" / "f.txt"), "read") == "ask"
+
+
+def test_check_temp_approval_file_does_not_grant_siblings(tmp_path):
+    """批准单个文件不会顺带授权同目录其它文件。"""
+    mgr = _mgr(tmp_path, external_default="ask")
+    d = tmp_path / "elsewhere" / "dir"
+    d.mkdir(parents=True)
+    mgr.add_temp_approval(str(d / "ok.txt"))
+    assert mgr.check(str(d / "ok.txt"), "read") == "allow"
+    assert mgr.check(str(d / "other.txt"), "read") == "ask"
+
+
 def test_check_whitelist_prefix(tmp_path):
     mgr = _mgr(tmp_path, external_default="ask")
     allowed = tmp_path / "allowed_root"

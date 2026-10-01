@@ -20,11 +20,18 @@ const mocks = vi.hoisted(() => ({
   forkSession: vi.fn(),
   compactSession: vi.fn(),
   getSessionStatus: vi.fn(),
+  enqueuePrompt: vi.fn(),
+  removePrompt: vi.fn(),
+  fetchTurnDiff: vi.fn(),
   mergeServerAndCache: (s: any[], c: any[], d?: string[]) =>
     [...(s || []), ...(c || [])].filter(m => !m?.live && !(d || []).includes(m?.id)),
 }))
 
-vi.mock('@/api/multiAgent', () => ({ sendMultiAgentStream: mocks.sendStream, restoreSnapshot: mocks.restoreSnapshot }))
+vi.mock('@/api/multiAgent', () => ({
+  sendMultiAgentStream: mocks.sendStream,
+  restoreSnapshot: mocks.restoreSnapshot,
+  fetchTurnDiff: mocks.fetchTurnDiff,
+}))
 vi.mock('@/api/sessions', () => ({
   listConversations: mocks.listConversations,
   getConversation: mocks.getConversation,
@@ -37,6 +44,8 @@ vi.mock('@/api/sessions', () => ({
   forkSession: mocks.forkSession,
   compactSession: mocks.compactSession,
   getSessionStatus: mocks.getSessionStatus,
+  enqueueSessionPrompt: mocks.enqueuePrompt,
+  removeSessionPrompt: mocks.removePrompt,
 }))
 vi.mock('@/api/models', () => ({
   fetchModels: mocks.fetchModels,
@@ -645,6 +654,142 @@ describe('model config 前端缓存（启动加载 + 离线兜底）', () => {
 })
 
 // [D1/D2] 此前无人调用的 fork / compact / status 路由接进 store 后的行为
+describe('[队列] 执行中追加任务（LIFO drain）', () => {
+  beforeEach(() => {
+    mocks.enqueuePrompt.mockReset()
+    mocks.removePrompt.mockReset()
+    mocks.enqueuePrompt.mockImplementation(async (_sid: string, _p: any, cid?: string) => ({ id: cid, message: '' }))
+  })
+
+  /** 手动控制 SSE 流何时结束（不 resolve → send() 一直处于 loading）；push 在 send() 后可用 */
+  function deferredStream() {
+    const box: { push?: (e: MultiAgentSSEEvent) => void; finish?: () => void } = {}
+    mocks.sendStream.mockImplementation(
+      async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void, _signal?: AbortSignal) => {
+        box.push = onEvent
+        onEvent(ev({ type: 'routing', detail: '路由中' }))
+        await new Promise<void>(r => { box.finish = r })
+      },
+    )
+    return {
+      push: (e: MultiAgentSSEEvent) => box.push!(e),
+      finish: () => box.finish!(),
+    }
+  }
+
+  it('执行中发送 → 入队而不是拒绝：新增「排队中」气泡 + 不开第二条流', async () => {
+    const store = useMultiAgentStore()
+    const { push, finish } = deferredStream()
+    const first = store.send('Q1')
+    await Promise.resolve()
+
+    push(ev({ type: 'done', conversation_id: 'ses_q', answer: 'A', assistant_msg_id: 'a1', user_msg_id: 'u1' }))
+    expect(await store.send('Q2 排队中')).toBe(true)
+
+    expect(mocks.sendStream).toHaveBeenCalledTimes(1)   // 没开第二条流
+    expect(mocks.enqueuePrompt).toHaveBeenCalledTimes(1)
+    expect(mocks.enqueuePrompt.mock.calls[0][0]).toBe('ses_q')
+    const queued = store.messages.filter(m => m.queued)
+    expect(queued).toHaveLength(1)
+    expect(queued[0].content).toBe('Q2 排队中')
+    expect(store.pendingPrompts).toHaveLength(1)
+    finish()
+    await first
+  })
+
+  it('turn_done → 收尾当前回合 + 新建助手占位，两个回合各自成消息', async () => {
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'routing', detail: '路由中' }))
+      onEvent(ev({ type: 'text_delta', agent_id: '', delta: '答案A' }))
+      onEvent(ev({ type: 'turn_done', conversation_id: 'ses_q', answer: '答案A', assistant_msg_id: 'a1', queued_turn: false, next_prompt_id: 'in_2' }))
+      onEvent(ev({ type: 'text_delta', agent_id: '', delta: '答案B' }))
+      onEvent(ev({ type: 'done', conversation_id: 'ses_q', answer: '答案B', assistant_msg_id: 'a2' }))
+    })
+    const store = useMultiAgentStore()
+    await store.send('Q1')
+    const msgs = store.messages
+    expect(msgs.length).toBe(3)                      // user + assistantA + assistantB
+    expect(msgs[1].content).toBe('答案A')
+    expect(msgs[1].id).toBe('a1')
+    expect(msgs[2].content).toBe('答案B')
+    expect(msgs[2].id).toBe('a2')
+    expect(store.loading).toBe(false)
+    expect(store.streamPhase).toBe('idle')
+  })
+
+  it('turn_done 摘掉排队徽标、清 pendingPrompts，并保持执行中', async () => {
+    const store = useMultiAgentStore()
+    const { push, finish } = deferredStream()
+    const first = store.send('Q1')
+    await Promise.resolve()
+    push(ev({ type: 'done', conversation_id: 'ses_q', answer: 'A', assistant_msg_id: 'a1', user_msg_id: 'u1' }))
+    await store.send('Q2 排队中')                     // → 排队
+    expect(store.pendingPrompts).toHaveLength(1)
+    expect(store.messages.filter(m => m.queued)).toHaveLength(1)
+
+    // 后端 drain 出第二个回合：turn_done（还有后续）→ done（队列空）
+    push(ev({ type: 'turn_done', conversation_id: 'ses_q', answer: 'A2', assistant_msg_id: 'a2', queued_turn: true, next_prompt_id: 'in_3' }))
+    expect(store.messages.filter(m => m.queued)).toHaveLength(0)
+    expect(store.pendingPrompts).toHaveLength(0)
+    expect(store.loading).toBe(true)                 // 仍在执行（下一回合占位已建）
+    expect(lastMsg(store).id).not.toBe('a2')
+    push(ev({ type: 'done', conversation_id: 'ses_q', answer: 'A2', assistant_msg_id: 'a3' }))
+    finish()
+    await first
+    expect(store.loading).toBe(false)
+  })
+
+  it('queue_drain 只做提示（不改徽标），并把剩余数记到 queuePosition', async () => {
+    const store = useMultiAgentStore()
+    const { push, finish } = deferredStream()
+    const first = store.send('Q1')
+    await Promise.resolve()
+    push(ev({ type: 'done', conversation_id: 'ses_q', answer: 'A', assistant_msg_id: 'a1', user_msg_id: 'u1' }))
+    await store.send('Q2 排队中')
+    push(ev({ type: 'queue_drain', queue_size: 3, detail: '本轮完成后继续执行 3 个排队任务' }))
+    expect(store.queuePosition).toBe(3)
+    expect(store.messages.filter(m => m.queued)).toHaveLength(1)
+    finish()
+    await first
+  })
+
+  it('入队失败 → 撤掉气泡、提示，不留假排队项', async () => {
+    const store = useMultiAgentStore()
+    const { push, finish } = deferredStream()
+    const first = store.send('Q1')
+    await Promise.resolve()
+    push(ev({ type: 'done', conversation_id: 'ses_q', answer: 'A', assistant_msg_id: 'a1', user_msg_id: 'u1' }))
+
+    mocks.enqueuePrompt.mockRejectedValueOnce(new Error('会话已被删除'))
+    expect(await store.send('会失败的那条')).toBe(false)
+    expect(store.messages.filter(m => m.content === '会失败的那条')).toHaveLength(0)
+    expect(store.pendingPrompts).toHaveLength(0)
+    expect(store.notice).toContain('排队失败')
+    finish()
+    await first
+  })
+
+  it('removeQueuedPrompt → 调后端删除并移除气泡与 pendingPrompts', async () => {
+    const store = useMultiAgentStore()
+    const { push, finish } = deferredStream()
+    const first = store.send('Q1')
+    await Promise.resolve()
+    push(ev({ type: 'done', conversation_id: 'ses_q', answer: 'A', assistant_msg_id: 'a1', user_msg_id: 'u1' }))
+    await store.send('要移除的')
+    expect(store.pendingPrompts).toHaveLength(1)
+
+    mocks.removePrompt.mockResolvedValue(undefined)
+    const sid = store.activeSessionId!
+    const pid = store.pendingPrompts[0].id
+    await store.removeQueuedPrompt(sid, pid)
+    expect(mocks.removePrompt).toHaveBeenCalledWith('ses_q', pid)
+    expect(store.pendingPrompts).toHaveLength(0)
+    expect(store.messages.filter(m => m.queued)).toHaveLength(0)
+    finish()
+    await first
+  })
+})
+
 describe('会话运维操作（fork / compact / status）', () => {
   beforeEach(() => {
     mocks.listConversations.mockResolvedValue([])

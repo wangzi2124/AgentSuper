@@ -33,6 +33,7 @@ from .lexcmd import _SHELL_SEP
 from .lexcmd import _cmd_lex
 from .lexcmd import _cmd_split_shell_segments
 from .lexcmd import _first_command
+from .lexcmd import _is_redirect_token
 from .lexcmd import _win_flag_split
 from .workspace import _workspace
 
@@ -103,6 +104,91 @@ def _split_shell_segments(command: str) -> list[list[str]]:
 
 _BACKTICK_RE = re.compile(r"`([^`]*)`")
 
+# ── [git 写操作审批] ────────────────────────────────────────────────────────
+# `git` 在 _ALLOWED_COMMANDS 里 → _check_single_allowed 直接早退，**从不调用**
+# check_command，于是 `git reset --hard` / `git commit` / `git checkout .` 可以
+# 无提示改写用户的仓库/index/HEAD，还会让本轮快照的 before_tree 与真实历史错位
+# （restore 时 `git checkout <before_tree> -- <files>` 还原出与用户历史不符的内容）。
+#
+# 这里按**子命令**分流，而不是把 git 整个踢出白名单（那会连 `git status` /
+# `git diff` 这类只读、且是本项目快照/文件核对主力的用法一起误伤）：
+#   - 只读子命令 → 放行（不进审批）
+#   - 其余一切（改写工作区/索引/HEAD/远端，含 add/commit/reset/checkout/
+#     restore/clean/stash/rm/mv/apply/rebase/merge/push…）→ check_command → 前端审批
+#   - 解析不出子命令 → 同样按写操作处理（fail-closed）
+# 审批 key 用 `git <subcommand>` 而非裸 `git`：批准 `git add` 不会顺带放开
+# `git reset`；持久化白名单 / 「允许并记住」也因此是**按子命令**粒度。
+
+# 只读子命令白名单：仅列出不会写入任何仓库状态（工作区/索引/HEAD/refs）的命令。
+# 刻意不含 branch/remote/tag/stash/config/reflog/symbolic-ref/update-ref 等
+# 「同名既可读又可写」的复合命令 —— 一律走审批，由用户在弹窗里判断。
+_GIT_READONLY_SUBCOMMANDS = frozenset({
+    "blame", "cat-file", "check-attr", "check-ignore", "count-objects",
+    "describe", "diff", "diff-files", "diff-index", "diff-tree",
+    "for-each-ref", "grep", "help", "log", "ls-files", "ls-remote",
+    "ls-tree", "merge-base", "name-rev", "rev-list", "rev-parse", "shortlog",
+    "show", "show-branch", "show-ref", "status", "var", "verify-commit",
+    "version", "whatchanged",
+})
+
+# 取值的全局选项（会吃掉下一个 token），解析子命令时必须成对跳过：
+# `git -C repo status` / `git -c user.email=a@b commit`。
+_GIT_GLOBAL_VALUE_FLAGS = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+    "--config-env", "--attr-source",
+})
+
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _is_git_command(base_cmd: str) -> bool:
+    """基命令是否为 git（含 `C:\\...\\git.exe` / `/usr/bin/git` 这样的显式路径）。"""
+    name = base_cmd.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    return name == "git"
+
+
+def _git_subcommand(seg: list[str]) -> Optional[str]:
+    """从 git 命令段解析子命令（小写）；跳过 env 前缀、重定向符、基命令与全局选项。
+
+    无法确定时返回 None（调用方按写操作处理）。
+    """
+    base_idx = -1
+    for i, tok in enumerate(seg):
+        if _ENV_ASSIGN_RE.match(tok) or tok == "$" or _is_redirect_token(tok):
+            continue
+        base_idx = i
+        break
+    if base_idx < 0:
+        return None
+    rest = seg[base_idx + 1:]
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok.startswith("-"):
+            i += 2 if tok in _GIT_GLOBAL_VALUE_FLAGS else 1
+            continue
+        return tok.lower()
+    return None
+
+
+def _check_git_write_approval(seg: list[str], sub: Optional[str], ask: bool = False) -> None:
+    """git 改写类子命令走命令级审批（对齐 opencode：动仓库前先问用户）。
+
+    allow → 放行；deny → 明确拒绝；ask → 抛 NeedsPermission 走前端审批弹窗。
+    `ask=False` 的调用方保持原语义（只做白名单，不触发审批）。
+    """
+    if not ask:
+        return
+    key = f"git {sub}" if sub else "git"
+    decision = get_perm_mgr().check_command(key)
+    if decision == "allow":
+        return
+    if decision == "deny":
+        raise ValueError(f"Command '{key}' is not allowed")
+    raise NeedsPermission(key, "command", "tool_execute", {"command": " ".join(seg)})
+
 def _backtick_bodies(command: str) -> list[str]:
     """提取命令中反引号命令替换的内部命令文本。"""
     return [m.group(1) for m in _BACKTICK_RE.finditer(command)]
@@ -141,6 +227,7 @@ def _validate_shell_command(command: str, cwd: str | None = None, ask: bool = Fa
 
     - 反引号命令替换内部命令递归校验
     - 每个简单命令段的首命令过白名单（防 `cat x | evil` 绕过）
+    - **git 子命令分流**：只读子命令放行，改写仓库/索引/HEAD 的走命令级审批（`_check_git_write_approval`）
     - 每段跑解释器内联黑名单与 SSRF
     """
     for inner in _backtick_bodies(command):
@@ -152,6 +239,11 @@ def _validate_shell_command(command: str, cwd: str | None = None, ask: bool = Fa
         base = _first_command(seg)
         if base is None:
             continue
+        if _is_git_command(base):
+            sub = _git_subcommand(seg)
+            # 解析不出子命令（`git` 裸跑 / 全局选项吃掉了后续 token）→ 按写操作处理，走审批
+            if sub is None or sub not in _GIT_READONLY_SUBCOMMANDS:
+                _check_git_write_approval(seg, sub, ask=ask)
         _check_single_allowed(base, cwd, ask=ask)
         seg_str = " ".join(seg)
         _check_command_blacklist(seg_str)

@@ -255,5 +255,32 @@ def _validate_chat_message(body: ChatRequest) -> None:
         raise HTTPException(status_code=422, detail=f"消息长度超出上限（{MAX_MESSAGE_LENGTH} 字符）")
 
 
+# 待处理任务队列里允许覆盖的 ChatRequest 字段（其余一律继承发起请求时的设置）
+_PROMPT_OVERRIDABLE = (
+    "message", "model", "use_vector_db", "files", "voice",
+    "agent_mode", "client_msg_id",
+)
+
+
+def _prompt_to_chat_request(base: ChatRequest, payload: dict) -> ChatRequest:
+    """把队列里存的一条待处理任务还原成完整 ChatRequest。
+
+    未指定的字段**继承发起请求时的设置**（模型 / 向量库开关 / 工作目录 / 语音等），
+    只有 payload 里显式给出的字段才覆盖 —— 排队任务不该因为晚执行而丢掉上下文配置。
+    非法字段直接丢弃（pydantic 强校验，避免一条脏队列记录让整个 drain 崩掉）。
+    """
+    merged = base.model_dump()
+    for key in _PROMPT_OVERRIDABLE:
+        if key in payload and payload[key] is not None:
+            merged[key] = payload[key]
+    merged["conversation_id"] = base.conversation_id
+    merged["directory"] = base.directory
+    try:
+        return ChatRequest.model_validate(merged)
+    except Exception:
+        merged = {**base.model_dump(), "message": str(payload.get("message") or ""),
+                  "client_msg_id": payload.get("client_msg_id")}
+        return ChatRequest.model_validate(merged)
+
 
 __all__ = ["MAX_HISTORY_TOKENS", "MAX_MESSAGE_LENGTH", "_ALLOWED_HISTORY_KEYS", "_DEFAULT_USER_ID", "_generate_title", "_get_session_service", "_get_summarizer", "_get_user_id", "_msg_type_to_role", "_sanitize_history", "_summarizer", "_summarizer_model", "_truncate_history", "_validate_chat_message", "reset_summarizer"]

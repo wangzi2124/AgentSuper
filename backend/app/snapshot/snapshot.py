@@ -23,7 +23,7 @@ import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +315,43 @@ class Snapshot:
             tree = proc.stdout.strip()
             return tree or None
 
+    def track_paths(self, paths: Iterable[str]) -> Optional[str]:
+        """只把给定路径入暂存后 write-tree，返回 tree hash（增量、代价与改动量成正比）。
+
+        [每 step 快照] 与 track() 的区别：track() 每次全量 `add --sparse .`（代价随仓库
+        大小增长），本方法只 add 工具真正改过的文件，因此可以在**每次写工具调用后**
+        拍一次快照（对齐 opencode「每步 write-tree」），长任务也不会因为 O(仓库) 的
+        全量 add 而变慢。返回 None 表示不可用（非 git 项目/路径为空/全在仓库外）。
+        接受绝对路径或已归一化的仓库相对路径。
+        """
+        rels: list[str] = []
+        for p in paths or ():
+            if not p:
+                continue
+            try:
+                cand = os.fspath(p)
+                if os.path.isabs(cand):
+                    rel = os.path.relpath(os.path.abspath(cand), self.worktree)
+                else:
+                    rel = os.path.normpath(cand)
+            except (OSError, ValueError):
+                continue
+            # worktree 外的路径不属于影子仓库（外部文件由归档 blob 负责），跳过
+            if rel.startswith("..") or os.path.isabs(rel):
+                continue
+            rels.append(rel)
+        if not rels:
+            return None
+        with self._lock():
+            if not self.enabled():
+                return None
+            if not self.gitdir().exists():
+                self._init_gitdir()
+            self._git(["add", "--", *rels], check=False)
+            proc = self._git(["write-tree"])
+            tree = proc.stdout.strip()
+            return tree or None
+
     def patch(self, hash: str) -> Patch:
         """自该 hash 后变更的文件清单(绝对路径)。规格 §5.6 patch()。"""
         with self._lock():
@@ -344,6 +381,29 @@ class Snapshot:
                 check=False,
             )
             return proc.stdout or ""
+
+    def diff_trees(self, from_hash: str, to_hash: str, path: str = "", max_bytes: int = 256 * 1024) -> dict:
+        """两个 tree 之间的 unified diff 文本（可按单文件过滤，带上限截断）。
+
+        [diff 可展开] 供聊天 UI 展示「本轮到底改了什么」：内部文件走 git diff，
+        path 为空时给全量（受 max_bytes 限制），指定 path 时只给该文件。
+        返回 {"diff": str, "truncated": bool}；非 git 项目/树缺失返回空 diff。
+        """
+        out = {"diff": "", "truncated": False}
+        with self._lock():
+            if not self.enabled() or not from_hash or not to_hash:
+                return out
+            args = ["-c", "core.quotepath=false", "diff", "--no-ext-diff", "--no-color", "-U3",
+                    from_hash, to_hash]
+            if path:
+                args += ["--", path]
+            proc = self._git(args, check=False)
+            text = proc.stdout or ""
+        if len(text) > max_bytes:
+            text = text[:max_bytes] + "\n... [diff 过长已截断]"
+            out["truncated"] = True
+        out["diff"] = text
+        return out
 
     def diff_full(self, from_hash: str, to_hash: str) -> list[FileDiff]:
         """每文件的 before/after、增减行、二进制标记。规格 §5.6 diffFull()。"""

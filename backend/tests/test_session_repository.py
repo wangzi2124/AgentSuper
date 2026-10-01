@@ -290,6 +290,22 @@ def test_inputs_admit_promote_priority(db_conn):
     assert repo.has_pending(s.id) is False
 
 
+def test_inputs_promote_newest_lifo(db_conn):
+    """后来居上（LIFO）：promote_newest 按 admitted_seq DESC 取最新一条。"""
+    s = _session(db_conn)
+    repo.admit_input(s.id, {"p": 1}, delivery="queue")
+    repo.admit_input(s.id, {"p": 2}, delivery="queue")
+    repo.admit_input(s.id, {"p": 3}, delivery="queue")
+    assert repo.count_pending(s.id) == 3
+    n1 = repo.promote_newest(s.id)
+    assert n1["prompt"] == {"p": 3}
+    n2 = repo.promote_newest(s.id)
+    assert n2["prompt"] == {"p": 2}
+    n3 = repo.promote_newest(s.id)
+    assert n3["prompt"] == {"p": 1}
+    assert repo.promote_newest(s.id) is None
+
+
 def test_inputs_clear(db_conn):
     s = _session(db_conn)
     repo.admit_input(s.id, {"p": 1})
@@ -297,3 +313,35 @@ def test_inputs_clear(db_conn):
     assert repo.clear_inputs(s.id) == 2
     assert repo.count_pending(s.id) == 0
     assert repo.clear_inputs(s.id) == 0
+
+
+def test_inputs_admit_idempotent_same_client_id(db_conn):
+    """同一 input_id（client_msg_id）重复 admit 不会新增队列条目。
+
+    repository 层用主键冲突表达幂等（service.enqueue_prompt 捕获后回读已有条目），
+    这里断言「重复 admit 抛冲突且队列只增一条」。
+    """
+    s = _session(db_conn)
+    id1 = repo.admit_input(s.id, {"m": "hi"}, delivery="queue", input_id="c1")
+    assert id1 == "c1"
+    with pytest.raises(Exception):
+        repo.admit_input(s.id, {"m": "hi"}, delivery="queue", input_id="c1")
+    assert repo.count_pending(s.id) == 1
+    r = repo.promote_newest(s.id)
+    assert r["prompt"] == {"m": "hi"}
+
+
+def test_inputs_promote_newest_mixed_delivery_lifo(db_conn):
+    """混合 delivery：同类内按 admitted_seq DESC（最新优先），
+    promote_newest 仍保留 steer 整体优先（见 ORDER BY）。"""
+    s = _session(db_conn)
+    repo.admit_input(s.id, {"q": 1}, delivery="queue")
+    repo.admit_input(s.id, {"s": 1}, delivery="steer")
+    repo.admit_input(s.id, {"q": 2}, delivery="queue")
+    repo.admit_input(s.id, {"s": 2}, delivery="steer")
+    # steer 整体优先，同类内最新优先 → s2、s1、q2、q1
+    assert repo.promote_newest(s.id)["prompt"] == {"s": 2}
+    assert repo.promote_newest(s.id)["prompt"] == {"s": 1}
+    assert repo.promote_newest(s.id)["prompt"] == {"q": 2}
+    assert repo.promote_newest(s.id)["prompt"] == {"q": 1}
+    assert repo.promote_newest(s.id) is None

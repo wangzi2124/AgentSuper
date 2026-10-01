@@ -200,6 +200,18 @@ function handleMessageDelete(messageId: string) {
   agent.deleteMessage(messageId)
 }
 
+// [队列] 移除一条待处理任务
+const pendingCount = computed(() => agent.pendingPrompts.length)
+async function handleRemoveQueued(msg: { queuePromptId?: string; clientMsgId?: string }) {
+  const pid = msg.queuePromptId || msg.clientMsgId
+  if (!pid || !agent.activeSessionId) return
+  try {
+    await agent.removeQueuedPrompt(agent.activeSessionId, pid)
+  } catch (e) {
+    agent.setNotice(`移除失败：${e instanceof Error ? e.message : '未知错误'}`)
+  }
+}
+
 // [TTS] AI 消息朗读
 const speakingId = ref<string | null>(null)
 let speakAudio: HTMLAudioElement | null = null
@@ -343,7 +355,7 @@ async function handleCopy(messageId: string, text: string) {
 
       <div v-else ref="parentRef" class="message-list" @scroll="onScroll">
         <div v-for="(msg, idx) in messages" :key="msg.id" class="message-wrapper">
-          <div class="chat-message" :class="[msg.role, { 'is-error': msg.isError }]">
+          <div class="chat-message" :class="[msg.role, { 'is-error': msg.isError, queued: msg.role === 'user' && msg.queued }]">
             <div class="avatar" :class="msg.role">
               <template v-if="msg.role === 'user'">
                 <img v-if="isImgAvatar(auth.avatar)" class="avatar-img" :src="auth.avatar" alt="avatar" />
@@ -355,6 +367,11 @@ async function handleCopy(messageId: string, text: string) {
             </div>
             <div class="bubble">
               <template v-if="msg.role === 'user'">
+                <!-- [队列] 执行中追加的任务：标「排队中」并可移除（后端 drain 时自动去掉徽标） -->
+                <div v-if="msg.queued" class="queued-badge" title="当前消息正在执行中，已排到待处理队列（后续按新→旧执行）">
+                  排队中<span v-if="pendingCount > 1"> · 共 {{ pendingCount }} 条</span>
+                  <button class="queued-remove" title="从待处理队列移除" @click.stop="handleRemoveQueued(msg)">移除</button>
+                </div>
                 <div class="content">{{ msg.content }}</div>
                 <!-- [语音消息] 微信式音频气泡 -->
                 <VoiceBubble v-if="msg.voice" :voice="msg.voice" />
@@ -375,7 +392,7 @@ async function handleCopy(messageId: string, text: string) {
               </template>
 
               <template v-else>
-                <MultiAgentResponse :message="msg" :routingStatus="agent.routingStatus" :isLast="idx === messages.length - 1" @restore="handleRestore(msg)" />
+                <MultiAgentResponse :message="msg" :routingStatus="agent.routingStatus" :isLast="idx === messages.length - 1" :loadDiff="agent.fetchMessageDiff" @restore="handleRestore(msg)" />
               </template>
 
               <div class="message-footer">

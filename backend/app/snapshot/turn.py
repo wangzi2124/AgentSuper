@@ -27,7 +27,7 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from .snapshot import Patch, Snapshot, _default_data_dir, _sha1
 
@@ -37,6 +37,10 @@ TURNS_ROOT_REL = "snapshot/turns"
 
 # 外部文件归档体积上限：超过则跳过（巨大二进制文件恢复成本高于收益，放弃还原）。
 MAX_EXTERNAL_ARCHIVE_BYTES = 20 * 1024 * 1024
+
+# 每轮最多保留多少条 step 快照（超出丢最旧的）——长任务里 agent 可能写几十次，
+# 全留会让消息 data.snapshot 无限膨胀，而多数轮次的可回看价值集中在最近几步。
+_MAX_STEPS = 50
 
 _current: ContextVar[Optional["TurnSnapshot"]] = ContextVar(
     "snapshot_active_turn", default=None
@@ -59,8 +63,10 @@ class TurnSnapshot:
         self.snap = snap
         self.turn_id = turn_id
         self.before_tree: str = ""
+        self.after_tree: str = ""
         self._lock = threading.Lock()
         self.external: dict[str, ExternalRec] = {}
+        self.steps: list[dict] = []
 
     # ── 目录布局 ──────────────────────────────────────────────────────────
 
@@ -86,6 +92,62 @@ class TurnSnapshot:
             logger.warning("turn before-tree failed", exc_info=True)
             self.before_tree = ""
         return self.before_tree
+
+    def capture_after(self) -> str:
+        """轮次收尾时拍 after tree（供 diff 渲染 / 事后核对）。"""
+        try:
+            self.after_tree = self.snap.track() or ""
+        except Exception:
+            logger.warning("turn after-tree failed", exc_info=True)
+            self.after_tree = ""
+        return self.after_tree
+
+    # ── 每 step 快照（对齐 opencode：每次写工具调用后记一个 tree）──────────
+
+    def track_step(self, paths: Iterable[str]) -> Optional[dict]:
+        """写工具改完文件后调：把受影响路径增量入树，记一条 step。
+
+        只 add 本次改动的文件（track_paths），代价与改动量成正比而非仓库大小，
+        因此可以在每个写工具调用后都拍一次。返回 step 记录或 None（不可用）。
+        step[i].hash 与 step[i-1].hash 之间的 diff 即「第 i+1 步改了什么」。
+        files 存**仓库相对路径**，与 descriptor.internal 保持一致（绝对路径会随
+        用户机器路径变化，且不该落库）。
+        """
+        rels = self._relative_paths(paths)
+        if not rels:
+            return None
+        try:
+            tree = self.snap.track_paths(rels)
+        except Exception:
+            logger.debug("track_step failed for %s", rels, exc_info=True)
+            return None
+        if not tree:
+            return None
+        with self._lock:
+            if len(self.steps) >= _MAX_STEPS:
+                self.steps.pop(0)  # 只保留最近 N 步，避免长任务 descriptor 膨胀
+            rec = {"seq": len(self.steps), "hash": tree, "files": rels}
+            self.steps.append(rec)
+        return rec
+
+    def _relative_paths(self, paths: Iterable[str]) -> list[str]:
+        """把绝对/相对路径归一为 worktree 相对路径，剔除工作区外的路径。"""
+        out: list[str] = []
+        worktree = os.fspath(self.snap.worktree)
+        for p in paths or ():
+            if not p:
+                continue
+            try:
+                cand = os.fspath(p)
+                rel = (os.path.relpath(os.path.abspath(cand), worktree)
+                       if os.path.isabs(cand) else os.path.normpath(cand))
+            except (OSError, ValueError):
+                continue
+            if rel.startswith("..") or os.path.isabs(rel) or rel == ".":
+                continue
+            if rel not in out:
+                out.append(rel)
+        return out
 
     # ── 外部文件判定与归档 ────────────────────────────────────────────────
 
@@ -206,8 +268,15 @@ class TurnSnapshot:
         descriptor = {
             "worktree": str(self.snap.worktree),
             "before_tree": self.before_tree,
+            # after_tree = 本轮结束时的 write-tree 结果。有了它才能事后渲染
+            # before→after 的 diff 文本（旧的 descriptor 只有 before_tree，
+            # 无法区分「本轮改的」与「现在的」，故 diff 端点对老消息返回 400）。
+            "after_tree": self.after_tree,
             "internal": [e["file"] for e in git_entries],
             "external": external_recs,
+            # [每 step 快照] 每次写工具调用后的增量树（seq/hash/files），
+            # 相邻两步之间的 diff = 「那一步改了什么」（对齐 opencode 的 step patch）。
+            "steps": list(self.steps),
         }
         return [*git_entries, *external_entries], descriptor
 
@@ -255,6 +324,138 @@ def archive_external(path: str | Path) -> None:
         turn.archive(Path(path))
     except Exception:
         logger.debug("snapshot archive_external failed for %s", path, exc_info=True)
+
+
+def record_write(paths: str | Path | Iterable[str | Path]) -> None:
+    """file_tools **写完**文件后调用：增量拍一个 step 快照（每 step 快照）。
+
+    与 archive_external（写前归档外部文件）配对使用：写前存 before，写后记 step，
+    于是「这一步改了什么」可以在事后用相邻两个 step 的 tree 求 diff 得到。
+    无活跃 turn / 非 git 项目 / 路径在工作区外时静默跳过（外部文件由归档负责）。
+    """
+    turn = _current.get()
+    if turn is None:
+        return
+    if isinstance(paths, (str, Path)):
+        items: list[str] = [str(paths)]
+    else:
+        items = [str(p) for p in paths]
+    if not items:
+        return
+    try:
+        turn.track_step(items)
+    except Exception:
+        logger.debug("snapshot record_write failed for %s", items, exc_info=True)
+
+
+# ── diff 渲染（聊天 UI「本轮改了什么」可展开）──────────────────────────────
+
+_DIFF_MAX_BYTES = 256 * 1024
+
+
+def _unified(before: bytes, after: bytes, label: str, context: int = 3) -> str:
+    """用 difflib 生成 unified diff 文本（外部文件无 git tree，只能这样渲染）。"""
+    try:
+        b_lines = before.decode("utf-8").splitlines(keepends=True)
+        a_lines = after.decode("utf-8").splitlines(keepends=True)
+    except (UnicodeDecodeError, ValueError):
+        return ""
+    diff = difflib.unified_diff(
+        b_lines, a_lines, fromfile=f"a/{label}", tofile=f"b/{label}", n=context,
+    )
+    return "".join(diff)
+
+
+def diff_turn(snap: Snapshot | None, descriptor: dict, path: str = "", step: Optional[int] = None) -> dict:
+    """渲染一轮改动的 diff 文本，供聊天 UI 展开查看。
+
+    - 内部文件（worktree 内、git 可见）：`git diff <before_tree> <after_tree>`
+    - 外部文件（工作区外/被 gitignore）：用归档 blob 与当前内容做 difflib 对比
+    - step=N 时只看第 N 步：[before_tree | step[N-1]] → step[N]，
+      即「那一次写工具调用改了什么」（每 step 快照）
+    返回 {"files": [{file, diff}], "truncated": bool, "reason": str, "steps": int}
+    reason 非空表示不可用（如老消息没有 after_tree），前端据此提示。
+    """
+    out: dict = {"files": [], "truncated": False, "reason": "", "steps": len(descriptor.get("steps") or [])}
+    if not descriptor:
+        out["reason"] = "该消息没有快照数据"
+        return out
+    before_tree = descriptor.get("before_tree") or ""
+    after_tree = descriptor.get("after_tree") or ""
+    steps = descriptor.get("steps") or []
+    internal = [str(x) for x in (descriptor.get("internal") or [])]
+    external = descriptor.get("external") or []
+
+    # ── 单步模式：只看第 step 步涉及的路径 ──
+    if step is not None:
+        if not steps:
+            out["reason"] = "该消息没有逐步快照（每 step 快照仅新版本轮次记录）"
+            return out
+        idx = max(0, min(int(step), len(steps) - 1))
+        rec = steps[idx]
+        prev = steps[idx - 1]["hash"] if idx > 0 else (before_tree or "")
+        cur = rec.get("hash") or ""
+        if snap is None:
+            out["reason"] = "快照服务不可用"
+            return out
+        if not (prev and cur):
+            out["reason"] = "该步骤缺少可比较的快照树"
+            return out
+        for rel in rec.get("files") or []:
+            res = snap.diff_trees(prev, cur, path=rel, max_bytes=_DIFF_MAX_BYTES)
+            out["files"].append({"file": rel, "diff": res["diff"]})
+            if res["truncated"]:
+                out["truncated"] = True
+        if not out["files"]:
+            out["reason"] = "该步骤无可展示的 diff"
+        return out
+
+    total = 0
+    if internal:
+        if snap is None:
+            out["reason"] = "快照服务不可用"
+        elif not (before_tree and after_tree):
+            # 旧消息只有 before_tree —— 无法区分「本轮改的」与「现在的」
+            out["reason"] = "该消息为旧版本记录，无 after_tree，无法渲染 diff"
+        else:
+            for rel in internal:
+                if path and rel != path:
+                    continue
+                res = snap.diff_trees(before_tree, after_tree, path=rel, max_bytes=_DIFF_MAX_BYTES)
+                total += len(res["diff"])
+                out["files"].append({"file": rel, "diff": res["diff"]})
+                if res["truncated"]:
+                    out["truncated"] = True
+
+    base = (snap.data_dir or _default_data_dir()) if snap is not None else _default_data_dir()
+    for ext in external:
+        p = str(ext.get("path") or "")
+        if not p or (path and p != path):
+            continue
+        before_bytes = b""
+        blob = ext.get("blob")
+        if ext.get("before") == "present" and blob:
+            blob_abs = base / str(blob)
+            try:
+                before_bytes = blob_abs.read_bytes() if blob_abs.is_file() else b""
+            except OSError:
+                before_bytes = b""
+        try:
+            after_bytes = Path(p).read_bytes() if Path(p).is_file() else b""
+        except OSError:
+            after_bytes = b""
+        text = _unified(before_bytes, after_bytes, p)
+        if len(text) > _DIFF_MAX_BYTES:
+            text = text[:_DIFF_MAX_BYTES] + "\n... [diff 过长已截断]"
+            out["truncated"] = True
+        total += len(text)
+        out["files"].append({"file": p, "diff": text})
+
+    if not out["files"] and not out["reason"]:
+        out["reason"] = "无可展示的 diff"
+    if total > _DIFF_MAX_BYTES * 4:
+        out["truncated"] = True
+    return out
 
 
 # ── 恢复 ───────────────────────────────────────────────────────────────────

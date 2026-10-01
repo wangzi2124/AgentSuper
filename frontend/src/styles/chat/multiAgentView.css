@@ -176,8 +176,30 @@ border: none;
 
 .is-error .bubble { color: var(--danger); }
 
-.message-footer { display: flex; align-items: center; justify-content: flex-start; gap: 4px; margin-top: 6px; font-size: 11px; }
-.user .message-footer { justify-content: flex-end; }
+/* [队列] 排队的用户气泡：半透明 + 「排队中」徽标（drain 完成后 store 会摘掉徽标） */
+.chat-message.user.queued .bubble { opacity: 0.75; border-style: dashed; }
+.queued-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--primary);
+  background: var(--primary-glow);
+  border-radius: 999px;
+}
+.queued-remove {
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.queued-remove:hover { color: #fff; background: var(--danger, #ef4444); border-color: transparent; }
+.message-footer { display: flex; align-items: center; justify-content: flex-start; gap: 4px; margin-top: 6px; font-size: 11px; }.user .message-footer { justify-content: flex-end; }
 .time { color: var(--text-muted); opacity: 0.85; font-variant-numeric: tabular-nums; flex-shrink: 0; }
 .msg-usage { color: var(--text-muted); opacity: 0.75; font-size: 10.5px; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: help; }
 .message-actions { display: flex; gap: 4px; align-items: center; opacity: 0; transition: opacity 0.18s var(--ease); }

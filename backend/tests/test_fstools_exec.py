@@ -171,6 +171,119 @@ def test_validate_shell_command_backtick_recursion(monkeypatch):
         ev._validate_shell_command("   ", cwd=".")
 
 
+# ── [git 写操作审批] git 写子命令必须走 check_command，不再靠白名单早退 ────────
+
+class _RecordingMgr:
+    """记录 check_command 被查询过的 key，按 key 返回预设决策。"""
+
+    def __init__(self, decision="ask"):
+        self.decision = decision
+        self.seen: list[str] = []
+
+    def check_command(self, cmd):
+        self.seen.append(cmd)
+        return self.decision
+
+
+@pytest.fixture
+def git_mgr(monkeypatch):
+    mgr = _RecordingMgr("ask")
+    monkeypatch.setattr(ev, "get_perm_mgr", lambda: mgr)
+    return mgr
+
+
+@pytest.mark.parametrize("command", [
+    "git status",
+    "git diff HEAD",
+    "git log --oneline",
+    "git rev-parse --show-toplevel",
+    "git show HEAD:README.md",
+    "git --no-pager diff",
+    "git -C E:/AgentSuper status",
+])
+def test_git_readonly_subcommands_allowed(command, git_mgr):
+    ev._validate_shell_command(command, cwd=".", ask=True)
+    assert git_mgr.seen == []  # 只读命令根本不查审批
+
+
+@pytest.mark.parametrize("command", [
+    "git add .",
+    "git commit -m x",
+    "git reset --hard",
+    "git checkout .",
+    "git stash",
+    "git clean -fd",
+    "git rm x",
+    "git mv a b",
+    "git apply p.patch",
+    "git push origin main",
+    "git rebase -i HEAD~3",
+    "git merge main",
+    "git -c user.email=a@b commit -m x",   # 全局选项带取值，不能把 user.email=… 当子命令
+    "git branch",                          # 同名可读可写 → 审批
+    "git remote -v",
+    "git",                                  # 解析不出子命令 → fail-closed 审批
+])
+def test_git_write_subcommands_require_approval(command, git_mgr):
+    with pytest.raises(NeedsPermission):
+        ev._validate_shell_command(command, cwd=".", ask=True)
+    assert git_mgr.seen, "写操作必须查询命令审批"
+    assert git_mgr.seen[0].startswith("git")
+
+
+def test_git_approval_key_is_per_subcommand(git_mgr):
+    """批准 git add 不能顺带放开 git reset（审批 key 按子命令粒度）。"""
+    with pytest.raises(NeedsPermission) as ei1:
+        ev._validate_shell_command("git add .", cwd=".", ask=True)
+    with pytest.raises(NeedsPermission) as ei2:
+        ev._validate_shell_command("git reset --hard", cwd=".", ask=True)
+    assert ei1.value.path == "git add"
+    assert ei2.value.path == "git reset"
+
+
+def test_git_write_subcommand_allowed_when_whitelisted(monkeypatch):
+    mgr = _RecordingMgr("allow")
+    monkeypatch.setattr(ev, "get_perm_mgr", lambda: mgr)
+    ev._validate_shell_command("git commit -m x", cwd=".", ask=True)
+    assert mgr.seen == ["git commit"]
+
+
+def test_git_write_subcommand_denied(monkeypatch):
+    monkeypatch.setattr(ev, "get_perm_mgr", lambda: _RecordingMgr("deny"))
+    with pytest.raises(ValueError):
+        ev._validate_shell_command("git reset --hard", cwd=".", ask=True)
+
+
+def test_git_pipeline_segments_validated_independently(git_mgr):
+    """`git status && git add .`：前半放行，后半触发审批。"""
+    with pytest.raises(NeedsPermission):
+        ev._validate_shell_command("git status && git add .", cwd=".", ask=True)
+
+
+def test_git_write_not_gated_when_ask_disabled(git_mgr):
+    """ask=False 的调用方保持原语义（只做白名单，不触发审批，避免零回归）。"""
+    ev._validate_shell_command("git reset --hard", cwd=".", ask=False)
+    assert git_mgr.seen == []
+
+
+def test_git_absolute_path_command_gated(monkeypatch):
+    """`C:\\...\\git.exe reset` 也要走审批（不靠白名单早退）。"""
+    mgr = _RecordingMgr("ask")
+    monkeypatch.setattr(ev, "get_perm_mgr", lambda: mgr)
+    assert ev._is_git_command("C:/Program Files/Git/bin/git.exe") is True
+    assert ev._is_git_command("git") is True
+    assert ev._is_git_command("github") is False
+    assert ev._is_git_command("rg") is False
+
+
+def test_git_subcommand_parser():
+    assert ev._git_subcommand(["git", "status"]) == "status"
+    assert ev._git_subcommand(["git", "-C", "E:/x", "commit", "-m", "y"]) == "commit"
+    assert ev._git_subcommand(["git", "--git-dir", "d", "status"]) == "status"
+    assert ev._git_subcommand(["git"]) is None
+    assert ev._git_subcommand(["FOO=1", "git", "push"]) == "push"
+
+
 def test_win_cmd_needs_shell(monkeypatch):
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setattr(ev, "_win_which_cache", {})

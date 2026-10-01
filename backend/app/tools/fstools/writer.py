@@ -21,7 +21,7 @@ from pathlib import Path
 
 from app.filesystem import fsutil  # [snapshot] 原子写 + 文件级锁（规格 §4.2）
 
-from app.snapshot.turn import archive_external  # [snapshot] 轮次级外部文件 before 归档
+from app.snapshot.turn import archive_external, record_write  # [snapshot] 轮次级 before 归档 + 每 step 快照
 
 
 
@@ -87,6 +87,7 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> dict:
             _write_text_raw(target, str(content))
             action = "Overwritten" if existed else "Created"
         _scan_cache.invalidate(target.parent)
+        record_write(target)  # [snapshot] 每 step 快照（写完增量入树）
         size = target.stat().st_size
         return _env("write", f"{action} {path} ({size} bytes)", path=str(target), size=size, action=action.lower())
     except Exception as e:
@@ -106,6 +107,7 @@ def tool_append_file(path: str, content: str) -> dict:
         total = target.stat().st_size
         action = "Appended to" if existed else "Created"
         _scan_cache.invalidate(target.parent)
+        record_write(target)  # [snapshot] 每 step 快照（写完增量入树）
         return _env("append", f"{action} {path} ({total} bytes total)", path=str(target), size=total)
     except Exception as e:
         return _env("append", f"Error appending to file: {e}", error=True)
@@ -420,6 +422,7 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
     except Exception as e:
         return _env("edit", f"Error reading file: {e}", error=True)
     _scan_cache.invalidate(target.parent)
+    record_write(target)  # [snapshot] 每 step 快照（写完增量入树）
     return _env("edit", f"Edited {path}", path=str(target), replace_all=replace_all)
 
 def tool_delete_file(path: str) -> dict:
@@ -433,12 +436,14 @@ def tool_delete_file(path: str) -> dict:
         try:
             target.rmdir()
             _scan_cache.invalidate(target.parent)
+            record_write(target)  # [snapshot] 每 step 快照（删除后入树）
             return _env("delete", f"Deleted directory {path}", path=str(target), kind="dir")
         except OSError as e:
             return _env("delete", f"Error deleting directory: {e}", error=True)
     try:
         target.unlink()
         _scan_cache.invalidate(target.parent)
+        record_write(target)  # [snapshot] 每 step 快照（删除后入树）
         return _env("delete", f"Deleted {path}", path=str(target), kind="file")
     except Exception as e:
         return _env("delete", f"Error deleting file: {e}", error=True)
@@ -460,6 +465,7 @@ def tool_rename_file(path: str, new_path: str) -> dict:
         src.rename(dst)
         _scan_cache.invalidate(src.parent)
         _scan_cache.invalidate(dst.parent)
+        record_write([src, dst])  # [snapshot] 每 step 快照（源+目标一起入树）
         return _env("rename", f"Renamed {path} -> {new_path}", src=str(src), dst=str(dst))
     except Exception as e:
         return _env("rename", f"Error renaming: {e}", error=True)

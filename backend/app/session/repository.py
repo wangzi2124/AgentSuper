@@ -580,20 +580,34 @@ def upsert_epoch(session_id: str, baseline: str, baseline_seq: int, snapshot: di
 
 # ── 输入队列（steer / queue）─────────────────────────────────────────────
 
-def admit_input(session_id: str, prompt: dict[str, Any], delivery: str = "steer") -> str:
+def admit_input(session_id: str, prompt: dict[str, Any], delivery: str = "steer",
+                input_id: Optional[str] = None) -> str:
     """投递输入：入队并返回 input id（对齐 opencode SessionInput.admit）。
 
-    admitted_seq 在单条 INSERT 内原子计算（同 session_messages 的 seq 语义）。
+    `admitted_seq` 是**入队票号**，在单条 INSERT 内原子计算：promote_newest 按它 DESC
+    取「最新一条」（后来居上插队）。
+    票号取 session_messages.seq 与既有 session_inputs.admitted_seq 的共同上界 +1 —— 必须
+    同时看两张表：只看 messages 会让「同一轮内连续投递的多条任务」拿到**同一个票号**
+    （两条消息之间没有新 seq），LIFO 顺序退化成未定义的 rowid 顺序（实测按 FIFO 出队）。
+    `input_id` 传入时按 (session_id, id) 主键幂等 —— 同一 client_msg_id 重复投递
+    不会产生第二条待处理任务（前端重试/双击的安全网；主键冲突由 service 捕获回读）。
     """
     conn = _get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        iid = new_id("in_")
+        iid = input_id or new_id("in_")
         now = int(time.time() * 1000)
         conn.execute(
             "INSERT INTO session_inputs (id, session_id, prompt, delivery, admitted_seq, time_created)"
-            " VALUES (?,?,?,?,(SELECT COALESCE(MAX(seq), 0) + 1 FROM session_messages WHERE session_id = ?),?)",
-            (iid, session_id, json.dumps(prompt, ensure_ascii=False), delivery, session_id, now),
+            " VALUES (?,?,?,?,("
+            "  SELECT COALESCE(MAX(v), 0) + 1 FROM ("
+            "    SELECT COALESCE(MAX(seq), 0) AS v FROM session_messages WHERE session_id = ?"
+            "    UNION ALL"
+            "    SELECT COALESCE(MAX(admitted_seq), 0) AS v FROM session_inputs WHERE session_id = ?"
+            "  )"
+            "),?)",
+            (iid, session_id, json.dumps(prompt, ensure_ascii=False), delivery,
+             session_id, session_id, now),
         )
         conn.commit()
         return iid
@@ -618,6 +632,72 @@ def promote_next(session_id: str) -> Optional[dict[str, Any]]:
         )
         conn.commit()
         return {"id": row["id"], "prompt": json.loads(row["prompt"]), "delivery": row["delivery"]}
+    finally:
+        conn.close()
+
+
+def promote_newest(session_id: str) -> Optional[dict[str, Any]]:
+    """原子取出**最新一条**待执行输入并出队（后来居上：新加的任务排到队首）。
+
+    与 promote_next 的区别只有排序方向：steer 仍优先于 queue，同类内
+    `admitted_seq DESC`（最新优先）。DELETE + SELECT 在同一事务内完成，
+    因此同一 session 的并发 drain 不会取到同一条。
+    """
+    conn = _get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM session_inputs WHERE session_id = ? AND promoted_seq IS NULL"
+            " ORDER BY (delivery = 'steer') DESC, admitted_seq DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if not row:
+            conn.commit()
+            return None
+        conn.execute("DELETE FROM session_inputs WHERE session_id = ? AND id = ?",
+                     (session_id, row["id"]))
+        conn.commit()
+        return {
+            "id": row["id"],
+            "prompt": json.loads(row["prompt"]),
+            "delivery": row["delivery"],
+            "enqueued_at": int(row["time_created"]),
+        }
+    finally:
+        conn.close()
+
+
+def list_inputs(session_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    """列出待执行输入，按「将要执行的顺序」返回（steer 优先、最新在前）。"""
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT id, prompt, delivery, admitted_seq, time_created FROM session_inputs"
+            " WHERE session_id = ? AND promoted_seq IS NULL"
+            " ORDER BY (delivery = 'steer') DESC, admitted_seq DESC LIMIT ?",
+            (session_id, int(limit)),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "prompt": json.loads(r["prompt"]),
+                "delivery": r["delivery"],
+                "enqueued_at": int(r["time_created"]),
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def remove_input(session_id: str, input_id: str) -> bool:
+    """移除一条待执行输入（用户在待处理面板里删掉自己排队的任务）。"""
+    conn = _get_db()
+    try:
+        cur = conn.execute("DELETE FROM session_inputs WHERE session_id = ? AND id = ?",
+                           (session_id, input_id))
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 

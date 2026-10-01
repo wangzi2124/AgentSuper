@@ -50,7 +50,9 @@ def _files_changed(request, before: str) -> tuple[list, dict]:
     try:
         git_entries: list[dict] = []
         if before and snap.enabled():
-            after = snap.track()
+            after = snap.track()                       # ←2nd (and only other) tree
+            if turn is not None:
+                turn.after_tree = after or ""
             if after and after != before:
                 worktree = os.fspath(snap.worktree)
                 for d in snap.diff_full(before, after):

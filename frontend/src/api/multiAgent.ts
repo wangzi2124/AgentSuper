@@ -27,6 +27,25 @@ export async function restoreSnapshot(conversationId: string, messageId: string)
   }>
 }
 
+/** [查看改动] 渲染某条 assistant 消息对应轮次的 diff 文本（聊天卡片展开用） */
+export async function fetchTurnDiff(
+  conversationId: string,
+  messageId: string,
+  file?: string,
+  step?: number,
+): Promise<{ files: { file: string; diff: string }[]; truncated: boolean; reason: string; steps: number }> {
+  return apiRequest(BASE + '/multi-agent/diff', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      conversation_id: conversationId,
+      message_id: messageId,
+      file: file || '',
+      step: step == null ? null : step,
+    }),
+  }, true) as Promise<{ files: { file: string; diff: string }[]; truncated: boolean; reason: string; steps: number }>
+}
+
 export async function sendMultiAgentStream(
   data: MultiAgentChatRequest,
   onEvent: (event: MultiAgentSSEEvent) => void,
