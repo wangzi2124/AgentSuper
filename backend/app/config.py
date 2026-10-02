@@ -198,6 +198,15 @@ class Settings(BaseSettings):
     # 当 MAX_STEPS >= MAX_TOOL_ROUNDS 时，MAX_STEPS 生效上限即等于该值。
     # [token 优化 v9] 16 → 8：每轮工具调用都会重发整段上下文，减少轮数即减少 token 累积。
     max_tool_rounds: int = 8
+    # [零进展救援] 思考模型把单轮输出预算全烧在 reasoning 上（content 空 +
+    # tool_calls 空 + finish_reason=length）时的「强制产出」重试次数。
+    # 这类轮次**没有任何已交付内容**，与「已交付部分内容的 length 截断」性质不同：
+    # 后者按 opencode 对齐不续跑（续跑会重复污染输出），前者不续跑就等于任务必败。
+    # 每次重试最多再花 LLM_MAX_TOKENS 输出 token，故默认保守取 1；设 0 关闭该行为。
+    zero_progress_rescue_attempts: int = 1
+    # 救援后仍零进展时，是否用诊断文案替换泄漏的 reasoning 独白。
+    # 默认开：把 2.7 万字内心独白直接返回给用户是纯粹的负体验，且会撑爆上下文预算。
+    zero_progress_mask_reasoning: bool = True
     # Doom-loop 检测：同一组工具调用指纹连续重复 N 轮后，注入策略变更提示（≥2）
     doom_loop_threshold: int = 3
     # Doom-loop 升级：首次提示之后，再次连续触发 N 次相同指纹即强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具），

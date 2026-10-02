@@ -70,6 +70,31 @@ MAX_STEPS_PROMPT = (
 )
 
 
+# ── 零进展救援（reasoning 预算耗尽）────────────────────────────────────────
+# 实测（deepseek-v4-flash，「在 D:\game 写 React 俄罗斯方块」）：单轮把 8192 输出
+# token **全部**花在 reasoning_content 上，content 空、tool_calls 空、
+# finish_reason=length → 循环退出，用户收到 2.7 万字内心独白而磁盘零文件。
+# 这不是「截断」（截断仍有已交付内容），而是「什么都没做」，所以必须续跑。
+ZERO_PROGRESS_ACK = (
+    "[上一轮输出因达到 token 上限被截断，未产生任何正文或工具调用]"
+)
+
+ZERO_PROGRESS_PROMPT = (
+    "CRITICAL - 上一轮你把全部输出预算耗尽在内部思考上，**没有产出任何正文，"
+    "也没有调用任何工具**，任务实际上一件都没做成。\n\n"
+    "现在立刻停止继续推演，按下面的顺序执行：\n"
+    "1. **不要再做方案推演/自我讨论/列举计划** —— 那些已经浪费了一整轮预算。\n"
+    "2. 如果任务需要落地文件/代码：**立刻调用写文件类工具"
+    "（tool_write_file / tool_apply_patch / tool_append_file）开始写**，"
+    "不要先解释再写，边写边推进。\n"
+    "3. 如果任务只需回答：**直接给最终答案**，控制在几百字内。\n\n"
+    "硬性约束：\n"
+    "- 本轮必须至少产生一次工具调用或一段正文，否则任务再次失败。\n"
+    "- 不要输出思考过程、不要复述计划、不要写「我将会…」这类将来时。\n"
+    "- 需要信息就直接调工具去取，不要靠推理补全。\n"
+)
+
+
 # P3: Doom-loop 检测提示词（对齐 opencode processor.ts:DOOM_LOOP_THRESHOLD）
 
 DOOM_LOOP_PROMPT = (
@@ -209,4 +234,4 @@ def _is_multi_agent_queue(q) -> bool:
 
 
 
-__all__ = ["DOOM_LOOP_PROMPT", "MAX_STEPS_PROMPT", "REPEAT_DELEGATION_PROMPT", "_DEDUP_READONLY_TOOLS", "_FINISH_REASON_MAP", "_TASK_TOOL_SCHEMA", "_TASK_TOOL_SUBAGENTS", "_is_multi_agent_queue", "_nearest_workspace_hint", "_normalize_finish_reason", "_permission_denied_msg"]
+__all__ = ["DOOM_LOOP_PROMPT", "MAX_STEPS_PROMPT", "REPEAT_DELEGATION_PROMPT", "ZERO_PROGRESS_ACK", "ZERO_PROGRESS_PROMPT", "_DEDUP_READONLY_TOOLS", "_FINISH_REASON_MAP", "_TASK_TOOL_SCHEMA", "_TASK_TOOL_SUBAGENTS", "_is_multi_agent_queue", "_nearest_workspace_hint", "_normalize_finish_reason", "_permission_denied_msg"]
