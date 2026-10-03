@@ -95,6 +95,51 @@ ZERO_PROGRESS_PROMPT = (
 )
 
 
+# ── 超长内联正文救援（模型无视「长内容写文件」规则）──────────────────────────
+# 实测（同一模型，同一「在 D 盘写个俄罗斯方块游戏」任务，2026-10-03）：
+# 前几轮正常 ls/read_file，第 4 轮突然把 8192 输出预算全部花在**聊天窗口正文**上
+# （content 24,258 字符的方案/分析报告，tool_calls=[]，finish_reason=length）。
+# `_is_zero_progress` 因「content 非空」判 False → 零进展救援不触发 → while 条件
+# 因「无 tool_calls」退出 → 磁盘零文件，用户收到一份被腰斩的 24K 字规划草稿。
+#
+# 与零进展的区别：不是「什么都没做」，而是「做了但做在聊天里而非磁盘上」。
+# 因此话术不能说「没有产出任何正文」（那是假的、且会削弱模型信任），必须明确
+# 告知「你被截断了」并把落盘动作前置。
+OVERSIZED_PROSE_MIN_CHARS = 2000
+
+OVERSIZED_PROSE_ACK = (
+    "[上一轮输出因达到 token 上限被截断：正文超长且未调用任何工具]"
+)
+
+OVERSIZED_PROSE_PROMPT = (
+    "CRITICAL - 上一轮你被**输出 token 上限截断**，而且你把整轮预算写成了聊天窗口里的"
+    "长篇正文（未调用任何工具），所以任务实际上一件都没做成。\n\n"
+    "硬性规则（不可协商）：\n"
+    "- **禁止**在聊天窗口里写代码、HTML、文档正文或长篇方案；那会再次撞上上限并被截断。\n"
+    "- 需要落盘的内容一律用写文件类工具分段写入："
+    "tool_write_file（首段）→ tool_append_file（后续段），每段控制在几百行以内。\n"
+    "- 如果文件很大，先只写骨架（结构 + 关键函数），再逐段补全，不要一次写完。\n"
+    "- 需要信息就直接调工具去取，不要靠推理补全。\n\n"
+    "如果你判断任务**不需要产出文件**（纯问答），则直接给出**几百字以内**的最终答案，"
+    "不要展开成长文。\n\n"
+    "本轮必须产生至少一次工具调用，或一段短答案；否则任务再次失败。"
+)
+
+
+# ── 工具参数截断守卫 ────────────────────────────────────────────────────────
+# finish_reason=length 且仍带 tool_calls ⇒ 参数一定被输出上限砍断。`parse_tool_args`
+# 会把半截 JSON「修复」成合法 dict，残缺字符串被当完整内容执行 → 静默写出损坏文件。
+# 回给模型的文案必须给出可操作的下一步（分段写），否则模型会原样重试同样大的 payload。
+_TRUNCATED_ARGS_ERROR = (
+    "Error: '{tool}' 的调用参数因达到输出 token 上限（finish_reason=length）被截断，"
+    "已阻止执行 —— 若强行执行会写出半截文件。\n"
+    "请重试并显著缩小单次 payload：\n"
+    "- 写文件：只写一个文件的**一部分**（如前 100 行），后续用 tool_append_file 续写；\n"
+    "- 单个文件很大时，先只写骨架（结构 + 关键函数），再逐段补全；\n"
+    "- 一次调用只写一个文件，不要把多个大文件塞进同一轮。"
+)
+
+
 # P3: Doom-loop 检测提示词（对齐 opencode processor.ts:DOOM_LOOP_THRESHOLD）
 
 DOOM_LOOP_PROMPT = (
@@ -234,4 +279,4 @@ def _is_multi_agent_queue(q) -> bool:
 
 
 
-__all__ = ["DOOM_LOOP_PROMPT", "MAX_STEPS_PROMPT", "REPEAT_DELEGATION_PROMPT", "ZERO_PROGRESS_ACK", "ZERO_PROGRESS_PROMPT", "_DEDUP_READONLY_TOOLS", "_FINISH_REASON_MAP", "_TASK_TOOL_SCHEMA", "_TASK_TOOL_SUBAGENTS", "_is_multi_agent_queue", "_nearest_workspace_hint", "_normalize_finish_reason", "_permission_denied_msg"]
+__all__ = ["DOOM_LOOP_PROMPT", "MAX_STEPS_PROMPT", "OVERSIZED_PROSE_ACK", "OVERSIZED_PROSE_MIN_CHARS", "OVERSIZED_PROSE_PROMPT", "REPEAT_DELEGATION_PROMPT", "ZERO_PROGRESS_ACK", "ZERO_PROGRESS_PROMPT", "_TRUNCATED_ARGS_ERROR", "_DEDUP_READONLY_TOOLS", "_FINISH_REASON_MAP", "_TASK_TOOL_SCHEMA", "_TASK_TOOL_SUBAGENTS", "_is_multi_agent_queue", "_nearest_workspace_hint", "_normalize_finish_reason", "_permission_denied_msg"]

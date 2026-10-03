@@ -179,6 +179,67 @@ async def test_generate_truncates_to_llm_call_budget(monkeypatch, tmp_path):
     assert "/x/a.py" in body  # tool_write_file 的 path 已被提取进 STEP_STATE
 
 
+# ── generate：截断预算下限 —— 用户请求永不消失 ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_generate_keeps_user_request_after_truncation(monkeypatch, tmp_path):
+    """回归：单条超大 assistant 正文不得把整轮上下文（含用户请求）截没。
+
+    实测事故（2026-10-03）：模型某一轮返回 `finish_reason=length` 的超长正文，
+    该条本身超预算 → `truncate_messages` 贪心循环一条都留不下 →
+    `sanitize_tool_messages` 再清掉仅剩的孤儿 tool 消息 →
+    第 3 次 LLM 调用只收到 `[system, "[earlier messages truncated...]"]`，
+    模型答「我没看到你的实际请求」并转头去查 git log，整轮任务报废。
+
+    断言：**每一次** LLM 调用都必须仍看得到用户问题。
+    """
+    from _graphmod_support import FakeLLM, build_agent, make_state
+    import app.agent.graphmod.generate as gen_mod
+    monkeypatch.setattr(settings, "max_context_tokens", 10_000)
+    monkeypatch.setattr(settings, "context_reserve_tokens", 1_000)
+    monkeypatch.setattr(settings, "context_safety_ratio", 0.5)
+    monkeypatch.setattr(settings, "step_summary_enabled", False)
+    monkeypatch.setattr(settings, "compaction_threshold_tokens", 0)
+    for n in ("record_model_call", "trace", "trace_messages"):
+        monkeypatch.setattr(gen_mod, n, lambda *a, **k: None)
+
+    agent = build_agent()
+    monkeypatch.setattr(agent, "_build_tool_defs", lambda *a, **k: [])
+    question = "在 D 盘写个俄罗斯方块游戏"
+
+    llm = FakeLLM()
+    llm.responses = [
+        # 第 1 轮：正常写文件
+        FakeLLM().response(tool_calls=[("tool_write_file", '{"path": "/x/a.py"}')]),
+        # 第 2 轮：finish_reason=length 的超长正文 + 1 个工具调用（生产实测形状）
+        FakeLLM().response(
+            content="超长正文" * 20000,
+            tool_calls=[("tool_ls", "{}")],
+            finish_reason="length",
+        ),
+        FakeLLM().response(content="done"),
+    ]
+    sent_snapshots = []
+
+    async def snap_llm(model, messages, tool_defs, state=None):
+        sent_snapshots.append([dict(m) for m in messages])
+        return await llm(model, messages, tool_defs, state=state)
+    agent._llm_call = snap_llm
+
+    async def spy(name, args, state=None):
+        return "工具输出"
+    agent._execute_tool = spy
+
+    out = await agent._generate(make_state(question=question, _cwd=str(tmp_path)))
+    assert out["answer"] == "done"
+    assert len(sent_snapshots) >= 2, sent_snapshots
+    for i, msgs in enumerate(sent_snapshots):
+        assert any(
+            m.get("role") == "user" and question in str(m.get("content"))
+            for m in msgs
+        ), f"LLM call #{i} lost the user request: {[(m.get('role'), str(m.get('content'))[:40]) for m in msgs]}"
+
+
 # ── step_state ─────────────────────────────────────────────────────────────
 
 def test_step_state_write_read(tmp_path):

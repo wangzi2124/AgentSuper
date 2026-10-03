@@ -163,6 +163,43 @@ def count_message_tokens(messages: list[dict]) -> int:
     return estimate_tokens_messages(messages)
 
 
+def ensure_request_anchor(kept: list[dict], rest: list[dict]) -> list[dict]:
+    """截断下限：保证「当前用户请求」永远不会被截断吃掉。
+
+    贪心从最新往回保留时，只要**最新一条消息本身就超预算**（典型：
+    `finish_reason=length` 的超长 assistant 正文），循环第一条就 break，
+    结果一条都留不下 —— 整轮上下文塌缩成 `system + [earlier messages
+    truncated...]`；随后 `sanitize_tool_messages` 还会把仅存的孤儿 tool
+    消息清掉，模型于是在**完全没有用户请求**的上下文里自由发挥。
+
+    实测（2026-10-03）：用户要求「在 D 盘写个俄罗斯方块游戏」，第 3 次 LLM
+    调用只收到 `[system, sentinel]`，模型答「我没看到你的实际请求」并
+    转头去查 git log / 目录，整轮任务报废。
+
+    兜底把最近一条 user 消息（请求锚点）补回窗口：宁可单次请求略微超预算
+    （Provider 会明确报错、可重试），也不能静默丢掉用户请求。rest 里没有
+    user 消息时（纯工具续轮）至少保留最新一条，避免空上下文。
+    """
+    if not rest:
+        return kept
+    kept_ids = {id(m) for m in kept}
+    anchor = None
+    for msg in reversed(rest):
+        if msg.get("role") == "user":
+            anchor = msg
+            break
+    if anchor is not None and id(anchor) not in kept_ids:
+        logger.warning(
+            "Budget floor: newest user message (%d chars) did not fit the truncation "
+            "budget, re-anchoring it so the request stays visible",
+            len(str(anchor.get("content", ""))),
+        )
+        kept = [anchor] + kept
+    if not kept:
+        kept = [rest[-1]]
+    return kept
+
+
 def truncate_messages(
     messages: list[dict],
     max_tokens: int = 1_000_000,
@@ -210,6 +247,7 @@ def truncate_messages(
         current += msg_tokens
         kept.append(msg)
     kept.reverse()
+    kept = ensure_request_anchor(kept, rest)
 
     result = []
     if system_msg:

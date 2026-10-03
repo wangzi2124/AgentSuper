@@ -142,3 +142,343 @@ def test_generate_source_has_no_bare_len_of_msg_tool_calls():
     body = src[start:end]
     assert not re.findall(r"len\(msg\.tool_calls\)", body)
 
+
+# ── 7. 超长内联正文救援（无视「长内容写文件」规则 → 预算烧在聊天窗口）────────
+# 实测事故（2026-10-03，同一模型 / 同一「在 D 盘写个俄罗斯方块游戏」任务）：
+# 前几轮正常 ls/read_file，第 4 轮把 8192 输出预算全写成 24,258 字符的聊天正文，
+# tool_calls=[] + finish_reason=length。`_is_zero_progress` 因 content 非空判 False
+# → 救援不触发 → while 因无 tool_calls 退出 → 磁盘零文件。
+# 这是与「零进展」互补的另一档：做了，但做在聊天里而非磁盘上。
+
+def test_oversized_prose_detected_when_truncated_without_tools():
+    from app.agent.graphmod.generate import RAGAgentGenerate
+    msg = types.SimpleNamespace(content="超长正文" * 20000, tool_calls=None)
+    assert RAGAgentGenerate._is_oversized_prose(msg, "length") is True
+    # 关键：这一档绝不能被误判成「零进展」，否则提示词话术会说「没有产出任何正文」（假的）
+    assert RAGAgentGenerate._is_zero_progress(msg) is False
+
+
+def test_oversized_prose_not_triggered_when_tools_called():
+    """带工具调用时不算「内联正文」—— 那是在正常干活（哪怕同时被截断）。"""
+    from app.agent.graphmod.generate import RAGAgentGenerate
+    tc = types.SimpleNamespace(id="1", function=types.SimpleNamespace(name="tool_write_file", arguments="{}"))
+    msg = types.SimpleNamespace(content="正文" * 5000, tool_calls=[tc])
+    assert RAGAgentGenerate._is_oversized_prose(msg, "length") is False
+
+
+def test_oversized_prose_requires_length_finish_reason():
+    """非 length 收尾（正常 stop）不得触发，避免对正常长回答多问一轮。"""
+    from app.agent.graphmod.generate import RAGAgentGenerate
+    msg = types.SimpleNamespace(content="正文" * 5000, tool_calls=None)
+    assert RAGAgentGenerate._is_oversized_prose(msg, "stop") is False
+    assert RAGAgentGenerate._is_oversized_prose(msg, "tool-calls") is False
+
+
+def test_oversized_prose_below_threshold_ignored():
+    """短回答恰好被截属于偶发，不触发救援（避免对短问答多问一轮）。"""
+    from app.agent.graphmod.constants import OVERSIZED_PROSE_MIN_CHARS
+    from app.agent.graphmod.generate import RAGAgentGenerate
+    msg = types.SimpleNamespace(content="x" * (OVERSIZED_PROSE_MIN_CHARS - 1), tool_calls=None)
+    assert RAGAgentGenerate._is_oversized_prose(msg, "length") is False
+
+
+def test_oversized_prose_prompt_forces_file_writes():
+    from app.agent.graphmod.constants import (
+        OVERSIZED_PROSE_ACK, OVERSIZED_PROSE_PROMPT,
+    )
+    # 必须点名写文件工具，且给出「分段写」的具体做法
+    assert "tool_write_file" in OVERSIZED_PROSE_PROMPT
+    assert "tool_append_file" in OVERSIZED_PROSE_PROMPT
+    # 话术不能沿用零进展那套「没有产出任何正文」——本档正文非空，说假话会削弱模型信任
+    assert "没有产出任何正文" not in OVERSIZED_PROSE_PROMPT
+    assert "截断" in OVERSIZED_PROSE_PROMPT
+    # ACK 必须短：绝不能把上轮 2 万多字正文塞回上下文（那正是吃光预算的东西）
+    assert len(OVERSIZED_PROSE_ACK) < 80
+    assert "tool_write_file" not in OVERSIZED_PROSE_ACK
+
+
+def test_generate_injects_oversized_prose_nudge_and_continues(monkeypatch):
+    """控制流回归：超长内联正文被截断时，循环必须**续跑**并注入落盘提示。
+
+    断言两件事：
+      1) 第 2 次 LLM 调用真的发生了（没有静默收尾）；
+      2) 该轮上下文里带上了 OVERSIZED_PROSE_PROMPT，且**没有**回灌那 24K 字正文。
+    """
+    import asyncio
+    import json as _json
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _graphmod_support import FakeLLM, build_agent, make_state
+    from app.agent.graphmod.constants import OVERSIZED_PROSE_PROMPT
+    from app.config import settings
+    import app.agent.graphmod.generate as gen_mod
+
+    monkeypatch.setattr(settings, "max_context_tokens", 10_000)
+    monkeypatch.setattr(settings, "context_reserve_tokens", 1_000)
+    monkeypatch.setattr(settings, "context_safety_ratio", 0.5)
+    monkeypatch.setattr(settings, "compaction_threshold_tokens", 0)
+    monkeypatch.setattr(settings, "zero_progress_rescue_attempts", 1)
+    monkeypatch.setattr(settings, "step_summary_enabled", False)
+    for n in ("record_model_call", "trace", "trace_messages"):
+        monkeypatch.setattr(gen_mod, n, lambda *a, **k: None)
+
+    agent = build_agent()
+    monkeypatch.setattr(agent, "_build_tool_defs", lambda *a, **k: [])
+
+    huge = "超长正文" * 20000
+    llm = FakeLLM()
+    llm.responses = [
+        FakeLLM().response(content=huge, finish_reason="length"),
+        FakeLLM().response(content="done"),
+    ]
+    seen = []
+
+    async def spy_llm(model, messages, tool_defs, state=None):
+        seen.append([dict(m) for m in messages])
+        return await llm(model, messages, tool_defs, state=state)
+
+    agent._llm_call = spy_llm
+
+    async def noop_tool(name, args, state=None):
+        return "工具输出"
+
+    agent._execute_tool = noop_tool
+
+    out = asyncio.run(agent._generate(make_state(question="在 D 盘写个俄罗斯方块游戏")))
+
+    # 1) 必须续跑：至少 2 次 LLM 调用
+    assert len(seen) >= 2, f"未续跑，只调用了 {len(seen)} 次: {seen}"
+    # 2) 第二次调用带上了落盘提示，且没回灌 2 万多字正文
+    #    （直接拼 content比较：json.dumps 会把换行转义成 \n，多行提示词匹配不上）
+    blob = "\n".join(str(m.get("content") or "") for m in seen[1])
+    assert OVERSIZED_PROSE_PROMPT in blob, "未注入超长正文救援提示"
+    assert "超长正文" not in blob, "把上轮 24K 字正文回灌进了上下文"
+    assert out["answer"] == "done"
+
+
+def test_generate_shortcut_ignores_reasoning_fallback_content(monkeypatch):
+    """核心回归：救援轮不得因「reasoning 回退正文非空」而跳过重试。
+
+    实测事故（2026-10-03，「在 D 盘写个俄罗斯方块游戏」）：
+      第 4 轮 content 空、reasoning 23,844 字符、finish=length、tool_calls=[]，
+      `core._llm_call` 把 reasoning 回退填进 content 并打 `_content_from_reasoning`。
+      `_is_zero_progress` 正确判 True → 救援注入催促 → 但「已拿到正文就收尾」捷径
+      被那份独白满足 → 当场 break → 模型从未拿到那次重试 → 磁盘零文件，
+      用户只收到 291 字诊断文案。救援对思考模型一直是空转。
+    """
+    import asyncio
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _graphmod_support import FakeLLM, build_agent, make_state
+    from app.agent.graphmod.constants import ZERO_PROGRESS_PROMPT
+    from app.config import settings
+    import app.agent.graphmod.generate as gen_mod
+
+    monkeypatch.setattr(settings, "max_context_tokens", 10_000)
+    monkeypatch.setattr(settings, "context_reserve_tokens", 1_000)
+    monkeypatch.setattr(settings, "context_safety_ratio", 0.5)
+    monkeypatch.setattr(settings, "compaction_threshold_tokens", 0)
+    monkeypatch.setattr(settings, "zero_progress_rescue_attempts", 1)
+    monkeypatch.setattr(settings, "step_summary_enabled", False)
+    for n in ("record_model_call", "trace", "trace_messages"):
+        monkeypatch.setattr(gen_mod, n, lambda *a, **k: None)
+
+    agent = build_agent()
+    monkeypatch.setattr(agent, "_build_tool_defs", lambda *a, **k: [])
+
+    monologue = "内心独白 " * 6000
+    llm = FakeLLM()
+    zero = FakeLLM().response(content="", finish_reason="length")
+    # 模拟 core 的 reasoning 回退：content 为空但独白被填进去并打标记
+    zero.choices[0].message.content = monologue
+    zero.choices[0].message.reasoning_content = monologue
+    zero.choices[0].message._content_from_reasoning = True
+    llm.responses = [zero, FakeLLM().response(content="done")]
+
+    seen = []
+
+    async def spy_llm(model, messages, tool_defs, state=None):
+        seen.append([dict(m) for m in messages])
+        return await llm(model, messages, tool_defs, state=state)
+
+    agent._llm_call = spy_llm
+
+    async def noop_tool(name, args, state=None):
+        return "工具输出"
+
+    agent._execute_tool = noop_tool
+
+    out = asyncio.run(agent._generate(make_state(question="在 D 盘写个俄罗斯方块游戏")))
+
+    assert len(seen) >= 2, f"救援被独白骗过，没有重试（只调用 {len(seen)} 次）"
+    blob = "\n".join(str(m.get("content") or "") for m in seen[1])
+    assert ZERO_PROGRESS_PROMPT in blob, "未注入零进展催促提示"
+    assert monologue not in blob, "把 2.4 万字内心独白回灌进了上下文"
+    assert out["answer"] == "done"
+
+
+def test_zero_progress_rescue_ignores_finish_reason():
+    """回归：思考模型烧光预算后 Provider 可能报 `stop` 而非 `length`。
+
+    实测（2026-10-03 变体）：content 空、reasoning 10,219 字符、finish_reason=stop。
+    若用 length 门禁，救援不触发 → 只返回 291 字诊断文案 → 磁盘零文件。
+    零进展档的 content 按定义不是真答案，所以不该受 finish_reason 限制。
+    """
+    import asyncio
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _graphmod_support import FakeLLM, build_agent, make_state
+    from app.agent.graphmod.constants import ZERO_PROGRESS_PROMPT
+    from app.config import settings
+    import app.agent.graphmod.generate as gen_mod
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(settings, "max_context_tokens", 10_000)
+    monkey.setattr(settings, "context_reserve_tokens", 1_000)
+    monkey.setattr(settings, "context_safety_ratio", 0.5)
+    monkey.setattr(settings, "compaction_threshold_tokens", 0)
+    monkey.setattr(settings, "zero_progress_rescue_attempts", 1)
+    monkey.setattr(settings, "step_summary_enabled", False)
+    for n in ("record_model_call", "trace", "trace_messages"):
+        monkey.setattr(gen_mod, n, lambda *a, **k: None)
+    try:
+        agent = build_agent()
+        monkey.setattr(agent, "_build_tool_defs", lambda *a, **k: [])
+
+        monologue = "内心独白 " * 3000
+        stop = FakeLLM().response(content="", finish_reason="stop")
+        stop.choices[0].message.content = monologue
+        stop.choices[0].message.reasoning_content = monologue
+        stop.choices[0].message._content_from_reasoning = True
+
+        llm = FakeLLM()
+        llm.responses = [stop, FakeLLM().response(content="done")]
+        seen = []
+
+        async def spy_llm(model, messages, tool_defs, state=None):
+            seen.append([dict(m) for m in messages])
+            return await llm(model, messages, tool_defs, state=state)
+
+        agent._llm_call = spy_llm
+
+        async def noop_tool(name, args, state=None):
+            return "工具输出"
+
+        agent._execute_tool = noop_tool
+
+        out = asyncio.run(agent._generate(make_state(question="在 D 盘写个俄罗斯方块游戏")))
+    finally:
+        monkey.undo()
+
+    assert len(seen) >= 2, f"finish=stop 的零进展未被救援（只调用 {len(seen)} 次）"
+    blob = "\n".join(str(m.get("content") or "") for m in seen[1])
+    assert ZERO_PROGRESS_PROMPT in blob, "未注入零进展催促提示"
+    assert out["answer"] == "done"
+
+
+def test_plain_empty_answer_still_goes_to_empty_answer_retry():
+    """反向守卫：不带 `_content_from_reasoning` 的空回答不得被零进展救援抢走。
+
+    空回答归既有的 EMPTY_ANSWER 重试 / 弱模型强模型兜底路径管（轮次由
+    `test_graphmod_generate_core.py::test_generate_empty_content_default` 锁定）；
+    抢过来会多烧一轮并挤掉强模型兜底。
+    """
+    import asyncio
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _graphmod_support import FakeLLM, build_agent, make_state
+    from app.config import settings
+    import app.agent.graphmod.generate as gen_mod
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(settings, "max_context_tokens", 10_000)
+    monkey.setattr(settings, "context_reserve_tokens", 1_000)
+    monkey.setattr(settings, "context_safety_ratio", 0.5)
+    monkey.setattr(settings, "compaction_threshold_tokens", 0)
+    monkey.setattr(settings, "zero_progress_rescue_attempts", 1)
+    monkey.setattr(settings, "empty_answer_retry", 1)
+    monkey.setattr(settings, "weak_model_strong_fallback", False)
+    monkey.setattr(settings, "step_summary_enabled", False)
+    for n in ("record_model_call", "trace", "trace_messages"):
+        monkey.setattr(gen_mod, n, lambda *a, **k: None)
+    try:
+        agent = build_agent()
+        monkey.setattr(agent, "_build_tool_defs", lambda *a, **k: [])
+
+        llm = FakeLLM()
+        llm.responses = [FakeLLM().response(content=""), FakeLLM().response(content="ok")]
+        seen = []
+
+        async def spy_llm(model, messages, tool_defs, state=None):
+            seen.append([dict(m) for m in messages])
+            return await llm(model, messages, tool_defs, state=state)
+
+        agent._llm_call = spy_llm
+
+        async def noop_tool(name, args, state=None):
+            return "工具输出"
+
+        agent._execute_tool = noop_tool
+
+        out = asyncio.run(agent._generate(make_state(question="你好")))
+    finally:
+        monkey.undo()
+
+    assert out["answer"] == "ok"
+    for batch in seen[1:]:
+        blob = "\n".join(str(m.get("content") or "") for m in batch)
+        assert "没有产出任何正文" not in blob, "空回答被误判为零进展救援"
+
+
+def test_oversized_prose_still_requires_length_finish_reason():
+    """反向守卫：超长正文档仍必须靠 length 证明「非空正文是残稿」，不得放宽。"""
+    from app.agent.graphmod.generate import RAGAgentGenerate
+    msg = types.SimpleNamespace(content="正文" * 5000, tool_calls=None)
+    assert RAGAgentGenerate._is_oversized_prose(msg, "stop") is False
+
+
+def test_generate_shortcut_only_for_zero_progress_kind():
+    """静态守卫：「已拿到正文就收尾」捷径必须限定零进展档。
+
+    该判断点处`msg` 仍是**触发救援那一轮**的响应。超长内联正文档正文非空，
+    若不限定档位就会当场 break —— 救援空转，模型永远学不会落盘（实测踩过）。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/agent/graphmod/generate.py").read_text(
+        encoding="utf-8")
+    assert 'rescue_kind == "zero_progress"' in src, "收尾捷径未限定档位"
+    assert "rescue_kind: str | None = None" in src, "rescue_kind 未初始化"
+
+
+def test_generate_source_gates_oversized_prose_on_not_zero_progress():
+    """静态守卫：两档判据必须在 `_rescue_kind` 里**串行判**且顺序为先零进展。
+
+    `_is_oversized_prose` 单独用会与零进展重叠（空正文 + length），话术会说
+    「没有产出任何正文」；零进展单独用又漏掉本档。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/agent/graphmod/generate.py").read_text(
+        encoding="utf-8")
+    assert "def _rescue_kind(" in src, "缺少 _rescue_kind 分档函数"
+    body = src[src.index("def _rescue_kind("):src.index("def _maybe_rescue(")]
+    assert body.index("self._is_zero_progress(m)") < body.index(
+        "self._is_oversized_prose(m, fr)"), "零进展必须先判，避免话术说假话"
+    assert "OVERSIZED_PROSE_PROMPT" in src, "超长正文提示未接入"
+
+
+def test_generate_checks_rescue_before_entering_loop():
+    """静态守卫：救援判定必须在 `while` 之前也跑一次。
+
+    `while` 条件只看 `tool_calls / tool-calls / rescue_pending`：若首轮响应就是
+    超长内联正文，循环压根不会进入，只挂在循环末尾的救援就是死代码。
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app/agent/graphmod/generate.py").read_text(
+        encoding="utf-8")
+    pre_loop = src[:src.index("while (")]
+    assert "_maybe_rescue(msg, finish_reason, 0)" in pre_loop, (
+        "首轮响应未纳入救援判定，超长正文/零进展在第一轮会静默失效")
+    # 循环内也仍需保留一次（后续轮次同样要判）
+    loop_body = src[src.index("while ("):]
+    assert "_maybe_rescue(msg, finish_reason, rounds)" in loop_body, "循环内救援判定被移除"
+

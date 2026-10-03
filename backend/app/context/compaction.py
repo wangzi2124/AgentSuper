@@ -26,7 +26,7 @@ from typing import Optional
 
 import litellm
 
-from app.context.token_counter import estimate_tokens, estimate_tokens_messages
+from app.context.token_counter import ensure_request_anchor, estimate_tokens, estimate_tokens_messages
 from app.monitor import record_model_call
 
 logger = logging.getLogger(__name__)
@@ -392,7 +392,12 @@ class ContextCompactor:
             return ""
 
     def _fallback_truncate(self, messages: list[dict]) -> list[dict]:
-        """Fallback: keep system messages + most recent messages."""
+        """Fallback: keep system messages + most recent messages.
+
+        摘要失败（LLM 不可用 / 返回空）时的兜底。与 truncate_messages 同样
+        受「预算下限」约束：绝不返回只剩 system + 占位符的空上下文，否则
+        模型看不到用户请求（见 ensure_request_anchor）。
+        """
         system_msgs = [m for m in messages if m.get("role") == "system"]
         non_system = [m for m in messages if m.get("role") != "system"]
 
@@ -406,6 +411,7 @@ class ContextCompactor:
             current += msg_tokens
             kept.append(msg)
         kept.reverse()
+        kept = ensure_request_anchor(kept, non_system)
 
         sentinel = {"role": "system", "content": "[earlier messages truncated to fit context window]"}
         return system_msgs + [sentinel] + kept

@@ -201,17 +201,94 @@ class TestTruncateMessages:
 
     def test_system_preserved_and_sentinel(self):
         msgs = [self._msg("system", "sys"), self._msg("user", "x" * 100), self._msg("user", "y" * 100)]
-        # tiny budget → nothing fits beyond the system message
+        # tiny budget → 只有「最近一条 user」能挤进窗口（见 TestTruncateBudgetFloor）
         result = token_counter.truncate_messages(msgs, max_tokens=5, reserve_tokens=0)
         assert result[0] == msgs[0]
         assert result[1]["role"] == "system" and "truncated" in result[1]["content"]
-        assert len(result) == 2
+        assert result[2:] == [msgs[-1]]
 
     def test_no_system(self):
         msgs = [self._msg("user", "x" * 100), self._msg("user", "y" * 100)]
         result = token_counter.truncate_messages(msgs, max_tokens=5, reserve_tokens=0)
         assert result[0]["content"] == "[earlier messages truncated to fit context window]"
-        assert msgs[-1] not in result
+        assert msgs[0] not in result
+        # 预算下限：最近一条 user 请求必须留下（旧实现把它一起丢掉）
+        assert msgs[-1] in result
+
+
+class TestTruncateBudgetFloor:
+    """截断预算下限：`truncate_messages` 绝不把上下文塌缩成「system + 占位符」。
+
+    回归背景（2026-10-03 实测事故）：一轮工具循环里模型返回
+    `finish_reason=length` 的超长 assistant 正文，该条本身就超预算 →
+    贪心循环第一条就 break → 整轮（含用户当前请求）被丢光 →
+    `sanitize_tool_messages` 再清掉仅剩的孤儿 tool 消息 →
+    模型只收到 `[system, "[earlier messages truncated...]"]`，
+    答「我没看到你的实际请求」并转头去查 git log，整轮任务报废。
+    """
+
+    def _oversized_tail(self):
+        """真实形状：user → assistant(tool_calls) → tool → 超长 assistant → tool。"""
+        return [
+            {"role": "system", "content": "sys " * 500},
+            {"role": "user", "content": "在 D 盘写个俄罗斯方块游戏"},
+            {"role": "assistant", "content": "## 实施计划", "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "tool_write_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "Created index.html (2506 bytes)"},
+            {"role": "assistant", "content": "x" * 30000, "tool_calls": [
+                {"id": "c2", "type": "function",
+                 "function": {"name": "tool_ls", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c2", "content": "d 0 .git"},
+        ]
+
+    def test_newest_user_message_survives(self):
+        msgs = self._oversized_tail()
+        result = token_counter.truncate_messages(msgs, max_tokens=500, reserve_tokens=0)
+        assert any(m.get("role") == "user" for m in result), result
+
+    def test_request_visible_after_sanitize(self):
+        """与 generate.py 的真实调用顺序一致：truncate → sanitize，仍须看得到请求。"""
+        msgs = self._oversized_tail()
+        result = token_counter.sanitize_tool_messages(
+            token_counter.truncate_messages(msgs, max_tokens=500, reserve_tokens=0))
+        assert [m.get("role") for m in result if m.get("role") == "user"], result
+
+    def test_never_returns_only_system_and_sentinel(self):
+        msgs = self._oversized_tail()
+        result = token_counter.truncate_messages(msgs, max_tokens=500, reserve_tokens=0)
+        # system + 占位符之外必须有内容
+        assert len(result) > 2
+
+    def test_anchor_prepended_before_kept_tail(self):
+        """锚点补在已保留窗口之前，保持时序（user 在其后的消息之前）。"""
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "q" * 2000},
+            {"role": "assistant", "content": "y" * 100},
+        ]
+        result = token_counter.truncate_messages(msgs, max_tokens=200, reserve_tokens=0)
+        roles = [m.get("role") for m in result]
+        assert "assistant" in roles, result
+        assert roles.index("user") < roles.index("assistant")
+
+    def test_no_user_message_keeps_newest(self):
+        """rest 里没有 user（纯工具续轮）时至少留最新一条，不返回空窗口。"""
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "y" * 5000},
+        ]
+        result = token_counter.truncate_messages(msgs, max_tokens=200, reserve_tokens=0)
+        assert msgs[-1] in result
+
+    def test_helper_is_noop_when_anchor_already_kept(self):
+        anchor = {"role": "user", "content": "q"}
+        kept = [anchor]
+        rest = [anchor, {"role": "assistant", "content": "a"}]
+        assert token_counter.ensure_request_anchor(kept, rest) == kept
+
+    def test_helper_noop_on_empty_rest(self):
+        assert token_counter.ensure_request_anchor([], []) == []
 
 
 class TestSanitizeToolMessages:
@@ -652,6 +729,17 @@ class TestContextCompactor:
         assert out[0] == {"role": "system", "content": "sys"}
         assert out[1]["content"] == "[earlier messages truncated to fit context window]"
         assert out[-1] == msgs[-1]
+
+    def test_fallback_truncate_keeps_request_anchor(self):
+        """摘要失败兜底同样受预算下限约束：不能只剩 system + 占位符。"""
+        c = compaction.ContextCompactor(threshold=1)
+        msgs = [
+            {"role": "system", "content": "sys"},
+            self._small_user("在 D 盘写个俄罗斯方块游戏"),
+            {"role": "assistant", "content": "x" * 30000},
+        ]
+        out = c._fallback_truncate(msgs)
+        assert any(m.get("role") == "user" for m in out), out
 
     async def test_compact_empty(self):
         c = compaction.ContextCompactor()

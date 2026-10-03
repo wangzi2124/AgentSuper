@@ -70,19 +70,29 @@ class Settings(BaseSettings):
     # 端点层等待 supervisor 返回的上限（需 > decompose + sub_agent + synthesize）
     supervisor_timeout: float = 300.0
 
-    # 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
+# 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
     # 默认 16_384 ≈ 模型原生上限的常用值；长任务配合系统提示"长内容写文件"规则避免截断。
     # [token 优化 v9] 16_384 → 8_192：普通问答用不到那么大输出，压低超长输出兜底成本。
-    llm_max_tokens: int = 8_192
+    # [输出上限 2026-10-03] 8_192 → 16_384：实测写俄罗斯方块时整份代码塞进单次
+    # tool_write_file 参数（24,528 字符）正好撞 8K 被腰斩。注意这只在**模型目录也放开**
+    # 时才有效 —— resolve_max_output_tokens 取 min(模型声明, 本值) 且绝不放大，
+    # 故 builtin_catalog.py 里 deepseek 的 limits.max_output_tokens 同步提到 16_384。
+    llm_max_tokens: int = 16_384
 
     # Token 成本控制
     # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
     # 对齐 opencode overflow.ts：usable = max_context_tokens - context_reserve_tokens
     # [token 优化 v5] 48K → 32K：配合 v4 压缩（信息不丢），单次调用天花板 -33%
     # [token 优化 v9] 32K → 24K：usable ≈ 15.8K，进一步压平单次调用体积（配套 MAX_HISTORY_TOKENS 16K）
-    max_context_tokens: int = 24_000
-    # 输出预留：留给模型回答的 token（≈ min(20_000, maxOutputTokens)，默认 8_192）
-    context_reserve_tokens: int = 8_192
+    # [输出上限 2026-10-03] 24K → 32K：**不是**为了放大单次调用体积（那会让每轮 prompt 成本涨 33%），
+    # 而是为了给上调后的输出预留腾地方 —— 预留必须 ≥ 输出上限，否则 usable = 32K-16K = 16K
+    # 会比调前的 15.8K 还小，历史可用量反而缩水。32K-16K = 16K ≈ 原来的 15.8K，
+    # 即「输出天花板翻倍、单次调用体积基本不变」，成本中性。
+    max_context_tokens: int = 32_768
+    # 输出预留：留给模型回答的 token（≈ min(20_000, maxOutputTokens)）
+    # [输出上限 2026-10-03] 8_192 → 16_384，与 llm_max_tokens 对齐（预留 < 输出上限是自相矛盾的：
+    # 模型一次输出就能吃掉全部 usable，留给历史的窗口归零）。
+    context_reserve_tokens: int = 16_384
     # [token 优化 P8] cl100k_base 对 DeepSeek tokenizer 系统性低估（实测 +13.2%：
     # round8 估算 20,851 vs 实际 23,599）。用于 token_counter 估算校正，避免
     # 截断/压缩判断"以为没超、实际已超"（实测 round9 实际 25,779 超 usable 23,808）

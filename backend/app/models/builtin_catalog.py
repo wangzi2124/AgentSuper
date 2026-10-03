@@ -9,6 +9,13 @@ from __future__ import annotations
 from typing import Any
 
 # cost 单位：USD / 每 1M tokens。价格未知记 0（opencode 当前即硬编码 0 的成本态）。
+#
+# [输出上限 2026-10-03] deepseek-v4-* 的 `limits.max_output_tokens` 8_192 → 16_384。
+# 起因是实测事故：写一个俄罗斯方块游戏时，模型把整份代码塞进单次 tool_write_file 的
+# 参数里（24,528 字符），正好撞 8_192 输出上限被腰斩。**光改 `LLM_MAX_TOKENS` 完全无效** ——
+# `resolve_max_output_tokens` 取 `min(模型声明, 全局)` 且绝不放大，模型目录里的声明才是
+# 真正的天花板（见 `tests/test_output_budget.py::test_builtin_deepseek_output_cap_raised`）。
+# 模型侧 `context_length` 仍是 160_000，远高于本项目的 32K 上下文预算，不构成约束。
 BUILTIN_CATALOG: list[dict[str, Any]] = [
     {
         "id": "deepseek/deepseek-v4-flash",
@@ -18,7 +25,7 @@ BUILTIN_CATALOG: list[dict[str, Any]] = [
         "description": "轻量高速模型，日常问答与多智能体调度首选，速度与质量兼顾",
         "capabilities": {"tool_use": True, "vision": False, "reasoning": True},
         "context_length": 160000,
-        "limits": {"max_output_tokens": 8192},
+        "limits": {"max_output_tokens": 16384},
         "cost": {"input_per_1m": 0.27, "output_per_1m": 1.10,
                  "cache_read_per_1m": 0.07, "cache_write_per_1m": 0.0},
         "default": True,
@@ -31,7 +38,7 @@ BUILTIN_CATALOG: list[dict[str, Any]] = [
         "description": "旗舰推理模型，复杂任务、长文本与深度分析能力更强",
         "capabilities": {"tool_use": True, "vision": False, "reasoning": True},
         "context_length": 160000,
-        "limits": {"max_output_tokens": 8192},
+        "limits": {"max_output_tokens": 16384},
         "cost": {"input_per_1m": 0.27, "output_per_1m": 1.10,
                  "cache_read_per_1m": 0.07, "cache_write_per_1m": 0.0},
     },
