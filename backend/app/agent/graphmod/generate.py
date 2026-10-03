@@ -92,6 +92,32 @@ def _is_valid_answer(text: str | None) -> bool:
     return not is_unparsed_json_answer(t) and not is_tool_call_markup(t)
 
 
+def _zero_progress_cause(
+    *, from_reasoning: bool, finish_reason: str,
+    output_tokens: int, reasoning_tokens: int,
+) -> str:
+    """判定「零进展」的归因，供全链路日志 `cause` 字段使用。
+
+    优先看 `from_reasoning`：它是 core 在 reasoning 回退**之前**打的标记，为真即
+    证明 content 为空、正文来自思考 —— 这正是「思考耗尽输出预算」。
+
+    不用 `reasoning_tokens / output_tokens` 比例当主判据：实测 deepseek-v4-flash 的
+    usage 不单独上报 reasoning token（同一现象 ratio 仅 0.023，而 content 确为空、
+    正文全部来自 reasoning 回退），按比例判会把「思考耗尽预算」误标成
+    `length_without_tool_calls`，把排查方向带偏到「调小输出上限」这个错方向上。
+
+    仅当该标记不可用（老路径/兜底）才退回 token 比例或 finish_reason 推断。
+    """
+    if from_reasoning:
+        return "reasoning_budget_exhausted"
+    if output_tokens > 0 and reasoning_tokens >= output_tokens * 0.9:
+        return "reasoning_budget_exhausted"
+    if str(finish_reason) == "length":
+        return "length_without_tool_calls"
+    # finish=stop 却既无工具又无正文：预算够但没用对，模型自行收尾却没做事
+    return "stop_without_output"
+
+
 logger = logging.getLogger(__name__)
 # ── 类分块（verbatim，继承链切片）──
 class RAGAgentGenerate(RAGAgentTools):
@@ -832,36 +858,59 @@ class RAGAgentGenerate(RAGAgentTools):
         zero_progress = self._is_zero_progress(msg)
         if zero_progress:
             _u = self._usage_accum
+            _out_tok = int((_u or {}).get("output", 0))
+            _rea_tok = int((_u or {}).get("reasoning", 0))
+            # 在调用处算归因，日志与用户文案共用同一份结论（避免两处各判一次）
+            _cause = _zero_progress_cause(
+                from_reasoning=_from_reasoning,
+                finish_reason=finish_reason,
+                output_tokens=_out_tok,
+                reasoning_tokens=_rea_tok,
+            )
             self._chainlog_zero_progress(
                 state=state, model=model, finish_reason=finish_reason,
                 rounds=rounds,
                 input_tokens=int((_u or {}).get("input", 0)),
-                output_tokens=int((_u or {}).get("output", 0)),
-                reasoning_tokens=int((_u or {}).get("reasoning", 0)),
+                output_tokens=_out_tok,
+                reasoning_tokens=_rea_tok,
                 cost=round(float(getattr(self, "_cost_accum", 0.0)), 6),
                 answer_chars=len(answer),
                 from_reasoning=_from_reasoning,
+                cause=_cause,
             )
             # 救援也没能把模型拉回正轨：此时 `answer` 是 core 回退填进来的
             # reasoning_content —— 实测 2.7 万字内心独白。直接返回它既撑爆下一轮
             # 上下文预算，又让用户以为「模型写了代码」而实际磁盘零文件。
             # 换成可诊断的失败文案（保留零进展日志作为排查线索）。
             if _from_reasoning and settings.zero_progress_mask_reasoning:
+                # 建议随归因变化：不是所有零进展都是「思考吃光预算」，
+                # 让用户去调 LLM_MAX_TOKENS 在 finish=stop 形态下属于误导。
+                _advice = (
+                    [
+                        "- 该模型的思考预算与本项目输出上限（`LLM_MAX_TOKENS`）不匹配，"
+                        "思考阶段就把配额用光了 → 调高 `LLM_MAX_TOKENS` 或改用思考较浅的模型；"
+                    ]
+                    if _cause == "reasoning_budget_exhausted"
+                    else [
+                        "- 模型提前收尾但没有真正做事 → 在提问中明确要求使用写文件工具"
+                        "（`tool_write_file` / `tool_apply_patch`）分批落盘，或拆成更小的步骤；",
+                    ]
+                )
                 answer = (
                     "**本次请求未能产出任何内容。**\n\n"
-                    f"模型 `{model}` 连续 {rounds + 1} 轮把全部输出预算耗尽在内部思考上，"
-                    "既没有调用任何工具，也没有输出正文。\n\n"
+                    f"模型 `{model}` 连续 {rounds + 1} 轮未调用任何工具，也未输出正文"
+                    f"（finish={finish_reason}）。\n\n"
                     "已自动重试 "
                     f"{rescue_used} 次仍未成功。常见原因与建议：\n"
-                    "- 该模型的思考预算与本项目输出上限（`LLM_MAX_TOKENS`）不匹配，"
-                    "思考阶段就把配额用光了 → 调高 `LLM_MAX_TOKENS` 或改用思考较浅的模型；\n"
+                    + "".join(_advice) +
                     "- 任务单轮产出过大（整份代码写进一次回复）→ 拆成多个小步骤，"
                     "或要求模型用写文件工具分批落盘。\n\n"
-                    "排查线索：全链路日志中搜索 `generate.zero_progress`。"
+                    "排查线索：全链路日志中搜索 `generate.zero_progress`"
+                    f"（`cause={_cause}`）。"
                 )
         if zero_progress:
             # 零进展：既没调工具也没给出有效回答，不能报「完成」骗用户
-            self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "error", "detail": f"零进展（finish={finish_reason}，思考耗尽输出预算，未执行任何工具，已重试 {rescue_used} 次）", "duration_ms": round(gen_dur, 1)})
+            self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "error", "detail": f"零进展（finish={finish_reason}，cause={_cause}，未执行任何工具，已重试 {rescue_used} 次）", "duration_ms": round(gen_dur, 1)})
         elif finish_reason == "length":
             answer = answer + "\n\n⚠️ 输出因达到 token 上限被截断，内容可能不完整。"
             self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "completed", "detail": "完成（输出被截断 length）", "duration_ms": round(gen_dur, 1)})
@@ -920,6 +969,7 @@ class RAGAgentGenerate(RAGAgentTools):
         self, *, state, model: str, finish_reason: str, rounds: int,
         input_tokens: int, output_tokens: int, reasoning_tokens: int,
         cost: float, answer_chars: int, from_reasoning: bool = False,
+        cause: str = "",
         event: str = "generate.zero_progress",
     ) -> None:
         """记一条「零进展」全链路日志节点（stage=agent, level=ERROR）。
@@ -934,12 +984,27 @@ class RAGAgentGenerate(RAGAgentTools):
             agent_id = ""
             if state is not None:
                 agent_id = str(state.get("agent") or state.get("agent_id") or "")
+            _cause = cause or _zero_progress_cause(
+                from_reasoning=bool(from_reasoning),
+                finish_reason=finish_reason,
+                output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens,
+            )
+            # 文案跟随归因，不要硬编码「全被思考占用」：实测存在 finish=stop 且
+            # content 为空的形态，断言思考占比会让排查者往错方向调输出上限。
+            _cause_text = {
+                "reasoning_budget_exhausted": f"输出 {output_tokens} token 全被思考占用",
+                "length_without_tool_calls": "回复被输出上限截断且未带工具调用",
+                "stop_without_output": "模型自行结束（finish=stop）但既无工具调用也无正文",
+            }.get(_cause, "未产出任何工具调用或正文")
+            if event.endswith("_rescue"):
+                _cause_text = f"{_cause_text}（本轮注入强制输出提示后重试）"
             chainlog.log(
                 "ERROR", "agent", "graph.generate",
                 event,
                 message=(
                     f"零进展：{model} finish={finish_reason}，"
-                    f"输出 {output_tokens} token 全被思考占用，未执行任何工具"
+                    f"{_cause_text}，未执行任何工具"
                 ),
                 agent_id=agent_id,
                 data={
@@ -954,11 +1019,11 @@ class RAGAgentGenerate(RAGAgentTools):
                     "answer_chars": answer_chars,
                     "tools_invoked": 0,
                     "answer_from_reasoning": bool(from_reasoning),
-                    # 聚合口径下 reasoning 不会精确等于 output（含首轮正常轮次），
-                    # 故用 0.9 阈值而非 >=：实测 8500/8670 = 0.98 才是同一现象
-                    "cause": "reasoning_budget_exhausted"
-                             if output_tokens > 0 and reasoning_tokens >= output_tokens * 0.9
-                             else "length_without_tool_calls",
+                    "cause": _cause,
+                    # 该模型是否上报了可用的 reasoning token 计数（比例可信的前提）
+                    "reasoning_tokens_reported": bool(
+                        output_tokens > 0 and reasoning_tokens >= output_tokens * 0.5
+                    ),
                 },
             )
         except Exception:  # noqa: BLE001

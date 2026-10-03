@@ -104,6 +104,32 @@ def test_llm_log_final_answer_not_flagged(monkeypatch):
     assert "no_progress" not in got["data"]
 
 
+def test_llm_log_records_effective_output_cap(monkeypatch):
+    """输出上限必须入链 —— 排查「为什么总是撞 8192」时唯一的硬证据。
+
+    真正的天花板是 min(模型目录声明, LLM_MAX_TOKENS)：只看 `.env` 会被 min()骗过去，
+    目录声明才是硬约束（2026-10-03 事故：目录里 DeepSeek 仍写 8192，配置调 16K 无效）。
+    """
+    got = _capture_llm_log(
+        monkeypatch,
+        where="invoke", duration_ms=100.0, state=None,
+        prompt_tokens=100, completion_tokens=100, reasoning_tokens=0,
+        finish_reason="stop", tool_calls=0, has_content=True, max_tokens=16384,
+    )
+    assert got["data"]["max_tokens"] == 16384
+
+
+def test_llm_log_omits_output_cap_when_unknown(monkeypatch):
+    """未解析出上限时不写脏字段（0/None 不入 data，避免日志里出现假 cap=0）"""
+    got = _capture_llm_log(
+        monkeypatch,
+        where="invoke", duration_ms=100.0, state=None,
+        prompt_tokens=100, completion_tokens=100, reasoning_tokens=0,
+        finish_reason="stop", tool_calls=0, has_content=True, max_tokens=0,
+    )
+    assert "max_tokens" not in got["data"]
+
+
 # ── 2. _generate 收尾记 generate.zero_progress 节点 ────────────────────────
 
 @pytest.fixture()
@@ -154,6 +180,92 @@ def test_zero_progress_cause_when_not_reasoning_bound(agent, monkeypatch):
         cost=0.0, answer_chars=0,
     )
     assert got["data"]["cause"] == "length_without_tool_calls"
+
+
+def test_zero_progress_cause_stop_without_reasoning_token_reporting(agent, monkeypatch):
+    """实测形态：finish=stop，但该模型 usage 不单独上报 reasoning token。
+
+    2026-10-03 全链路实测抓到 deepseek-v4-flash 连续两轮各 ~6.5k token、
+    `finish_reason=stop`、content 为空（正文来自 reasoning 回退），
+    而 `reasoning_tokens/output_tokens` 仅 0.023。按比例判会把归因错标成
+    `length_without_tool_calls`，把排查方向误导到「调小/调大输出上限」。
+    """
+    import app
+
+    got = {}
+    fake = types.SimpleNamespace(log=lambda level, stage, component, event, **kw: got.update(**kw))
+    monkeypatch.setattr(app, "chainlog", fake, raising=False)
+
+    agent._chainlog_zero_progress(
+        state=None, model="deepseek/deepseek-v4-flash", finish_reason="stop",
+        rounds=1, input_tokens=5198, output_tokens=13151, reasoning_tokens=302,
+        cost=0.02, answer_chars=26000, from_reasoning=True,
+    )
+
+    # from_reasoning 是硬证据，优先于 token 比例
+    assert got["data"]["cause"] == "reasoning_budget_exhausted"
+    assert got["data"]["reasoning_tokens_reported"] is False
+    # 文案不得断言「全被思考占用」以外的内容，也不得谎称被截断
+    assert "截断" not in got["message"]
+    assert "零进展" in got["message"]
+
+
+def test_zero_progress_cause_stop_without_output(agent, monkeypatch):
+    """finish=stop 且无 reasoning 回退痕迹：预算够但模型没用对（既无工具也无正文）。"""
+    import app
+
+    got = {}
+    fake = types.SimpleNamespace(log=lambda level, stage, component, event, **kw: got.update(**kw))
+    monkeypatch.setattr(app, "chainlog", fake, raising=False)
+
+    agent._chainlog_zero_progress(
+        state=None, model="m", finish_reason="stop",
+        rounds=0, input_tokens=10, output_tokens=500, reasoning_tokens=5,
+        cost=0.0, answer_chars=0, from_reasoning=False,
+    )
+    assert got["data"]["cause"] == "stop_without_output"
+
+
+def test_zero_progress_rescue_event_marks_retry_in_message(agent, monkeypatch):
+    """rescue 节点要标明「已注入强制输出提示」，避免与最终零进展节点混淆。"""
+    import app
+
+    got = {}
+    fake = types.SimpleNamespace(log=lambda level, stage, component, event, **kw: got.update(
+        level=level, event=event, **kw))
+    monkeypatch.setattr(app, "chainlog", fake, raising=False)
+
+    agent._chainlog_zero_progress(
+        state=None, model="m", finish_reason="length",
+        rounds=0, input_tokens=10, output_tokens=100, reasoning_tokens=5,
+        cost=0.0, answer_chars=0, event="generate.zero_progress_rescue",
+    )
+    assert got["event"] == "generate.zero_progress_rescue"
+    assert "强制输出提示" in got["message"]
+
+
+def test_zero_progress_cause_helper_prefers_from_reasoning_over_ratio():
+    """纯函数级锁定归因优先级：from_reasoning > token 比例 > finish_reason。"""
+    # reasoning 回退痕迹存在，即使比例极低也判「思考耗尽预算」
+    assert gen_mod._zero_progress_cause(
+        from_reasoning=True, finish_reason="stop",
+        output_tokens=13151, reasoning_tokens=302,
+    ) == "reasoning_budget_exhausted"
+    # 无回退痕迹 + 比例高
+    assert gen_mod._zero_progress_cause(
+        from_reasoning=False, finish_reason="length",
+        output_tokens=1000, reasoning_tokens=990,
+    ) == "reasoning_budget_exhausted"
+    # 无回退痕迹 + 比例低 + length
+    assert gen_mod._zero_progress_cause(
+        from_reasoning=False, finish_reason="length",
+        output_tokens=1000, reasoning_tokens=10,
+    ) == "length_without_tool_calls"
+    # 无回退痕迹 + 比例低 + stop
+    assert gen_mod._zero_progress_cause(
+        from_reasoning=False, finish_reason="stop",
+        output_tokens=1000, reasoning_tokens=10,
+    ) == "stop_without_output"
 
 
 def test_zero_progress_never_raises(agent, monkeypatch):

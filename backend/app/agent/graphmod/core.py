@@ -223,6 +223,7 @@ def _chainlog_llm(
     has_content: bool = False,
     error: str = "",
     error_type: str = "",
+    max_tokens: int = 0,
 ) -> None:
     """把一次 LLM 调用记进全链路日志（stage=llm）。
 
@@ -246,6 +247,11 @@ def _chainlog_llm(
             "cost": round(float(cost or 0.0), 8),
             "tool_calls": tool_calls,
         }
+        # [可观测性 2026-10-03] 记录本次实际下发的输出上限。排查「为什么每次都恰好撞
+        # 8192」时，缺这一字段只能靠猜 —— 真正的天花板是 min(模型目录声明, 全局)，
+        # 光看 LLM_MAX_TOKENS 配置会被 min() 骗过去（目录声明才是硬约束）。
+        if max_tokens:
+            data["max_tokens"] = int(max_tokens)
         if finish_reason is not None:
             data["finish_reason"] = str(finish_reason)
         # [零进展] 思考模型把输出预算全花在 reasoning 上、没吐出 content 也没发 tool call，
@@ -302,6 +308,10 @@ class RAGAgent(RAGAgentGenerate):
     def _assemble_response(self, model: str, response, start: float, state: AgentState | None, push_text: bool = False):
         """记录调用指标并累加 token 用量，可选把非流式全文转为 text_delta 推送。"""
         dur = (tmod.time() - start) * 1000
+        # 本方法独立于 `_llm_call`，需自行解析输出上限（仅供链路日志展示）
+        from app.config import settings as _s
+        from app.models.catalog import resolve_max_output_tokens as _rmot
+        _cap = _rmot(model, _s.llm_max_tokens)
         usage = getattr(response, "usage", None)
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
@@ -342,6 +352,7 @@ class RAGAgent(RAGAgentGenerate):
                 finish_reason=_fr,
                 tool_calls=len(getattr(_msg0, "tool_calls", None) or []),
                 has_content=bool(_raw_content.strip()),
+                max_tokens=_cap,
             )
             try:
                 _msg0._content_from_reasoning = not bool(_raw_content.strip())
@@ -433,6 +444,7 @@ class RAGAgent(RAGAgentGenerate):
                 _chainlog_llm(
                     model, where="error", duration_ms=dur, state=state,
                     error=str(exc), error_type=type(exc).__name__,
+                    max_tokens=_max_tokens,
                 )
                 from app.models.catalog import normalize_llm_exception
                 _friendly = normalize_llm_exception(exc, model)
@@ -596,6 +608,7 @@ class RAGAgent(RAGAgentGenerate):
             finish_reason=finish_reason,
             tool_calls=len(tool_slots),
             has_content=_content_is_real,
+            max_tokens=_max_tokens,
         )
 
         tool_calls = None

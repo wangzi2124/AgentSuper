@@ -475,6 +475,50 @@ def test_mirror_tool_steps_and_permission(tmp_db):
     assert entries[3]["data"]["request_id"] == "p1"
 
 
+def test_mirror_tool_step_records_tool_result(tmp_db, monkeypatch):
+    """工具结果必须入链，否则写后校验/参数截断守卫的播报在链路日志里看不见。
+
+    实测（2026-10-03）：`tool_write_file` 的 `node --check` 通过播报、
+    `finish_reason=length` 时的「参数达到 token 上限被截断，已阻止执行」，
+    都只存在于 `tool_result` 字段 —— 之前 mirror_event 只取 tool_name/tool_args/
+    detail，导致排查时只能去翻 SSE 流。
+    """
+    from app import chainlog
+
+    st = tmp_db
+    # 本文件模块级把 chain_log_max_data_chars 压到 200（见文件头），会触发
+    # store 的长文本预算均摊裁剪把 tool_result 挤掉；这里抬高以验证完整内容入链。
+    # （裁剪行为本身由 test_oversized_data_keeps_valid_json 覆盖）
+    # `app.chainlog.store` 名字被 store() 函数遮蔽，只能走 sys.modules 取模块
+    store_mod = sys.modules["app.chainlog.store"]
+    monkeypatch.setattr(store_mod, "_max_data_chars", lambda: 4000)
+    with chainlog.bind(chainlog.new_context(trace_id="t-mirror-result")):
+        chainlog.mirror_event({
+            "type": "agent_step", "agent_id": "build",
+            "step": {
+                "type": "tool_end", "step_id": "tool_tool_write_file",
+                "name": "调用工具: tool_write_file", "status": "completed",
+                "tool_name": "tool_write_file", "tool_args": {"path": "a.js"},
+                "tool_result": "✅ 已写入 a.js（124 B）｜语法校验通过（node --check）",
+                "duration_ms": 18,
+            },
+        })
+        # running 状态没有 tool_result，不应留下空字段
+        chainlog.mirror_event({
+            "type": "agent_step", "agent_id": "build",
+            "step": {
+                "type": "tool_start", "step_id": "tool_tool_execute",
+                "name": "调用工具: tool_execute", "status": "running",
+                "tool_name": "tool_execute",
+            },
+        })
+    st.flush()
+    entries = st.list_entries(trace_id="t-mirror-result", order="asc")["entries"]
+    assert "语法校验通过" in entries[0]["data"]["tool_result"]
+    # 无 tool_result 的节点不携带该键（避免日志里一堆 null）
+    assert "tool_result" not in entries[1]["data"]
+
+
 def test_mirror_tool_steps_can_be_disabled(tmp_db, monkeypatch):
     from app import chainlog
 

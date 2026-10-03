@@ -363,7 +363,14 @@ def mirror_event(event: dict, component: str = "agent") -> None:
             "tool_name": step.get("tool_name"),
             "tool_args": step.get("tool_args"),
             "detail": step.get("detail"),
+            # [全链路可观测性 2026-10-03] 带上工具结果，否则这些关键播报在链路日志里
+            # 完全不可见，只能去翻 SSE 流：写后校验门禁（`node --check` 通过/失败）、
+            # 参数截断守卫（"达到 token 上限被截断，已阻止执行"）、权限审批结果。
+            # 截断交给 `log()` 统一按 chain_log_max_data_chars 收敛，不在此处硬编码。
+            "tool_result": step.get("tool_result"),
         }
+        # 剔除 None，避免每个 tool 节点都挂一个空的 tool_result 字段
+        data = {k: v for k, v in data.items() if v is not None}
         log(
             level, stage, component, name, agent_id=agent_id,
             message=str(step.get("detail") or name), data=data,
