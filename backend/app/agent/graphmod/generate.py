@@ -92,29 +92,44 @@ def _is_valid_answer(text: str | None) -> bool:
     return not is_unparsed_json_answer(t) and not is_tool_call_markup(t)
 
 
+# 「思考规模」绝对门槛：低于此值不算「思考耗尽预算」，而是模型提前收尾
+# （实测末轮只吐 346 token 思考 + finish=stop，归因成预算耗尽会把用户引向
+#   错误的修复方向「调 LLM_MAX_TOKENS」）
+_ZERO_PROGRESS_REASONING_MIN_TOKENS = 2000
+
+
 def _zero_progress_cause(
     *, from_reasoning: bool, finish_reason: str,
     output_tokens: int, reasoning_tokens: int,
 ) -> str:
     """判定「零进展」的归因，供全链路日志 `cause` 字段使用。
 
-    优先看 `from_reasoning`：它是 core 在 reasoning 回退**之前**打的标记，为真即
-    证明 content 为空、正文来自思考 —— 这正是「思考耗尽输出预算」。
+    `from_reasoning` 只说明「content 为空、正文来自思考回退」，**不能单独**当作
+    「思考耗尽预算」的证据 —— 实测两种形态都命中它：
 
-    不用 `reasoning_tokens / output_tokens` 比例当主判据：实测 deepseek-v4-flash 的
-    usage 不单独上报 reasoning token（同一现象 ratio 仅 0.023，而 content 确为空、
-    正文全部来自 reasoning 回退），按比例判会把「思考耗尽预算」误标成
-    `length_without_tool_calls`，把排查方向带偏到「调小输出上限」这个错方向上。
+    - 真耗尽：末轮 ct≈rt≈cap（8500/8670），预算确实被思考吃光；
+    - 伪耗尽：末轮只吐 346 token 思考（rt=346, ct=346, finish=stop）就收尾，
+      聚合口径 rt/out 也仅 0.58（9605/16645），预算根本没用完。
 
-    仅当该标记不可用（老路径/兜底）才退回 token 比例或 finish_reason 推断。
+    后者归因成「思考耗尽预算」会让用户去调 `LLM_MAX_TOKENS`，方向完全错。因此在
+    `from_reasoning` 之上再加一道**规模门槛**：思考必须真的吃掉可观份额的输出预算
+    才算耗尽，否则是「模型自己收尾却没做事」（`stop_without_output`）。
+
+    不用 `reasoning_tokens / output_tokens` 单看比例当主判据：deepseek-v4-flash 的
+    usage 不单独上报 reasoning token（实测同一现象 ratio 仅 0.023 而 content 确为空）。
     """
-    if from_reasoning:
+    # 思考规模门槛：既要占满输出的大头，也要达到绝对量级（滤掉「几百 token 就收尾」
+    # 这种明显没花预算的情形；2000 低于任何有意义的思考预算，高于纯噪声）
+    _min = max(_ZERO_PROGRESS_REASONING_MIN_TOKENS, output_tokens * 0.9)
+    _reasoning_bound = reasoning_tokens >= _min and output_tokens > 0
+    if from_reasoning and _reasoning_bound:
         return "reasoning_budget_exhausted"
-    if output_tokens > 0 and reasoning_tokens >= output_tokens * 0.9:
+    if not from_reasoning and _reasoning_bound:
+        # 无回退痕迹但思考吃满预算：同样指向思考预算问题
         return "reasoning_budget_exhausted"
     if str(finish_reason) == "length":
         return "length_without_tool_calls"
-    # finish=stop 却既无工具又无正文：预算够但没用对，模型自行收尾却没做事
+    # finish=stop、content 空、思考规模很小：预算够但没用对，模型自行收尾却没做事
     return "stop_without_output"
 
 
@@ -475,6 +490,9 @@ class RAGAgentGenerate(RAGAgentTools):
         _maybe_rescue(msg, finish_reason, 0)
         # [token 优化 v5] 已使用工具集合：每轮重挂载时保留，避免模型想复用却被移除
         used_tools: set[str] = set()
+        # [部分完成播报 2026-10-03] 本轮成功执行过的文件类工具路径：末轮空响应时如实
+        # 告诉用户「已落盘哪些文件」，而不是把整轮成果用失败文案盖掉
+        _round_files: set[str] = set()
         while (
             msg.tool_calls or finish_reason == "tool-calls" or rescue_pending
         ) and rounds < effective_max_steps:
@@ -584,6 +602,12 @@ class RAGAgentGenerate(RAGAgentTools):
                     continue
 
                 self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
+                # [部分完成播报] 文件类工具在此登记路径（失败也要登记：用户需要知道
+                # 哪些文件被尝试过，尤其 overwrite 冲突这类）
+                _round_files.update(
+                    str(args.get(_k)) for _k in self._FILE_TOOL_ARGS.get(tool_name, ())
+                    if args.get(_k)
+                )
                 tool_tasks.append(self._execute_tool(tool_name, args, state))
                 tool_metas.append((tc.id, tool_name, dedup_key))
 
@@ -788,6 +812,19 @@ class RAGAgentGenerate(RAGAgentTools):
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tc_id, "tool_name": tool_name, "content": bounded_result})
                 used_tools.add(tool_name)
+                # 强制收尾轮也登记文件路径，供末轮空响应的「部分完成」播报
+                if tool_name in RAGAgentGenerate._FILE_TOOL_ARGS:
+                    for _m in cur_tool_calls:
+                        if _m.function.name != tool_name or _m.id != tc_id:
+                            continue
+                        try:
+                            _a = parse_tool_args(_m.function.arguments) or {}
+                        except Exception:  # noqa: BLE001
+                            _a = {}
+                        _round_files.update(
+                            str(_a.get(_k)) for _k in self._FILE_TOOL_ARGS[tool_name]
+                            if _a.get(_k)
+                        )
             # [token 优化 P8] 强制收尾路径补齐"清理→压缩→截断"闭环：此前仅截断，
             # 且截断基于低估估算可能不触发（实测收尾轮裸发 25,779 超 usable 23,808）。
             # 与主循环保持同款处理，避免收尾调用成为单请求内最大单次 pt。
@@ -882,7 +919,35 @@ class RAGAgentGenerate(RAGAgentTools):
             # reasoning_content —— 实测 2.7 万字内心独白。直接返回它既撑爆下一轮
             # 上下文预算，又让用户以为「模型写了代码」而实际磁盘零文件。
             # 换成可诊断的失败文案（保留零进展日志作为排查线索）。
-            if _from_reasoning and settings.zero_progress_mask_reasoning:
+            #
+            # [关键修复 2026-10-03] 但**本轮已经干过活**时不能这么干：末轮空响应属于
+            # 收尾失败，不等于整轮白跑。实测 8 轮真实写入 5 个文件（engine.js /
+            # tetrisReducer.js / useTetris.js / tetrominoes.js / main.jsx，均
+            # node --check 通过），末轮 346 token 思考后 finish=stop 空响应，此前整段
+            # 成果被「本次请求未能产出任何内容」覆盖 —— 用户只看到失败，磁盘上的
+            # 东西也不知道存在，而文案还谎称「未执行任何工具」。
+            # 此时改为「部分完成」播报：如实说明收尾失败 + 列出已用工具与产出文件。
+            _did_work = bool(used_tools)
+            if _from_reasoning and settings.zero_progress_mask_reasoning and _did_work:
+                _files = sorted(_round_files)
+                _file_lines = (
+                    "\n".join(f"  - `{p}`" for p in _files[:20])
+                    + (f"\n  - …另有 {len(_files) - 20} 个" if len(_files) > 20 else "")
+                ) if _files else ""
+                answer = (
+                    "**本次任务已执行部分工作，但最后一轮收尾失败。**\n\n"
+                    f"模型 `{model}` 完成 {rounds} 轮工具调用后，最后一轮未输出正文"
+                    f"（finish={finish_reason}），没能给出总结。"
+                    "**已落盘的改动仍然有效**，未做任何回滚。\n\n"
+                    "本轮已调用工具：\n"
+                    + "".join(f"  - `{t}`\n" for t in sorted(used_tools))
+                    + (f"\n本轮写入的文件：\n{_file_lines}\n" if _files else "")
+                    + "\n建议：直接查看上述文件确认内容；如需继续，可就未完成部分"
+                    "再追问一次（模型往往在总结这一步空响应，实际产出已可用）。\n\n"
+                    "排查线索：全链路日志中搜索 `generate.zero_progress`"
+                    f"（`cause={_cause}`）。"
+                )
+            elif _from_reasoning and settings.zero_progress_mask_reasoning:
                 # 建议随归因变化：不是所有零进展都是「思考吃光预算」，
                 # 让用户去调 LLM_MAX_TOKENS 在 finish=stop 形态下属于误导。
                 _advice = (
@@ -909,8 +974,17 @@ class RAGAgentGenerate(RAGAgentTools):
                     f"（`cause={_cause}`）。"
                 )
         if zero_progress:
-            # 零进展：既没调工具也没给出有效回答，不能报「完成」骗用户
-            self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "error", "detail": f"零进展（finish={finish_reason}，cause={_cause}，未执行任何工具，已重试 {rescue_used} 次）", "duration_ms": round(gen_dur, 1)})
+            # 零进展：末轮既没调工具也没给出有效回答，不能报「完成」骗用户。
+            # 但注意措辞：本轮**可能已经干过活**（前几轮工具调用成功），说「未执行任何
+            # 工具」与事实不符 —— 实测末轮空响应时前 8 轮已写入 5 个文件。
+            _zp_detail = (
+                f"零进展（finish={finish_reason}，cause={_cause}，"
+                + (f"本轮已完成 {len(used_tools)} 类工具调用、写入 {len(_round_files)} 个文件，"
+                   f"但收尾未输出正文，已重试 {rescue_used} 次）"
+                   if used_tools else
+                   f"全程未执行任何工具，已重试 {rescue_used} 次）")
+            )
+            self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "error", "detail": _zp_detail, "duration_ms": round(gen_dur, 1)})
         elif finish_reason == "length":
             answer = answer + "\n\n⚠️ 输出因达到 token 上限被截断，内容可能不完整。"
             self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "completed", "detail": "完成（输出被截断 length）", "duration_ms": round(gen_dur, 1)})

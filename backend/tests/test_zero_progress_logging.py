@@ -183,9 +183,9 @@ def test_zero_progress_cause_when_not_reasoning_bound(agent, monkeypatch):
 
 
 def test_zero_progress_cause_stop_without_reasoning_token_reporting(agent, monkeypatch):
-    """实测形态：finish=stop，但该模型 usage 不单独上报 reasoning token。
+    """实测形态 A：finish=stop，usage 不单独上报 reasoning token。
 
-    2026-10-03 全链路实测抓到 deepseek-v4-flash 连续两轮各 ~6.5k token、
+    2026-10-03 全链路实测抓到 deepseek-v4-flash 两轮各 ~6.5k token、
     `finish_reason=stop`、content 为空（正文来自 reasoning 回退），
     而 `reasoning_tokens/output_tokens` 仅 0.023。按比例判会把归因错标成
     `length_without_tool_calls`，把排查方向误导到「调小/调大输出上限」。
@@ -202,12 +202,35 @@ def test_zero_progress_cause_stop_without_reasoning_token_reporting(agent, monke
         cost=0.02, answer_chars=26000, from_reasoning=True,
     )
 
-    # from_reasoning 是硬证据，优先于 token 比例
-    assert got["data"]["cause"] == "reasoning_budget_exhausted"
+    # 思考规模远低于门槛（302 < 2000）→ 不是预算耗尽，而是模型自己收尾
+    assert got["data"]["cause"] == "stop_without_output"
     assert got["data"]["reasoning_tokens_reported"] is False
     # 文案不得断言「全被思考占用」以外的内容，也不得谎称被截断
     assert "截断" not in got["message"]
     assert "零进展" in got["message"]
+
+
+def test_zero_progress_cause_small_final_round_not_budget_exhaustion(agent, monkeypatch):
+    """实测形态 B（真实用户任务 ses_208egtw0xz58cf43d）：末轮空响应但整轮干了活。
+
+    8 轮工具调用成功写入 5 个文件后，末轮只吐 346 token 思考（rt=ct=346）
+    就 finish=stop 空响应。聚合口径 rt/out=0.58 也不支持「预算耗尽」，
+    但 `from_reasoning=True`。仅凭 from_reasoning 归因为「思考耗尽预算」会让
+    用户去调 LLM_MAX_TOKENS —— 而实际预算只用了 346/16384，方向完全错。
+    """
+    import app
+
+    got = {}
+    fake = types.SimpleNamespace(log=lambda level, stage, component, event, **kw: got.update(**kw))
+    monkeypatch.setattr(app, "chainlog", fake, raising=False)
+
+    agent._chainlog_zero_progress(
+        state=None, model="deepseek/deepseek-v4-flash", finish_reason="stop",
+        rounds=8, input_tokens=51982, output_tokens=16645, reasoning_tokens=9605,
+        cost=0.42, answer_chars=346, from_reasoning=True,
+    )
+    assert got["data"]["cause"] == "stop_without_output"
+    assert "思考占用" not in got["message"]
 
 
 def test_zero_progress_cause_stop_without_output(agent, monkeypatch):
@@ -245,23 +268,28 @@ def test_zero_progress_rescue_event_marks_retry_in_message(agent, monkeypatch):
 
 
 def test_zero_progress_cause_helper_prefers_from_reasoning_over_ratio():
-    """纯函数级锁定归因优先级：from_reasoning > token 比例 > finish_reason。"""
-    # reasoning 回退痕迹存在，即使比例极低也判「思考耗尽预算」
+    """纯函数级锁定归因优先级：思考规模够大才是「预算耗尽」。"""
+    # 真耗尽：思考吃满输出大头且规模够（8500/8670 实测经典形态）
     assert gen_mod._zero_progress_cause(
         from_reasoning=True, finish_reason="stop",
-        output_tokens=13151, reasoning_tokens=302,
+        output_tokens=8670, reasoning_tokens=8500,
     ) == "reasoning_budget_exhausted"
-    # 无回退痕迹 + 比例高
+    # 无回退痕迹 + 思考规模够 + length
     assert gen_mod._zero_progress_cause(
         from_reasoning=False, finish_reason="length",
-        output_tokens=1000, reasoning_tokens=990,
+        output_tokens=8670, reasoning_tokens=8500,
     ) == "reasoning_budget_exhausted"
-    # 无回退痕迹 + 比例低 + length
+    # 有回退痕迹但思考规模很小 → 模型自己收尾（实测末轮 346 token）
+    assert gen_mod._zero_progress_cause(
+        from_reasoning=True, finish_reason="stop",
+        output_tokens=16645, reasoning_tokens=9605,
+    ) == "stop_without_output"
+    # 无回退痕迹 + 思考规模小 + length
     assert gen_mod._zero_progress_cause(
         from_reasoning=False, finish_reason="length",
         output_tokens=1000, reasoning_tokens=10,
     ) == "length_without_tool_calls"
-    # 无回退痕迹 + 比例低 + stop
+    # 无回退痕迹 + 思考规模小 + stop
     assert gen_mod._zero_progress_cause(
         from_reasoning=False, finish_reason="stop",
         output_tokens=1000, reasoning_tokens=10,

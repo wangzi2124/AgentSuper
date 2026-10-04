@@ -93,6 +93,61 @@ def test_rescue_budget_is_bounded():
     assert max(0, int(s.zero_progress_rescue_attempts)) == 0
 
 
+# ── 4b. 末轮空响应不得覆盖已完成的工作 ──────────────────────────────────
+# 真实事故（2026-10-03，session ses_208egtw0xz58cf43d）：用户要求在 D 盘写
+# React 俄罗斯方块。Agent 连续 8 轮工具调用成功写入 5 个文件（engine.js /
+# tetrisReducer.js / useTetris.js / tetrominoes.js / main.jsx，均 node --check
+# 通过），末轮只吐 346 token 思考后 finish=stop 空响应。此前零进展掩码把整轮
+# 成果替换成「本次请求未能产出任何内容 / 未执行任何工具」——用户看不到任何成果，
+# 磁盘上的文件也不知道存在（文案还与事实相反）。
+
+def test_mask_does_not_claim_no_tools_when_tools_ran():
+    """有工具调用过时，step_end 不得写「未执行任何工具」。"""
+    src = _generate_source()
+    # 零进展播报必须按 used_tools 分流
+    assert "if used_tools else" in src
+    assert "全程未执行任何工具" in src
+    # 曾经那句无条件断言「未执行任何工具」必须已消失
+    assert 'cause={_cause}，未执行任何工具' not in src
+
+
+def test_partial_completion_broadcast_lists_work():
+    """干了活时改用「部分完成」播报，并如实列出工具与已落盘文件。"""
+    src = _generate_source()
+    assert "本次任务已执行部分工作，但最后一轮收尾失败" in src
+    # 必须列出工具与文件，而不是宣称什么都没做
+    assert "本轮已调用工具" in src
+    assert "本轮写入的文件" in src
+    assert "已落盘的改动仍然有效" in src
+
+
+def test_round_files_registered_for_file_tools():
+    """文件类工具的路径必须在执行处登记，供末轮空响应播报使用。"""
+    src = _generate_source()
+    assert "_round_files: set[str] = set()" in src
+    # 两处执行路径（主循环 + 强制收尾轮）都要登记
+    assert src.count("_round_files.update(") >= 2
+
+
+def test_zero_progress_reasoning_size_threshold():
+    """思考规模门槛：低于 2000 token 不算「预算耗尽」（实测末轮 346 token 形态）。"""
+    from app.agent.graphmod.generate import (
+        _ZERO_PROGRESS_REASONING_MIN_TOKENS,
+        _zero_progress_cause,
+    )
+    assert _ZERO_PROGRESS_REASONING_MIN_TOKENS == 2000
+    # 真实事故形态：末轮 346 token 思考、预算几乎没用
+    assert _zero_progress_cause(
+        from_reasoning=True, finish_reason="stop",
+        output_tokens=16645, reasoning_tokens=9605,
+    ) == "stop_without_output"
+    # 真耗尽仍然成立
+    assert _zero_progress_cause(
+        from_reasoning=True, finish_reason="stop",
+        output_tokens=8670, reasoning_tokens=8500,
+    ) == "reasoning_budget_exhausted"
+
+
 # ── 6. 回归：救援轮 tool_calls=None 不得崩溃 ─────────────────────────────
 # 实测事故：救援轮 litellm 返回 tool_calls=None，循环体内 `for tc in msg.tool_calls`
 # 直接抛 TypeError: 'NoneType' object is not iterable（generate.py:417），
@@ -113,6 +168,13 @@ def test_rescue_round_with_none_tool_calls_is_iterable():
     # 循环体内的 task_only 判定（救援轮必为 False）
     task_only = bool(cur) and all(tc.function.name == "tool_task" for tc in cur)
     assert task_only is False
+
+
+def _generate_source() -> str:
+    """generate.py 全文，供源码级静态守卫使用。"""
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] / "app/agent/graphmod/generate.py").read_text(
+        encoding="utf-8")
 
 
 def test_generate_source_has_no_bare_iteration_of_msg_tool_calls():
