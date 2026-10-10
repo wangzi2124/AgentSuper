@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     supervisor_timeout: float = 300.0
 
 # 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
+# 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
     # 默认 16_384 ≈ 模型原生上限的常用值；长任务配合系统提示"长内容写文件"规则避免截断。
     # [token 优化 v9] 16_384 → 8_192：普通问答用不到那么大输出，压低超长输出兜底成本。
     # [输出上限 2026-10-03] 8_192 → 16_384：实测写俄罗斯方块时整份代码塞进单次
