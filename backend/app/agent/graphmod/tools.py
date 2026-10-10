@@ -10,6 +10,8 @@ import logging
 
 import os
 
+import re
+
 import shlex
 
 import subprocess
@@ -109,6 +111,104 @@ class RAGAgentTools(RAGAgentBase):
     def _voice_tool_placeholder(self, **kwargs) -> str:
         """占位实现：_execute_tool 对语音工具特判，这里不会被真正调用。"""
         return ""
+    def _search_tools_placeholder(self, query: str = "", kind: str = "all", max_results: int = 8) -> str:
+        """占位实现：_execute_tool 对 tool_search_tools 特判，这里不会被真正调用。"""
+        return ""
+    def _codeact_tool_placeholder(self, code: str = "") -> str:
+        """占位实现：_execute_tool 对 tool_code_exec 特判，这里不会被真正调用。"""
+        return ""
+    async def _tool_code_exec(self, args: dict, state: dict | None = None) -> str:
+        """[CodeAct Phase 1] 受控代码执行：spawn 沙盒子进程跑一段 Python，回结构化结果。
+
+        - codeact_max_retries 强制（§10，不依赖提示词）：同一会话连续失败达上限即停用，
+          避免死循环空烧 token——这里是执行入口，对同步/流式两条路径都生效；
+        - 子进程一次一跑（无状态），超时/审批暂停/Job 隔离在 ExecutionSession 内部；
+        - 结果以 CodeActResult.to_text(主要段上限 codeact_max_output_chars) 回灌。
+        """
+        from app.codeact.session import ExecutionSession
+
+        if not getattr(settings, "codeact_enabled", False):
+            return "Error: tool_code_exec 未启用（CODEACT_ENABLED=false）"
+        code = str((args or {}).get("code") or "").strip()
+        if not code:
+            return "Error: 'code' is required."
+        conv = str((state or {}).get("conversation_id") or "") or "default"
+        max_retries = max(0, int(getattr(settings, "codeact_max_retries", 3)))
+        if self._codeact_failures.get(conv, 0) >= max_retries:
+            return (
+                "Error: 本会话 codeact 连续失败已达重试上限，tool_code_exec 已停用。"
+                "请改用文件工具/直接回答完成剩余工作；或先对照报错修正思路后再试。"
+            )
+        from pathlib import Path as _Path
+
+        cwd = str((state or {}).get("_cwd") or "") or str(_Path.cwd())
+        session = ExecutionSession(
+            code=code,
+            workspace_dir=_Path(cwd),
+            conversation_id=conv,
+            session_id=conv,
+            event_queue=(state or {}).get("_event_queue"),
+        )
+        result = await session.run()
+        if result.ok:
+            self._codeact_failures[conv] = 0
+        else:
+            self._codeact_failures[conv] = self._codeact_failures.get(conv, 0) + 1
+        return result.to_text(int(getattr(settings, "codeact_max_output_chars", 2000)))
+    async def _tool_search_tools(self, args: dict, state: dict | None = None) -> str:
+        """[工具懒加载 2026-10-09] 按关键词检索工具/技能注册表，命中项注入下一轮 schema。
+
+        对齐 opencode 的 tool-search 语义：常驻 schema 只保留核心 tool_* + 已发现的技能，
+        其余技能由模型在运行时按需检索。命中项写入会话工具缓存（`_remember_conversation_tools`），
+        下一轮 `_build_tool_defs` 重建 schema 时在**尾部**追加（保前缀缓存的字节稳定）。
+        """
+        query = str((args or {}).get("query") or "").strip()
+        kind = str((args or {}).get("kind") or "all").strip().lower()
+        try:
+            max_results = int((args or {}).get("max_results") or 8)
+        except (TypeError, ValueError):
+            max_results = 8
+        max_results = max(1, min(max_results, 20))
+        if not query:
+            return "Error: 'query' is required — give keywords describing the skill/tool you need."
+
+        # 关键词：空白/标点切分 + 整串兜底（CJK 无空格时整串匹配描述里的连续中文）
+        terms = [t for t in re.split(r"[\s,，、;；/]+", query.lower()) if t]
+        if len(terms) > 1 and query.lower() not in terms:
+            terms.append(query.lower())
+
+        def _kind_ok(name: str) -> bool:
+            if kind == "skill":
+                return name.startswith("load_skill_")
+            if kind == "plugin":
+                return name.startswith("plugin_")
+            return True
+
+        scored = []
+        for t in self.tools:
+            if not _kind_ok(t.name) or t.name == "tool_search_tools":
+                continue
+            hay = (t.name + " " + (t.description or "")).lower()
+            score = sum(hay.count(term) for term in terms if term)
+            if score > 0:
+                scored.append((score, t.name, t))
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        matched = [t for _, _, t in scored[:max_results]]
+        if not matched:
+            return (
+                f"No tools/skills matched '{query}'. Try different keywords "
+                "(e.g. the task domain), or proceed without a specialized skill."
+            )
+
+        conv_id = str((state or {}).get("conversation_id") or "")
+        self._remember_conversation_tools(conv_id, {t.name for t in matched})
+        lines = ["Matched tools (callable now — they are mounted on your next step):"]
+        for t in matched:
+            desc = " ".join((t.description or "").split())[:140]
+            lines.append(f"- {t.name}: {desc}")
+        if any(t.name.startswith("load_skill_") for t in matched):
+            lines.append("Call the matching load_skill_<name>() tool to load its full instructions.")
+        return "\n".join(lines)
     async def _tool_task(self, args: dict, depth: int = 0, event_queue=None, directory: str = "", conversation_id: str = "") -> str:
         """[opencode task tool] 把聚焦子任务委派给子 Agent 并取回最终结果。
 
@@ -329,6 +429,10 @@ class RAGAgentTools(RAGAgentBase):
                         return await self._tool_memory(name, args, state)
                     if name in ("tool_tts_synthesize", "tool_voice_transcribe"):
                         return await self._tool_voice(name, args)
+                    if name == "tool_search_tools":
+                        return await self._tool_search_tools(args, state)
+                    if name == "tool_code_exec":
+                        return await self._tool_code_exec(args, state)
                     eq = state.get("_event_queue") if state else None
                     if eq and name == "tool_execute":
                         try:

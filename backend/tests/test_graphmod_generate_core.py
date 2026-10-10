@@ -579,6 +579,7 @@ async def test_generate_multimodal_files(gen_env, monkeypatch):
         return "图片描述内容"
     monkeypatch.setattr(gen_mod, "describe_image", fake_describe)
     monkeypatch.setattr(settings, "image_caption_model", "openai/gpt-4o-mini")  # 开启描述桥
+    monkeypatch.setattr(settings, "image_vlm_caption", True)  # 描述桥总闸（.env 可能覆盖为关）
     # [能力驱动视觉] 模拟视觉模型（vision=True → 原生附图），不依赖 live catalog 的模型能力声明
     import app.models.catalog as catalog_mod
     monkeypatch.setattr(
@@ -629,7 +630,7 @@ async def test_generate_images_not_resent_after_first_round(gen_env, monkeypatch
 
     snapshots = []
 
-    async def snap(model, messages, tool_defs, state=None):
+    async def snap(model, messages, tool_defs, state=None, **kwargs):
         snapshots.append([dict(m) for m in messages])  # 发送时快照（原列表后续被改写）
         return await llm(model, messages, tool_defs, state=state)
     agent._llm_call = snap

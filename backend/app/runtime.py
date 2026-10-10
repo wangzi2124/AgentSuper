@@ -98,6 +98,16 @@ def _do_init(app):
 
     _load_env_to_os()
 
+    # [DeepSeek 兼容补丁] litellm 的 deepseek provider：(1) 会把 content 列表扁平化、
+    # 丢弃 image_url 分块；(2) 思考模式下不回填 assistant 的 reasoning_content（未知
+    # 模型 supports_reasoning()=False 门控失效）。安装两个补丁修复（详见模块 docstring）。
+    from app.models.litellm_vision_patch import (
+        install_litellm_vision_patch,
+        install_litellm_reasoning_patch,
+    )
+    install_litellm_vision_patch()
+    install_litellm_reasoning_patch()
+
     plugin_loader = PluginLoader(settings.plugins_dir)
     plugin_loader.load_all()
 

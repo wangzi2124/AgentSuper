@@ -1,0 +1,79 @@
+== E2E Agent Tetris test (mode=tetris) ==
+[TC-01] health -> {'status': 'ok', 'vector_store_size': 0} pass=True
+[tetris] stream open, X-Session-Id=ses_20949dp65u73c1a5b
+  [tetris] +0.01s model_switched
+  [tetris] +0.51s routing 
+  [tetris] +0.52s agent_start 
+  [tetris] +0.52s agent_step step=None 
+  [tetris] +0.52s agent_step step=None 
+  [tetris] +0.55s agent_step step=None 
+  [tetris] +2.46s text_delta
+  [tetris] +2.46s agent_step step=None 
+  [tetris] +2.5s agent_step step=None 
+  [tetris] +12.4s text_delta
+  [tetris] +12.4s agent_step step=None 
+  [tetris] +12.4s agent_step step=None 
+  [tetris] +12.4s agent_step step=None 
+  [tetris] +13.91s agent_step step=None 
+  [tetris] +13.91s agent_step step=None 
+  [tetris] +13.91s agent_step step=None 
+  [tetris] +22.08s text_delta
+  [tetris] +22.09s agent_step step=None 
+  [tetris] +22.2s agent_step step=None 
+  [tetris] +27.24s text_delta
+  [tetris] +27.24s agent_step step=None 
+  [tetris] +27.35s agent_step step=None 
+  [tetris] +31.37s text_delta
+  [tetris] +31.37s agent_step step=None 
+  [tetris] +31.48s agent_step step=None 
+  [tetris] +37.49s text_delta
+  [tetris] +37.49s agent_step step=None 
+  [tetris] +37.49s agent_step step=None 
+  [tetris] +37.54s agent_step step=None 
+  [tetris] +37.54s agent_step step=None 
+  [tetris] +43.03s text_delta
+  [tetris] +43.03s agent_step step=None 
+  [tetris] +43.08s agent_step step=None 
+  [tetris] +44.63s text_delta
+  [tetris] +44.65s agent_step step=None 
+  [tetris] +53.5s agent_step step=None 
+  [tetris] +53.59s agent_step step=None 
+  [tetris] +54.71s agent_step step=None 
+  [tetris] +56.3s agent_step step=None 
+  [tetris] +61.35s text_delta
+  [tetris] +61.35s agent_step step=None 
+  [tetris] +61.49s agent_step step=None 
+  [tetris] +62.29s agent_step step=None 
+  [tetris] +62.43s agent_step step=None 
+  [tetris] +64.95s text_delta
+  [tetris] +64.95s agent_step step=None 
+  [tetris] +64.95s agent_step step=None 
+  [tetris] +65.13s agent_step step=None 
+  [tetris] +65.14s agent_step step=None 
+  [tetris] +66.37s agent_step step=None 
+  [tetris] +66.53s agent_step step=None 
+  [tetris] +68.56s text_delta
+  [tetris] +68.57s agent_step step=None 
+  [tetris] +70.17s agent_step step=None 
+  [tetris] +72.42s text_delta
+  [tetris] +72.42s agent_step step=None 
+  [tetris] +72.42s agent_step step=None 
+  [tetris] +72.49s agent_step step=None 
+  [tetris] +72.49s agent_step step=None 
+  [tetris] +73.6s agent_step step=None 
+  [tetris] +73.66s agent_step step=None 
+  [tetris] +77.85s text_delta
+  [tetris] +77.85s agent_step step=None 
+  [tetris] +77.85s agent_done 
+  [tetris] +78.6s done
+[tetris] stream closed after 78.6s, 65 events
+[TC-03] files=2289 bytes=38235884 key=3/3 pass=True
+[TC-04] zero-byte=0 pass=True
+[TC-05] syntax checked=1420 pass=True
+[TC-06] conv=ses_20949dp65u73c1a5b msg=msg_20949j0r28i5a221f persistence pass=True diff=True
+[TC-07] quality pass=True answer_len=1392 err=None
+
+== result -> C:\tool\AgentSuper\docs\test\runs\20261009_104413_result.json ==
+== events -> C:\tool\AgentSuper\docs\test\runs\20261009_104413_events.jsonl ==
+PASS: ['TC-01_health', 'TC-03_files', 'TC-04_truncation', 'TC-05_syntax', 'TC-06_persistence', 'TC-07_quality']
+FAIL: []

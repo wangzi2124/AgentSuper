@@ -1,0 +1,24 @@
+== E2E Agent Tetris test (mode=tetris) ==
+[TC-01] health -> {'status': 'ok', 'vector_store_size': 0} pass=True
+[tetris] stream open, X-Session-Id=ses_2094929h0xtcacb43
+  [tetris] +0.04s model_switched
+  [tetris] +0.6s routing 
+  [tetris] +0.66s agent_start 
+  [tetris] +0.66s agent_step step=None 
+  [tetris] +0.66s agent_step step=None 
+  [tetris] +0.7s agent_step step=None 
+  [tetris] +59.0s text_delta
+  [tetris] +59.0s agent_step step=None 
+  [tetris] +59.0s agent_done 
+  [tetris] +59.74s done
+[tetris] stream closed after 59.74s, 10 events
+[TC-03] files=0 bytes=0 key=0/3 pass=False
+[TC-04] zero-byte=0 pass=True
+[TC-05] syntax checked=0 pass=True
+[TC-06] conv=ses_2094929h0xtcacb43 msg=msg_209496b26f839bdf1 persistence pass=True diff=True
+[TC-07] quality pass=True answer_len=179 err=None
+
+== result -> C:\tool\AgentSuper\docs\test\runs\20261009_104124_result.json ==
+== events -> C:\tool\AgentSuper\docs\test\runs\20261009_104124_events.jsonl ==
+PASS: ['TC-01_health', 'TC-04_truncation', 'TC-05_syntax', 'TC-06_persistence', 'TC-07_quality']
+FAIL: ['TC-03_files']

@@ -229,6 +229,8 @@ def _validate_shell_command(command: str, cwd: str | None = None, ask: bool = Fa
     - 每个简单命令段的首命令过白名单（防 `cat x | evil` 绕过）
     - **git 子命令分流**：只读子命令放行，改写仓库/索引/HEAD 的走命令级审批（`_check_git_write_approval`）
     - 每段跑解释器内联黑名单与 SSRF
+    - **[CodeAct §4.0]** CODEACT_ENABLED=true 时每段额外收紧 python/node 内联入口
+      （`_check_codeact_inline`，python -c / node -e 一律拒绝，引导走 tool_code_exec）
     """
     for inner in _backtick_bodies(command):
         _validate_shell_command(inner, cwd, ask=ask)
@@ -247,6 +249,7 @@ def _validate_shell_command(command: str, cwd: str | None = None, ask: bool = Fa
         _check_single_allowed(base, cwd, ask=ask)
         seg_str = " ".join(seg)
         _check_command_blacklist(seg_str)
+        _check_codeact_inline(seg_str)
         _ssrf_check_command(seg_str)
 
 
@@ -372,27 +375,37 @@ _DANGEROUS_PATTERNS = (
     "/dev/tcp", "/dev/udp", "curl", "wget",
 )
 
+def _interpreter_inline_flag(command: str) -> "tuple[str, str] | None":
+    """识别解释器内联代码入口，返回 (interp, flag)；非解释器返回 None。
+
+    python→-c、node→-e、powershell→-Command、cmd→/c。
+    """
+    parts = _win_flag_split(command)
+    if not parts:
+        return None
+    interp = Path(parts[0]).name.lower() or parts[0].lower()
+    if interp in ("python", "python3", "py", "python.exe", "py.exe"):
+        return interp, "-c"
+    if interp in ("node", "node.exe"):
+        return interp, "-e"
+    if interp in ("powershell", "powershell.exe", "pwsh", "pwsh.exe"):
+        return interp, "-Command"
+    if interp in ("cmd", "cmd.exe"):
+        return interp, "/c"
+    return None
+
+
 def _check_command_blacklist(command: str) -> None:
     """对解释器类命令的 -c/-e/-Command 内联参数做危险模式检查，阻止任意代码执行。
 
     白名单只能校验首个 token，`python -c "import os; os.system(...)"` 可完全绕过，
     因此对 python/node/powershell/cmd 等解释器的内联代码参数额外做黑名单过滤。
     """
+    detected = _interpreter_inline_flag(command)
+    if detected is None:
+        return
+    interp, interpreter_flag = detected
     parts = _win_flag_split(command)
-    if not parts:
-        return
-    interp = Path(parts[0]).name.lower() or parts[0].lower()
-    interpreter_flag: str | None = None
-    if interp in ("python", "python3", "py", "python.exe", "py.exe"):
-        interpreter_flag = "-c"
-    elif interp in ("node", "node.exe"):
-        interpreter_flag = "-e"
-    elif interp in ("powershell", "powershell.exe", "pwsh", "pwsh.exe"):
-        interpreter_flag = "-Command"
-    elif interp in ("cmd", "cmd.exe"):
-        interpreter_flag = "/c"
-    if interpreter_flag is None:
-        return
     flag = interpreter_flag.lower()
     i = 1
     while i < len(parts):
@@ -408,6 +421,33 @@ def _check_command_blacklist(command: str) -> None:
             return
         i += 1
 
+
+def _check_codeact_inline(command: str) -> None:
+    """[CodeAct §4.0] CODEACT_ENABLED=true 时收紧 python/node 内联代码入口。
+
+    收紧后 `tool_execute python -c ...` / `node -e ...` 一律拒绝（含无害代码），
+    引导模型改用 tool_code_exec，避免绕过 CodeAct 沙盒的六层防护；
+    shell 命令（含 powershell -Command / cmd /c）不受影响，仍走 tool_execute。
+    """
+    detected = _interpreter_inline_flag(command)
+    if detected is None:
+        return
+    interp, flag = detected
+    if flag not in ("-c", "-e"):
+        return
+    parts = _win_flag_split(command)
+    if not any(p.lower() == flag.lower() for p in parts[1:]):
+        return  # 无内联 flag（如 `python script.py` / `node app.js`）→ 不收紧
+    try:
+        from app.config import settings as _settings
+        codeact_on = bool(getattr(_settings, "codeact_enabled", False))
+    except Exception:  # noqa: BLE001
+        codeact_on = False
+    if codeact_on:
+        raise ValueError(
+            f"'{interp} {flag}' inline code execution is disabled while CodeAct is enabled "
+            "(CODEACT_ENABLED=true); run Python via tool_code_exec."
+        )
 
 
 # 出站网络命令：对其 URL 参数做 SSRF 校验（curl/wget 任意 URL、ssh/scp/rsync 目标主机）
@@ -452,4 +492,4 @@ def _ssrf_check_command(command: str) -> None:
 
 
 
-__all__ = ["_ALLOWED_COMMANDS", "_BACKTICK_RE", "_DANGEROUS_PATTERNS", "_NET_COMMANDS", "_WIN_CMD_BUILTINS", "_WIN_SHIM_EXTS", "_backtick_bodies", "_check_command_allowed", "_check_command_blacklist", "_check_single_allowed", "_needs_shell", "_split_shell_segments", "_ssrf_check_command", "_validate_shell_command", "_win_cmd_needs_shell", "_win_which_cache"]
+__all__ = ["_ALLOWED_COMMANDS", "_BACKTICK_RE", "_DANGEROUS_PATTERNS", "_NET_COMMANDS", "_WIN_CMD_BUILTINS", "_WIN_SHIM_EXTS", "_backtick_bodies", "_check_codeact_inline", "_check_command_allowed", "_check_command_blacklist", "_check_single_allowed", "_interpreter_inline_flag", "_needs_shell", "_split_shell_segments", "_ssrf_check_command", "_validate_shell_command", "_win_cmd_needs_shell", "_win_which_cache"]

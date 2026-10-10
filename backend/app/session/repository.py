@@ -24,6 +24,19 @@ _DEFAULT_USER = "anonymous"
 _SQLITE_MAX_VARS = 500
 
 
+def _serialize_model(value: Any) -> Optional[str]:
+    """模型引用序列化为 JSON 文本：接受 dict 或 pydantic 模型（ModelRef）。
+
+    service.fork 会把源会话的 `SessionInfo.model`（pydantic ModelRef）直接透传，
+    若此处只做 json.dumps 会抛 TypeError（BaseModel 不可 JSON 序列化）→ fork 500。
+    """
+    if not value:
+        return None
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    return json.dumps(value)
+
+
 def _row_to_session(row: sqlite3.Row) -> SessionInfo:
     data = dict(row)
     return SessionInfo(
@@ -124,7 +137,7 @@ def create_session(
             (
                 sid, slug, "1", user_id, project_id, parent_id, directory, path,
                 title or f"新会话 - {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                agent, json.dumps(model) if model else None, kind, "idle",
+                agent, _serialize_model(model), kind, "idle",
                 0, 0, 0, 0, 0, now, now,
             ),
         )
@@ -199,7 +212,7 @@ def update_session(session_id: str, **fields: Any) -> SessionInfo:
         if key not in allowed:
             continue
         if key == "model":
-            value = json.dumps(value) if value else None
+            value = _serialize_model(value)
         if key == "archived":
             # sessions 表只有 time_archived（无 archived 列）：把布尔归档标识
             # 映射为归档时间戳（true→当前时间，false→清除归档）

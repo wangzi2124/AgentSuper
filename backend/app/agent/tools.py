@@ -150,18 +150,21 @@ def create_filesystem_tools() -> List[ToolDef]:
     tools: List[ToolDef] = []
 
     # Manual parameter descriptions for each tool
+    # [token 优化 v16] 描述精简：参数说明/工具描述按「无语义损失」原则压缩（评估报告
+    # 2026-10-09：文件系统 schema 1618 tok，长描述是可压缩项）。仅删冗余措辞与示例，
+    # 保留语义、默认值与边界条件。
     _PARAM_DOCS: dict[str, dict[str, str]] = {
-        "tool_ls": {"path": "Directory path to list (default: current directory)"},
-        "tool_read_file": {"path": "File path to read", "offset": "Line number to start reading from (1-indexed, default: 1)", "limit": "Maximum number of lines to read (default: 2000; 0 also means 2000; for large files paginate via offset)"},
-        "tool_write_file": {"path": "File path to create", "content": "Text content to write into the file", "overwrite": "If true, overwrite existing file (default: false)"},
-        "tool_append_file": {"path": "File path to append to (created if missing)", "content": "Text content to append to the end of the file"},
-        "tool_edit_file": {"path": "File path to edit", "old_string": "Text to search for and replace", "new_string": "Replacement text", "replace_all": "If true, replace ALL occurrences; if false, replace only the first. Multiple matches without replace_all cause an error (default: false)"},
-        "tool_glob": {"pattern": "Glob pattern to match files (e.g. **/*.py)", "path": "Directory to search in (default: workspace; absolute paths allowed, e.g. F:\\tetris)"},
-        "tool_grep": {"pattern": "Regex pattern to search for", "include": "File glob pattern to restrict search (e.g. *.py)", "context": "Number of context lines before/after each match", "count_only": "If true, return only match counts per file", "files_only": "If true, return only file paths", "path": "Directory to search in (default: workspace; absolute paths allowed, e.g. F:\\tetris)"},
-        "tool_execute": {"command": "Shell command to run (supports pipes/redirects/&&; every command segment is whitelist-checked)", "timeout": "Max execution time in seconds (default 300, max 600)", "workdir": "Working directory for the command (default: current directory)"},
-        "tool_delete_file": {"path": "File or empty directory path to delete"},
-        "tool_rename_file": {"path": "Source path to rename/move", "new_path": "Destination path"},
-        "tool_apply_patch": {"patch_text": "Apply-patch format text: '*** Begin Patch' / '*** Add File: <path>' + '+' lines / '*** Update File: <path>' + '-/+/space lines / '*** Delete File: <path>' / '*** End Patch'"},
+        "tool_ls": {"path": "Directory (default: cwd)"},
+        "tool_read_file": {"path": "File path", "offset": "Start line (1-based, default 1)", "limit": "Max lines (default 2000, max 50KB; paginate via offset)"},
+        "tool_write_file": {"path": "File path (parent dirs auto-created)", "content": "Text to write", "overwrite": "Overwrite if exists (default false)"},
+        "tool_append_file": {"path": "File path (created if missing)", "content": "Text to append"},
+        "tool_edit_file": {"path": "File path", "old_string": "Text to replace", "new_string": "Replacement", "replace_all": "Replace all (default false; multiple matches without this error)"},
+        "tool_glob": {"pattern": "Glob (e.g. **/*.py)", "path": "Dir (default workspace; absolute allowed)"},
+        "tool_grep": {"pattern": "Regex", "include": "File glob filter (e.g. *.py)", "context": "Context lines around match", "count_only": "Return counts only", "files_only": "Return file paths only", "path": "Dir (default workspace; absolute allowed)"},
+        "tool_execute": {"command": "Shell command (pipes/redirects/&& ok; each segment whitelist-checked)", "timeout": "Seconds (default 300, max 600)", "workdir": "Working dir (default cwd)"},
+        "tool_delete_file": {"path": "File or empty dir to delete"},
+        "tool_rename_file": {"path": "Source path", "new_path": "Destination path"},
+        "tool_apply_patch": {"patch_text": "apply_patch text: '*** Begin Patch' / '*** Add File: <p>' + '+' lines / '*** Update File: <p>' -/+/space lines / '*** Delete File: <p>' / '*** End Patch'"},
     }
 
     for func in [tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file, tool_glob, tool_grep, tool_execute, tool_delete_file, tool_rename_file, tool_apply_patch]:
@@ -183,16 +186,16 @@ def create_filesystem_tools() -> List[ToolDef]:
         # Use a concise description for the tool
         _DESC = {
             "tool_ls": "List files and directories",
-            "tool_read_file": "Read file content (text with line numbers; max 2000 lines / 50KB per call, paginate via offset; base64 for images/pdf/audio/video; also lists directories)",
-            "tool_write_file": "Create a new file with text content (auto-creates parent directories)",
-            "tool_append_file": "Append text content to a file (creates it if missing). Use for large files: write the first chunk then append in chunks.",
-            "tool_edit_file": "Edit a file by replacing text (fuzzy matching; errors when multiple matches unless replace_all)",
-            "tool_glob": "Find files matching a glob pattern (absolute paths, mtime-sorted, max 100)",
-            "tool_grep": "Search file contents using regex (absolute paths, 'Found N matches', max 100 matches)",
-            "tool_execute": "Run a shell command (build/install/test/check/verify only, NOT for network/web operations)",
-            "tool_delete_file": "Delete a file or empty directory (workspace only)",
-            "tool_rename_file": "Rename or move a file/directory",
-            "tool_apply_patch": "Apply an apply_patch-format patch (Add File / Update File / Delete File). Best for creating or editing multiple files in one call.",
+            "tool_read_file": "Read file content (line-numbered; max 2000 lines/50KB, paginate via offset; base64 for images/pdf/audio/video; also lists dirs)",
+            "tool_write_file": "Create a file with text (parent dirs auto-created)",
+            "tool_append_file": "Append text (creates if missing); for large files write first chunk then append in chunks",
+            "tool_edit_file": "Replace text in a file (fuzzy match; errors on multiple matches unless replace_all)",
+            "tool_glob": "Find files by glob (absolute paths, mtime-sorted, max 100)",
+            "tool_grep": "Search file contents by regex (absolute paths, 'Found N matches', max 100)",
+            "tool_execute": "Run a shell command (build/install/test/check only; NOT network/web)",
+            "tool_delete_file": "Delete a file or empty dir (workspace only)",
+            "tool_rename_file": "Rename or move a file/dir",
+            "tool_apply_patch": "Apply apply_patch text (Add/Update/Delete File); best for multiple files in one call",
         }
         tools.append(ToolDef(
             name=name,
@@ -246,6 +249,13 @@ def build_system_prompt_no_kb(
     """
     enabled_skills = skill_loader.get_enabled_skills()
     enabled_plugins = plugin_loader.get_enabled_plugins()
+
+    # [CodeAct §10] 仅当受控执行器开启时注入代码执行提示（默认关闭）。
+    try:
+        from app.config import settings as _settings_codeact
+        _codeact_enabled = bool(getattr(_settings_codeact, "codeact_enabled", False))
+    except Exception:  # noqa: BLE001
+        _codeact_enabled = False
 
     parts = [
         "You are a helpful AI assistant.",
@@ -304,16 +314,27 @@ def build_system_prompt_no_kb(
         tool_parts.append(f"Plugin tools:\n{plugins_desc}")
 
     if enabled_skills:
-        # [token 优化 v10] 不再逐一列出全部技能名（30+ 技能约 1.3K 字符，固定随每次调用发出）。
-        # [技能常驻] 技能清单 + 截断描述由 graph._build_tool_defs 作为**常驻** load_skill_*
-        # schema 无条件挂载（17 技能约 1.7K token），系统提示词只保留这一行，避免重复描述。
-        tool_parts.append(
-            "Skill tools (load_skill_<name>()): specialized skills are available. Their inventory and "
-            "truncated descriptions are already present in your tool schema — scan that list first, "
-            "then call the matching load_skill_<name>() tool to load the full instructions BEFORE "
-            "starting a task that matches one (documents, web/frontend, design, coding practices, "
-            "teaching, research, etc.). Skills not in the schema were disabled by the user."
-        )
+        from app.config import settings as _settings
+        if getattr(_settings, "skills_lazy", False):
+            # [工具懒加载 2026-10-09] 技能 schema 不再常驻；用 tool_search_tools 按需发现。
+            tool_parts.append(
+                "Skill tools (load_skill_<name>()): specialized skills exist but are NOT preloaded "
+                "(to save context). FIRST call tool_search_tools(query=...) to find the matching "
+                "skill(s), then call the returned load_skill_<name>() tool to load the full "
+                "instructions BEFORE starting a task that matches one (documents, web/frontend, "
+                "design, coding practices, teaching, research, etc.)."
+            )
+        else:
+            # [token 优化 v10] 不再逐一列出全部技能名（30+ 技能约 1.3K 字符，固定随每次调用发出）。
+            # [技能常驻] 技能清单 + 截断描述由 graph._build_tool_defs 作为**常驻** load_skill_*
+            # schema 无条件挂载（17 技能约 1.7K token），系统提示词只保留这一行，避免重复描述。
+            tool_parts.append(
+                "Skill tools (load_skill_<name>()): specialized skills are available. Their inventory and "
+                "truncated descriptions are already present in your tool schema — scan that list first, "
+                "then call the matching load_skill_<name>() tool to load the full instructions BEFORE "
+                "starting a task that matches one (documents, web/frontend, design, coding practices, "
+                "teaching, research, etc.). Skills not in the schema were disabled by the user."
+            )
 
     if tool_parts:
         parts.append("You can use the following tools:")
@@ -344,9 +365,20 @@ def build_system_prompt_no_kb(
             "(saved to data/generated); tool_voice_transcribe to transcribe a local audio file to text. "
             "Speakers: Vivian/Serena/Uncle_fu/Dylan/Eric/Ryan/Aiden/Ono_anna/Sohee."
         ] if has_voice else []),
+        *([
+            "- Code execution (tool_code_exec — controlled executor): for multi-step exact computation, "
+            "data cleaning/stats/transform, or string/regex handling, write a short Python program and run it "
+            "in the controlled executor. Inside the sandbox os/subprocess/socket/open are unavailable; access "
+            "files/network ONLY through the built-in api module: api.read_file / api.write_file / "
+            "api.append_file / api.list_dir / api.glob / api.grep / api.web_search / api.save_artifact. "
+            "On error read the traceback and rewrite (max 3 attempts). After success summarize in natural "
+            "language; write large results to files with the normal file tools. Use tool_execute for "
+            "shell/system commands — NOT the executor."
+        ] if _codeact_enabled else []),
         "- If no tool fits, answer directly without calling tools.",
         "",
-        "IMPORTANT - Before code/design tasks: FIRST call the relevant load_skill_*() tool for best practices, "
+        "IMPORTANT - Before code/design tasks: FIRST load the relevant skill (if it is not already in your "
+        "tool list, call tool_search_tools to find it, then call its load_skill_<name>()) for best practices, "
         "then write files with tool_write_file; use tool_execute for build/install/test/check (e.g. python -m py_compile) as needed.",
         "",
         "IMPORTANT - Documents (.docx/.pdf/.xlsx/.pptx): use the matching generator plugin "

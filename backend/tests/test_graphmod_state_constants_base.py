@@ -454,6 +454,41 @@ def test_pinned_tool_names_exception():
 
 # ── [技能常驻] load_skill_* 无条件挂载 ──────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _pin_skills_resident(monkeypatch):
+    """[工具懒加载 2026-10-09] 本文件的常驻用例锁定 SKILLS_LAZY=false 语义。
+
+    生产 `.env` 现在默认 `SKILLS_LAZY=true`；若不显式关掉，这些用例会依运行目录
+    （是否加载 .env）而变。单个用例可再 monkeypatch 覆写为 true。
+    """
+    from app.config import settings as _s
+    monkeypatch.setattr(_s, "skills_lazy", False)
+
+
+def test_build_tool_defs_skills_lazy_mounts_on_search(monkeypatch):
+    """[工具懒加载] SKILLS_LAZY=true：技能不常驻，tool_search_tools 检索后下一轮挂载。"""
+    from app.config import settings as _s
+    from app.agent.tools import ToolDef
+    monkeypatch.setattr(_s, "skills_lazy", True)
+    agent = build_agent()
+    for n in _ORPHAN_SKILLS:
+        agent.tools.append(_skill_tool(n))
+    agent.tools.append(ToolDef(name="tool_search_tools", description="search registry", parameters={}, fn=lambda: ""))
+
+    defs = agent._build_tool_defs("随便聊聊", conversation_id="lazy-c", model="deepseek/deepseek-v4-flash")
+    names = {d["function"]["name"] for d in defs}
+    assert "tool_search_tools" in names, "元工具必须常驻"
+    assert not (set(_ORPHAN_SKILLS) & names), f"lazy 时技能不得常驻: {sorted(set(_ORPHAN_SKILLS) & names)}"
+
+    # 模拟 tool_search_tools 命中后回写会话缓存 → 下一轮重建挂载
+    agent._remember_conversation_tools("lazy-c", {"load_skill_mcp_builder"})
+    names2 = {
+        d["function"]["name"]
+        for d in agent._build_tool_defs("随便聊聊", conversation_id="lazy-c", model="deepseek/deepseek-v4-flash")
+    }
+    assert "load_skill_mcp_builder" in names2, "检索命中的技能应在下一轮挂载"
+
+
 def _skill_tool(name: str):
     from app.agent.tools import ToolDef
     return ToolDef(name=name, description=f"{name} 技能", parameters={}, fn=lambda: "")

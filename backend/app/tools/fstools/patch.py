@@ -33,6 +33,7 @@ from .writer import _detect_line_ending
 from .writer import _normalize_line_endings
 from .writer import _read_text_raw
 from .writer import _write_text_raw
+from .verify import verify_written_file  # [写后校验] patch 落盘后语法门禁
 
 # ── 拆分内语句（verbatim，含前置注释，保持原始顺序）──
 
@@ -208,7 +209,16 @@ def tool_apply_patch(patch_text: str) -> dict:
             else f"Error: Patch partially applied before failing at {rel_path}. Applied: {', '.join(applied)}"
         )
         return _env("apply_patch", f"{prefix}\n{e}", error=True, applied=applied)
-    return _env("apply_patch", "Applied patch sequentially:\n" + "\n".join(applied), applied=applied)
+    notes = []
+    for item in applied:  # [写后校验] A/M 操作后逐个做语法校验（D 是删除，无需校验）
+        op, _, rel = item.partition(" ")
+        if op not in ("A", "M"):
+            continue
+        note = verify_written_file(_resolve(rel), existed_before=(op == "M"))
+        if note:
+            notes.append(note)
+    tail = ("\n" + "\n".join(notes)) if notes else ""
+    return _env("apply_patch", "Applied patch sequentially:\n" + "\n".join(applied) + tail, applied=applied)
 
 
 

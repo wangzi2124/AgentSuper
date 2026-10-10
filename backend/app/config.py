@@ -70,19 +70,36 @@ class Settings(BaseSettings):
     # 端点层等待 supervisor 返回的上限（需 > decompose + sub_agent + synthesize）
     supervisor_timeout: float = 300.0
 
-    # 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
+# 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
     # 默认 16_384 ≈ 模型原生上限的常用值；长任务配合系统提示"长内容写文件"规则避免截断。
     # [token 优化 v9] 16_384 → 8_192：普通问答用不到那么大输出，压低超长输出兜底成本。
-    llm_max_tokens: int = 8_192
+    # [输出上限 2026-10-03] 8_192 → 16_384：实测写俄罗斯方块时整份代码塞进单次
+    # tool_write_file 参数（24,528 字符）正好撞 8K 被腰斩。注意这只在**模型目录也放开**
+    # 时才有效 —— resolve_max_output_tokens 取 min(模型声明, 本值) 且绝不放大，
+    # 故 builtin_catalog.py 里 deepseek 的 limits.max_output_tokens 同步提到 16_384。
+    # [思考预算 2026-10-09] 16_384 → 32_000：deepseek-v4-flash 默认开思考，且思考 token
+    # 计入 max_tokens（实测 ct==reasoning==16_384、finish=length、content=0），16K 上限被
+    # 思考吃光 → 正文与工具调用皆空、任务失败。对齐 opencode `OUTPUT_TOKEN_MAX=32000`，
+    # 给「思考 + 正文」留总预算。⚠ 必须同步抬高 CONTEXT_RESERVE_TOKENS（预留 ≥ 输出上限），
+    # 并同步 builtin_catalog deepseek 条目的 limits.max_output_tokens（resolve 取 min）。
+    llm_max_tokens: int = 32_000
 
     # Token 成本控制
     # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
     # 对齐 opencode overflow.ts：usable = max_context_tokens - context_reserve_tokens
     # [token 优化 v5] 48K → 32K：配合 v4 压缩（信息不丢），单次调用天花板 -33%
     # [token 优化 v9] 32K → 24K：usable ≈ 15.8K，进一步压平单次调用体积（配套 MAX_HISTORY_TOKENS 16K）
-    max_context_tokens: int = 24_000
-    # 输出预留：留给模型回答的 token（≈ min(20_000, maxOutputTokens)，默认 8_192）
-    context_reserve_tokens: int = 8_192
+    # [输出上限 2026-10-03] 24K → 32K：**不是**为了放大单次调用体积（那会让每轮 prompt 成本涨 33%），
+    # 而是为了给上调后的输出预留腾地方 —— 预留必须 ≥ 输出上限，否则 usable = 32K-16K = 16K
+    # 会比调前的 15.8K 还小，历史可用量反而缩水。32K-16K = 16K ≈ 原来的 15.8K，
+    # 即「输出天花板翻倍、单次调用体积基本不变」，成本中性。
+    max_context_tokens: int = 32_768
+    # 输出预留：留给模型回答的 token（≈ min(20_000, maxOutputTokens)）
+    # [输出上限 2026-10-03] 8_192 → 16_384，与 llm_max_tokens 对齐（预留 < 输出上限是自相矛盾的：
+    # 模型一次输出就能吃掉全部 usable，留给历史的窗口归零）。
+    # [思考预算 2026-10-09] 16_384 → 32_768：预留必须 ≥ llm_max_tokens（32_000），
+    # 否则一次输出就能吃光 usable、历史窗口归零（见 test_output_budget.py）。
+    context_reserve_tokens: int = 32_768
     # [token 优化 P8] cl100k_base 对 DeepSeek tokenizer 系统性低估（实测 +13.2%：
     # round8 估算 20,851 vs 实际 23,599）。用于 token_counter 估算校正，避免
     # 截断/压缩判断"以为没超、实际已超"（实测 round9 实际 25,779 超 usable 23,808）
@@ -134,6 +151,15 @@ class Settings(BaseSettings):
     step_summary_interval: int = 2
     # 摘要后原样保留的最近消息条数（覆盖最近一轮 assistant+tool 结果）
     step_summary_keep_messages: int = 4
+    # ── [C5 · 方案 E/F] 长任务小步快走（多请求接力）──
+    # code 子 Agent 对多步骤实现类任务先拆解计划、每步一个独立 fresh-context 请求执行，
+    # 步间只传落盘 STEP_STATE（上下文永不膨胀）。默认开启（用 LONG_TASK_MIN_QUESTION_CHARS
+    # 门控，短问题不触发规划调用，零额外开销）。
+    long_task_step_mode: bool = True
+    # 接力规划门控：问题字符数低于该阈值时不拆计划（保持普通单请求路径）
+    long_task_min_question_chars: int = 30
+    # 接力时计划最多拆几步
+    long_task_max_steps: int = 6
     # ── [F8/F9] 图片上传解析给模型（多模态附件管线）──
     # 上传图片先规格化（缩放+JPEG 压缩）再投递给模型，避免大图 base64 撑爆上下文。
     image_max_dimension: int = 1024          # 长边缩放上限（px）
@@ -198,6 +224,27 @@ class Settings(BaseSettings):
     # 当 MAX_STEPS >= MAX_TOOL_ROUNDS 时，MAX_STEPS 生效上限即等于该值。
     # [token 优化 v9] 16 → 8：每轮工具调用都会重发整段上下文，减少轮数即减少 token 累积。
     max_tool_rounds: int = 8
+    # [零进展救援] 思考模型把单轮输出预算全烧在 reasoning 上（content 空 +
+    # tool_calls 空 + finish_reason=length）时的「强制产出」重试次数。
+    # 这类轮次**没有任何已交付内容**，与「已交付部分内容的 length 截断」性质不同：
+    # 后者按 opencode 对齐不续跑（续跑会重复污染输出），前者不续跑就等于任务必败。
+    # 每次重试最多再花 LLM_MAX_TOKENS 输出 token，故默认保守取 1；设 0 关闭该行为。
+    zero_progress_rescue_attempts: int = 1
+    # 救援后仍零进展时，是否用诊断文案替换泄漏的 reasoning 独白。
+    # 默认开：把 2.7 万字内心独白直接返回给用户是纯粹的负体验，且会撑爆上下文预算。
+    zero_progress_mask_reasoning: bool = True
+    # [思考模式 2026-10-09] DeepSeek V4 思考开关：enabled / disabled / adaptive。
+    # 默认 disabled —— 实测 agentic 工具循环里思考会吃光 max_tokens 预算
+    # （reasoning == ct == 上限，finish=length，零工具 / 零正文），且思考轮要求把
+    # reasoning_content 回传（依赖 litellm 补丁）。关闭后 finish=stop、正常产出。
+    # adaptive = 不显式下发，交服务端默认（DeepSeek V4 默认 enabled）；
+    # enabled 时经 extra_body 下发 thinking={"type":"enabled"}（litellm 顶层 kwarg 会被丢弃）。
+    deepseek_thinking: str = "disabled"
+    # [工具懒加载 2026-10-09] 技能 schema 惰性挂载：开 = 技能（load_skill_*）不再常驻，
+    # 由 tool_search_tools 元工具在运行时按需发现并（尾部）注入 schema。评估报告实测
+    # 45 个技能常驻占 4802 tok（常驻 schema 的 63%）；开启后每请求省下这部分固定开销。
+    # 默认关（保留已测试的技能常驻语义）；在 .env 设 SKILLS_LAZY=true 开启。
+    skills_lazy: bool = False
     # Doom-loop 检测：同一组工具调用指纹连续重复 N 轮后，注入策略变更提示（≥2）
     doom_loop_threshold: int = 3
     # Doom-loop 升级：首次提示之后，再次连续触发 N 次相同指纹即强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具），
@@ -282,6 +329,33 @@ class Settings(BaseSettings):
     chain_log_llm_calls: bool = True
     # 记录链路上的工具调用明细（tool_start/tool_end）。关闭可显著降低写入量
     chain_log_tool_calls: bool = True
+
+    # ── CodeAct 受控执行器（app/codeact/，设计 docs/codeact-sandbox-design.md）──
+    # 总开关：默认关。启用后挂载 tool_code_exec（受控 Python 沙盒），并同步收紧
+    # tool_execute 的 python -c / node -e 内联入口（§4.0，见 fstools/execv.py）。
+    codeact_enabled: bool = False
+    # 执行超时（秒）——审批等待期间时钟暂停（v2.1 修正 9）
+    codeact_timeout: float = 10.0
+    # 单次 RPC（api.read_file/web_search/save_artifact…）超时（秒）
+    codeact_rpc_timeout: float = 30.0
+    # 回灌给 LLM 的单段输出上限（stdout/stderr/last_expr，字符）
+    codeact_max_output_chars: int = 2000
+    # AST 静态守卫：代码长度与 AST 节点数上限
+    codeact_max_code_chars: int = 20000
+    codeact_max_ast_nodes: int = 5000
+    # Job Object 进程内存上限（MB）与子进程数上限（§5.1）
+    codeact_max_memory_mb: int = 512
+    codeact_max_processes: int = 16
+    # 宿主并发执行上限（信号量，超出排队）
+    codeact_max_concurrent: int = 2
+    # 同一会话连续失败重试上限（§10；generate.py/_tool_code_exec 强制，达上限停用）
+    codeact_max_retries: int = 3
+    # 网络访问开关（web_search RPC 门控）
+    codeact_allow_network: bool = False
+    # 产物目录（相对数据根；save_artifact RPC 与宿主侧截断转储的子目录）
+    codeact_artifact_dir: str = "data/codeact"
+    # 单产物大小上限（MB；save_artifact RPC 拒绝超限，防 socket 帧被撑爆）
+    codeact_max_artifact_size_mb: int = 10
 
 
 settings = Settings()

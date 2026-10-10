@@ -67,6 +67,7 @@ class AgentState(TypedDict):
     files: list[dict]
     steps: list[dict]
     tokens: dict[str, int]
+    cost: float
     finish: str
     _event_queue: asyncio.Queue | None
     _on_activity: Callable[[str], None] | None

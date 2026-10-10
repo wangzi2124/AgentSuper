@@ -1,0 +1,659 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.13.2, pytest-9.1.1, pluggy-1.6.0
+rootdir: C:\tool\AgentSuper\backend
+configfile: pytest.ini
+plugins: anyio-4.15.1, langsmith-0.14.5, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 52 items
+
+tests\test_write_verification.py .................                       [ 32%]
+tests\test_truncated_tool_args.py F.FFF.                                 [ 44%]
+tests\test_zero_progress_rescue.py FFFF..F....F....FFFF.FFFFF...         [100%]
+
+================================== FAILURES ===================================
+__________________ test_truncated_args_message_is_actionable __________________
+
+    def test_truncated_args_message_is_actionable():
+        """回灌文案必须给出可操作的下一步，否则模型会原样重试同样大的 payload。"""
+>       from app.agent.graphmod.constants import _TRUNCATED_ARGS_ERROR
+
+tests\test_truncated_tool_args.py:39: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\__init__.py:18: in <module>
+    from app.agent.rag_wrapper import RAGAgentWrapper
+app\agent\rag_wrapper.py:16: in <module>
+    from app.agent.graph import RAGAgent
+app\agent\graph.py:6: in <module>
+    from .graphmod.core import RAGAgent
+app\agent\graphmod\core.py:28: in <module>
+    from app.context.token_counter import estimate_tokens_messages, estimate_tools, update_token_correction
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+___________ test_generate_blocks_tool_execution_when_args_truncated ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000002DD2B9B5010>
+
+    def test_generate_blocks_tool_execution_when_args_truncated(monkeypatch):
+        """核心回归：被截断的 tool_write_file **绝不能**被调用。"""
+        import asyncio
+    
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+>       from _graphmod_support import FakeLLM, build_agent, make_state
+
+tests\test_truncated_tool_args.py:68: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\_graphmod_support.py:10: in <module>
+    from app.agent.graphmod.core import RAGAgent  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app\agent\graphmod\core.py:34: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+________________ test_generate_error_message_reaches_the_model ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000002DD2BA08C00>
+
+    def test_generate_error_message_reaches_the_model(monkeypatch):
+        """守卫必须把错误**回灌给模型**，否则它不知道该改用分段写。"""
+        import asyncio
+    
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+>       from _graphmod_support import FakeLLM, build_agent, make_state
+
+tests\test_truncated_tool_args.py:115: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\_graphmod_support.py:10: in <module>
+    from app.agent.graphmod.core import RAGAgent  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app\agent\graphmod\core.py:34: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+____________ test_generate_normal_length_tool_calls_still_execute _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000002DD2BA085A0>
+
+    def test_generate_normal_length_tool_calls_still_execute(monkeypatch):
+        """反向守卫：正常（finish=tool_calls）必须照常执行，绝不能被误伤。"""
+        import asyncio
+    
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+>       from _graphmod_support import FakeLLM, build_agent, make_state
+
+tests\test_truncated_tool_args.py:166: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\_graphmod_support.py:10: in <module>
+    from app.agent.graphmod.core import RAGAgent  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app\agent\graphmod\core.py:34: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+_____________________ test_empty_content_is_zero_progress _____________________
+
+    def test_empty_content_is_zero_progress():
+>       from app.agent.graphmod.generate import RAGAgentGenerate
+
+tests\test_zero_progress_rescue.py:24: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+____________________ test_tool_calls_is_not_zero_progress _____________________
+
+    def test_tool_calls_is_not_zero_progress():
+>       from app.agent.graphmod.generate import RAGAgentGenerate
+
+tests\test_zero_progress_rescue.py:30: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+___________________ test_real_content_is_not_zero_progress ____________________
+
+    def test_real_content_is_not_zero_progress():
+>       from app.agent.graphmod.generate import RAGAgentGenerate
+
+tests\test_zero_progress_rescue.py:37: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+___________ test_reasoning_fallback_content_counts_as_zero_progress ___________
+
+    def test_reasoning_fallback_content_counts_as_zero_progress():
+        """核心回归：core 把 reasoning_content 回退填进 content 后，
+        绝不能被当成「有回答」（否则 2.7 万字独白伪装成成功）。"""
+>       from app.agent.graphmod.generate import RAGAgentGenerate
+
+tests\test_zero_progress_rescue.py:45: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+___________ test_mask_reasoning_message_is_diagnostic_not_monologue ___________
+
+    def test_mask_reasoning_message_is_diagnostic_not_monologue():
+        """最终失败时返回的应是诊断文案，且不含独白内容。"""
+>       from app.agent.graphmod.generate import RAGAgentGenerate
+
+tests\test_zero_progress_rescue.py:77: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+_________________ test_zero_progress_reasoning_size_threshold _________________
+
+    def test_zero_progress_reasoning_size_threshold():
+        """思考规模门槛：低于 2000 token 不算「预算耗尽」（实测末轮 346 token 形态）。"""
+>       from app.agent.graphmod.generate import (
+            _ZERO_PROGRESS_REASONING_MIN_TOKENS,
+            _zero_progress_cause,
+        )
+
+tests\test_zero_progress_rescue.py:134: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+_________ test_oversized_prose_detected_when_truncated_without_tools __________
+
+    def test_oversized_prose_detected_when_truncated_without_tools():
+>       from app.agent.graphmod.generate import RAGAgentGenerate
+
+tests\test_zero_progress_rescue.py:216: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+____________ test_oversized_prose_not_triggered_when_tools_called _____________
+
+    def test_oversized_prose_not_triggered_when_tools_called():
+        """带工具调用时不算「内联正文」—— 那是在正常干活（哪怕同时被截断）。"""
+>       from app.agent.graphmod.generate import RAGAgentGenerate
+
+tests\test_zero_progress_rescue.py:225: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+_____________ test_oversized_prose_requires_length_finish_reason ______________
+
+    def test_oversized_prose_requires_length_finish_reason():
+        """非 length 收尾（正常 stop）不得触发，避免对正常长回答多问一轮。"""
+>       from app.agent.graphmod.generate import RAGAgentGenerate
+
+tests\test_zero_progress_rescue.py:233: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+________________ test_oversized_prose_below_threshold_ignored _________________
+
+    def test_oversized_prose_below_threshold_ignored():
+        """短回答恰好被截属于偶发，不触发救援（避免对短问答多问一轮）。"""
+        from app.agent.graphmod.constants import OVERSIZED_PROSE_MIN_CHARS
+>       from app.agent.graphmod.generate import RAGAgentGenerate
+
+tests\test_zero_progress_rescue.py:242: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+__________ test_generate_injects_oversized_prose_nudge_and_continues __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000002DD2BC70E50>
+
+    def test_generate_injects_oversized_prose_nudge_and_continues(monkeypatch):
+        """控制流回归：超长内联正文被截断时，循环必须**续跑**并注入落盘提示。
+    
+        断言两件事：
+          1) 第 2 次 LLM 调用真的发生了（没有静默收尾）；
+          2) 该轮上下文里带上了 OVERSIZED_PROSE_PROMPT，且**没有**回灌那 24K 字正文。
+        """
+        import asyncio
+        import json as _json
+    
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+>       from _graphmod_support import FakeLLM, build_agent, make_state
+
+tests\test_zero_progress_rescue.py:273: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\_graphmod_support.py:10: in <module>
+    from app.agent.graphmod.core import RAGAgent  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app\agent\graphmod\core.py:34: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+__________ test_generate_shortcut_ignores_reasoning_fallback_content __________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x000002DD2B933850>
+
+    def test_generate_shortcut_ignores_reasoning_fallback_content(monkeypatch):
+        """核心回归：救援轮不得因「reasoning 回退正文非空」而跳过重试。
+    
+        实测事故（2026-10-03，「在 D 盘写个俄罗斯方块游戏」）：
+          第 4 轮 content 空、reasoning 23,844 字符、finish=length、tool_calls=[]，
+          `core._llm_call` 把 reasoning 回退填进 content 并打 `_content_from_reasoning`。
+          `_is_zero_progress` 正确判 True → 救援注入催促 → 但「已拿到正文就收尾」捷径
+          被那份独白满足 → 当场 break → 模型从未拿到那次重试 → 磁盘零文件，
+          用户只收到 291 字诊断文案。救援对思考模型一直是空转。
+        """
+        import asyncio
+    
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+>       from _graphmod_support import FakeLLM, build_agent, make_state
+
+tests\test_zero_progress_rescue.py:334: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\_graphmod_support.py:10: in <module>
+    from app.agent.graphmod.core import RAGAgent  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app\agent\graphmod\core.py:34: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+_______________ test_zero_progress_rescue_ignores_finish_reason _______________
+
+    def test_zero_progress_rescue_ignores_finish_reason():
+        """回归：思考模型烧光预算后 Provider 可能报 `stop` 而非 `length`。
+    
+        实测（2026-10-03 变体）：content 空、reasoning 10,219 字符、finish_reason=stop。
+        若用 length 门禁，救援不触发 → 只返回 291 字诊断文案 → 磁盘零文件。
+        零进展档的 content 按定义不是真答案，所以不该受 finish_reason 限制。
+        """
+        import asyncio
+    
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+>       from _graphmod_support import FakeLLM, build_agent, make_state
+
+tests\test_zero_progress_rescue.py:392: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\_graphmod_support.py:10: in <module>
+    from app.agent.graphmod.core import RAGAgent  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app\agent\graphmod\core.py:34: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+__________ test_plain_empty_answer_still_goes_to_empty_answer_retry ___________
+
+    def test_plain_empty_answer_still_goes_to_empty_answer_retry():
+        """反向守卫：不带 `_content_from_reasoning` 的空回答不得被零进展救援抢走。
+    
+        空回答归既有的 EMPTY_ANSWER 重试 / 弱模型强模型兜底路径管（轮次由
+        `test_graphmod_generate_core.py::test_generate_empty_content_default` 锁定）；
+        抢过来会多烧一轮并挤掉强模型兜底。
+        """
+        import asyncio
+    
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+>       from _graphmod_support import FakeLLM, build_agent, make_state
+
+tests\test_zero_progress_rescue.py:451: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+tests\_graphmod_support.py:10: in <module>
+    from app.agent.graphmod.core import RAGAgent  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app\agent\graphmod\core.py:34: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+__________ test_oversized_prose_still_requires_length_finish_reason ___________
+
+    def test_oversized_prose_still_requires_length_finish_reason():
+        """反向守卫：超长正文档仍必须靠 length 证明「非空正文是残稿」，不得放宽。"""
+>       from app.agent.graphmod.generate import RAGAgentGenerate
+
+tests\test_zero_progress_rescue.py:497: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app\agent\graphmod\generate.py:28: in <module>
+    from app.context.budget import usable_context_tokens, compaction_threshold_tokens, prune_protect_tokens, prune_minimum_tokens
+app\context\__init__.py:10: in <module>
+    from app.context.compaction import ContextCompactor, previous_summary_of
+app\context\compaction.py:27: in <module>
+    import litellm
+.venv\Lib\site-packages\litellm\__init__.py:51: in <module>
+    from litellm.litellm_core_utils.core_helpers import drop_params_env_flag
+.venv\Lib\site-packages\litellm\litellm_core_utils\core_helpers.py:14: in <module>
+    from litellm.types.llms.openai import AllMessageValues, OpenAIChatCompletionFinishReason
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    from collections.abc import Iterable, Mapping
+    from enum import Enum
+    from os import PathLike
+    from typing import IO, Any, Final, Literal, Optional, TypeAlias, Union
+    
+    import httpx
+>   from openai import Omit
+E   ModuleNotFoundError: No module named 'openai'
+
+.venv\Lib\site-packages\litellm\types\llms\openai.py:7: ModuleNotFoundError
+=========================== short test summary info ===========================
+FAILED tests/test_truncated_tool_args.py::test_truncated_args_message_is_actionable
+FAILED tests/test_truncated_tool_args.py::test_generate_blocks_tool_execution_when_args_truncated
+FAILED tests/test_truncated_tool_args.py::test_generate_error_message_reaches_the_model
+FAILED tests/test_truncated_tool_args.py::test_generate_normal_length_tool_calls_still_execute
+FAILED tests/test_zero_progress_rescue.py::test_empty_content_is_zero_progress
+FAILED tests/test_zero_progress_rescue.py::test_tool_calls_is_not_zero_progress
+FAILED tests/test_zero_progress_rescue.py::test_real_content_is_not_zero_progress
+FAILED tests/test_zero_progress_rescue.py::test_reasoning_fallback_content_counts_as_zero_progress
+FAILED tests/test_zero_progress_rescue.py::test_mask_reasoning_message_is_diagnostic_not_monologue
+FAILED tests/test_zero_progress_rescue.py::test_zero_progress_reasoning_size_threshold
+FAILED tests/test_zero_progress_rescue.py::test_oversized_prose_detected_when_truncated_without_tools
+FAILED tests/test_zero_progress_rescue.py::test_oversized_prose_not_triggered_when_tools_called
+FAILED tests/test_zero_progress_rescue.py::test_oversized_prose_requires_length_finish_reason
+FAILED tests/test_zero_progress_rescue.py::test_oversized_prose_below_threshold_ignored
+FAILED tests/test_zero_progress_rescue.py::test_generate_injects_oversized_prose_nudge_and_continues
+FAILED tests/test_zero_progress_rescue.py::test_generate_shortcut_ignores_reasoning_fallback_content
+FAILED tests/test_zero_progress_rescue.py::test_zero_progress_rescue_ignores_finish_reason
+FAILED tests/test_zero_progress_rescue.py::test_plain_empty_answer_still_goes_to_empty_answer_retry
+FAILED tests/test_zero_progress_rescue.py::test_oversized_prose_still_requires_length_finish_reason
+======================== 19 failed, 33 passed in 2.85s ========================

@@ -132,6 +132,9 @@ class RAGAgentBase:
         )
 
         self._usage_accum: dict[str, int] = dict(_ZERO_USAGE)
+        # [CodeAct §10] 会话级 codeact 连续失败计数（conversation_id → int），
+        # 达 codeact_max_retries 后 _tool_code_exec 返回停用消息，避免死循环空烧。
+        self._codeact_failures: dict[str, int] = {}
         # 工具热更新锁：refresh_tools 重建 graph 期间与并发请求互斥
         self._refresh_lock = asyncio.Lock()
         # [token 优化 · 前缀缓存 v15] 会话级已挂载工具名缓存（conversation_id → 有序工具名）。
@@ -192,6 +195,29 @@ class RAGAgentBase:
             parameters=_TASK_TOOL_SCHEMA["function"]["parameters"],
             fn=self._task_tool_placeholder,
         )]
+        # [工具懒加载 2026-10-09] 元工具：按关键词检索技能/插件注册表并按需挂载其 schema。
+        # 开启 SKILLS_LAZY 后技能不再常驻（省下 ~4802 tok），模型先检索再调用。
+        # fn 仅为 schema 占位：实际执行在 _execute_tool 中特判（需会话 id 以回写工具缓存）。
+        tools.append(ToolDef(
+            name="tool_search_tools",
+            description=(
+                "Search the available tool/skill registry by keyword and load matching tool "
+                "schemas. Use this when a specialized capability (a skill such as brand-guidelines, "
+                "mcp-builder, pptx, docx, or a plugin) would help but is not currently in your tool "
+                "list. Returns matching names + one-line descriptions; matched tools become callable "
+                "on your next step. Prefer this over guessing a skill name."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keywords describing what you need (Chinese or English)"},
+                    "kind": {"type": "string", "enum": ["skill", "plugin", "all"], "description": "Restrict to skills, plugins, or all (default all)"},
+                    "max_results": {"type": "integer", "description": "Max matches to return (default 8, max 20)"},
+                },
+                "required": ["query"],
+            },
+            fn=self._search_tools_placeholder,
+        ))
         # [opencode memory] 主 Agent 记忆读写工具：模型可主动记忆/回忆关键信息。
         if self.memory is not None:
             tools.append(ToolDef(
@@ -276,6 +302,33 @@ class RAGAgentBase:
                     "required": ["audio_path"],
                 },
                 fn=self._voice_tool_placeholder,
+            ))
+        # [CodeAct §Phase1] 受控代码执行工具：把精确计算/数据处理/批量变换交给沙盒，
+        # 避免 LLM 心算出错或产出长文本撑爆输出预算。默认关闭（CODEACT_ENABLED=false）。
+        if getattr(settings, "codeact_enabled", False):
+            tools.append(ToolDef(
+                name="tool_code_exec",
+                description=(
+                    "在受控沙盒中执行一段 Python 并回传 stdout 与最后一个表达式的值。"
+                    "适合：多步精确计算、数据清洗/统计/转换、字符串与正则处理、需要确定结果的中间步骤。"
+                    "沙盒内禁止直接 import os/socket/subprocess/open 访问文件与网络；需要读写工作区文件、"
+                    "搜索或联网时用内置 api 模块：api.read_file / api.write_file / api.append_file / "
+                    "api.list_dir / api.glob / api.grep / api.web_search / api.save_artifact。"
+                    "可导入的纯计算标准库：math/json/re/statistics/datetime/itertools/functools/"
+                    "collections/decimal/fractions/random/textwrap/csv/base64/hashlib/uuid/unicodedata/string。"
+                    "大段最终成果请用普通文件工具落盘，这里只回摘要与数值结果。"
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "要执行的 Python 源码（可多行；最后一行若是表达式会回传其值）",
+                        },
+                    },
+                    "required": ["code"],
+                },
+                fn=self._codeact_tool_placeholder,
             ))
         return tools
 
@@ -506,7 +559,13 @@ class RAGAgentBase:
             if t.name in used:
                 wanted.add(t.name)
                 continue
-            if t.name.startswith(self._CORE_TOOL_PREFIXES) or t.name.startswith(self._RESIDENT_SKILL_PREFIXES):
+            # [工具懒加载 2026-10-09] SKILLS_LAZY 关闭时技能常驻（既有语义）；开启时技能
+            # 不常驻，改由 tool_search_tools 元工具检索后经会话缓存按需（尾部）挂载。
+            _skill_resident = (
+                not getattr(settings, "skills_lazy", False)
+                and t.name.startswith(self._RESIDENT_SKILL_PREFIXES)
+            )
+            if t.name.startswith(self._CORE_TOOL_PREFIXES) or _skill_resident:
                 wanted.add(t.name)
                 continue
             if self._tool_matches_intent(t, q):

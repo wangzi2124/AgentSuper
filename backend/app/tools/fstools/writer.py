@@ -32,6 +32,23 @@ from .common import _env
 from .workspace import _ensure_safe
 from .workspace import _resolve
 from .workspace import _scan_cache
+from .verify import readback_mismatch, verify_written_file  # [写后校验] 语法/读回门禁
+
+def _verify_note(target: Path, wrote: str | None, *, existed_before: bool) -> str:
+    """写后机械校验的播报尾巴（读回一致性 + 语法），空串表示无可校验项。
+
+    `wrote=None` 表示跳过读回比对 —— append 场景下磁盘内容是「旧全文 + 本次追加」，
+    与本次写入的片段本就不相等，拿片段去比会恒假告警。
+    """
+    parts: list[str] = []
+    if wrote is not None:
+        rb = readback_mismatch(target, wrote)
+        if rb:
+            parts.append(rb)
+    syn = verify_written_file(target, existed_before=existed_before)
+    if syn:
+        parts.append(syn)
+    return ("\n" + "\n".join(parts)) if parts else ""
 
 # ── 拆分内语句（verbatim，含前置注释，保持原始顺序）──
 
@@ -89,7 +106,8 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> dict:
         _scan_cache.invalidate(target.parent)
         record_write(target)  # [snapshot] 每 step 快照（写完增量入树）
         size = target.stat().st_size
-        return _env("write", f"{action} {path} ({size} bytes)", path=str(target), size=size, action=action.lower())
+        note = _verify_note(target, str(content), existed_before=existed)
+        return _env("write", f"{action} {path} ({size} bytes){note}", path=str(target), size=size, action=action.lower())
     except Exception as e:
         return _env("write", f"Error writing file: {e}", error=True)
 
@@ -108,7 +126,8 @@ def tool_append_file(path: str, content: str) -> dict:
         action = "Appended to" if existed else "Created"
         _scan_cache.invalidate(target.parent)
         record_write(target)  # [snapshot] 每 step 快照（写完增量入树）
-        return _env("append", f"{action} {path} ({total} bytes total)", path=str(target), size=total)
+        note = _verify_note(target, None, existed_before=existed)
+        return _env("append", f"{action} {path} ({total} bytes total){note}", path=str(target), size=total)
     except Exception as e:
         return _env("append", f"Error appending to file: {e}", error=True)
 
@@ -423,7 +442,8 @@ def tool_edit_file(path: str, old_string: str, new_string: str, replace_all: boo
         return _env("edit", f"Error reading file: {e}", error=True)
     _scan_cache.invalidate(target.parent)
     record_write(target)  # [snapshot] 每 step 快照（写完增量入树）
-    return _env("edit", f"Edited {path}", path=str(target), replace_all=replace_all)
+    note = _verify_note(target, content_new, existed_before=True)
+    return _env("edit", f"Edited {path}{note}", path=str(target), replace_all=replace_all)
 
 def tool_delete_file(path: str) -> dict:
     """删除指定文件或空目录（仅限工作区内）。"""

@@ -121,20 +121,48 @@ def _import_json_if_empty(conn: sqlite3.Connection) -> None:
 def _seed_builtin(conn) -> None:
     """幂等物化 BUILTIN_CATALOG 到 catalog_entries(kind='builtin')。
 
-    已存在（按 id，不论任何 kind）的条目跳过——不会覆盖用户自定义的
-    extra / override 同名行，也不会重复追加。
+    内建行是常量的**物化副本**而非用户数据，因此与常量不一致时就地刷新
+    （否则改 builtin_catalog.py 对已有安装完全无效：`build_catalog()` 让 DB 行优先于
+    常量，陈旧行会永久遮蔽更新 —— 2026-10-03 调 deepseek 输出上限时踩过：只改常量，
+    DB 里仍是 8_192，表现为「改了 LLM_MAX_TOKENS 却依然每次撞 8192」）。
+
+    kind 为 override / extra 的行是用户自定义，**任何情况下都不碰**。
     """
-    existing_ids = {
-        r[0] for r in conn.execute("SELECT id FROM catalog_entries").fetchall()
+    existing = {
+        r[0]: r[1]
+        for r in conn.execute(
+            "SELECT id, kind FROM catalog_entries WHERE kind = 'builtin'"
+        ).fetchall()
+    }
+    # 用户自定义的同 id 行存在时，内建常量让位（保持旧的「先到先得」语义）
+    taken = {
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM catalog_entries WHERE kind <> 'builtin'"
+        ).fetchall()
     }
     for entry in BUILTIN_CATALOG:
         mid = entry.get("id")
-        if not mid or mid in existing_ids:
+        if not mid or mid in taken:
             continue
-        conn.execute(
-            "INSERT INTO catalog_entries(id, kind, data) VALUES (?, 'builtin', ?)",
-            (mid, json.dumps(entry, ensure_ascii=False)),
-        )
+        payload = json.dumps(entry, ensure_ascii=False)
+        kind = existing.get(mid)
+        if kind is None:
+            conn.execute(
+                "INSERT INTO catalog_entries(id, kind, data) VALUES (?, 'builtin', ?)",
+                (mid, payload),
+            )
+            continue
+        # 已存在：仅在数据确实不同时刷新，避免无谓写放大
+        row = conn.execute(
+            "SELECT data FROM catalog_entries WHERE id = ? AND kind = 'builtin'",
+            (mid,),
+        ).fetchone()
+        if row and row[0] != payload:
+            conn.execute(
+                "UPDATE catalog_entries SET data = ? WHERE id = ? AND kind = 'builtin'",
+                (payload, mid),
+            )
     conn.commit()
 
 

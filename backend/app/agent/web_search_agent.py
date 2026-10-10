@@ -148,12 +148,15 @@ class WebSearchAgent(BaseAgent):
                     "agent_id": self._id,
                     "step": step_event("synthesize", "合成回答", "running"),
                 })
+                usage: dict = {"input": 0, "output": 0, "reasoning": 0,
+                               "cache_read": 0, "cache_write": 0, "cost": 0.0}
                 answer = await self._synthesize(
                     question, search_results, memory_context,
                     event_queue=event_queue, agent_id=self._id,
                     history=payload.get("history") or [],
                     directory=payload.get("directory", ""),
                     attachment_context=await self._attachment_text(payload.get("files") or []),
+                    usage_sink=usage,
                 )
                 emit(event_queue, {
                     "type": "agent_step",
@@ -193,6 +196,10 @@ class WebSearchAgent(BaseAgent):
                             for i, r in enumerate(search_results[:5])
                         ] if search_results else [],
                         "steps": [],
+                        # 透传本次合成的真实 LLM 用量，供 supervisor 汇总落库
+                        "tokens": {k: usage.get(k, 0) for k in
+                                   ("input", "output", "reasoning", "cache_read", "cache_write")},
+                        "cost": usage.get("cost", 0.0),
                     },
                     thread_id=msg.thread_id,
                 )
@@ -353,6 +360,7 @@ class WebSearchAgent(BaseAgent):
         history: Optional[list[dict]] = None,
         directory: str = "",
         attachment_context: str = "",
+        usage_sink: Optional[dict] = None,
     ) -> str:
         """使用 LLM 将搜索结果合成为回答（带文件工具，可按需核对工作区内容）。"""
         if not search_results:
@@ -390,6 +398,7 @@ class WebSearchAgent(BaseAgent):
                 agent_id=agent_id,
                 history=history,
                 directory=directory,
+                usage_sink=usage_sink,
             )
         except Exception as e:
             logger.error("LLM synthesis failed: %s", e)

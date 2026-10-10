@@ -478,6 +478,79 @@ def test_litellm_extra_kwargs_expands_think_and_num_ctx():
     kw3 = catalog.litellm_extra_kwargs({"options": {"num_ctx": None, "think": True}})
     assert kw3 == {"think": True}
 
+
+def test_provider_api_deepseek_thinking_from_reasoning_capability(monkeypatch):
+    """DeepSeek 思考模型：按「推理模型」能力 + DEEPSEEK_THINKING 开关下发 thinking。
+
+    默认 disabled —— 实测 agentic 工具循环里思考会吃光 max_tokens（reasoning==ct==上限、
+    finish=length、零正文/零工具）；设 enabled 才下发 enabled（此时 litellm 的
+    reasoning_content 回填由 install_litellm_reasoning_patch 生效）；adaptive 不显式下发。
+    """
+    from app.config import settings as _settings
+
+    monkeypatch.setattr(catalog, "read_providers", lambda: {})
+    monkeypatch.setattr(
+        catalog, "read_capabilities",
+        lambda m: {"tool_use": True, "vision": True, "reasoning": True})
+    # 默认配置即 disabled
+    monkeypatch.setattr(_settings, "deepseek_thinking", "disabled")
+    creds = catalog.provider_api("deepseek/deepseek-v4-flash")
+    assert creds["is_ollama"] is False
+    assert creds["options"] == {"thinking": {"type": "disabled"}}
+    # 显式开启
+    monkeypatch.setattr(_settings, "deepseek_thinking", "enabled")
+    assert catalog.provider_api("deepseek/deepseek-v4-flash")["options"] == {
+        "thinking": {"type": "enabled"}}
+    # adaptive → 不显式下发，交服务端默认
+    monkeypatch.setattr(_settings, "deepseek_thinking", "adaptive")
+    assert catalog.provider_api("deepseek/deepseek-v4-flash")["options"] is None
+    # 能力未声明推理（或非思考模型）→ 不下发 thinking，保持既有 options=None
+    monkeypatch.setattr(_settings, "deepseek_thinking", "disabled")
+    monkeypatch.setattr(catalog, "read_capabilities", lambda m: {})
+    assert catalog.provider_api("deepseek/deepseek-v4-flash")["options"] is None
+
+
+def test_litellm_extra_kwargs_expands_thinking():
+    """DeepSeek thinking=enabled 需顶层透传（同 num_ctx/think），才能触发 reasoning_content 回填。"""
+    kw = catalog.litellm_extra_kwargs({"options": {"thinking": {"type": "enabled"}}})
+    assert kw == {"thinking": {"type": "enabled"}}
+    # 与 num_ctx/think 共存
+    kw2 = catalog.litellm_extra_kwargs(
+        {"options": {"num_ctx": 8192, "think": True, "thinking": {"type": "enabled"}}})
+    assert kw2 == {"num_ctx": 8192, "think": True, "thinking": {"type": "enabled"}}
+
+
+def test_litellm_extra_kwargs_routes_disabled_thinking_to_extra_body():
+    """disabled 必须走 extra_body：litellm 的 deepseek transformation 只保留 enabled，
+    顶层传 disabled 会被 pop 丢弃（实测仍烧满 reasoning → 关不掉思考）。"""
+    kw = catalog.litellm_extra_kwargs({"options": {"thinking": {"type": "disabled"}}})
+    assert kw == {"extra_body": {"thinking": {"type": "disabled"}}}
+    kw2 = catalog.litellm_extra_kwargs(
+        {"options": {"num_ctx": 8192, "thinking": {"type": "disabled"}}})
+    assert kw2 == {"num_ctx": 8192, "extra_body": {"thinking": {"type": "disabled"}}}
+
+
+def test_normalize_deepseek_thinking():
+    """DEEPSEEK_THINKING 宽松归一化：enabled/disabled，其它/空 → adaptive。"""
+    assert catalog._normalize_deepseek_thinking("enabled") == "enabled"
+    assert catalog._normalize_deepseek_thinking("ON") == "enabled"
+    assert catalog._normalize_deepseek_thinking("disabled") == "disabled"
+    assert catalog._normalize_deepseek_thinking("off") == "disabled"
+    assert catalog._normalize_deepseek_thinking("") == "adaptive"
+    assert catalog._normalize_deepseek_thinking("weird") == "adaptive"
+
+
+def test_install_litellm_reasoning_patch_idempotent():
+    """DeepSeek 思考模式补丁：去掉 supports_reasoning 门控，仅认 thinking=enabled；幂等。"""
+    from app.models import litellm_vision_patch as patch
+    from litellm.llms.deepseek.chat.transformation import DeepSeekChatConfig
+    assert patch.install_litellm_reasoning_patch() is True
+    assert patch.install_litellm_reasoning_patch() is True  # 幂等
+    cfg = DeepSeekChatConfig()
+    assert cfg._thinking_mode_active("deepseek-v4-flash", {"thinking": {"type": "enabled"}}) is True
+    assert cfg._thinking_mode_active("deepseek-v4-flash", {}) is False
+
+
 # ── 本地端点端口预检（避免「没监听」赔满 HTTP 超时）─────────────────────────
 def test_local_endpoint_alive_skips_dead_local_port(monkeypatch):
     """本地端口没人监听时，预检必须立刻判死——这是 8s 冷启动延迟的修复点。"""

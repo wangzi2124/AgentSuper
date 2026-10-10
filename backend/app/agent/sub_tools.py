@@ -504,6 +504,32 @@ async def _run_task_tool(
     return f'<task id="{sub_thread_id}" state="error"><task_error>{err}</task_error></task>'
 
 
+def _accumulate_call_usage(sink: Optional[dict], model: str, usage, pt: int, ct: int) -> None:
+    """把单次 LLM 调用的用量累加进 usage_sink（5 键 tokens + cost）。
+
+    与主 Agent `graphmod/core.py` 的累加口径一致（`_extract_cache_usage` +
+    `_reasoning_and_cost` + `resolve_cost`），供子 Agent 向 supervisor 回报真实用量，
+    使会话费用统计覆盖 code/web_search 子 Agent。统计失败绝不能影响主流程。
+    """
+    if sink is None:
+        return
+    hit = miss = rt = 0
+    cost = 0.0
+    try:
+        from app.agent.graphmod.state import _extract_cache_usage
+        from app.agent.graphmod.core import _reasoning_and_cost
+        hit, miss = _extract_cache_usage(usage, pt=int(pt or 0))
+        rt, cost = _reasoning_and_cost(model, usage, int(pt or 0), int(ct or 0), hit, miss)
+    except Exception:  # noqa: BLE001
+        logger.debug("usage accumulation failed", exc_info=True)
+    sink["input"] = int(sink.get("input", 0)) + int(pt or 0)
+    sink["output"] = int(sink.get("output", 0)) + int(ct or 0)
+    sink["reasoning"] = int(sink.get("reasoning", 0)) + int(rt or 0)
+    sink["cache_read"] = int(sink.get("cache_read", 0)) + int(hit or 0)
+    sink["cache_write"] = int(sink.get("cache_write", 0)) + int(miss or 0)
+    sink["cost"] = round(float(sink.get("cost", 0.0)) + float(cost or 0.0), 6)
+
+
 async def tool_loop_chat(
     system_prompt: str,
     user_message: str,
@@ -518,6 +544,7 @@ async def tool_loop_chat(
     conversation_id: str = "",
     bus=None,
     task_subagents: Optional[Tuple[str, ...]] = None,
+    usage_sink: Optional[dict] = None,
 ) -> str:
     """子 Agent 的 LLM 工具循环：允许读写文件/搜索/执行白名单命令，最后返回文本回答。
 
@@ -657,6 +684,7 @@ async def tool_loop_chat(
             pt = getattr(usage, "prompt_tokens", 0) if usage else 0
             ct = getattr(usage, "completion_tokens", 0) if usage else 0
             record_model_call(model, prompt_tokens=pt, completion_tokens=ct, duration_ms=(tmod.time() - start) * 1000)
+            _accumulate_call_usage(usage_sink, model, usage, pt, ct)
 
             msg = response.choices[0].message
             tool_calls = getattr(msg, "tool_calls", None) or []
@@ -741,6 +769,10 @@ async def tool_loop_chat(
             if _friendly:
                 raise RuntimeError(_friendly) from _exc
             raise
+        _u2 = getattr(response, "usage", None)
+        _pt2 = getattr(_u2, "prompt_tokens", 0) if _u2 else 0
+        _ct2 = getattr(_u2, "completion_tokens", 0) if _u2 else 0
+        _accumulate_call_usage(usage_sink, model, _u2, _pt2, _ct2)
         from app.utils.json_repair import parse_answer_envelope
         return parse_answer_envelope(
             strip_tool_call_markup((response.choices[0].message.content or "").strip())

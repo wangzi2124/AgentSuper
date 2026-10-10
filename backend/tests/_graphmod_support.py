@@ -94,7 +94,9 @@ class FakeLLM:
             ),
         )
 
-    async def __call__(self, model, messages, tool_defs, state=None):
+    async def __call__(self, model, messages, tool_defs, state=None, **kwargs):
+        # **kwargs 吸收 _llm_call 的可选参数（如 disable_thinking=...），
+        # 避免 generate.py 新增调用参数时测试替身签名漂移导致 TypeError。
         self.calls.append((model, messages, tool_defs))
         if not self.responses:
             raise AssertionError("no programmed response left for _llm_call")

@@ -535,6 +535,16 @@ def probe_configured_providers(known_ids: set[str], force: bool = False) -> list
     return out
 
 
+def _normalize_deepseek_thinking(value: Any) -> str:
+    """归一化 DEEPSEEK_THINKING：enabled / disabled / adaptive（其它/空 → adaptive）。"""
+    v = str(value or "").strip().lower()
+    if v in ("enabled", "on", "true", "1"):
+        return "enabled"
+    if v in ("disabled", "off", "false", "0"):
+        return "disabled"
+    return "adaptive"
+
+
 def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     """解析模型对应的调用凭证：{api_base, api_key, is_ollama, options}。优先级：
 
@@ -566,12 +576,24 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         if "reasoning" in caps:
             opts["think"] = bool(caps["reasoning"])
         return {"api_base": None, "api_key": "ollama", "is_ollama": True, "options": opts}
+    # DeepSeek 思考模型（V4.1-Flash / V4-Pro 默认开思考）：按「推理模型」能力 + 全局
+    # DEEPSEEK_THINKING 开关下发 thinking。**默认 disabled** —— 实测 agentic 工具循环里
+    # 思考会吃光 max_tokens（reasoning==ct==上限、finish=length、零工具/零正文），
+    # 关闭后 finish=stop 正常产出。enabled 时的 reasoning_content 回填依赖
+    # litellm_vision_patch.install_litellm_reasoning_patch（修「思考模式多轮流式报错」）。
+    # adaptive → 不显式下发（options=None），交服务端默认。
+    options = None
+    if provider == "deepseek" and read_capabilities(mid).get("reasoning"):
+        _tt = _normalize_deepseek_thinking(getattr(settings, "deepseek_thinking", "disabled"))
+        if _tt in ("enabled", "disabled"):
+            options = {"thinking": {"type": _tt}}
     reg = read_providers().get(provider)
     if reg:
         return {"api_base": reg.get("api_base") or settings.llm_api_base,
                 "api_key": reg.get("api_key") or settings.llm_api_key,
-                "is_ollama": False, "options": None}
-    return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False, "options": None}
+                "is_ollama": False, "options": options}
+    return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key,
+            "is_ollama": False, "options": options}
 
 
 def litellm_extra_kwargs(creds: Optional[dict]) -> dict:
@@ -580,7 +602,9 @@ def litellm_extra_kwargs(creds: Optional[dict]) -> dict:
     litellm 对 Ollama 只认顶层 `num_ctx`（非嵌套 `options`：transformation 会
     丢弃任意 `options` 键，导致 num_ctx 不生效、推理服务默认 2048 窗口截断历史）。
     `think` 同理需顶层传（Qwen3.5 思考模型按「推理模型」能力显式开关）。
-    非 ollama（options=None）返回 {}，避免把 num_ctx=None 透传给其它 provider。
+    `thinking`（DeepSeek）同理需顶层传：litellm 的 deepseek transformation 只在
+    optional_params 里读到 `thinking={"type":"enabled"}` 才回填 reasoning_content。
+    无 options（None）返回 {}，避免把 num_ctx=None 透传给其它 provider。
     """
     opts = (creds or {}).get("options") or {}
     out: dict[str, Any] = {}
@@ -588,6 +612,16 @@ def litellm_extra_kwargs(creds: Optional[dict]) -> dict:
         out["num_ctx"] = opts["num_ctx"]
     if opts.get("think") is not None:
         out["think"] = bool(opts["think"])
+    thinking = opts.get("thinking")
+    if thinking is not None:
+        # litellm 的 deepseek transformation（`_map_openai_params`）**只保留**
+        # thinking={"type":"enabled"}，disabled/其它一律被 pop 丢弃 → 顶层传 disabled
+        # 根本关不掉思考（实测仍烧满 16_384 reasoning）。必须走 `extra_body` 直接注入
+        # 请求体才生效。enabled 仍走顶层：可同时触发 litellm 的 reasoning_content 回填。
+        if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+            out.setdefault("extra_body", {})["thinking"] = thinking
+        else:
+            out["thinking"] = thinking
     return out
 
 

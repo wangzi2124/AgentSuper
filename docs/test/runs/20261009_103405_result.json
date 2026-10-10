@@ -1,0 +1,21 @@
+{
+  "ts": "20261009_103405",
+  "mode": "smoke",
+  "base": "http://127.0.0.1:8000",
+  "out_dir": "C:\\tool\\tetris-react",
+  "cases": {
+    "TC-01_health": {
+      "pass": true,
+      "resp": {
+        "status": "ok",
+        "vector_store_size": 0
+      }
+    },
+    "TC-02_smoke": {
+      "pass": true,
+      "routed_to": "build",
+      "answer": "你好！我是你的 AI 助手，可以帮你写代码、做设计、查资料、生成文档（Word/PDF/Excel/PPT）等各类任务，随时告诉我要做什么就好。",
+      "error": null
+    }
+  }
+}

@@ -55,6 +55,9 @@ from .tools import RAGAgentTools
 from .base import is_weak_model
 from .constants import DOOM_LOOP_PROMPT, REPEAT_DELEGATION_PROMPT
 from .constants import MAX_STEPS_PROMPT
+from .constants import OVERSIZED_PROSE_ACK, OVERSIZED_PROSE_MIN_CHARS, OVERSIZED_PROSE_PROMPT
+from .constants import _TRUNCATED_ARGS_ERROR
+from .constants import ZERO_PROGRESS_ACK, ZERO_PROGRESS_PROMPT
 from .constants import _DEDUP_READONLY_TOOLS
 from .constants import _normalize_finish_reason
 from .task_registry import get_task_registry as _get_task_registry
@@ -87,6 +90,47 @@ def _is_valid_answer(text: str | None) -> bool:
     if not t:
         return False
     return not is_unparsed_json_answer(t) and not is_tool_call_markup(t)
+
+
+# 「思考规模」绝对门槛：低于此值不算「思考耗尽预算」，而是模型提前收尾
+# （实测末轮只吐 346 token 思考 + finish=stop，归因成预算耗尽会把用户引向
+#   错误的修复方向「调 LLM_MAX_TOKENS」）
+_ZERO_PROGRESS_REASONING_MIN_TOKENS = 2000
+
+
+def _zero_progress_cause(
+    *, from_reasoning: bool, finish_reason: str,
+    output_tokens: int, reasoning_tokens: int,
+) -> str:
+    """判定「零进展」的归因，供全链路日志 `cause` 字段使用。
+
+    `from_reasoning` 只说明「content 为空、正文来自思考回退」，**不能单独**当作
+    「思考耗尽预算」的证据 —— 实测两种形态都命中它：
+
+    - 真耗尽：末轮 ct≈rt≈cap（8500/8670），预算确实被思考吃光；
+    - 伪耗尽：末轮只吐 346 token 思考（rt=346, ct=346, finish=stop）就收尾，
+      聚合口径 rt/out 也仅 0.58（9605/16645），预算根本没用完。
+
+    后者归因成「思考耗尽预算」会让用户去调 `LLM_MAX_TOKENS`，方向完全错。因此在
+    `from_reasoning` 之上再加一道**规模门槛**：思考必须真的吃掉可观份额的输出预算
+    才算耗尽，否则是「模型自己收尾却没做事」（`stop_without_output`）。
+
+    不用 `reasoning_tokens / output_tokens` 单看比例当主判据：deepseek-v4-flash 的
+    usage 不单独上报 reasoning token（实测同一现象 ratio 仅 0.023 而 content 确为空）。
+    """
+    # 思考规模门槛：既要占满输出的大头，也要达到绝对量级（滤掉「几百 token 就收尾」
+    # 这种明显没花预算的情形；2000 低于任何有意义的思考预算，高于纯噪声）
+    _min = max(_ZERO_PROGRESS_REASONING_MIN_TOKENS, output_tokens * 0.9)
+    _reasoning_bound = reasoning_tokens >= _min and output_tokens > 0
+    if from_reasoning and _reasoning_bound:
+        return "reasoning_budget_exhausted"
+    if not from_reasoning and _reasoning_bound:
+        # 无回退痕迹但思考吃满预算：同样指向思考预算问题
+        return "reasoning_budget_exhausted"
+    if str(finish_reason) == "length":
+        return "length_without_tool_calls"
+    # finish=stop、content 空、思考规模很小：预算够但没用对，模型自行收尾却没做事
+    return "stop_without_output"
 
 
 logger = logging.getLogger(__name__)
@@ -314,7 +358,7 @@ class RAGAgentGenerate(RAGAgentTools):
 
         # [F8 · D 步 每轮不重发] 首轮已展示图片 → 后续工具轮替换为占位文本，
         # 避免每轮重发大 base64 撑爆上下文（图片描述/OCR 文本仍保留供模型参照）。
-        if msg.tool_calls:
+        if getattr(msg, "tool_calls", None):
             for m in messages:
                 if isinstance(m.get("content"), list):
                     m["content"] = [
@@ -343,12 +387,131 @@ class RAGAgentGenerate(RAGAgentTools):
         steps_prompt_injected = False
         rounds = 0
         tool_calls_count = 0
+        # [零进展救援] 思考模型可能把整轮输出预算烧在 reasoning 上（实测
+        # deepseek-v4-flash ct=8192/reasoning=8192），content 空 + 无 tool_calls +
+        # finish=length → 什么都不产出。此处不续跑任务必败，故在**主循环内部**追加
+        # 有限次「强制产出」重试：复用现有工具执行/doom-loop/预算机制，模型一旦
+        # 改口调工具即回到正常流程（而非像循环外补丁那样只能收尾）。
+        rescue_budget = max(0, int(settings.zero_progress_rescue_attempts))
+        rescue_pending = False
+        rescue_used = 0
+        # 触发本次救援的档位（None=无）；循环内据它决定能否走「已拿到正文就收尾」捷径。
+        # 注意 `msg` 在该判断点仍是**触发救援那一轮**的响应，语义必须显式携带。
+        rescue_kind: str | None = None
+        # [思考预算 2026-10-09] 一旦因「思考吃光输出预算」触发救援，后续轮次强制关闭
+        # DeepSeek 思考（`_llm_call(disable_thinking=True)`）。同一配置原样重试只会
+        # 再烧光一次（实测两轮均 ct=16_384）；关掉思考才能拿到正文/工具调用真正完成任务。
+        force_no_thinking = False
+
+        def _rescue_kind(m, fr) -> str | None:
+            """本轮属于哪一档「没推进任务」，None 表示正常。
+
+            两档互补，顺序即优先级（先判零进展，避免话术说「没有产出任何正文」——
+            超长正文档正文非空，那句话是假的）：
+              a) zero_progress   —— 思考烧光预算，正文与工具皆空；
+              b) oversized_prose —— 无视「长内容写文件」规则，把预算全写成聊天正文，
+                                   被截断且零工具调用（`_is_zero_progress` 判 False）。
+
+            **零进展档的 finish_reason 门禁是分情况的**：推理回退（`_content_from_reasoning`）
+            无条件救援 —— 那一档的 content 是思考独白，按定义不是交付给用户的回答，而实测
+            思考模型烧光预算后 Provider 会归一化成 `stop` 而非 `length`（content 空 +
+            reasoning 10,219 字符 + finish=stop），若用 length 门禁就会漏掉、只留下
+            291 字诊断文案。真正空白的 content 则仍要求 `length`：不带 `_content_from_reasoning`
+            的空回答归既有的 EMPTY_ANSWER 重试 / 弱模型强模型兜底路径管（`test_graphmod_generate_core.py`
+            锁定了那套轮次），这里抢过来会多烧一轮并挤掉强模型兜底。
+            超长正文档同样必须靠 `length` 证明「非空正文其实是被砍断的残稿」，
+            否则会对正常的短问答多问一轮。
+            """
+            if getattr(m, "tool_calls", None):
+                return None
+            if self._is_zero_progress(m):
+                if str(fr) == "length" or getattr(m, "_content_from_reasoning", False):
+                    return "zero_progress"
+                return None
+            if str(fr) == "length" and self._is_oversized_prose(m, fr):
+                return "oversized_prose"
+            return None
+
+        def _maybe_rescue(m, fr, round_no) -> bool:
+            """命中救援档就注入催促并置位 `rescue_pending`，让主循环**再问一轮**。
+
+            刻意留在主循环内（而不是循环外收尾补丁）：下一轮模型若改口调工具，会照常
+            走完整执行路径，任务得以真正完成；写成循环外收尾就只能拿到一段文字，
+            且工具已被禁用。判定必须在**首轮响应之后、循环之前**也执行一次 ——
+            `while` 条件只看 `tool_calls / tool-calls / rescue_pending`，若首轮就是
+            超长内联正文，循环根本不会进入，救援形同虚设（实测第 4 轮才触发时正常，
+            首轮就触发时静默失效）。
+            """
+            nonlocal rescue_budget, rescue_used, rescue_pending, rescue_kind, force_no_thinking
+            kind = _rescue_kind(m, fr)
+            if kind is None or rescue_budget <= 0 or steps_prompt_injected:
+                return False
+            rescue_budget -= 1
+            rescue_used += 1
+            rescue_pending = True
+            rescue_kind = kind
+            if kind == "zero_progress":
+                force_no_thinking = True
+            logger.warning(
+                "Zero-progress round %d (%s; finish=length, content_chars=%d); "
+                "injecting forced-output nudge (rescue %d/%d)",
+                round_no,
+                "oversized inline prose, zero tool calls" if kind == "oversized_prose"
+                else "reasoning consumed output budget",
+                len(m.content or ""),
+                rescue_used, max(0, int(settings.zero_progress_rescue_attempts)),
+            )
+            self._chainlog_zero_progress(
+                state=state, model=model, finish_reason=fr,
+                rounds=round_no,
+                input_tokens=int((self._usage_accum or {}).get("input", 0)),
+                output_tokens=int((self._usage_accum or {}).get("output", 0)),
+                reasoning_tokens=int((self._usage_accum or {}).get("reasoning", 0)),
+                cost=round(float(getattr(self, "_cost_accum", 0.0)), 6),
+                answer_chars=len(m.content or ""),
+                from_reasoning=bool(getattr(m, "_content_from_reasoning", False)),
+                event="generate.zero_progress_rescue",
+            )
+            self._push_event(state, {
+                "type": "step_end", "step_id": "zero_progress",
+                "name": "零进展救援", "status": "running",
+                "detail": (
+                    "上一轮把输出预算写成超长聊天正文、未调用任何工具且被截断，"
+                    "注入强制落盘提示重试"
+                    if kind == "oversized_prose" else
+                    "上一轮思考耗尽输出预算、未产出任何内容，注入强制产出提示重试"
+                ),
+            })
+            # 只注入短确认句 + 针对性指令，**不回灌**上一轮那 2 万多字正文/独白（纯浪费，
+            # 而且正是它吃掉了输出预算）。
+            if kind == "oversized_prose":
+                messages.append({"role": "assistant", "content": OVERSIZED_PROSE_ACK})
+                messages.append({"role": "user", "content": OVERSIZED_PROSE_PROMPT})
+            else:
+                messages.append({"role": "assistant", "content": ZERO_PROGRESS_ACK})
+                messages.append({"role": "user", "content": ZERO_PROGRESS_PROMPT})
+            return True
+
+        # 首轮响应同样纳入救援判定（见 `_maybe_rescue` docstring 的说明）。
+        _maybe_rescue(msg, finish_reason, 0)
         # [token 优化 v5] 已使用工具集合：每轮重挂载时保留，避免模型想复用却被移除
         used_tools: set[str] = set()
+        # [部分完成播报 2026-10-03] 本轮成功执行过的文件类工具路径：末轮空响应时如实
+        # 告诉用户「已落盘哪些文件」，而不是把整轮成果用失败文案盖掉
+        _round_files: set[str] = set()
         while (
-            msg.tool_calls or finish_reason == "tool-calls"
+            msg.tool_calls or finish_reason == "tool-calls" or rescue_pending
         ) and rounds < effective_max_steps:
             rounds += 1
+            # 本轮是否由「零进展救援」触发；进入即清标志（下一轮若再次零产出，
+            # 由循环末尾的检测重新置位），避免救援轮把 while 条件永久撑开。
+            is_rescue_round = rescue_pending
+            rescue_pending = False
+            # 统一出口：本轮的工具调用列表。litellm 在无工具时给 `tool_calls=None`，
+            # 救援轮必然走这条路径 —— 后续所有遍历一律用它，避免 `for tc in None` 崩。
+            # 统一出口：本轮的工具调用列表。litellm 在无工具时给 `tool_calls=None`，
+            # 救援轮必然走这条路径 —— 后续所有遍历一律用它，避免 `for tc in None` 崩。
+            cur_tool_calls = list(getattr(msg, "tool_calls", None) or [])
 
             # [opencode background] 每轮吸收本会话已完成的后台任务结果（合成 assistant 消息）
             bg_results = _get_task_registry().drain_background_results(state.get("conversation_id", ""))
@@ -377,26 +540,51 @@ class RAGAgentGenerate(RAGAgentTools):
                     state["_task"].record_compaction()
                 self._push_event(state, {"type": "step_end", "step_id": "compaction", "name": "压缩上下文", "status": "completed", "detail": f"{old_count} 条消息压缩为 {len(messages)} 条"})
 
-            messages.append({
-                "role": "assistant",
-                "content": msg.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                    }
-                    for tc in msg.tool_calls
-                ],
-            })
+            # [零进展救援轮] 本轮是「上一轮零产出」的强制重试，没有 tool_calls 可执行；
+            # 追加空 tool_calls 的 assistant 消息是非法的，且会把上一轮 2.7 万字
+            # reasoning 独白塞回上下文（双重浪费），故跳过。
+            if cur_tool_calls:
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                        }
+                        for tc in cur_tool_calls
+                    ],
+                })
+            elif (msg.content or "").strip():
+                # 救援轮直接给出了正文（无工具）—— 追加以保留它，否则本轮内容会被
+                # 随后的 LLM 调用覆盖掉，白花一次调用。
+                messages.append({"role": "assistant", "content": msg.content})
 
             tool_tasks = []
             tool_metas = []
             early_results: dict[str, str] = {}
-            for tc in msg.tool_calls:
+            # [工具参数截断守卫] finish_reason=length 且仍带 tool_calls 时，**参数一定是
+            # 被输出上限砍断的**：`parse_tool_args` 会把半截 JSON「修复」成合法 dict，
+            # 于是残缺字符串被当成完整内容执行 —— 实测「在 D 盘写个俄罗斯方块」写出
+            # 24,877 字节的 tetris/game.js，结尾停在 `const dt = performance.now()`、
+            # 括号不配平、无 IIFE 闭合，而 tool_write_file 回报成功。执行它等于静默
+            # 产出损坏文件，比直接失败糟得多。这里一律不执行，改回一条明确错误让模型
+            # 用更小的 payload 重试（分段写）。
+            _args_truncated = str(finish_reason) == "length"
+            for tc in cur_tool_calls:
                 tool_name = tc.function.name
                 # [token 优化 v5] 记录已使用工具 → 下轮重挂载时保留
                 used_tools.add(tool_name)
+                if _args_truncated:
+                    early_results[tc.id] = _TRUNCATED_ARGS_ERROR.format(tool=tool_name)
+                    self._push_event(state, {
+                        "type": "tool_end", "step_id": f"tool_{tool_name}",
+                        "name": f"调用工具: {tool_name}", "status": "error",
+                        "tool_name": tool_name,
+                        "tool_result": "参数因达到输出 token 上限被截断，已阻止执行",
+                    })
+                    continue
                 args = parse_tool_args(tc.function.arguments)
                 if args is None:
                     early_results[tc.id] = f"Error parsing arguments for '{tool_name}': 参数不是合法 JSON 且自动修复失败（已按空参数处理，请重新提交完整参数）"
@@ -420,6 +608,12 @@ class RAGAgentGenerate(RAGAgentTools):
                     continue
 
                 self._push_event(state, {"type": "tool_start", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "running", "tool_name": tool_name, "tool_args": args})
+                # [部分完成播报] 文件类工具在此登记路径（失败也要登记：用户需要知道
+                # 哪些文件被尝试过，尤其 overwrite 冲突这类）
+                _round_files.update(
+                    str(args.get(_k)) for _k in self._FILE_TOOL_ARGS.get(tool_name, ())
+                    if args.get(_k)
+                )
                 tool_tasks.append(self._execute_tool(tool_name, args, state))
                 tool_metas.append((tc.id, tool_name, dedup_key))
 
@@ -441,7 +635,7 @@ class RAGAgentGenerate(RAGAgentTools):
             if any(name not in _DEDUP_READONLY_TOOLS for _, name, _ in tool_metas):
                 dedup.clear()
 
-            for tc in msg.tool_calls:
+            for tc in cur_tool_calls:
                 tc_id = tc.id
                 result_str = early_results.get(tc_id, f"Error: no result for tool call {tc_id}")
                 bounded_result = bound_tool_output(result_str, tc.function.name)
@@ -455,17 +649,17 @@ class RAGAgentGenerate(RAGAgentTools):
                 })
 
             # TaskState 进度跟踪：每轮 +1 step，并按本轮工具调用数累加 tool_calls_count
-            tool_calls_count += len(msg.tool_calls)
+            tool_calls_count += len(cur_tool_calls)
             if state.get("_task"):
                 state["_task"].increment_step()
-                state["_task"].increment_tool_calls(len(msg.tool_calls))
+                state["_task"].increment_tool_calls(len(cur_tool_calls))
 
             # [C5 · 方案 D 基础] 每轮把执行进度落盘为 STEP_STATE（会话工作目录存在时），
             # 供长任务接力/断点续跑恢复；上下文只装摘要+当前步，旧轮次不再携带。
             # files 从本轮工具实参提取（写/改/删/生成器的真实路径），供下一步读取衔接。
             if state.get("_cwd") and rounds >= 1:
                 from app.context.step_state import write_step_state
-                done = [f"round {rounds}: {tc.function.name}" for tc in msg.tool_calls]
+                done = [f"round {rounds}: {tc.function.name}" for tc in cur_tool_calls]
                 write_step_state(
                     state["_cwd"], rounds,
                     {
@@ -474,7 +668,7 @@ class RAGAgentGenerate(RAGAgentTools):
                         "active": ["等待下一轮工具调用或收尾总结"],
                         "blocked": [],
                         "next_move": ["继续剩余子任务；若接近上下文上限则先输出已完成部分"],
-                        "files": self._extract_step_files(msg.tool_calls),
+                        "files": self._extract_step_files(cur_tool_calls),
                     },
                 )
 
@@ -489,13 +683,17 @@ class RAGAgentGenerate(RAGAgentTools):
 
             # Doom-loop 检测：同一组工具调用指纹连续重复 ≥ threshold 轮 → 注入策略变更提示；
             # 首次提示后仍连续重复（升级到 doom_loop_max_strikes）→ 强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具）
+            # 零进展救援轮没有 tool_calls → fp 为空串。若照样入指纹窗口，连续两轮
+            # 救援的 "" 会被判成「重复工具调用」而误升级强制收尾，反而害死救援。
             fp = "|".join(
-                sorted(f"{tc.function.name}:{tc.function.arguments}" for tc in msg.tool_calls)
+                sorted(f"{tc.function.name}:{tc.function.arguments}" for tc in cur_tool_calls)
             )
+            if not fp:
+                fp = None
             # 重复委派守卫：整轮只有 tool_task 且参数与本轮已发起过的完全一致 → 第 2 次即拦。
             # 比通用 doom-loop（阈值 3）更早，因为子 Agent 结果已在上下文里，重发必然无新信息。
-            task_only = bool(msg.tool_calls) and all(
-                tc.function.name == "tool_task" for tc in msg.tool_calls
+            task_only = bool(cur_tool_calls) and all(
+                tc.function.name == "tool_task" for tc in cur_tool_calls
             )
             if task_only and fp in delegated_tasks:
                 repeat_delegation_strikes += 1
@@ -513,27 +711,29 @@ class RAGAgentGenerate(RAGAgentTools):
             elif task_only:
                 delegated_tasks.add(fp)
 
-            doom_fingerprints.append(fp)
-            # 首次按 threshold 判定；注入过策略提示后只要**再重复 1 次**就升级
-            # 强制收尾（否则清空窗口要再等 threshold 轮，白烧几轮 LLM 调用）。
-            window = doom_threshold if doom_strikes == 0 else 1
-            if len(doom_fingerprints) >= window and len(set(doom_fingerprints[-window:])) == 1:
-                doom_strikes += 1
-                if doom_strikes >= doom_max_strikes:
-                    logger.warning(
-                        "Doom loop persisted (%d strikes), forcing structured summary: %s",
-                        doom_strikes, fp[:120],
-                    )
-                    messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
-                    steps_prompt_injected = True
-                    self._push_event(state, {"type": "step_end", "step_id": "doom_loop", "name": "重复工具调用升级", "status": "completed", "detail": "已强制收尾总结"})
-                else:
-                    logger.warning("Doom loop detected: %d consecutive identical tool calls (%s)", doom_threshold, fp[:120])
-                    messages.append({"role": "user", "content": DOOM_LOOP_PROMPT})
-                    self._push_event(state, {"type": "step_end", "step_id": "doom_loop", "name": "检测到重复工具调用", "status": "completed", "detail": "已注入策略变更提示"})
-                doom_fingerprints.clear()
-                if doom_strikes < doom_max_strikes:
-                    doom_fingerprints.append(fp)  # 保留本轮指纹：再重复一次即升级
+            # Doom-loop 指纹窗口只收有工具调用的轮；救援轮 fp=None 直接跳过。
+            if fp is not None:
+                doom_fingerprints.append(fp)
+                # 首次按 threshold 判定；注入过策略提示后只要**再重复 1 次**就升级
+                # 强制收尾（否则清空窗口要再等 threshold 轮，白烧几轮 LLM 调用）。
+                window = doom_threshold if doom_strikes == 0 else 1
+                if len(doom_fingerprints) >= window and len(set(doom_fingerprints[-window:])) == 1:
+                    doom_strikes += 1
+                    if doom_strikes >= doom_max_strikes:
+                        logger.warning(
+                            "Doom loop persisted (%d strikes), forcing structured summary: %s",
+                            doom_strikes, fp[:120],
+                        )
+                        messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
+                        steps_prompt_injected = True
+                        self._push_event(state, {"type": "step_end", "step_id": "doom_loop", "name": "重复工具调用升级", "status": "completed", "detail": "已强制收尾总结"})
+                    else:
+                        logger.warning("Doom loop detected: %d consecutive identical tool calls (%s)", doom_threshold, fp[:120])
+                        messages.append({"role": "user", "content": DOOM_LOOP_PROMPT})
+                        self._push_event(state, {"type": "step_end", "step_id": "doom_loop", "name": "检测到重复工具调用", "status": "completed", "detail": "已注入策略变更提示"})
+                    doom_fingerprints.clear()
+                    if doom_strikes < doom_max_strikes:
+                        doom_fingerprints.append(fp)  # 保留本轮指纹：再重复一次即升级
 
             # MAX_STEPS：达到生效上限前的最后一轮注入收尾提示（对齐 opencode prompt.ts:1281，
             # 以 assistant 角色消息注入，模型据此收尾总结）
@@ -545,12 +745,43 @@ class RAGAgentGenerate(RAGAgentTools):
             # 使「system + tools」前缀跨轮次字节稳定 → DeepSeek 前缀缓存命中（0.1x 计费）。
             # 核心 tool_* 工具本就常驻 schema；模型若调用未挂载的插件/技能工具，_execute_tool
             # 仍会执行（self.tools 全量），仅本轮 schema 未列出该工具（下轮仍可被调用）。
+            # [零进展救援已拿到正文] 直接收尾，不再多问一次（该轮已满足任务完成条件，
+            # while 条件本也会因无 tool_calls 而退出，这里只是省掉一次 LLM 调用）。
+            # 必须同时排除两种「假正文」，否则救援注入完立刻 break，模型永远拿不到那次重试：
+            #   1) rescue_kind != zero_progress —— 超长内联正文档正文非空且已被判为残稿；
+            #   2) _content_from_reasoning —— 正文其实是 core 从 reasoning_content 回退填进来的
+            #      内心独白（实测 23,844 字符），`_is_zero_progress` 正是靠这个标记把它判成
+            #      零进展的，这里若当正文收尾就等于自相矛盾。
+            if (rescue_kind == "zero_progress" and not msg.tool_calls
+                    and not getattr(msg, "_content_from_reasoning", False)
+                    and (msg.content or "").strip()):
+                self._push_event(state, {
+                    "type": "step_end", "step_id": "zero_progress",
+                    "name": "零进展救援", "status": "completed",
+                    "detail": "强制产出后已获得有效回答",
+                })
+                break
+
+            # [工具懒加载 2026-10-09] SKILLS_LAZY 开启时，本轮 tool_search_tools 命中的技能
+            # 已写入会话工具缓存；在本轮 LLM 调用前重建 tool_defs 才能把它们挂载进来。
+            # 会话缓存只增不减、新工具尾部追加 → 「system + tools」前缀跨轮字节稳定，
+            # 前缀缓存不失效。关闭时维持「请求内冻结」（见下方 C5 注释），零额外开销。
+            if getattr(settings, "skills_lazy", False):
+                tool_defs = self._build_tool_defs(
+                    state.get("question", ""),
+                    conversation_id=state.get("conversation_id", ""),
+                    model=_model_hint,
+                )
             final_tool_defs = None if steps_prompt_injected else tool_defs
             messages = sanitize_tool_messages(_truncate_messages(messages, max_tokens=llm_call_budget(_model_hint), reserve_tokens=0, tool_defs=final_tool_defs))
             trace_messages("graph.round_ready", messages, tool_defs=final_tool_defs)  # [token trace v7]
-            response = await self._llm_call(model, messages, final_tool_defs, state=state)
+            response = await self._llm_call(model, messages, final_tool_defs, state=state,
+                                            disable_thinking=force_no_thinking)
             msg = response.choices[0].message
             finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
+
+            # ── [零进展救援 / 超长内联正文救援] ──────────────────────────
+            _maybe_rescue(msg, finish_reason, rounds)
 
         record_model_call(
             model, duration_ms=(tmod.time() - _gen_start) * 1000,
@@ -598,6 +829,19 @@ class RAGAgentGenerate(RAGAgentTools):
                 self._push_event(state, {"type": "tool_end", "step_id": f"tool_{tool_name}", "name": f"调用工具: {tool_name}", "status": "completed", "tool_name": tool_name, "tool_result": bounded_result[:500]})
                 messages.append({"role": "tool", "tool_call_id": tc_id, "tool_name": tool_name, "content": bounded_result})
                 used_tools.add(tool_name)
+                # 强制收尾轮也登记文件路径，供末轮空响应的「部分完成」播报
+                if tool_name in RAGAgentGenerate._FILE_TOOL_ARGS:
+                    for _m in cur_tool_calls:
+                        if _m.function.name != tool_name or _m.id != tc_id:
+                            continue
+                        try:
+                            _a = parse_tool_args(_m.function.arguments) or {}
+                        except Exception:  # noqa: BLE001
+                            _a = {}
+                        _round_files.update(
+                            str(_a.get(_k)) for _k in self._FILE_TOOL_ARGS[tool_name]
+                            if _a.get(_k)
+                        )
             # [token 优化 P8] 强制收尾路径补齐"清理→压缩→截断"闭环：此前仅截断，
             # 且截断基于低估估算可能不触发（实测收尾轮裸发 25,779 超 usable 23,808）。
             # 与主循环保持同款处理，避免收尾调用成为单请求内最大单次 pt。
@@ -620,7 +864,8 @@ class RAGAgentGenerate(RAGAgentTools):
             trace_messages("graph.final_round_ready", messages, tool_defs=None)  # [token trace v8]
             # 对齐 opencode max-steps 语义：达到上限后工具禁用，仅注入收尾总结提示（assistant 角色）
             messages.append({"role": "assistant", "content": MAX_STEPS_PROMPT})
-            response = await self._llm_call(model, messages, None, state=state)
+            response = await self._llm_call(model, messages, None, state=state,
+                                            disable_thinking=force_no_thinking)
             msg = response.choices[0].message
             finish_reason = _normalize_finish_reason(getattr(response.choices[0], "finish_reason", None))
         if msg.tool_calls:
@@ -655,7 +900,126 @@ class RAGAgentGenerate(RAGAgentTools):
         # content-filter → 内容被 Provider 过滤，视为错误暴露
         answer = msg.content or ""
         gen_dur = (tmod.time() - _gen_start) * 1000
-        if finish_reason == "length":
+        # [零进展] 最后一轮既没发 tool_call 也没有**模型自己写的**正文 → 本次请求
+        # 没做成任何事。典型是思考模型把输出预算全烧在 reasoning 上
+        # （单轮 ct == reasoning == 8192），content 空 + finish=length，循环随即退出。
+        # 实测「写 React 俄罗斯方块」：第二轮即此情形，D:\game 零文件，
+        # 用户却收到 27908 字内心独白（core 的 reasoning 回退把零产出伪装成回答）。
+        # 注意不能用 `rounds == 0` 判定：实测该场景 rounds == 1（首轮确实调过
+        # tool_ls/tool_execute），真正该看的是**最后一轮**有没有产出。
+        # `msg._content_from_reasoning` 由 core 在 reasoning 回退前标记，
+        # 用来区分「真截断的完整回答」与「思考耗尽预算的内心独白」。
+        _from_reasoning = bool(getattr(msg, "_content_from_reasoning", False))
+        zero_progress = self._is_zero_progress(msg)
+        if zero_progress:
+            _u = self._usage_accum
+            _out_tok = int((_u or {}).get("output", 0))
+            _rea_tok = int((_u or {}).get("reasoning", 0))
+            # 在调用处算归因，日志与用户文案共用同一份结论（避免两处各判一次）
+            _cause = _zero_progress_cause(
+                from_reasoning=_from_reasoning,
+                finish_reason=finish_reason,
+                output_tokens=_out_tok,
+                reasoning_tokens=_rea_tok,
+            )
+            self._chainlog_zero_progress(
+                state=state, model=model, finish_reason=finish_reason,
+                rounds=rounds,
+                input_tokens=int((_u or {}).get("input", 0)),
+                output_tokens=_out_tok,
+                reasoning_tokens=_rea_tok,
+                cost=round(float(getattr(self, "_cost_accum", 0.0)), 6),
+                answer_chars=len(answer),
+                from_reasoning=_from_reasoning,
+                cause=_cause,
+            )
+            # 救援也没能把模型拉回正轨：此时 `answer` 是 core 回退填进来的
+            # reasoning_content —— 实测 2.7 万字内心独白。直接返回它既撑爆下一轮
+            # 上下文预算，又让用户以为「模型写了代码」而实际磁盘零文件。
+            # 换成可诊断的失败文案（保留零进展日志作为排查线索）。
+            #
+            # [关键修复 2026-10-03] 但**本轮已经干过活**时不能这么干：末轮空响应属于
+            # 收尾失败，不等于整轮白跑。实测 8 轮真实写入 5 个文件（engine.js /
+            # tetrisReducer.js / useTetris.js / tetrominoes.js / main.jsx，均
+            # node --check 通过），末轮 346 token 思考后 finish=stop 空响应，此前整段
+            # 成果被「本次请求未能产出任何内容」覆盖 —— 用户只看到失败，磁盘上的
+            # 东西也不知道存在，而文案还谎称「未执行任何工具」。
+            # 此时改为「部分完成」播报：如实说明收尾失败 + 列出已用工具与产出文件。
+            # [文案失实修复 2026-10-09] 必须以「是否真的写入文件」判定，而不是「是否调过工具」。
+            # 只跑过只读工具（tool_ls/tool_execute 的探查命令）也应算零产出——实测任务在
+            # D:\tool 下只 ls/wmic 了 4 轮、**0 文件**，却播报「已落盘的改动仍然有效」。
+            _did_work = bool(_round_files)
+            if _from_reasoning and settings.zero_progress_mask_reasoning and _did_work:
+                _files = sorted(_round_files)
+                _file_lines = (
+                    "\n".join(f"  - `{p}`" for p in _files[:20])
+                    + (f"\n  - …另有 {len(_files) - 20} 个" if len(_files) > 20 else "")
+                ) if _files else ""
+                answer = (
+                    "**本次任务已执行部分工作，但最后一轮收尾失败。**\n\n"
+                    f"模型 `{model}` 完成 {rounds} 轮工具调用后，最后一轮未输出正文"
+                    f"（finish={finish_reason}），没能给出总结。"
+                    "**已落盘的改动仍然有效**，未做任何回滚。\n\n"
+                    "本轮已调用工具：\n"
+                    + "".join(f"  - `{t}`\n" for t in sorted(used_tools))
+                    + (f"\n本轮写入的文件：\n{_file_lines}\n" if _files else "")
+                    + "\n建议：直接查看上述文件确认内容；如需继续，可就未完成部分"
+                    "再追问一次（模型往往在总结这一步空响应，实际产出已可用）。\n\n"
+                    "排查线索：全链路日志中搜索 `generate.zero_progress`"
+                    f"（`cause={_cause}`）。"
+                )
+            elif _from_reasoning and settings.zero_progress_mask_reasoning:
+                # 建议随归因变化：不是所有零进展都是「思考吃光预算」，
+                # 让用户去调 LLM_MAX_TOKENS 在 finish=stop 形态下属于误导。
+                _advice = (
+                    [
+                        "- 该模型的思考预算与本项目输出上限（`LLM_MAX_TOKENS`）不匹配，"
+                        "思考阶段就把配额用光了 → 调高 `LLM_MAX_TOKENS` 或改用思考较浅的模型；"
+                    ]
+                    if _cause == "reasoning_budget_exhausted"
+                    else [
+                        "- 模型提前收尾但没有真正做事 → 在提问中明确要求使用写文件工具"
+                        "（`tool_write_file` / `tool_apply_patch`）分批落盘，或拆成更小的步骤；",
+                    ]
+                )
+                # [文案失实修复 2026-10-09] 没写入任何文件时才走这里。区分「只探查未落盘」
+                # 与「连工具都没调」，避免把只读探查说成「未调用任何工具」。
+                if used_tools:
+                    _head = (
+                        f"本轮执行了 {len(used_tools)} 类工具调用（"
+                        + "、".join(f"`{t}`" for t in sorted(used_tools))
+                        + "），但都只是探查、**未写入任何文件**"
+                        f"（最后一轮 finish={finish_reason}）。\n\n"
+                    )
+                else:
+                    _head = (
+                        f"模型 `{model}` 连续 {rounds + 1} 轮未调用任何工具，也未输出正文"
+                        f"（finish={finish_reason}）。\n\n"
+                    )
+                answer = (
+                    "**本次请求未能产出任何结果。**\n\n"
+                    + _head
+                    + "已自动重试 "
+                    f"{rescue_used} 次仍未成功。常见原因与建议：\n"
+                    + "".join(_advice) +
+                    "- 任务单轮产出过大（整份代码写进一次回复）→ 拆成多个小步骤，"
+                    "或要求模型用写文件工具分批落盘。\n\n"
+                    "排查线索：全链路日志中搜索 `generate.zero_progress`"
+                    f"（`cause={_cause}`）。"
+                )
+        if zero_progress:
+            # 零进展：末轮既没调工具也没给出有效回答，不能报「完成」骗用户。
+            # 但注意措辞：本轮**可能已经干过活**（前几轮工具调用成功），说「未执行任何
+            # 工具」与事实不符 —— 实测末轮空响应时前 8 轮已写入 5 个文件。
+            _zp_detail = (
+                f"零进展（finish={finish_reason}，cause={_cause}，"
+                + (f"本轮已完成 {len(used_tools)} 类工具调用、写入 {len(_round_files)} 个文件，"
+                   f"但收尾未输出正文，已重试 {rescue_used} 次）"
+                   if used_tools else
+                   f"全程未执行任何工具，已重试 {rescue_used} 次）")
+            )
+            self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "error", "detail": _zp_detail, "duration_ms": round(gen_dur, 1)})
+        elif finish_reason == "length":
             answer = answer + "\n\n⚠️ 输出因达到 token 上限被截断，内容可能不完整。"
             self._push_event(state, {"type": "step_end", "step_id": "generate", "name": "生成回答", "status": "completed", "detail": "完成（输出被截断 length）", "duration_ms": round(gen_dur, 1)})
         elif finish_reason == "content-filter":
@@ -674,6 +1038,104 @@ class RAGAgentGenerate(RAGAgentTools):
             "tokens": dict(self._usage_accum),
             "cost": round(float(getattr(self, "_cost_accum", 0.0)), 6),
         }
+
+    @staticmethod
+    def _is_zero_progress(msg) -> bool:
+        """本轮是否「什么都没产出」。
+
+        判据不能只看 `msg.content` 是否为空 —— `core._llm_call` 在 content 为空时会把
+        `reasoning_content` 回退填进去（防思考模型答空），于是「思考耗尽预算、零产出」
+        会被伪装成「有回答」。`_content_from_reasoning` 是回退**之前**打的标记，
+        据此把两者分开。
+        """
+        if getattr(msg, "tool_calls", None):
+            return False
+        if bool(getattr(msg, "_content_from_reasoning", False)):
+            return True
+        return not (getattr(msg, "content", "") or "").strip()
+
+    @staticmethod
+    def _is_oversized_prose(msg, finish_reason) -> bool:
+        """本轮是否是「超长内联正文 + 零工具调用 + 被截断」。
+
+        与 `_is_zero_progress` 互补而非替代：那一档判定「什么都没做」，这一档判定
+        「做了，但做在聊天窗口里而非磁盘上」。实测 deepseek-v4-flash 无视系统提示里
+        「长内容写文件」的规则，把 8192 输出预算全写成 24K 字聊天正文，`tool_calls=[]`
+        + `finish_reason=length` → while 条件退出 → 磁盘零文件、用户收到腰斩的规划稿。
+
+        以 `finish_reason == "length"` 作为「被截断」的硬证据（正文非空却撞上限，用户
+        拿到的必然是残缺回答），再用 `OVERSIZED_PROSE_MIN_CHARS` 过滤「短回答恰好被截」
+        的偶发情形，避免对正常短问答多问一轮。
+        """
+        if getattr(msg, "tool_calls", None):
+            return False
+        if str(finish_reason) != "length":
+            return False
+        return len(getattr(msg, "content", "") or "") >= OVERSIZED_PROSE_MIN_CHARS
+
+    def _chainlog_zero_progress(
+        self, *, state, model: str, finish_reason: str, rounds: int,
+        input_tokens: int, output_tokens: int, reasoning_tokens: int,
+        cost: float, answer_chars: int, from_reasoning: bool = False,
+        cause: str = "",
+        event: str = "generate.zero_progress",
+    ) -> None:
+        """记一条「零进展」全链路日志节点（stage=agent, level=ERROR）。
+
+        单独成节点而不是只塞进 llm 节点的 data：日志页默认按时间线展示，
+        一条 ERROR 节点能被一眼扫到；而 llm 节点里的 no_progress 标记要展开
+        data 才看得见。
+        """
+        try:
+            from app import chainlog
+
+            agent_id = ""
+            if state is not None:
+                agent_id = str(state.get("agent") or state.get("agent_id") or "")
+            _cause = cause or _zero_progress_cause(
+                from_reasoning=bool(from_reasoning),
+                finish_reason=finish_reason,
+                output_tokens=output_tokens,
+                reasoning_tokens=reasoning_tokens,
+            )
+            # 文案跟随归因，不要硬编码「全被思考占用」：实测存在 finish=stop 且
+            # content 为空的形态，断言思考占比会让排查者往错方向调输出上限。
+            _cause_text = {
+                "reasoning_budget_exhausted": f"输出 {output_tokens} token 全被思考占用",
+                "length_without_tool_calls": "回复被输出上限截断且未带工具调用",
+                "stop_without_output": "模型自行结束（finish=stop）但既无工具调用也无正文",
+            }.get(_cause, "未产出任何工具调用或正文")
+            if event.endswith("_rescue"):
+                _cause_text = f"{_cause_text}（本轮注入强制输出提示后重试）"
+            chainlog.log(
+                "ERROR", "agent", "graph.generate",
+                event,
+                message=(
+                    f"零进展：{model} finish={finish_reason}，"
+                    f"{_cause_text}，未执行任何工具"
+                ),
+                agent_id=agent_id,
+                data={
+                    "model": model,
+                    "finish_reason": str(finish_reason),
+                    "rounds": rounds,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "reasoning_tokens": reasoning_tokens,
+                    "reasoning_ratio": round(reasoning_tokens / output_tokens, 3) if output_tokens else 0,
+                    "cost": cost,
+                    "answer_chars": answer_chars,
+                    "tools_invoked": 0,
+                    "answer_from_reasoning": bool(from_reasoning),
+                    "cause": _cause,
+                    # 该模型是否上报了可用的 reasoning token 计数（比例可信的前提）
+                    "reasoning_tokens_reported": bool(
+                        output_tokens > 0 and reasoning_tokens >= output_tokens * 0.5
+                    ),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _resolve_fallback_model(self, model: str) -> str:
         """回退模型优先级：显式 env（EMPTY_ANSWER_FALLBACK_MODEL_NAME）→ 前端「模型管理」默认
@@ -711,3 +1173,4 @@ class RAGAgentGenerate(RAGAgentTools):
         return ""
 
 __all__ = ['RAGAgentGenerate']
+

@@ -220,8 +220,10 @@ def _chainlog_llm(
     cost: float = 0.0,
     finish_reason: Any = None,
     tool_calls: int = 0,
+    has_content: bool = False,
     error: str = "",
     error_type: str = "",
+    max_tokens: int = 0,
 ) -> None:
     """把一次 LLM 调用记进全链路日志（stage=llm）。
 
@@ -245,8 +247,31 @@ def _chainlog_llm(
             "cost": round(float(cost or 0.0), 8),
             "tool_calls": tool_calls,
         }
+        # [可观测性 2026-10-03] 记录本次实际下发的输出上限。排查「为什么每次都恰好撞
+        # 8192」时，缺这一字段只能靠猜 —— 真正的天花板是 min(模型目录声明, 全局)，
+        # 光看 LLM_MAX_TOKENS 配置会被 min() 骗过去（目录声明才是硬约束）。
+        if max_tokens:
+            data["max_tokens"] = int(max_tokens)
         if finish_reason is not None:
             data["finish_reason"] = str(finish_reason)
+        # [零进展] 思考模型把输出预算全花在 reasoning 上、没吐出 content 也没发 tool call，
+        # 循环随即终止 → 一次请求零产出。这类调用是「任务完不成」的主因，光看
+        # pt/ct 看不出来（ct 很大像是成功），必须单独标出来。
+        # 判据要同时看 content：`has_content` 取的是**回退之前**的正文有无，
+        # 否则 reasoning_content 兜底一填，零产出就被伪装成「有回答」。
+        _ct = int(completion_tokens or 0)
+        _rt = int(reasoning_tokens or 0)
+        if _ct > 0:
+            data["reasoning_ratio"] = round(_rt / _ct, 3)
+        _no_progress = (not tool_calls) and (not has_content) and (
+            str(finish_reason) == "length" or (_ct > 0 and _rt >= _ct)
+        )
+        if _no_progress:
+            data["no_progress"] = True
+            data["no_progress_reason"] = (
+                "budget_exhausted_by_reasoning" if _ct > 0 and _rt >= _ct
+                else "length_without_tool_calls"
+            )
         if error:
             data["error"] = error
             data["error_type"] = error_type
@@ -254,12 +279,13 @@ def _chainlog_llm(
         if state is not None:
             agent_id = str(state.get("agent") or state.get("agent_id") or "")
         chainlog.log(
-            "ERROR" if error else "INFO", "llm", "graph._llm_call",
+            "ERROR" if (error or _no_progress) else "INFO", "llm", "graph._llm_call",
             f"llm.{where}",
             message=(
                 f"{model} 调用失败: {error}" if error
                 else f"{model} pt={prompt_tokens} ct={completion_tokens} "
                      f"cache={cache_read}/{cache_write} {duration_ms:.0f}ms"
+                     + ("  [零进展：思考耗尽预算，未执行任何工具]" if _no_progress else "")
             ),
             agent_id=agent_id,
             data=data,
@@ -282,6 +308,10 @@ class RAGAgent(RAGAgentGenerate):
     def _assemble_response(self, model: str, response, start: float, state: AgentState | None, push_text: bool = False):
         """记录调用指标并累加 token 用量，可选把非流式全文转为 text_delta 推送。"""
         dur = (tmod.time() - start) * 1000
+        # 本方法独立于 `_llm_call`，需自行解析输出上限（仅供链路日志展示）
+        from app.config import settings as _s
+        from app.models.catalog import resolve_max_output_tokens as _rmot
+        _cap = _rmot(model, _s.llm_max_tokens)
         usage = getattr(response, "usage", None)
         pt = getattr(usage, "prompt_tokens", 0) if usage else 0
         ct = getattr(usage, "completion_tokens", 0) if usage else 0
@@ -309,6 +339,27 @@ class RAGAgent(RAGAgentGenerate):
             "LLM call | model=%s pt=%d ct=%d cache_hit=%d cache_miss=%d dur=%.0fms",
             model, pt, ct, hit, miss, dur,
         )
+        # [全链路日志] 非流式路径同样落 llm 节点（此前只有流式记，导致「流式建连失败
+        # 回退非流式」的调用在链路里完全不可见 —— 排查时看不到这次调用发生过）
+        try:
+            _msg0 = getattr(response.choices[0], "message", None)
+            _fr = getattr(response.choices[0], "finish_reason", None)
+            _raw_content = getattr(_msg0, "content", None) or ""
+            _chainlog_llm(
+                model, where="assemble", duration_ms=dur, state=state,
+                prompt_tokens=int(pt or 0), completion_tokens=int(ct or 0),
+                reasoning_tokens=rt, cache_read=hit, cache_write=miss, cost=cost,
+                finish_reason=_fr,
+                tool_calls=len(getattr(_msg0, "tool_calls", None) or []),
+                has_content=bool(_raw_content.strip()),
+                max_tokens=_cap,
+            )
+            try:
+                _msg0._content_from_reasoning = not bool(_raw_content.strip())
+            except Exception:
+                pass
+        except Exception:  # noqa: BLE001
+            pass
         if state is not None and push_text:
             msg0 = getattr(response.choices[0], "message", None)
             content = getattr(msg0, "content", None) or ""
@@ -326,12 +377,17 @@ class RAGAgent(RAGAgentGenerate):
             if content:
                 self._push_stream_event(state, {"type": "text_delta", "delta": content})
         return response
-    async def _llm_call(self, model: str, messages: list, tool_defs: list, state: AgentState | None = None):
+    async def _llm_call(self, model: str, messages: list, tool_defs: list, state: AgentState | None = None,
+                        disable_thinking: bool = False):
         """调用大语言模型API（流式）并记录调用指标。
 
         流式把文本增量经 _push_stream_event 实时转发（type=text_delta），同时累积出
         完整 message（含 tool_calls/finish_reason），与原有调用在 _generate 中完全兼容。
         流式建立失败自动回退非流式；流式中断则用已累积内容兜底。
+
+        `disable_thinking`：强制关闭 DeepSeek 思考（走 extra_body，顶层 kwarg 会被
+        litellm 丢弃）。供「零进展救援」在思考吃光输出预算后切换策略：同一配置重试只会
+        再烧光一次，关掉思考才能拿到正文/工具调用。
         """
         from types import SimpleNamespace
 
@@ -347,6 +403,11 @@ class RAGAgent(RAGAgentGenerate):
         _api_key = _creds["api_key"]
         _api_base = _creds["api_base"]
         _llm_extra = litellm_extra_kwargs(_creds)
+        if disable_thinking and (model or "").lower().startswith("deepseek/"):
+            _eb = dict(_llm_extra.get("extra_body") or {})
+            _eb["thinking"] = {"type": "disabled"}
+            _llm_extra["extra_body"] = _eb
+            _llm_extra.pop("thinking", None)
         from app.models.catalog import provider_config_hint
         _hint = provider_config_hint(model, creds=_creds)
         if _hint:
@@ -393,6 +454,7 @@ class RAGAgent(RAGAgentGenerate):
                 _chainlog_llm(
                     model, where="error", duration_ms=dur, state=state,
                     error=str(exc), error_type=type(exc).__name__,
+                    max_tokens=_max_tokens,
                 )
                 from app.models.catalog import normalize_llm_exception
                 _friendly = normalize_llm_exception(exc, model)
@@ -468,6 +530,10 @@ class RAGAgent(RAGAgentGenerate):
             logger.warning("LLM stream interrupted, using accumulated content", exc_info=True)
 
         content = "".join(text_chunks)
+        # [零进展] 模型**自己**是否吐出了正文。必须在 reasoning 回退**之前**取：
+        # 回退后 content 变成长达两万字的内心独白，据此判断会以为「有回答」，
+        # 从而把「思考耗尽预算、零产出」误判成正常完成。
+        _content_is_real = bool(content.strip())
         # [reasoning 方言] 思考模型（如 qwen3.5 think=True）只有 reasoning_content 流、
         # content 为空（litellm 不落最终回答）；回退：content 空且 reasoning 非空 → 用 reasoning。
         if not content.strip() and reasoning_chunks:
@@ -551,6 +617,8 @@ class RAGAgent(RAGAgentGenerate):
             reasoning_tokens=rt, cache_read=hit, cache_write=miss, cost=cost,
             finish_reason=finish_reason,
             tool_calls=len(tool_slots),
+            has_content=_content_is_real,
+            max_tokens=_max_tokens,
         )
 
         tool_calls = None
@@ -564,6 +632,9 @@ class RAGAgent(RAGAgentGenerate):
                 for _, slot in sorted(tool_slots.items())
             ]
         msg = SimpleNamespace(content=content, tool_calls=tool_calls)
+        # [零进展] 把「正文是否由 reasoning 回退而来」透传给 _generate：
+        # 它据此区分「真截断的完整回答」与「思考耗尽预算的内心独白」。
+        msg._content_from_reasoning = not _content_is_real
         return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason=finish_reason)], usage=usage)
     def _build_graph(self):
         """构建LangGraph状态图，定义检索、重排序和生成的流程。"""
@@ -626,6 +697,7 @@ class RAGAgent(RAGAgentGenerate):
                 files=files or [],
                 steps=[],
                 tokens=dict(_ZERO_USAGE),
+                cost=0.0,
                 finish="stop",
                 _event_queue=event_queue,
                 _on_activity=on_activity,
