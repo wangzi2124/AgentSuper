@@ -123,6 +123,12 @@ function shortToolName(name?: string): string {
   return name.replace(/^plugin_[^_]+_/, '').replace(/^tool_/, '')
 }
 
+// 卡片标签：真实工具调用（带 tool_name）显示工具名；其余是模型的阶段步骤
+// （检索/重排/生成/探索…），显示「思考」，避免把生成/思考阶段误标成「工具」。
+function cardLabel(step: AgentStep): string {
+  return step.tool_name ? shortToolName(step.tool_name) : '思考'
+}
+
 // 按输出顺序排列的展示部件：优先 parts（真实交错），否则组装 steps（含最终正文）
 function orderedParts(agent: {
   parts?: AgentOutputPart[]
@@ -182,9 +188,9 @@ function statusLabel(status: string): string {
               <MarkdownContent :text="p.text || ''" />
             </div>
             <!-- 极简工具卡片（无参数 / 无结果展开） -->
-            <div v-else-if="p.kind === 'tool' && p.step" class="o-tool" :class="p.step.status">
+            <div v-else-if="p.kind === 'tool' && p.step" class="o-tool" :class="[p.step.status, { 'is-step': !p.step.tool_name }]">
               <span class="o-tool-icon" :class="p.step.status">{{ getStatusIcon(p.step.status) }}</span>
-              <span class="o-tool-name">{{ shortToolName(p.step.tool_name) }}</span>
+              <span class="o-tool-name">{{ cardLabel(p.step) }}</span>
               <span class="o-tool-title">{{ stepTitle(p.step) }}</span>
               <span v-if="p.step.duration_ms != null" class="o-tool-time">{{ formatDuration(p.step.duration_ms) }}</span>
               <span v-else-if="p.step.status === 'running'" class="o-tool-spin"></span>

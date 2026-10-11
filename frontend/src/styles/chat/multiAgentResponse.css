@@ -90,6 +90,11 @@ flex-shrink: 0;
 font-family: 'JetBrains Mono', Consolas, monospace;
 font-size: 12px;
 }
+/* 非工具阶段（思考/检索/生成…）：不用等宽字体，弱化为次要色 */
+.o-tool.is-step .o-tool-name {
+font-family: inherit;
+color: var(--text-secondary);
+}
 .o-tool-title {
 color: var(--text-secondary);
 white-space: nowrap;
