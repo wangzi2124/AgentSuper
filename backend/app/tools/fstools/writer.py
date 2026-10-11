@@ -86,10 +86,12 @@ def _write_text_raw(path: Path, text: str, has_bom: bool = False) -> None:
     with fsutil.file_lock(str(path), timeout=30):
         fsutil.write_file(path, text, atomic=True)
 
-def tool_write_file(path: str, content: str, overwrite: bool = False) -> dict:
-    """创建新文件并写入内容。overwrite=True 时允许覆盖已存在的文件。
+def tool_write_file(path: str, content: str, overwrite: bool = True) -> dict:
+    """创建或覆盖文件并写入内容（对齐 opencode write：默认覆盖已存在文件）。
 
-    行尾按内容原样写入（newline=""），不做系统换行符转换。
+    行尾按内容原样写入（newline=""），不做系统换行符转换。overwrite=False 时保留旧的
+    防御语义：目标已存在则报错、不改动。目标已存在且内容与本次完全相同时不重复写盘，
+    直接回报「无变化」（幂等短路），避免弱模型反复重写同一文件空耗轮次。
     """
     target = _resolve(path)
     archive_external(target)  # [snapshot] 轮次级 before 归档（外部文件）
@@ -101,6 +103,13 @@ def tool_write_file(path: str, content: str, overwrite: bool = False) -> dict:
             existed = target.exists()
             if existed and not overwrite:
                 return _env("write", f"Error: file already exists: {path} (use overwrite=True to overwrite, or edit_file to modify)", error=True)
+            # [幂等短路] 内容与磁盘现有内容完全一致 → 不重复写盘，明确回报「无变化」。
+            if existed:
+                existing_text, _bom = _read_text_raw(target)
+                if existing_text == str(content):
+                    _scan_cache.invalidate(target.parent)
+                    size = target.stat().st_size
+                    return _env("write", f"{path} already up to date ({size} bytes, no change)", path=str(target), size=size, action="unchanged")
             _write_text_raw(target, str(content))
             action = "Overwritten" if existed else "Created"
         _scan_cache.invalidate(target.parent)

@@ -3,6 +3,7 @@
 原文件 docstring: (无)"""
 # ── 复制自原模块的顶层 import ──
 import asyncio
+import json
 
 
 import logging
@@ -148,6 +149,30 @@ class RAGAgentGenerate(RAGAgentTools):
         "plugin_excel-generator_tool_create_excel": ("output_path",),
         "plugin_kb-export_tool_export_kb_to_docx": ("output_path",),
     }
+
+    # [死循环检测] 指纹里忽略这些「不影响操作目标/内容」的开关型参数，
+    # 防止模型加个 overwrite=True / replace_all=True 就改掉指纹、逃逸重复检测
+    # （实测 qwen2.5-coder 连续 4 轮重写同一 game.js，仅第 2 轮起多带 overwrite=True
+    #   就重置了计数，白烧数轮）。
+    _DOOM_NOISE_ARGS = ("overwrite", "replace_all")
+
+    @staticmethod
+    def _fingerprint_args(raw_args: str) -> str:
+        """归一化工具实参用于死循环指纹：剔除开关型噪声参数后稳定序列化。
+
+        解析失败时退回原始字符串（保持保守：不会因归一化吞掉真实差异）。
+        """
+        args = parse_tool_args(raw_args)
+        if not isinstance(args, dict):
+            return raw_args or ""
+        cleaned = {
+            k: v for k, v in args.items()
+            if k not in RAGAgentGenerate._DOOM_NOISE_ARGS
+        }
+        try:
+            return json.dumps(cleaned, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            return raw_args or ""
 
     @staticmethod
     def _extract_step_files(tool_calls) -> list[str]:
@@ -686,7 +711,10 @@ class RAGAgentGenerate(RAGAgentTools):
             # 零进展救援轮没有 tool_calls → fp 为空串。若照样入指纹窗口，连续两轮
             # 救援的 "" 会被判成「重复工具调用」而误升级强制收尾，反而害死救援。
             fp = "|".join(
-                sorted(f"{tc.function.name}:{tc.function.arguments}" for tc in cur_tool_calls)
+                sorted(
+                    f"{tc.function.name}:{self._fingerprint_args(tc.function.arguments)}"
+                    for tc in cur_tool_calls
+                )
             )
             if not fp:
                 fp = None

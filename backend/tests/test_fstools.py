@@ -155,8 +155,17 @@ class TestWriterTools:
     def test_write_create_and_overwrite(self, ws):
         r = writer.tool_write_file("a.txt", "hello", overwrite=False)
         assert r["metadata"]["action"] == "created" and ws.joinpath("a.txt").exists()
+        # overwrite=False 保留防御语义：目标已存在则报错、不改动
+        err = writer.tool_write_file("a.txt", "nope", overwrite=False)
+        assert err["metadata"]["error"] is True
+        assert ws.joinpath("a.txt").read_text(encoding="utf-8") == "hello"
+        # 默认 overwrite=True（对齐 opencode write）：再次写入直接覆盖，不报错
         r2 = writer.tool_write_file("a.txt", "nope")
-        assert r2["metadata"]["error"] is True
+        assert r2["metadata"]["action"] == "overwritten"
+        assert ws.joinpath("a.txt").read_text(encoding="utf-8") == "nope"
+        # 幂等短路：内容与磁盘一致时不重复写盘，回报「无变化」
+        r2b = writer.tool_write_file("a.txt", "nope")
+        assert r2b["metadata"]["action"] == "unchanged"
         r3 = writer.tool_write_file("a.txt", "hi", overwrite=True)
         assert r3["metadata"]["action"] == "overwritten"
         assert ws.joinpath("a.txt").read_text(encoding="utf-8") == "hi"

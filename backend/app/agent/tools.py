@@ -156,7 +156,7 @@ def create_filesystem_tools() -> List[ToolDef]:
     _PARAM_DOCS: dict[str, dict[str, str]] = {
         "tool_ls": {"path": "Directory (default: cwd)"},
         "tool_read_file": {"path": "File path", "offset": "Start line (1-based, default 1)", "limit": "Max lines (default 2000, max 50KB; paginate via offset)"},
-        "tool_write_file": {"path": "File path (parent dirs auto-created)", "content": "Text to write", "overwrite": "Overwrite if exists (default false)"},
+        "tool_write_file": {"path": "File path (parent dirs auto-created)", "content": "Text to write", "overwrite": "Overwrite if exists (default true)"},
         "tool_append_file": {"path": "File path (created if missing)", "content": "Text to append"},
         "tool_edit_file": {"path": "File path", "old_string": "Text to replace", "new_string": "Replacement", "replace_all": "Replace all (default false; multiple matches without this error)"},
         "tool_glob": {"pattern": "Glob (e.g. **/*.py)", "path": "Dir (default workspace; absolute allowed)"},
