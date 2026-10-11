@@ -621,6 +621,17 @@ class RAGAgentBase:
                 filtered.append(d)
             else:
                 filtered.append(d)
+        # [CodeAct §10] 同会话连续失败达上限 → 不再注入 tool_code_exec（其余工具照常）。
+        # 放在**最终阶段**过滤（而非建 wanted 集合时），因为会话级工具缓存只增不减：
+        # 即使缓存里已挂过 tool_code_exec，这里也能在达到失败上限后把它从 schema 摘除。
+        if getattr(settings, "codeact_enabled", False):
+            _conv = conversation_id or "default"
+            _maxr = max(0, int(getattr(settings, "codeact_max_retries", 3)))
+            if _maxr > 0 and getattr(self, "_codeact_failures", {}).get(_conv, 0) >= _maxr:
+                filtered = [
+                    d for d in filtered
+                    if d.get("function", {}).get("name", "") != "tool_code_exec"
+                ]
         return filtered
     def _remember_conversation_tools(self, conversation_id: str, used_names: set | str) -> None:
         """把本请求实际用到的工具名并入会话挂载缓存（只增不减，尾部追加）。

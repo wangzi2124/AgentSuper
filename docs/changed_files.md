@@ -52,3 +52,30 @@
 - `tool_code_exec` 注册（`graphmod/base.py:_static_tools_tail` + `graphmod/tools.py:_execute_tool`）。
 - `codeact_max_retries` 由 `graphmod/generate.py` 强制（连续失败停用工具）。
 - **§4.0 前置**：`CODEACT_ENABLED=true` 时同步收紧 `tool_execute` 的 `python/node -c`。
+
+---
+
+## 接线完成（v2.2 收尾，2026-10-12）
+
+> 上述「尚未接线」三条已全部落地并通过端到端验证。设计清单见 `docs/codeact-sandbox-design.md` §14（全部勾选）。
+
+### 新增改动（本轮）
+- `backend/app/agent/graphmod/constants.py`
+  - 新增 `CODEACT_DISABLED_PROMPT`（§10 停用提示）。
+- `backend/app/agent/graphmod/base.py`
+  - `_build_tool_defs` 末尾阶段过滤：`codeact_enabled` 且会话失败数 ≥ `codeact_max_retries` 时从 schema 摘除 `tool_code_exec`（其余工具照常）。
+- `backend/app/agent/graphmod/generate.py`
+  - `_generate_impl` 主循环：会话失败数越限 → 注入 `CODEACT_DISABLED_PROMPT` + 重建 `tool_defs`（只注入一次）。
+- `backend/app/agent/graphmod/tools.py`
+  - `_tool_code_exec`（既有）：会话级连续失败累加/清零，达上限返回停用错误信息（执行级兜底）。
+- `backend/tests/test_codeact.py`
+  - +3 项：schema 摘除（≥上限）／保留（<上限）／提示词常量；合计 34 项。
+- `docs/codeact-sandbox-design.md`
+  - §10 接线描述与实现对齐；§11 测试计划标注已并入 pytest；§14 checklist 全部勾选并注明实际位置。
+
+### 验证
+- 单测：`pytest tests/test_codeact.py` → **34 passed**。
+- 端到端（`deepseek/deepseek-v4-flash`，会话 `ses_209frh5jvpa8284c8`）：
+  - 正向：fib(100)+1..300 质数计数落盘 `codeact_result.txt`，数值独立复算一致；沙盒痕迹
+    `data/codeact/run/<run_id>/`（隔离 pycache 证明 `-S`+`-X pycache_prefix` 生效）。
+  - 负向：`import os` → `ast_rejected`（0.0s，未 spawn），白名单随错误返回。

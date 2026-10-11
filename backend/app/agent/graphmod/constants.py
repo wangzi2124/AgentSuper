@@ -160,6 +160,22 @@ REPEAT_DELEGATION_PROMPT = (
 )
 
 
+# ── CodeAct §10：连续失败停用 tool_code_exec ────────────────────────────────
+# 设计 §10 要求：tool_code_exec 连续失败达 CODEACT_MAX_RETRIES 后**不再注入该工具**
+# （由 _build_tool_defs 末尾过滤 schema），并注入结构化收尾提示，止住「反复修同一段
+# 注定失败的代码」的空烧。区别于 DOOM_LOOP（判「重复指纹」），这里判「同会话累计
+# 失败次数」—— 即使模型每轮都换新代码在乱试，累计失败到顶也照样停用。
+CODEACT_DISABLED_PROMPT = (
+    "系统提示：代码执行器 tool_code_exec 在本会话已**连续失败达到上限**，现已停用"
+    "（本轮起不再提供该工具）。\n"
+    "请不要再尝试代码执行，改用文件工具（tool_write_file / tool_append_file / "
+    "tool_apply_patch / tool_read_file / tool_grep / tool_execute）或直接在回复中"
+    "完成剩余工作。\n"
+    "如果任务确实需要运行代码，请说明你要执行的步骤与已遇到的错误，让用户决定；"
+    "不要原样重试同一段失败代码，也不要再臆测执行结果。"
+)
+
+
 # P4: finish_reason 归一化映射（对齐 opencode FinishReason 六值，llm/src/schema/ids.ts:39）
 
 _FINISH_REASON_MAP = {

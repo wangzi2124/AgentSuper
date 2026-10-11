@@ -423,11 +423,17 @@ codeact_max_artifact_size_mb: int = 10 # 【v2.2】save_artifact 单产物上限
 
 ## 10. 工具注册
 
-- `graphmod/base.py:_static_tools_tail()`：`codeact_enabled` 时追加 `tool_code_exec(code, timeout?)`。
-- `graphmod/tools.py:_execute_tool()`：特判 → `ExecutionSession(...).run(code)`，注入 `conversation_id / _cwd / _event_queue / _task_depth`。
-- **【修正】错误自愈次数由 `graphmod/generate.py` 强制**：跟踪连续 `tool_code_exec` 失败次数，达 `CODEACT_MAX_RETRIES`
-  后**不再注入 `tool_code_exec`**（等同 doom-loop 的 `DOOM_LOOP_MAX_STRIKES` 处理），并注入结构化总结提示，止住空烧。
-  纯靠系统提示词约束不可靠，必须代码层兜底。
+- `graphmod/base.py:_static_tools_tail()`：`codeact_enabled` 时追加 `tool_code_exec(code)`（主 Agent 专用，explore/plan 子 Agent 不挂）。
+- `graphmod/tools.py:_execute_tool()`：特判 → `graphmod/tools.py:_tool_code_exec(args, state)`，
+  注入 `conversation_id / _cwd / _event_queue`，spawn `ExecutionSession(...).run(code)`，结果 `CodeActResult.to_text` 回灌。
+- **【已实现】错误自愈次数强制（§14 已勾选）**：执行入口 `_tool_code_exec` 按会话累计连续失败
+  （`agent._codeact_failures[conversation_id]`，成功清零、失败 +1），达 `CODEACT_MAX_RETRIES` 后：
+  - 工具内直接返回停用错误信息（执行级兜底，同步/流式两条路径都生效）；
+  - `graphmod/generate.py:_generate_impl` 主循环检测到越限 → 注入 `CODEACT_DISABLED_PROMPT`（结构化收尾提示，
+    语义同 doom-loop 的强制收尾）+ 重建 `tool_defs`；
+  - `graphmod/base.py:_build_tool_defs` **末尾阶段过滤**：从 schema 摘除 `tool_code_exec`（其余工具照常，
+    模型不得再调用；即使会话级工具缓存里已挂过也能摘除）。
+  - 纯靠系统提示词约束不可靠，必须代码层兜底——以上均为代码层。
 - 系统提示词（仅 `codeact_enabled` 注入）：
 
 ```
@@ -443,7 +449,8 @@ codeact_max_artifact_size_mb: int = 10 # 【v2.2】save_artifact 单产物上限
 
 ## 11. 测试计划
 
-> 注意：本机 `backend/.venv` **未安装 pytest**，Phase 1 需先补测试依赖，否则用例无法执行。
+> 注意：已并入 pytest（`backend/tests/test_codeact.py`，34 项通过）。以下 11.1-11.6 为设计覆盖矩阵；
+> 关键安全路径（AST/frame/exec §4.0/§10 停用）已在单测锁定，端到端用 deepseek 实测通过。
 
 - **11.1 AST / builtins / hook**
   - 白名单导入通过；`os/subprocess/eval/__import__/open/getattr` 被拒；
@@ -491,8 +498,11 @@ codeact_max_artifact_size_mb: int = 10 # 【v2.2】save_artifact 单产物上限
 
 ## 14. 实现者 checklist
 
-> 状态（v2.2）：`backend/app/codeact/` 核心已落地，`codeact_check.py` 24 项 + `codeact_p0_check.py` 11 项全部通过。
-> 尚未接线到 Agent（`tool_code_exec` 注册/`generate.py` 连续失败计数/`tool_execute` 收紧）。
+> 状态（v2.2）：`backend/app/codeact/` 核心落地 + **全量接线 Agent（主 Agent 已注册 `tool_code_exec`、
+> `generate.py` 连续失败停用、`tool_execute` 的 python/node `-c` 收紧均已完成）**。
+> 单测并入 pytest：`backend/tests/test_codeact.py` 34 项全部通过。
+> 端到端用 `deepseek/deepseek-v4-flash` 实测通过：正向任务（fib(100)+质数计数落盘）与负向任务
+> （`import os` → `ast_rejected`，0.0s 未 spawn）。
 
 - [x] RPC 走本地（回环 socket）+ 长度前缀帧协议（3.x/6）；帧长上限双向（D2）。
 - [x] 子进程一律 `subprocess.Popen` + 后台线程桥，**禁用 `asyncio.create_subprocess_*`**（§3.3）。
@@ -505,12 +515,16 @@ codeact_max_artifact_size_mb: int = 10 # 【v2.2】save_artifact 单产物上限
 - [x] `ExecutionSession` 统一超时/审批/取消/并发；超时钳制 B1。
 - [x] 导入白名单处理“内部导入 os”冲突 + 白名单 `__import__` wrapper；`-S` + `-X pycache_prefix`（§4.2/4.6）。
 - [x] 配置并入 `app/config.py`（含 `codeact_max_artifact_size_mb` B6）。
-- [ ] `tool_code_exec` 注册（`graphmod/base.py:_static_tools_tail` + `graphmod/tools.py:_execute_tool` 特判）。
-- [ ] `codeact_max_retries` 由 `generate.py` 强制（连续失败后停用工具，§10）。
-- [ ] **§4.0 前置**：`CODEACT_ENABLED=true` 时同步收紧 `tool_execute` 的 `python/node -c`（需审批/禁止）。
+- [x] `tool_code_exec` 注册（`graphmod/base.py:_static_tools_tail` 注册 + `graphmod/tools.py:_execute_tool` 特判分派）。
+- [x] `codeact_max_retries` 强制（§10）：执行入口 `graphmod/tools.py:_tool_code_exec` 会话级累加/清零；
+     达上限后由 `graphmod/generate.py:_generate_impl` 检测并注入 `CODEACT_DISABLED_PROMPT` + 重建 tool_defs，
+     `graphmod/base.py:_build_tool_defs` 末尾从 schema 摘除 `tool_code_exec`（其余工具照常）。
+- [x] **§4.0 前置**：`CODEACT_ENABLED=true` 时同步收紧 `tool_execute` 的 `python/node -c`
+     （`tools/fstools/execv.py:_check_codeact_inline`，逐段调用，禁内联、放脚本文件）。
 - [x] 产物写 `data/codeact/`，全文转储走 `data/truncation/`（勿污染 `data/generated/`）；truncation 只读（B4）。
 - [x] RPC 分发复用 `run_tool`（SSRF + `bound_tool_output` + 轮次快照自动生效）+ **硬编码白名单**（B2）。
 - [x] api 函数闭包注入 `make_api(rpc, b64)`，分发原语不进 `__globals__`（B3）；`save_artifact` sanitize+上限（B6）。
 - [x] 崩溃 stderr 尾部脱敏回灌 + `0xC000012D→memory_limit`（B5/C6）。
-- [ ] **文档同步**：`.env.example` 增补 `codeact_*`；`AGENTS.md` 增补条目；`changed_files.md` 记录。
-- [ ] 测试用例补通道/路径/资源/生命周期（并入 pytest，先补 pytest 依赖，当前为独立检查脚本 `codeact_check.py`/`codeact_p0_check.py`）。
+- [x] **文档同步**：`.env.example` 增补 `codeact_*`；`AGENTS.md` 增补条目；`changed_files.md` 记录。
+- [x] 测试用例并入 pytest：`backend/tests/test_codeact.py`（34 项：ast_guard/frame/result/session/
+     execv §4.0/提示词/job_object/§10 停用），独立检查脚本 `codeact_check.py`/`codeact_p0_check.py` 已删除。

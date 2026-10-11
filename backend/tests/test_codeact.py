@@ -15,6 +15,7 @@
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -247,3 +248,50 @@ def test_job_object_non_windows_returns_none(monkeypatch):
 
 def test_job_object_resume_thread_removed():
     assert not hasattr(jo, "resume_thread")
+
+
+# ── §10：连续失败达上限停用 tool_code_exec（generate.py/_build_tool_defs 强制）──────────
+
+def _codeact_stub_agent(conv: str, failures: int):
+    """用 object.__new__ 绕过 __init__（不触碰 Retriever/依赖），只装 _build_tool_defs
+    需要的属性和会话工具缓存，验证「失败达上限 → schema 摘除」的真实分支。"""
+    from app.agent.tools import ToolDef
+    from app.agent.graphmod.base import RAGAgentBase
+    stub = object.__new__(RAGAgentBase)
+    stub.model = "deepseek/deepseek-v4-flash"
+    stub.tools = [
+        ToolDef("tool_code_exec", "受控代码执行", {"type": "object", "properties": {}}, lambda: ""),
+        ToolDef("tool_read_file", "读取文件", {"type": "object", "properties": {}}, lambda: ""),
+        ToolDef("tool_ls", "列出目录", {"type": "object", "properties": {}}, lambda: ""),
+    ]
+    stub._codeact_failures = {conv: failures}
+    stub._conv_tool_cache = {}
+    stub._conv_tool_cache_lock = threading.Lock()
+    stub._conv_tool_cache_max = 200
+    stub._pinned_tool_names = lambda: set()
+    return stub
+
+
+def test_codeact_tool_dropped_at_failure_limit(monkeypatch):
+    monkeypatch.setattr(settings, "codeact_enabled", True)
+    monkeypatch.setattr(settings, "codeact_max_retries", 3)
+    stub = _codeact_stub_agent("conv1", failures=3)
+    defs = stub._build_tool_defs("hi", conversation_id="conv1", model="deepseek/deepseek-v4-flash")
+    names = [d["function"]["name"] for d in defs]
+    assert "tool_code_exec" not in names
+    assert "tool_read_file" in names and "tool_ls" in names  # 其余工具照常
+
+
+def test_codeact_tool_kept_below_limit(monkeypatch):
+    monkeypatch.setattr(settings, "codeact_enabled", True)
+    monkeypatch.setattr(settings, "codeact_max_retries", 3)
+    stub = _codeact_stub_agent("conv2", failures=2)
+    defs = stub._build_tool_defs("hi", conversation_id="conv2", model="deepseek/deepseek-v4-flash")
+    names = [d["function"]["name"] for d in defs]
+    assert "tool_code_exec" in names
+
+
+def test_codeact_disabled_prompt_constant():
+    from app.agent.graphmod.constants import CODEACT_DISABLED_PROMPT
+    assert "tool_code_exec" in CODEACT_DISABLED_PROMPT
+    assert "连续失败" in CODEACT_DISABLED_PROMPT

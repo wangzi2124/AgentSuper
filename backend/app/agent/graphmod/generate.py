@@ -56,6 +56,7 @@ from .tools import RAGAgentTools
 from .base import is_weak_model
 from .constants import DOOM_LOOP_PROMPT, REPEAT_DELEGATION_PROMPT
 from .constants import MAX_STEPS_PROMPT
+from .constants import CODEACT_DISABLED_PROMPT
 from .constants import OVERSIZED_PROSE_ACK, OVERSIZED_PROSE_MIN_CHARS, OVERSIZED_PROSE_PROMPT
 from .constants import _TRUNCATED_ARGS_ERROR
 from .constants import ZERO_PROGRESS_ACK, ZERO_PROGRESS_PROMPT
@@ -410,6 +411,9 @@ class RAGAgentGenerate(RAGAgentTools):
         delegated_tasks: set[str] = set()
         repeat_delegation_strikes = 0
         steps_prompt_injected = False
+        # [CodeAct §10] 本会话 codeact 连续失败达上限后置位：本轮起 _build_tool_defs
+        # 会据 self._codeact_failures 把 tool_code_exec 从 schema 摘除，且只注入一次收尾提示。
+        codeact_tripped = False
         rounds = 0
         tool_calls_count = 0
         # [零进展救援] 思考模型可能把整轮输出预算烧在 reasoning 上（实测
@@ -678,6 +682,32 @@ class RAGAgentGenerate(RAGAgentTools):
             if state.get("_task"):
                 state["_task"].increment_step()
                 state["_task"].increment_tool_calls(len(cur_tool_calls))
+
+            # [CodeAct §10 · 由 generate.py 强制] 同会话 codeact 连续失败达 CODEACT_MAX_RETRIES
+            # → 本轮起不再注入 tool_code_exec（重建 tool_defs，_build_tool_defs 末尾据失败
+            #   计数过滤 schema）+ 注入结构化收尾提示，止住反复试错空烧。与 doom-loop 不同：
+            #   这里判「累计失败次数」而非「重复指纹」，模型每轮换新代码乱试也会被停用。
+            #   失败计数由 _tool_code_exec（tools.py）在每次执行后累加/清零。
+            if not codeact_tripped and getattr(settings, "codeact_enabled", False):
+                _cc_conv = state.get("conversation_id", "") or "default"
+                _cc_maxr = max(0, int(getattr(settings, "codeact_max_retries", 3)))
+                if _cc_maxr > 0 and self._codeact_failures.get(_cc_conv, 0) >= _cc_maxr:
+                    codeact_tripped = True
+                    tool_defs = self._build_tool_defs(
+                        state.get("question", ""),
+                        conversation_id=state.get("conversation_id", ""),
+                        model=_model_hint,
+                    )
+                    messages.append({"role": "assistant", "content": CODEACT_DISABLED_PROMPT})
+                    self._push_event(state, {
+                        "type": "step_end", "step_id": "codeact_disabled",
+                        "name": "代码执行器停用", "status": "completed",
+                        "detail": f"tool_code_exec 连续失败已达上限（{_cc_maxr} 次），本轮起不再提供",
+                    })
+                    logger.warning(
+                        "CodeAct disabled for conversation %s after %d consecutive failures",
+                        _cc_conv, self._codeact_failures.get(_cc_conv, 0),
+                    )
 
             # [C5 · 方案 D 基础] 每轮把执行进度落盘为 STEP_STATE（会话工作目录存在时），
             # 供长任务接力/断点续跑恢复；上下文只装摘要+当前步，旧轮次不再携带。
