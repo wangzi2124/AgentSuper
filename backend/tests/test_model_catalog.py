@@ -319,6 +319,57 @@ def test_probe_ollama_models_uses_real_context_length(tmp_path, monkeypatch):
     assert by_id["ollama/old:latest"]["limits"]["max_output_tokens"] == 8192
 
 
+def test_apply_ollama_native_refreshes_and_respects_override(monkeypatch):
+    """已收录条目的写死能力应被 /api/tags 真实值刷新，但用户 override 优先。"""
+    monkeypatch.setattr(catalog, "_ollama_native", {
+        "ollama/mistral:latest": {
+            "capabilities": {"tool_use": True, "vision": False, "reasoning": False},
+            "context_length": 0,
+            "limits": None,
+        },
+    })
+    base = [{
+        "id": "ollama/mistral:latest",
+        "capabilities": {"tool_use": False, "vision": False, "reasoning": False},
+        "context_length": 32768,
+        "limits": {"max_output_tokens": 4096},
+    }]
+    # 无 override → 采用真实能力
+    monkeypatch.setattr(catalog, "load_config", lambda: {"overrides": {}})
+    out = catalog._apply_ollama_native(base)
+    assert out[0]["capabilities"]["tool_use"] is True
+    # 不修改原对象（内置常量/缓存安全）
+    assert base[0]["capabilities"]["tool_use"] is False
+    # 用户显式 override 的 capabilities 优先于真实探测值
+    monkeypatch.setattr(catalog, "load_config", lambda: {
+        "overrides": {"ollama/mistral:latest": {
+            "capabilities": {"tool_use": False, "vision": False, "reasoning": False}}},
+    })
+    out2 = catalog._apply_ollama_native(base)
+    assert out2[0]["capabilities"]["tool_use"] is False
+
+
+def test_get_catalog_refreshes_known_ollama_capabilities_from_tags(tmp_path, monkeypatch):
+    """集成：内置 ollama 条目（probe 会跳过）也应被真实 /api/tags 能力刷新。"""
+    from app.models import catalog_db
+
+    monkeypatch.setenv("AGENTSUPER_DATA", str(tmp_path))
+    monkeypatch.setattr("app.models.catalog_db.backends.is_sqlite", lambda: True)
+    catalog_db._initialized_paths.clear()
+    catalog_db._json_imported_non_sqlite = False
+    monkeypatch.setattr(catalog, "_catalog_cache", {})
+    monkeypatch.setattr(catalog, "probe_configured_providers", lambda known, force=False: [])
+    _fake_ollama_tags(tmp_path, monkeypatch, [
+        {"name": "qwen2.5:7b", "capabilities": ["completion"]},                 # 内置 True → 真实无 tools
+        {"name": "codellama:latest", "capabilities": ["completion", "tools"]},  # 内置 False → 真实有 tools
+        {"name": "tiny:1b", "capabilities": ["completion"]},                    # 未收录 → 增量条目
+    ])
+    by_id = {e["id"]: e for e in catalog.get_catalog(force_reload=True)}
+    assert by_id["ollama/qwen2.5:7b"]["capabilities"]["tool_use"] is False
+    assert by_id["ollama/codellama:latest"]["capabilities"]["tool_use"] is True
+    assert by_id["ollama/tiny:1b"]["capabilities"]["tool_use"] is False
+
+
 def test_read_capabilities_returns_declared_and_unknown(monkeypatch):
     # 内置目录 deepseek → 按目录能力返回
     caps = catalog.read_capabilities("deepseek/deepseek-v4-flash")

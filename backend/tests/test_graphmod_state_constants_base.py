@@ -431,9 +431,15 @@ def test_build_tool_defs_pinned_and_used():
     assert "tool_grep" in names  # 已使用保留
 
 
-def test_build_tool_defs_weak_model_excludes_task_tool():
-    """[弱模型] 弱模型不挂任何工具（全部 schema 移除，纯文本问答）。"""
+def test_build_tool_defs_weak_model_excludes_task_tool(monkeypatch):
+    """[弱模型] 弱模型不挂任何工具（全部 schema 移除，纯文本问答）。
+
+    弱模型判据已与目录能力解耦（mistral 在较新 ollama 上支持 tools），
+    用例用 WEAK_MODELS 显式把该模型钉为弱模型，避免依赖真实目录/探测状态。
+    """
     from app.agent.tools import ToolDef
+    from app.config import settings
+    monkeypatch.setattr(settings, "weak_models", "ollama/mistral:latest")
     agent = build_agent()
     agent.tools.append(ToolDef(name="tool_task", description="委派子 Agent", parameters={}, fn=lambda: ""))
     weak = agent._build_tool_defs("", model="ollama/mistral:latest")
@@ -516,8 +522,10 @@ def test_build_tool_defs_skills_are_resident_without_intent():
         assert not missing, f"q={q!r} 未常驻挂载: {sorted(missing)}"
 
 
-def test_build_tool_defs_resident_skills_respects_weak_model():
+def test_build_tool_defs_resident_skills_respects_weak_model(monkeypatch):
     """[技能常驻] 弱模型仍不挂任何工具（常驻不得绕过弱模型纯文本降级）。"""
+    from app.config import settings
+    monkeypatch.setattr(settings, "weak_models", "ollama/mistral:latest")
     agent = build_agent()
     for n in _ORPHAN_SKILLS:
         agent.tools.append(_skill_tool(n))

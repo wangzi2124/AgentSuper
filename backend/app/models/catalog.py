@@ -128,6 +128,10 @@ _ollama_cache: Optional[list[dict[str, Any]]] = None
 _ollama_cache_time: float = 0.0
 _ollama_probe_ok: bool = False
 _ollama_installed: Optional[set[str]] = None
+# /api/tags 里**所有**模型的真实能力/窗口（含已收录的内置 id）。过去 probe 会跳过已
+# 收录 id，导致写错的内置 capabilities（如 mistral tool_use=False）永远得不到纠正
+# —— 这里额外记录真实值，由 `_apply_ollama_native` 在目录快照组装后刷新（用户 override 优先）。
+_ollama_native: dict[str, dict[str, Any]] = {}
 _ollama_lock = threading.Lock()
 
 
@@ -188,7 +192,7 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
     ollama 未启动/不可达/超时一律返回 []（不抛异常，不阻塞启动）；
     成功探测结果按 TTL 缓存，避免每个请求都去打 /api/tags。
     """
-    global _ollama_cache, _ollama_cache_time, _ollama_probe_ok, _ollama_installed
+    global _ollama_cache, _ollama_cache_time, _ollama_probe_ok, _ollama_installed, _ollama_native
     now = time.time()
     if not force and _ollama_cache is not None and now - _ollama_cache_time < _OLLAMA_TTL:
         return _ollama_cache
@@ -199,6 +203,7 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
         if not local_endpoint_alive(_ollama_base_url()):
             _ollama_cache, _ollama_cache_time, _ollama_probe_ok = [], now, False
             _ollama_installed = None
+            _ollama_native = {}
             return []
         try:
             import urllib.request
@@ -209,22 +214,22 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
             with urllib.request.urlopen(req, timeout=3) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             extras: list[dict[str, Any]] = []
+            native: dict[str, dict[str, Any]] = {}
             for m in (data.get("models") or []):
                 name = (m.get("name") or "").strip()
                 if not name:
                     continue
                 mid = f"ollama/{name}"
-                if mid in known_ids:
-                    continue
                 family = name.split(":", 1)[0]
                 # [能力透传] /api/tags 的 capabilities 列出入参能力（vision/completion/tools/thinking），
-                # 映射为本系统能力键：tools→tool_use、thinking→reasoning。探测失败/缺失默认关。
+                # 映射为本系统能力键：tools→tool_use、thinking→reasoning。老版 ollama 无该字段
+                # → None（未知）：未收录模型按默认关；已收录条目保留内置声明，不据此误降级。
                 raw_caps = set(m.get("capabilities") or [])
                 capabilities = {
                     "tool_use": "tools" in raw_caps,
                     "vision": "vision" in raw_caps,
                     "reasoning": "thinking" in raw_caps,
-                }
+                } if raw_caps else None
                 # [真实窗口] 新版 ollama /api/tags 在 details.context_length 给出模型原生
                 # 窗口（如 qwen3.5:4b=262144）。老版本缺失 → 回退 32768/8192 保守值。
                 details = m.get("details") or {}
@@ -233,13 +238,22 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
                 except (TypeError, ValueError):
                     native_ctx = 0
                 context_length = native_ctx if native_ctx > 0 else 32768
+                # 已收录的内置/覆盖条目：不改条目结构，只记录真实能力/窗口，
+                # 交由 `_apply_ollama_native` 刷新过期的内置默认值（用户 override 优先）。
+                native[mid] = {
+                    "capabilities": capabilities,
+                    "context_length": native_ctx,
+                    "limits": ({"max_output_tokens": native_ctx} if native_ctx > 0 else None),
+                }
+                if mid in known_ids:
+                    continue
                 extras.append({
                     "id": mid,
                     "provider": "ollama",
                     "family": family,
                     "name": f"Ollama {family}",
                     "description": "本地 Ollama 模型（探测自 /api/tags）",
-                    "capabilities": capabilities,
+                    "capabilities": capabilities or {"tool_use": False, "vision": False, "reasoning": False},
                     "context_length": context_length,
                     # 输出上限跟随真实窗口：resolve_max_output_tokens 会与全局
                     # LLM_MAX_TOKENS 取小（大窗模型 → 用全局预算，小窗模型 → 收窄）。
@@ -247,6 +261,7 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
                     "cost": dict(_ZERO_COST),
                 })
             _ollama_cache, _ollama_cache_time, _ollama_probe_ok = extras, now, True
+            _ollama_native = native
             _ollama_installed = {
                 (m.get("name") or "").strip()
                 for m in (data.get("models") or [])
@@ -256,6 +271,7 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
         except Exception:
             _ollama_cache, _ollama_cache_time, _ollama_probe_ok = [], now, False
             _ollama_installed = None
+            _ollama_native = {}
             return []
 
 
@@ -290,8 +306,44 @@ def ollama_model_installed(model_id: Optional[str]) -> bool:
     return name in installed
 
 
+def _apply_ollama_native(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """用 /api/tags 的真实能力/窗口刷新已收录的 ollama 条目（用户 override 优先）。
+
+    背景：内置目录里部分模型的 capabilities 写死（如 mistral/llama3.1 曾为
+    tool_use=False），而 `probe_ollama_models` 会跳过已收录 id → 真实的 `tools` 能力
+    永远进不来，这类模型被 `is_weak_model` 当弱模型、不挂工具。这里在目录快照组装后，
+    用探测到的真实值刷新**未被 override 的**字段：
+
+      - capabilities：仅当 /api/tags 明确给出 capabilities 时采用（老版 ollama 无该
+        字段 → 保留内置声明，绝不误降级）；
+      - context_length / limits：仅当探测到原生窗口（>0）时采用（`resolve_*` 仍会与
+        全局取小，不会放大）。
+    """
+    if not _ollama_native:
+        return entries
+    overrides = load_config().get("overrides") or {}
+    out: list[dict[str, Any]] = []
+    for e in entries:
+        n = _ollama_native.get(e.get("id"))
+        if not n:
+            out.append(e)
+            continue
+        ov = overrides.get(e["id"]) or {}
+        e2 = dict(e)
+        nat_caps = n.get("capabilities")
+        if nat_caps and "capabilities" not in ov:
+            e2["capabilities"] = dict(nat_caps)
+        if n.get("context_length") and "context_length" not in ov:
+            e2["context_length"] = n["context_length"]
+        if n.get("limits") and "limits" not in ov:
+            e2["limits"] = dict(n["limits"])
+        out.append(e2)
+    return out
+
+
 def get_catalog(force_reload: bool = False) -> list[dict[str, Any]]:
     """目录快照（按数据目录键的线程安全缓存；force_reload=True 重新读库 + 重探测）。"""
+    global _ollama_native
     key = _cache_key()
     cached = _catalog_cache.get(key)
     if cached is None or force_reload:
@@ -300,10 +352,12 @@ def get_catalog(force_reload: bool = False) -> list[dict[str, Any]]:
             if cached is None or force_reload:
                 static = build_catalog()
                 known = {e["id"] for e in static}
+                # 复位真实值快照：由紧随其后的探测重新填充（探测被 stub 时保持空，不影响测试）。
+                _ollama_native = {}
                 probe = probe_ollama_models(known, force=force_reload)
                 known |= {e["id"] for e in probe}
                 probe = probe + probe_configured_providers(known, force=force_reload)
-                cached = static + probe
+                cached = _apply_ollama_native(static + probe)
                 _catalog_cache[key] = cached
     return cached
 
