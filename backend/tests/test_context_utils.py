@@ -352,7 +352,11 @@ class TestBudget:
         monkeypatch.setattr(settings, "max_context_tokens", 1000)
         monkeypatch.setattr(settings, "context_reserve_tokens", 200)
         assert budget.usable_context_tokens() == 800
+        # 预留超过窗口一半时按窗口一半封顶（小窗本地模型防 usable=0 塌缩）
         monkeypatch.setattr(settings, "context_reserve_tokens", 99999)
+        assert budget.usable_context_tokens() == 500
+        # 窗口为 0（未配置）时预留不封顶，仍可返回 0
+        monkeypatch.setattr(settings, "max_context_tokens", 0)
         assert budget.usable_context_tokens() == 0
 
     def test_threshold_explicit(self, monkeypatch):

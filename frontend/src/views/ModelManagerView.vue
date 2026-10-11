@@ -101,12 +101,12 @@ const modelForm = reactive<{
   id: string; name: string; provider: string; family: string; description: string;
   context_length: number; max_output_tokens: number;
   input_price: number; output_price: number; cache_read_price: number; cache_write_price: number;
-  tool_use: boolean; vision: boolean; reasoning: boolean;
+  tool_use: boolean; vision: boolean; reasoning: boolean; thinking: string;
 }>({
   id: '', name: '', provider: 'ollama', family: '', description: '',
   context_length: 32768, max_output_tokens: 8192,
   input_price: 0, output_price: 0, cache_read_price: 0, cache_write_price: 0,
-  tool_use: true, vision: false, reasoning: false,
+  tool_use: true, vision: false, reasoning: false, thinking: '',
 })
 
 function openModelForm(m?: ModelInfo) {
@@ -124,6 +124,7 @@ function openModelForm(m?: ModelInfo) {
   modelForm.tool_use = m?.capabilities?.tool_use ?? true
   modelForm.vision = m?.capabilities?.vision ?? false
   modelForm.reasoning = m?.capabilities?.reasoning ?? false
+  modelForm.thinking = m?.thinking || ''
   showModelForm.value = true
 }
 
@@ -138,6 +139,7 @@ async function submitModel() {
     context_length: Number(modelForm.context_length) || 32768,
     limits: { max_output_tokens: Number(modelForm.max_output_tokens) || 8192 },
     capabilities: { tool_use: modelForm.tool_use, vision: modelForm.vision, reasoning: modelForm.reasoning },
+    thinking: modelForm.thinking || undefined,
     cost: {
       input_per_1m: Number(modelForm.input_price) || 0,
       output_per_1m: Number(modelForm.output_price) || 0,
@@ -160,7 +162,8 @@ function fmtCost(v?: number) {
 }
 function capOf(m: ModelInfo) {
   const c = m.capabilities || {}
-  return [c.tool_use && '工具', c.vision && '视觉', c.reasoning && '推理'].filter(Boolean).join('·') || '—'
+  const think = m.thinking === 'enabled' ? '思考' : ''
+  return [c.tool_use && '工具', c.vision && '视觉', c.reasoning && '推理', think].filter(Boolean).join('·') || '—'
 }
 </script>
 
@@ -385,6 +388,17 @@ function capOf(m: ModelInfo) {
         <label class="mm-check"><input v-model="modelForm.vision" type="checkbox" /> 支持视觉</label>
         <label class="mm-check"><input v-model="modelForm.reasoning" type="checkbox" /> 推理模型</label>
       </div>
+      <div class="form-row">
+        <label class="mm-field"><span>思考模式（Ollama）</span>
+          <select v-model="modelForm.thinking" class="ctrl">
+            <option value="">跟随后端默认（关闭）</option>
+            <option value="disabled">关闭（推荐）</option>
+            <option value="enabled">开启思考</option>
+            <option value="adaptive">自适应（服务端默认）</option>
+          </select>
+        </label>
+      </div>
+      <p class="hint">开启思考时 Ollama 只输出 reasoning_content、正文为空（会拖累工具循环），非必要勿开；仅对 Ollama 模型生效。</p>
       <div class="form-footer">
         <button class="btn" :disabled="mm.saving" @click="showModelForm = false">取消</button>
         <button class="btn btn-primary mm-save-btn" :disabled="mm.saving" @click="submitModel">

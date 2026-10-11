@@ -240,6 +240,13 @@ class Settings(BaseSettings):
     # adaptive = 不显式下发，交服务端默认（DeepSeek V4 默认 enabled）；
     # enabled 时经 extra_body 下发 thinking={"type":"enabled"}（litellm 顶层 kwarg 会被丢弃）。
     deepseek_thinking: str = "disabled"
+    # [思考模式 2026-10-11] Ollama 思考开关（全局兜底默认）：enabled / disabled / adaptive。
+    # 现已优先使用每模型 `thinking` 字段（前端「模型管理 → 思考模式」）；仅当模型条目未设
+    # `thinking` 时才回落到此处。默认 disabled —— 实测（qwen3.5:4b）litellm+ollama 下
+    # think=True 会把**最终回答**全部塞进 reasoning_content、content 恒空（工具调用也进
+    # reasoning，工具循环报废），与 DeepSeek 同理。关闭后 finish=stop、content 正常产出
+    # （含标准 tool_calls）。adaptive = 不显式下发，交推理服务默认；enabled 时顶层传 think=True。
+    ollama_thinking: str = "disabled"
     # [工具懒加载 2026-10-09] 技能 schema 惰性挂载：开 = 技能（load_skill_*）不再常驻，
     # 由 tool_search_tools 元工具在运行时按需发现并（尾部）注入 schema。评估报告实测
     # 45 个技能常驻占 4802 tok（常驻 schema 的 63%）；开启后每请求省下这部分固定开销。

@@ -26,6 +26,8 @@ export interface ModelInfo {
   limits?: { max_output_tokens?: number } | null
   cost: ModelCost
   default?: boolean
+  // Ollama 思考模式：enabled / disabled / adaptive（空 = 跟随全局 OLLAMA_THINKING）
+  thinking?: string
 }
 
 export interface ModelCatalogResponse {

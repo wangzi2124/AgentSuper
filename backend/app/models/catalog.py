@@ -225,6 +225,14 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
                     "vision": "vision" in raw_caps,
                     "reasoning": "thinking" in raw_caps,
                 }
+                # [真实窗口] 新版 ollama /api/tags 在 details.context_length 给出模型原生
+                # 窗口（如 qwen3.5:4b=262144）。老版本缺失 → 回退 32768/8192 保守值。
+                details = m.get("details") or {}
+                try:
+                    native_ctx = int(details.get("context_length") or 0)
+                except (TypeError, ValueError):
+                    native_ctx = 0
+                context_length = native_ctx if native_ctx > 0 else 32768
                 extras.append({
                     "id": mid,
                     "provider": "ollama",
@@ -232,8 +240,10 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
                     "name": f"Ollama {family}",
                     "description": "本地 Ollama 模型（探测自 /api/tags）",
                     "capabilities": capabilities,
-                    "context_length": 32768,
-                    "limits": {"max_output_tokens": 8192},
+                    "context_length": context_length,
+                    # 输出上限跟随真实窗口：resolve_max_output_tokens 会与全局
+                    # LLM_MAX_TOKENS 取小（大窗模型 → 用全局预算，小窗模型 → 收窄）。
+                    "limits": {"max_output_tokens": context_length if native_ctx > 0 else 8192},
                     "cost": dict(_ZERO_COST),
                 })
             _ollama_cache, _ollama_cache_time, _ollama_probe_ok = extras, now, True
@@ -436,7 +446,7 @@ def set_defaults(default_model: Optional[str] = None, small_model: Optional[str]
 def _strip_unknown_fields(entry: dict) -> dict:
     """只保留目录条目已知字段，避免把前端 UI 噪音字段写进 overrides。"""
     known = {"id", "provider", "family", "name", "description", "capabilities",
-             "context_length", "limits", "cost", "default", "tokenizer"}
+             "context_length", "limits", "cost", "default", "tokenizer", "thinking"}
     return {k: v for k, v in entry.items() if k in known and v is not None}
 
 
@@ -558,10 +568,13 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     （B5：模型自身窗口更小时以条目为准，避免按错误窗口估预算）；带 deterministic 能力的
     provider 也可在此扩展。
 
-    `think`：Ollama 思考模型（qwen3.5 等，/api/tags capabilities 含 thinking）默认思考态
-    出空 content（litellm 不落最终回答），必须按模型管理的「推理模型」能力显式传 think：
-    reasoning=True→think=True（保留思考，供 reasoning_content 回退），
-    reasoning=False→think=False（关闭思考，得到干净的最终回答）。
+    `think`：Ollama 思考模型（qwen3.5 等）。开关优先级：模型条目的 `thinking` 字段
+    （前端「模型管理」每模型「思考模式」，enabled/disabled/adaptive）> 全局 `OLLAMA_THINKING`
+    环境变量 > 默认 disabled。litellm+ollama 下 think=True 会把最终回答全塞进
+    reasoning_content、content 恒空（工具调用也进 reasoning，工具循环报废）；disabled→
+    think=False（干净 content + 标准 tool_calls），enabled→think=True（保留思考），
+    adaptive→不下发交服务端默认。仅对声明了 reasoning 能力的模型或显式设了 `thinking` 的
+    模型生效。
     """
     from app.config import settings
     mid = normalize_model(model_id)
@@ -571,10 +584,19 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     if provider == "ollama":
         opts: dict[str, Any] = {"num_ctx": resolve_context_length(mid, settings.ollama_num_ctx)}
         caps = read_capabilities(mid)
-        # 能力未声明（非目录模型）→ 不传 think（交给推理服务默认，不臆断）；
-        # 声明了 reasoning → 严格按它传（True 保留思考 / False 关闭防空内容）
-        if "reasoning" in caps:
-            opts["think"] = bool(caps["reasoning"])
+        entry = lookup(mid)
+        # 思考开关优先级：模型条目 `thinking`（前端「模型管理」每模型配置）
+        #   > 全局 OLLAMA_THINKING 环境变量 > 默认 disabled。
+        # **默认 disabled**：litellm+ollama 下 think=True 会把最终回答全塞进
+        # reasoning_content、content 恒空、工具调用也进 reasoning（工具循环报废），
+        # 与 DeepSeek thinking 同理故默认关闭。
+        #   enabled→think=True；disabled→think=False；adaptive→不传（交服务端默认）。
+        per_model = (entry or {}).get("thinking")
+        if per_model or caps.get("reasoning"):
+            raw_mode = per_model or getattr(settings, "ollama_thinking", "disabled")
+            _ot = _normalize_deepseek_thinking(raw_mode)
+            if _ot in ("enabled", "disabled"):
+                opts["think"] = (_ot == "enabled")
         return {"api_base": None, "api_key": "ollama", "is_ollama": True, "options": opts}
     # DeepSeek 思考模型（V4.1-Flash / V4-Pro 默认开思考）：按「推理模型」能力 + 全局
     # DEEPSEEK_THINKING 开关下发 thinking。**默认 disabled** —— 实测 agentic 工具循环里

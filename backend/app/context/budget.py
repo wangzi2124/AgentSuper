@@ -16,12 +16,28 @@ AgentSuper 用 `max_context_tokens` 表示上下文上限、`context_reserve_tok
 from app.config import settings
 
 
+def _reserve_tokens(window: int) -> int:
+    """输出预留：全局 context_reserve_tokens 与窗口一半取小。
+
+    小窗本地模型（ollama 32768 窗口）下，全局预留 32768 ≥ 窗口 → usable=0，
+    截断预算塌缩成 1 token、`ensure_request_anchor` 把整段历史全部丢弃，模型实际
+    收不到任何上下文（实测 2026-10-11：所有 32768 及以下窗口的 ollama 模型
+    usable=0）。预留至多占窗口一半，保证任何窗口都留出 ≥50% 给输入。大窗模型
+    （≥ 2×context_reserve_tokens）行为不变。
+    """
+    reserve = int(settings.context_reserve_tokens or 0)
+    if window <= 0:
+        return reserve
+    return min(reserve, window // 2)
+
+
 def usable_context_tokens(model: str | None = None) -> int:
     """单次 LLM 调用可用的上下文预算（system + history + 当前轮 + 工具记录）。
 
     已扣掉输出预留，因此调用方在 truncate 时不应再二次预留。
     """
-    return max(0, _context_length(model) - settings.context_reserve_tokens)
+    window = _context_length(model)
+    return max(0, window - _reserve_tokens(window))
 
 
 def _context_length(model: str | None = None) -> int:

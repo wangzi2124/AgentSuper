@@ -187,3 +187,14 @@ def test_write_config_dedup_id_in_both_override_and_extra(iso):
     cfg = catalog_db.load_config()
     assert cfg["overrides"]["x/y"]["name"] == "O"
     assert [e["id"] for e in (cfg.get("extra") or [])] == []  # extra 重复者被跳过
+
+
+def test_upsert_custom_model_keeps_thinking_field(iso, no_probes):
+    """每模型「思考模式」thinking 是已知字段，upsert 后不被 _strip_unknown_fields 丢弃。"""
+    entry = {"id": "ollama/think-test:latest", "provider": "ollama", "name": "T",
+             "capabilities": {"tool_use": True, "vision": False, "reasoning": True},
+             "thinking": "enabled"}
+    catalog.upsert_custom_model(dict(entry))
+    cfg = catalog_db.load_config()
+    saved = (cfg.get("extra") or [{}])[0]
+    assert saved.get("thinking") == "enabled"

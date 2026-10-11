@@ -1362,17 +1362,65 @@ async def test_llm_call_both_fail_raises(core_env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_llm_call_interrupted_uses_accumulated(core_env, monkeypatch):
+async def test_llm_call_interrupted_falls_back_to_non_stream(core_env, monkeypatch):
+    """[流式中断] 断在 finish_reason 之前 → 累积内容不可信，回退非流式取完整回答。"""
+    calls = []
+
     async def fake_acompletion(**kw):
+        calls.append(kw.get("stream"))
+        if kw.get("stream"):
+            async def gen():
+                yield _chunk(content="part")
+                raise RuntimeError("connection reset")
+            return gen()
+        return SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1, prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=2),
+            choices=[SimpleNamespace(message=SimpleNamespace(content="complete answer"), finish_reason="stop")],
+        )
+
+    monkeypatch.setattr(core_mod.litellm, "acompletion", fake_acompletion)
+    agent = build_agent()
+    resp = await agent._llm_call("m", [], None)
+    assert resp.choices[0].message.content == "complete answer"
+    assert calls == [True, None]
+
+
+@pytest.mark.asyncio
+async def test_llm_call_interrupted_after_finish_uses_accumulated(core_env, monkeypatch):
+    """[流式中断] 已收到 finish_reason 后才断（如 usage 块 EOF）→ 内容完整，不再重试。"""
+    calls = []
+
+    async def fake_acompletion(**kw):
+        calls.append(kw.get("stream"))
+
         async def gen():
-            yield _chunk(content="part")
-            raise RuntimeError("connection reset")
+            yield _chunk(content="done", finish_reason="stop")
+            raise RuntimeError("usage chunk EOF")
         return gen()
 
     monkeypatch.setattr(core_mod.litellm, "acompletion", fake_acompletion)
     agent = build_agent()
     resp = await agent._llm_call("m", [], None)
-    assert resp.choices[0].message.content == "part"
+    assert resp.choices[0].message.content == "done"
+    assert resp.choices[0].finish_reason == "stop"
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_llm_call_interrupted_retry_fails_raises(core_env, monkeypatch):
+    """[流式中断] 非流式补全也失败 → 抛可重试错误，绝不把截断内容伪装成正常完成。"""
+    async def fake_acompletion(**kw):
+        if kw.get("stream"):
+            async def gen():
+                yield _chunk(content="part")
+                raise RuntimeError("connection reset")
+            return gen()
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(core_mod.litellm, "acompletion", fake_acompletion)
+    agent = build_agent()
+    with pytest.raises(RuntimeError):
+        await agent._llm_call("m", [], None)
 
 
 def test_build_graph_nodes():

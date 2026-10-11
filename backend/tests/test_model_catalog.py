@@ -299,6 +299,26 @@ def test_probe_ollama_models_maps_capabilities(tmp_path, monkeypatch):
         "qwen3.5:4b", "llava:latest", "qwen2.5:3b", "mistral:latest"}
 
 
+def test_probe_ollama_models_uses_real_context_length(tmp_path, monkeypatch):
+    """新版 /api/tags 的 details.context_length 应透传，而非写死 32768/8192。"""
+    _fake_ollama_tags(tmp_path, monkeypatch, [
+        {"name": "qwen3.5:4b", "capabilities": ["completion", "tools", "thinking"],
+         "details": {"context_length": 262144}},
+        {"name": "tiny:1b", "capabilities": ["completion"],
+         "details": {"context_length": 4096}},
+        {"name": "old:latest", "capabilities": ["completion"]},  # 无 details → 保守回退
+    ])
+    extras = catalog.probe_ollama_models(known_ids=set(), force=True)
+    by_id = {e["id"]: e for e in extras}
+    assert by_id["ollama/qwen3.5:4b"]["context_length"] == 262144
+    assert by_id["ollama/qwen3.5:4b"]["limits"]["max_output_tokens"] == 262144
+    assert by_id["ollama/tiny:1b"]["context_length"] == 4096
+    assert by_id["ollama/tiny:1b"]["limits"]["max_output_tokens"] == 4096
+    # 缺失 details → 回退旧的保守值
+    assert by_id["ollama/old:latest"]["context_length"] == 32768
+    assert by_id["ollama/old:latest"]["limits"]["max_output_tokens"] == 8192
+
+
 def test_read_capabilities_returns_declared_and_unknown(monkeypatch):
     # 内置目录 deepseek → 按目录能力返回
     caps = catalog.read_capabilities("deepseek/deepseek-v4-flash")
@@ -443,20 +463,56 @@ def test_llm_call_uses_resolved_max_tokens(monkeypatch):
 
 
 def test_provider_api_ollama_think_from_reasoning_capability(monkeypatch):
-    # ollama + 声明推理 → think=True；未声明推理 → 不传 think（不臆断）
+    # 全局 OLLAMA_THINKING 兜底（无每模型配置时）：
+    # 思考模型按开关下发 think（默认 disabled 防空 content）；未声明推理 → 不传 think（不臆断）
+    _settings = settings
+    monkeypatch.setattr(catalog, "lookup", lambda m: None)
+    monkeypatch.setattr(_settings, "ollama_thinking", "disabled")
     monkeypatch.setattr(catalog, "read_capabilities", lambda m: {"tool_use": True, "vision": False, "reasoning": True})
     creds = catalog.provider_api("ollama/qwen3.5:4b")
     assert creds["is_ollama"] is True
-    assert creds["options"]["think"] is True
-    assert creds["options"]["num_ctx"] == settings.ollama_num_ctx
+    assert creds["options"]["think"] is False
+    assert creds["options"]["num_ctx"] == _settings.ollama_num_ctx
 
+    monkeypatch.setattr(_settings, "ollama_thinking", "enabled")
+    assert catalog.provider_api("ollama/qwen3.5:4b")["options"]["think"] is True
+
+    # adaptive → 不下发 think（交服务端默认）
+    monkeypatch.setattr(_settings, "ollama_thinking", "adaptive")
+    assert "think" not in catalog.provider_api("ollama/qwen3.5:4b")["options"]
+
+    # 未声明推理 → 不下发 think（即使开关 enabled）
+    monkeypatch.setattr(_settings, "ollama_thinking", "enabled")
     monkeypatch.setattr(catalog, "read_capabilities", lambda m: {"tool_use": True, "vision": True, "reasoning": False})
-    assert catalog.provider_api("ollama/llava:latest")["options"]["think"] is False
+    assert "think" not in catalog.provider_api("ollama/llava:latest")["options"]
 
     # 未收录/能力缺失 → options 不含 think
     monkeypatch.setattr(catalog, "read_capabilities", lambda m: {})
     opts = catalog.provider_api("ollama/something-new")["options"]
     assert "think" not in opts
+
+
+def test_provider_api_ollama_think_per_model_overrides_global(monkeypatch):
+    """模型条目 `thinking`（前端「思考模式」）优先于全局 OLLAMA_THINKING。"""
+    _settings = settings
+    monkeypatch.setattr(_settings, "ollama_thinking", "disabled")
+    monkeypatch.setattr(catalog, "read_capabilities", lambda m: {"tool_use": True, "vision": False, "reasoning": True})
+
+    monkeypatch.setattr(catalog, "lookup", lambda m: {"id": m, "thinking": "enabled"})
+    assert catalog.provider_api("ollama/qwen3.5:4b")["options"]["think"] is True
+
+    monkeypatch.setattr(catalog, "lookup", lambda m: {"id": m, "thinking": "adaptive"})
+    assert "think" not in catalog.provider_api("ollama/qwen3.5:4b")["options"]
+
+    # 全局 enabled，但每模型强制关闭 → think=False
+    monkeypatch.setattr(_settings, "ollama_thinking", "enabled")
+    monkeypatch.setattr(catalog, "lookup", lambda m: {"id": m, "thinking": "disabled"})
+    assert catalog.provider_api("ollama/qwen3.5:4b")["options"]["think"] is False
+
+    # 显式每模型设置，即便未声明推理能力也生效
+    monkeypatch.setattr(catalog, "read_capabilities", lambda m: {"tool_use": True, "vision": True, "reasoning": False})
+    monkeypatch.setattr(catalog, "lookup", lambda m: {"id": m, "thinking": "enabled"})
+    assert catalog.provider_api("ollama/llava:latest")["options"]["think"] is True
 
     # 非 ollama（deepseek）→ options=None，绝不含 think
     monkeypatch.setattr(catalog, "read_providers", lambda: {})

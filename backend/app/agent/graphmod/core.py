@@ -383,7 +383,8 @@ class RAGAgent(RAGAgentGenerate):
 
         流式把文本增量经 _push_stream_event 实时转发（type=text_delta），同时累积出
         完整 message（含 tool_calls/finish_reason），与原有调用在 _generate 中完全兼容。
-        流式建立失败自动回退非流式；流式中断则用已累积内容兜底。
+        流式建立失败自动回退非流式；流式中断于 finish_reason 到达前则回退一次非流式补全
+        （补全失败即抛可重试错误），避免把截断内容当作正常完成。
 
         `disable_thinking`：强制关闭 DeepSeek 思考（走 extra_body，顶层 kwarg 会被
         litellm 丢弃）。供「零进展救援」在思考吃光输出预算后切换策略：同一配置重试只会
@@ -469,6 +470,8 @@ class RAGAgent(RAGAgentGenerate):
         tool_slots: dict[int, dict] = {}
         finish_reason = None
         usage = None
+        stream_interrupted = False
+        stream_error: Exception | None = None
         try:
             async for chunk in stream:
                 u = getattr(chunk, "usage", None)
@@ -525,9 +528,48 @@ class RAGAgent(RAGAgentGenerate):
                             slot["function"]["name"] += fn.name
                         if getattr(fn, "arguments", None):
                             slot["function"]["arguments"] += fn.arguments
-        except Exception:
-            # 流式中断 → 用已累积内容兜底（不再重试）
-            logger.warning("LLM stream interrupted, using accumulated content", exc_info=True)
+        except Exception as e:
+            # 流式中断（EOF / 连接重置等）→ 记下标志，稍后决定兜底策略。
+            # 不能直接把累积内容当正常结果返回：finish_reason 从未到达 →
+            # _normalize_finish_reason(None) 会归一成 "stop"，截断内容被伪装成完整成功回答。
+            stream_interrupted = True
+            stream_error = e
+            logger.warning("LLM stream interrupted, will fall back to non-stream", exc_info=True)
+
+        # [流式中断] 若中断发生在 finish_reason 之前（未收到终止块），累积内容很可能被截断。
+        # 回退一次非流式调用获取完整回答（与流式初始化失败的兜底一致）；补全再失败则抛出
+        # 可重试错误，绝不把截断内容伪装成正常完成。
+        if stream_interrupted and finish_reason is None:
+            logger.info("LLM stream interrupted before finish_reason; retrying non-stream")
+            try:
+                response = await litellm.acompletion(
+                    model=model,
+                    messages=messages,
+                    tools=tool_defs,
+                    api_key=_api_key,
+                    api_base=_api_base,
+                    temperature=0.1,
+                    max_tokens=_max_tokens,
+                    timeout=500,
+                    num_retries=2,
+                    cache_prompt=True,
+                    **_llm_extra,
+                )
+            except Exception as exc:
+                dur = (tmod.time() - start) * 1000
+                trace("llm.usage", where="error", model=model, pt=0, ct=0, duration_ms=dur)  # [token trace v7]
+                record_model_call(model, duration_ms=dur)
+                _chainlog_llm(
+                    model, where="error", duration_ms=dur, state=state,
+                    error=str(exc), error_type=type(exc).__name__,
+                    max_tokens=_max_tokens,
+                )
+                from app.models.catalog import normalize_llm_exception
+                _friendly = normalize_llm_exception(exc, model) or normalize_llm_exception(stream_error, model)
+                if _friendly:
+                    raise RuntimeError(_friendly)
+                raise exc
+            return self._assemble_response(model, response, start, state, push_text=True)
 
         content = "".join(text_chunks)
         # [零进展] 模型**自己**是否吐出了正文。必须在 reasoning 回退**之前**取：
