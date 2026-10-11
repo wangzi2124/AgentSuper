@@ -43,6 +43,7 @@ from app.config import settings
 from app.agent.tools import (
     ToolDef,
     LONG_CONTENT_FILE_RULE,
+    BATCH_WRITES_RULE,
     create_filesystem_tools,
     create_skill_tools,
     create_plugin_tools,
@@ -472,6 +473,8 @@ class RAGAgentBase:
                 else ""
             )
             + LONG_CONTENT_FILE_RULE
+            + "\n\n"
+            + BATCH_WRITES_RULE
         )
 
     # 按需挂载工具 schema：核心文件工具 + 技能常驻，插件按意图关键词 + 已使用保留

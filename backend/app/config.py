@@ -261,6 +261,11 @@ class Settings(BaseSettings):
     sub_agent_timeout_extended: float = 300.0
     # 使用 extended 超时的子 Agent 列表（逗号分隔）
     extended_timeout_agents: str = "build"
+    # [慢模型自适应超时 2026-10-11] 自托管/本地模型（`ollama/` 前缀，或 provider api_base
+    # 指向本机 localhost/127.0.0.1）每次 LLM 调用可慢至 60–120s（云端通常 3–15s）。基础超时
+    # （SUPERVISOR_TIMEOUT / SUB_AGENT_TIMEOUT[_EXTENDED]）是按云端模型设的，慢模型 5 轮就爆
+    # ——用该倍数放大等待窗口，避免长任务被误判超时。云端模型倍数为 1（不受影响）。
+    local_model_timeout_factor: float = 6.0
     # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth）。
     # [C10] 默认 1 = 与「实际可达深度」一致：build/plan 委派 explore 仅 1 跳，
     # 且 explore 的只读 allowlist 不含 tool_task，无法再嵌套 → 原默认值 4 永不触发，

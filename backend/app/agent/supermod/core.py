@@ -169,7 +169,7 @@ class SupervisorAgentCore(SupervisorAgentBase):
         🔧 Bug 修复: 子请求使用独立 thread_id，避免覆盖调用方的 Future。
         """
         sub_thread_id = f"{original_thread_id}:sub:{uuid.uuid4().hex[:8]}"
-        timeout = self._timeout_for(target_agent)
+        timeout = self._timeout_for(target_agent, payload.get("model"))
         from app import chainlog
         chainlog.info(
             "agent", "supervisor", "route.start", agent_id=target_agent,

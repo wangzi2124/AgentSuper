@@ -474,3 +474,11 @@ def test_prompt_windows_shell_hint():
         assert "cmd.exe" in p
     else:
         assert "cmd.exe" not in p
+
+
+def test_prompt_batch_writes_rule():
+    # [减少轮次] 系统提示必须含「一轮批量写多文件」指引
+    p = _prompt()
+    assert "Fewest rounds / batch file writes" in p
+    assert "tool_apply_patch" in p
+    assert at.BATCH_WRITES_RULE in p

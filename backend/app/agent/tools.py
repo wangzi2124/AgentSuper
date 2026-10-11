@@ -34,6 +34,21 @@ LONG_CONTENT_FILE_RULE = (
 )
 
 
+# [减少轮次 2026-10-11] 慢模型（本地/自托管）每轮 LLM 往返 60–120s，逐文件一轮会迅速耗尽
+# 超时预算。强制「一轮批量写多文件」：要么在同一条回复里并发发出多个 tool_write_file，
+# 要么用一条 tool_apply_patch（可含多个 *** Add File: 块）一次性建全部文件。
+BATCH_WRITES_RULE = (
+    "IMPORTANT - Fewest rounds / batch file writes: create or update ALL files a task needs in "
+    "as FEW assistant turns as possible (each extra turn is another slow model round-trip and "
+    "risks the task timing out):\n"
+    "  - Put every tool_write_file / tool_append_file call for the whole project in ONE response "
+    "(multiple tool calls in parallel), instead of writing one file per turn;\n"
+    "  - OR issue a SINGLE tool_apply_patch whose patch_text contains multiple '*** Add File:' "
+    "blocks to create many files in one call.\n"
+    "  Do NOT write one file, wait for the result, then write the next."
+)
+
+
 # Python类型到JSON Schema类型的映射表（精确匹配外层类型）
 _TYPE_MAP: Dict[str, str] = {
     "str": "string",
@@ -386,6 +401,8 @@ def build_system_prompt_no_kb(
         "",
         "IMPORTANT - Projects: write ALL code files first via tool_write_file (auto-creates dirs); do NOT use "
         "mkdir/Set-Content or 'npm create'/'create-react-app'/'create vite'; only then run tool_execute for install/build/test.",
+        "",
+        BATCH_WRITES_RULE,
         "",
         "IMPORTANT - Long content MUST be written to files, NOT pasted in replies (≈500 Chinese chars / 1000 tokens):",
         "  Write text/code with tool_write_file (first chunk, then tool_append_file for large files); generator plugins for .docx/.pdf/.xlsx/.pptx.",

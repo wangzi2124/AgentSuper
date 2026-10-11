@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
+from app.agent.timeouts import scale_timeout
 
 
 
@@ -243,7 +244,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
                 },
                 thread_id=thread_id,
             ),
-            timeout=settings.supervisor_timeout,
+            timeout=scale_timeout(settings.supervisor_timeout, body.model),
         )
     except asyncio.CancelledError:
         # [opencode abort 级联] 客户端断开 → 除登记清理外，中断 supervisor 在途 handler
@@ -503,7 +504,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
                 },
                 thread_id=turn_thread_id,
             ),
-            timeout=settings.supervisor_timeout,
+            timeout=scale_timeout(settings.supervisor_timeout, turn_body.model),
         )
 
         # [plan→build] build 失败但计划已生成：payload["answer"] 带着完整计划。

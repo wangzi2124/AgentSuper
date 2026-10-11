@@ -63,11 +63,19 @@ class SupervisorAgentBase(BaseAgent):
         self._extended_timeout_agents.update(
             a.strip() for a in (settings.extended_timeout_agents or "").split(",") if a.strip()
         )
-    def _timeout_for(self, agent_id: str) -> float:
-        """按 Agent 类型分级超时：工具密集型 Agent 使用更长等待，避免长任务被误判超时。"""
+    def _timeout_for(self, agent_id: str, model: Optional[str] = None) -> float:
+        """按 Agent 类型分级超时：工具密集型 Agent 使用更长等待，避免长任务被误判超时。
+
+        `model` 为本次请求实际使用的模型（payload["model"]）。自托管/本地模型（Ollama 等）
+        推理很慢，用 settings.local_model_timeout_factor 放大等待窗口（云端模型倍数为 1）。
+        """
         if agent_id in self._extended_timeout_agents:
-            return settings.sub_agent_timeout_extended
-        return settings.sub_agent_timeout
+            base = settings.sub_agent_timeout_extended
+        else:
+            base = settings.sub_agent_timeout
+        from app.agent.timeouts import scale_timeout
+
+        return scale_timeout(base, model or getattr(self, "_request_model", None))
     @property
     def agent_id(self) -> str:
         return self._id
