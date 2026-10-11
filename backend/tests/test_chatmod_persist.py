@@ -64,7 +64,10 @@ class MockService:
 
     def update(self, user_id, session_id, **fields):
         self.updates.append((session_id, fields))
-        return self.sessions.get(session_id)
+        s = self.sessions.get(session_id)
+        if s is not None and "directory" in fields:
+            s.directory = fields["directory"]
+        return s
 
 
 @pytest.fixture
@@ -105,6 +108,25 @@ def test_resolve_parent_creates_with_directory(service, monkeypatch):
     svc, req = service
     out = p._resolve_multi_agent_parent(req, "u1", None, directory="/custom")
     assert svc.creates[0]["directory"] == "/custom"
+
+
+def test_resolve_parent_updates_directory_on_existing(service):
+    """[会话中途改工作目录] 已有会话也必须采纳前端本次指定的 directory。"""
+    svc, req = service
+    svc.create("u1", session_id="conv1", directory=r"E:\AgentSuper\backend")
+    out = p._resolve_multi_agent_parent(req, "u1", "conv1", directory=r"D:\tetris")
+    assert out == (svc, "conv1", r"D:\tetris")
+    assert svc.sessions["conv1"].directory == r"D:\tetris"
+    assert svc.updates[-1][1].get("directory") == r"D:\tetris"
+
+
+def test_resolve_parent_keeps_directory_when_empty(service):
+    """未带 directory 时不改动已有会话（保持旧目录 + 不触发 update）。"""
+    svc, req = service
+    svc.create("u1", session_id="conv1", directory="/old")
+    out = p._resolve_multi_agent_parent(req, "u1", "conv1", directory="")
+    assert out[2] == "/old"
+    assert svc.updates == []
 
 
 # ── _session_history_for ───────────────────────────────────────────────────
@@ -333,6 +355,18 @@ async def test_persist_interrupted_partial_failure_tolerated(service, monkeypatc
     svc.create("u1", session_id="c1")
     monkeypatch.setattr(p, "_persist_multi_agent_parts", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
     await p._persist_interrupted_partial(svc, "u1", "s1", "c1", "q", "部分", [], "c1")  # 不抛
+
+
+@pytest.mark.asyncio
+async def test_persist_interrupted_partial_skips_when_child_reverted(service, monkeypatch):
+    """[revert 竞态] 子会话已被撤销删除 → 整体跳过（不复活主会话轮次、不报 SessionNotFound）。"""
+    svc, req = service
+    svc.create("u1", session_id="s1")
+    # c1 不存在（被 revert/remove 删除）
+    monkeypatch.setattr(p, "_persist_multi_agent_parts", lambda *a, **k: None)
+    await p._persist_interrupted_partial(svc, "u1", "s1", "c1", "q", "部分", [], "c1")
+    assert svc._msgs.get("s1", []) == []  # 主会话未被补写（无复活）
+    assert svc.updates == []
 # [F8·D2] 图片附件缩略图 + 描述
 
 

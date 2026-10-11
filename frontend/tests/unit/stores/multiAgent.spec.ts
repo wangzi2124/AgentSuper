@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   getConversation: vi.fn(),
   listConversations: vi.fn(),
   revertSession: vi.fn(),
+  interruptSession: vi.fn(),
   deleteSessionMessage: vi.fn(),
   deleteConversation: vi.fn(),
   saveCache: vi.fn(),
@@ -37,7 +38,7 @@ vi.mock('@/api/sessions', () => ({
   getConversation: mocks.getConversation,
   renameConversation: vi.fn(),
   deleteConversation: mocks.deleteConversation,
-  interruptSession: vi.fn(),
+  interruptSession: mocks.interruptSession,
   revertSession: mocks.revertSession,
   deleteSessionMessage: mocks.deleteSessionMessage,
   updateSession: vi.fn(),
@@ -74,6 +75,8 @@ beforeEach(() => {
   mocks.restoreSnapshot.mockReset()
   mocks.getConversation.mockReset()
   mocks.revertSession.mockReset()
+  mocks.interruptSession.mockReset()
+  mocks.interruptSession.mockResolvedValue(undefined)
   mocks.deleteSessionMessage.mockReset()
   mocks.saveCache.mockResolvedValue(undefined)
   mocks.loadCache.mockResolvedValue(null)
@@ -285,6 +288,28 @@ describe('撤销 / 删除（墓碑）', () => {
     expect(store.sessions['s1'].deletedIds).toEqual(['m2', 'm3'])
     expect(mocks.revertSession).toHaveBeenCalledWith('c1', 'm1')
     expect(mocks.saveCache).toHaveBeenCalled()
+  })
+
+  it('undoMessage 在生成中先中止在途流再撤销（复位 streamPhase，防卡「思考生成」）', async () => {
+    const store = useMultiAgentStore()
+    store.activeSessionId = 's1'
+    const abort = vi.fn()
+    store.sessions['s1'] = {
+      messages: [
+        { id: 'm0', role: 'user', content: 'a', agents: [], timestamp: new Date() },
+        { id: 'm1', role: 'assistant', content: '', agents: [], timestamp: new Date() },
+      ],
+      conversationId: 'c1', conversationTitle: '', loading: true,
+      abortController: { abort } as unknown as AbortController,
+      streamPhase: 'running', queuePosition: null, deletedIds: [],
+    }
+    await store.undoMessage(1)
+    expect(abort).toHaveBeenCalled()
+    expect(mocks.interruptSession).toHaveBeenCalledWith('c1')
+    expect(store.sessions['s1'].streamPhase).toBe('idle')
+    expect(store.sessions['s1'].loading).toBe(false)
+    expect(store.sessions['s1'].abortController).toBeNull()
+    expect(mocks.revertSession).toHaveBeenCalledWith('c1', 'm0')
   })
 
   it('deleteMessage 过滤 + 墓碑', async () => {

@@ -956,6 +956,20 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (activeSessionId.value) {
       const s = sessions.value[activeSessionId.value]
       if (!s) return
+      // [revert 竞态] 若正在生成，先停止在途流（本地 abort + 后端 interrupt）再撤销：
+      // 否则撤销后 SSE 事件继续回写 streamPhase，对话框永远卡在「思考生成回答」，
+      // 且后端 finally 的兜底落库会往已撤销的会话写回内容。
+      if (s.streamPhase !== 'idle' || s.abortController) {
+        s.abortController?.abort()
+        s.abortController = null
+        if (s.conversationId) {
+          try { await interruptSession(s.conversationId) } catch (e) { console.error('Failed to interrupt before undo:', e) }
+        }
+        if (autoRetrySessionId.value === activeSessionId.value) cancelAutoRetry()
+        s.streamPhase = 'idle'
+        s.queuePosition = null
+        s.loading = false
+      }
       // 目标保留消息 = 撤销点前一条；index===0 无保留消息，仅本地清空
       const target = index > 0 ? s.messages[index - 1] : undefined
       const removedIds = s.messages.slice(index).map(m => m.id)

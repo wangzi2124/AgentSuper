@@ -62,6 +62,15 @@ def _resolve_multi_agent_parent(request: Request, user_id: str, conv_id: str | N
             info = service.get(user_id, conv_id)
         except session_repo.SessionNotFound:
             raise HTTPException(status_code=404, detail="Conversation not found")
+        # [工作目录·会话中途切换] 已有会话也必须尊重前端本次携带的 directory：
+        # 否则用户在会话中途（工作目录面板）改选的目录会被静默丢弃，agent 仍在
+        # **创建时的默认目录**（discover_project_root → 后端 backend/）执行。
+        new_dir = (directory or "").strip()
+        if new_dir and new_dir != (info.directory or ""):
+            try:
+                info = service.update(user_id, conv_id, directory=new_dir)
+            except Exception:  # noqa: BLE001 —— 更新失败不阻断本轮（沿用旧目录）
+                logger.exception("failed to update session directory: session=%s dir=%s", conv_id, new_dir)
         return service, conv_id, info.directory or ""
     else:
         session = service.create(user_id, directory=directory or discover_project_root(), kind="multi-agent")
@@ -355,6 +364,15 @@ def _account_session_usage(session_id: str, tokens: dict | None, cost: float = 0
     except Exception:  # noqa: BLE001 —— 聚合失败不阻断消息已落库的主路径
         logger.exception("add_session_usage failed for %s", session_id)
 
+def _session_gone(service, user_id: str, session_id: str) -> bool:
+    """会话是否已不存在/无权访问（被 revert/remove 删除）。"""
+    try:
+        service.get(user_id, session_id)
+        return False
+    except (session_repo.SessionNotFound, session_repo.Forbidden):
+        return True
+
+
 async def _persist_interrupted_partial(service, user_id: str, session_id: str, child_id: str,
                                        question: str, answer: str, agents: list | None,
                                        client_msg_id: str | None) -> None:
@@ -366,8 +384,17 @@ async def _persist_interrupted_partial(service, user_id: str, session_id: str, c
 
     assistant 标记 interrupted=True：B4 的 _existing_pair 会将其视为「未完整」，
     因此前端以同一 client_msg_id 自动重试时仍会补齐完整轮次，不会复用残缺答案。
+
+    [revert 竞态] 用户在生成中途「撤销到此处」会级联删除该轮的 kind='task' 子会话。
+    此时本兜底落库必须**整体跳过**（而非只报错）：① 对已删除的子会话写入会抛
+    SessionNotFound 刷 ERROR 日志；② 对主会话补写会把刚被撤销的轮次**复活**。
+    child_id 已被删除 = 该轮已被 revert/delete → 既不复活也容忍缺失。
     """
     try:
+        if _session_gone(service, user_id, child_id):
+            logger.debug("persist interrupted partial skipped: child %s gone (reverted)", child_id)
+            return
+
         def _append_partial(target_session: str) -> str:
             user_msg_id, existing_assistant_id = _existing_pair(service, user_id, target_session, client_msg_id)
             if existing_assistant_id:
@@ -390,6 +417,9 @@ async def _persist_interrupted_partial(service, user_id: str, session_id: str, c
         async with service.write_lock(child_id):
             _append_partial(child_id)
             service.update(user_id, child_id, status="interrupted")
+    except session_repo.SessionNotFound:
+        # 竞态：检查后、写入间会话才被删除 —— 静默容忍，不算错误
+        logger.debug("persist interrupted partial skipped: session vanished mid-write")
     except Exception:
         logger.exception("persist interrupted partial failed: user=%s session=%s", user_id, session_id)
 

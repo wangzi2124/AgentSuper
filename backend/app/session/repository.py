@@ -204,7 +204,7 @@ def list_sessions(
 
 
 def update_session(session_id: str, **fields: Any) -> SessionInfo:
-    allowed = {"title", "archived", "agent", "model", "status", "cost",
+    allowed = {"title", "archived", "agent", "model", "status", "cost", "directory",
                "tokens_input", "tokens_output", "tokens_cache_read", "tokens_cache_write",
                "time_compacted", "time_archived"}
     sets, params = [], []
