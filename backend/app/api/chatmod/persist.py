@@ -226,6 +226,39 @@ def _persist_multi_agent_parts(session_id: str, message_id: str, answer: str,
     except Exception:  # noqa: BLE001
         logger.exception("persist multi-agent parts failed")
 
+async def _ensure_user_message(service, user_id: str, session_id: str, question: str,
+                               files: list | None = None, voice: dict | None = None,
+                               client_msg_id: str | None = None) -> str:
+    """[#11 双真相源] 流式开始即落库 user 消息，使 server 成为在线唯一真相源。
+
+    此前 user/assistant 只在 done（或断连兜底）才落库，生成期间服务端没有任何该轮
+    记录，前端不得不靠本地 IndexedDB 缓存 + merge 才能刷新后仍看到提问——这正是
+    「双真相源」的根源。这里在回合开始（send_and_wait 前）就写入 user 消息，前端
+    在线时可直接以服务端为准。
+
+    幂等：client_msg_id 命中已存在的 user 消息时直接复用（重试/重复请求不重复写）；
+    首条消息同步落规则标题 + 后台 LLM 刷新（与 _persist_multi_agent 一致，仅此触发
+    一次，后续 _persist_multi_agent 复用该 user 时不再二次生成标题）。返回 user_msg_id。
+    """
+    async with service.write_lock(session_id):
+        if client_msg_id:
+            existing_user_id, _ = _existing_pair(service, user_id, session_id, client_msg_id)
+            if existing_user_id:
+                return existing_user_id
+        user_msg = service.append_message(user_id, session_id, "user", {
+            "role": "user", "content": question, "client_msg_id": client_msg_id,
+            "files": await _enrich_image_files(files) or [],
+            "voice": voice or None,
+        })
+        if session_repo.latest_seq(session_id) == 1:
+            service.update(user_id, session_id, title=_generate_title([{"role": "user", "content": question}]))
+            try:
+                asyncio.get_running_loop().create_task(_refresh_title_llm(service, user_id, session_id, question))
+            except Exception:
+                logger.exception("failed to schedule LLM title refresh")
+        return user_msg.id
+
+
 async def _persist_multi_agent(service, user_id: str, session_id: str, child_id: str,
                                question: str, answer: str, sources: list, steps: list,
                                agents: list | None = None, model: str | None = None,
@@ -234,7 +267,8 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
                                files: list | None = None,
                                voice: dict | None = None,
                                files_changed: list | None = None,
-                               snapshot_restore: dict | None = None) -> tuple[str, str]:
+                               snapshot_restore: dict | None = None,
+                               user_msg_id: str | None = None) -> tuple[str, str]:
     """主会话 + 子任务会话各追加 user/assistant 消息；新会话生成标题。
 
     主会话写经 write_lock 串行化（与 /stream 协调器执行体、compact/revert 互斥），
@@ -247,9 +281,14 @@ async def _persist_multi_agent(service, user_id: str, session_id: str, child_id:
     主/子会话均按 (user_id, session_id, client_msg_id) 去重——命中已落库的完整
     轮次直接复用 id、跳过写入；命中 user 但缺 assistant 时补齐缺失对，避免断网
     重试/重复请求产生重复轮次。
+
+    [#11] user_msg_id：流式回合已在开始时用 _ensure_user_message 落库 user 消息，
+    这里传入其 id 直接复用（跳过 user 写入与标题生成），只追加 assistant。
     """
     async with service.write_lock(session_id):
-        user_msg_id, existing_assistant_id = _existing_pair(service, user_id, session_id, client_msg_id)
+        existing_user_id, existing_assistant_id = _existing_pair(service, user_id, session_id, client_msg_id)
+        if user_msg_id is None:
+            user_msg_id = existing_user_id
         if not existing_assistant_id:
             if user_msg_id is None:
                 user_msg = service.append_message(user_id, session_id, "user", {
@@ -375,7 +414,8 @@ def _session_gone(service, user_id: str, session_id: str) -> bool:
 
 async def _persist_interrupted_partial(service, user_id: str, session_id: str, child_id: str,
                                        question: str, answer: str, agents: list | None,
-                                       client_msg_id: str | None) -> None:
+                                       client_msg_id: str | None,
+                                       user_msg_id: str | None = None) -> None:
     """[B11] 会话中断时把已生成的部分内容落库（status=interrupted）。
 
     客户端断开/取消导致流未走到 done 时，主/子会话并没有完整 user/assistant 轮次
@@ -395,25 +435,28 @@ async def _persist_interrupted_partial(service, user_id: str, session_id: str, c
             logger.debug("persist interrupted partial skipped: child %s gone (reverted)", child_id)
             return
 
-        def _append_partial(target_session: str) -> str:
-            user_msg_id, existing_assistant_id = _existing_pair(service, user_id, target_session, client_msg_id)
+        def _append_partial(target_session: str, known_user_msg_id: str | None = None) -> str:
+            found_user_id, existing_assistant_id = _existing_pair(service, user_id, target_session, client_msg_id)
             if existing_assistant_id:
                 return existing_assistant_id
-            if user_msg_id is None:
+            # [#11] 主会话 user 消息已在回合开始用 _ensure_user_message 落库 → 直接复用，
+            # 避免再写一条重复的 user（即使 client_msg_id 缺失也能正确定位）。
+            target_user_id = known_user_msg_id or found_user_id
+            if target_user_id is None:
                 user_msg = service.append_message(user_id, target_session, "user", {
                     "role": "user", "content": question, "client_msg_id": client_msg_id,
                 })
-                user_msg_id = user_msg.id
+                target_user_id = user_msg.id
             partial = service.append_message(user_id, target_session, "assistant", {
                 "role": "assistant", "content": answer, "sources": [], "steps": [],
-                "agents": agents or [], "parent_id": user_msg_id, "agent": "supervisor",
+                "agents": agents or [], "parent_id": target_user_id, "agent": "supervisor",
                 "model": None, "tokens": {}, "interrupted": True,
             })
             _persist_multi_agent_parts(target_session, partial.id, answer, agents)
             return partial.id
 
         async with service.write_lock(session_id):
-            _append_partial(session_id)
+            _append_partial(session_id, user_msg_id)
         async with service.write_lock(child_id):
             _append_partial(child_id)
             service.update(user_id, child_id, status="interrupted")
@@ -425,4 +468,4 @@ async def _persist_interrupted_partial(service, user_id: str, session_id: str, c
 
 
 
-__all__ = ["_begin_task_session", "_build_compressed_history", "_ensure_child_pair", "_existing_pair", "_persist_interrupted_partial", "_persist_multi_agent", "_persist_multi_agent_parts", "_resolve_multi_agent_parent", "_session_history_for"]
+__all__ = ["_begin_task_session", "_build_compressed_history", "_ensure_child_pair", "_ensure_user_message", "_existing_pair", "_persist_interrupted_partial", "_persist_multi_agent", "_persist_multi_agent_parts", "_resolve_multi_agent_parent", "_session_history_for"]

@@ -34,7 +34,7 @@ from app.skills.loader import SkillLoader
 
 from app.plugins.loader import PluginLoader
 
-from app.config import settings
+from app.config import settings, tool_execute_available
 
 from app.agent.tools import (
     ToolDef,
@@ -433,6 +433,14 @@ class RAGAgentBase:
         return {"context": context}
     def _system_prompt_with_kb(self) -> str:
         """构建包含知识库上下文的系统提示词。"""
+        _fs_tools = (
+            "tool_ls, tool_read_file, tool_write_file, tool_append_file, "
+            "tool_edit_file, tool_glob, tool_grep"
+        )
+        # [P1 #8] tool_execute 仅在可用时列出
+        if tool_execute_available():
+            _fs_tools += ", tool_execute"
+        _fs_tools += ", tool_apply_patch"
         return (
             "You are a knowledgeable AI assistant with access to a knowledge base."
             "\n\nUse the retrieved context below to answer the user's question."
@@ -440,7 +448,7 @@ class RAGAgentBase:
             "\n- If a source has 'chapter_title' in its metadata, use that exact title when referring to the chapter."
             "\n- If a source has 'chapter_summary', it is a chapter overview — use it to describe the chapter's content."
             "\n- If you don't have enough information, say so."
-            "\n\nYou have access to built-in filesystem tools (tool_ls, tool_read_file, tool_write_file, tool_append_file, tool_edit_file, tool_glob, tool_grep, tool_execute, tool_apply_patch) for reading/writing files, running shell commands and applying patches."
+            f"\n\nYou have access to built-in filesystem tools ({_fs_tools}) for reading/writing files, running shell commands and applying patches."
             "\nYou also have access to skill tools (load_skill_*) and plugin tools."
             "\nIf the user asks to create/edit/manipulate documents (Word, PDF, PPT, Excel), generate visual designs, build web pages, or use other specialized capabilities, call the relevant skill or plugin tool to get instructions first."
             "\n\nCharacter Analysis (for novels, scripts, or documents with dialogues):"
@@ -618,9 +626,9 @@ class RAGAgentBase:
                     d for d in filtered
                     if d.get("function", {}).get("name", "") != "tool_code_exec"
                 ]
-        # [P1 #8] tool_execute 总开关关闭 → 同样在最终阶段从 schema 摘除
-        # （即使会话级缓存已挂过该工具也能摘除，与 CodeAct 同法）。
-        if not getattr(settings, "tool_execute_enabled", True):
+        # [P1 #8] tool_execute 不可用（显式开关与 allow_source_writes 均关闭）→
+        # 同样在最终阶段从 schema 摘除（即使会话级缓存已挂过也能摘除，与 CodeAct 同法）。
+        if not tool_execute_available():
             filtered = [
                 d for d in filtered
                 if d.get("function", {}).get("name", "") != "tool_execute"

@@ -357,6 +357,8 @@ async def test_execute_memory_dispatch(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_streaming_dispatch(monkeypatch):
     agent = build_agent()
+    from app.config import settings
+    monkeypatch.setattr(settings, "tool_execute_enabled", True)
 
     async def fake_stream(args, eq, on_activity):
         return "STREAMED"
@@ -370,6 +372,8 @@ async def test_execute_streaming_dispatch(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_streaming_fallback_sync(monkeypatch):
     agent = build_agent()
+    from app.config import settings
+    monkeypatch.setattr(settings, "tool_execute_enabled", True)
 
     async def fake_stream(args, eq, on_activity):
         raise RuntimeError("selector loop")

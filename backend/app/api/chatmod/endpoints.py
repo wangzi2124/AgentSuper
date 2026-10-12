@@ -45,6 +45,7 @@ from .helpers import _prompt_to_chat_request
 from .helpers import _validate_chat_message
 from .persist import _begin_task_session
 from .persist import _build_compressed_history
+from .persist import _ensure_user_message
 from .persist import _persist_interrupted_partial
 from .persist import _persist_multi_agent
 from .persist import _resolve_multi_agent_parent
@@ -220,6 +221,14 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         # 把 trace 上下文注入 payload，随消息透传到 supervisor 与全部子 Agent
         _trace = _chainlog_trace_fields(session_id, child_id)
 
+        # [#11 双真相源] 回合开始即落库 user 消息（幂等），使服务端成为在线唯一真相源。
+        user_msg_id = await _ensure_user_message(
+            service, user_id, session_id, body.message,
+            files=[f.model_dump() for f in body.files],
+            voice=body.voice.model_dump() if body.voice else None,
+            client_msg_id=body.client_msg_id,
+        )
+
         reply = await agent_bus.send_and_wait(
             AgentMessage(
                 source="user",
@@ -344,6 +353,7 @@ async def chat_multi_agent(request: Request, body: ChatRequest):
         voice=body.voice.model_dump() if body.voice else None,
         files_changed=files_changed,
         snapshot_restore=snapshot_restore,
+        user_msg_id=user_msg_id,
     )
     task_bridge.unregister(child_id)
     chainlog.info(
@@ -479,6 +489,15 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
         # 把 trace 上下文注入 payload，随消息透传到 supervisor 与全部子 Agent
         _trace = _chainlog_trace_fields(session_id, turn_child_id)
 
+        # [#11 双真相源] 回合开始即落库 user 消息（幂等），使服务端成为在线唯一真相源：
+        # 生成期间刷新页面也能看到本轮的提问；done/兜底落库复用该 user 只补 assistant。
+        turn_user_msg_id = await _ensure_user_message(
+            service, user_id, session_id, turn_body.message,
+            files=[f.model_dump() for f in turn_body.files],
+            voice=turn_body.voice.model_dump() if turn_body.voice else None,
+            client_msg_id=turn_body.client_msg_id,
+        )
+
         reply = await agent_bus.send_and_wait(
             AgentMessage(
                 source="user",
@@ -591,6 +610,7 @@ async def chat_multi_agent_stream(request: Request, body: ChatRequest):
             voice=turn_body.voice.model_dump() if turn_body.voice else None,
             files_changed=files_changed,
             snapshot_restore=snapshot_restore,
+            user_msg_id=turn_user_msg_id,
         )
 
         # [队列竞态] 认领下一个排队任务（原子 pop）→ 决定发 done 还是 turn_done。

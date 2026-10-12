@@ -446,12 +446,21 @@ async def test_loop_chat_allowlist_hard_deny_at_runtime(monkeypatch, fake_acompl
 
 
 @pytest.mark.asyncio
-async def test_loop_chat_allowlist_default_full_set(fake_acompletion):
-    """allowlist=None → 全量工具（build/web_search 等未被规则的子 Agent）。"""
+async def test_loop_chat_allowlist_default_full_set(fake_acompletion, monkeypatch):
+    """allowlist=None → 全量工具（build/web_search 等未被规则的子 Agent）。
+
+    [P1 #8] tool_execute 默认关闭 → 从默认全量集中摘除；显式开启后恢复全量。
+    """
+    from app.config import settings
     calls = fake_acompletion([_resp(content="done")])
     await st.tool_loop_chat("sys", "user", model="deepseek/deepseek-v4-flash")
     exposed = [t["function"]["name"] for t in calls[0]["tools"]]
-    assert set(exposed) == set(st._ALL_TOOL_NAMES)
+    assert set(exposed) == set(st._ALL_TOOL_NAMES) - {"tool_execute"}
+    monkeypatch.setattr(settings, "tool_execute_enabled", True)
+    fake_acompletion([_resp(content="done")])
+    await st.tool_loop_chat("sys", "user", model="deepseek/deepseek-v4-flash")
+    exposed2 = [t["function"]["name"] for t in calls[-1]["tools"]]
+    assert set(exposed2) == set(st._ALL_TOOL_NAMES)
 
 
 # ── tool_task 委派（对齐 opencode task：plan → explore）────────────────────────

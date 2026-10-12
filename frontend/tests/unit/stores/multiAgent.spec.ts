@@ -24,8 +24,6 @@ const mocks = vi.hoisted(() => ({
   enqueuePrompt: vi.fn(),
   removePrompt: vi.fn(),
   fetchTurnDiff: vi.fn(),
-  mergeServerAndCache: (s: any[], c: any[], d?: string[]) =>
-    [...(s || []), ...(c || [])].filter(m => !m?.live && !(d || []).includes(m?.id)),
 }))
 
 vi.mock('@/api/multiAgent', () => ({
@@ -56,7 +54,6 @@ vi.mock('@/api/session-cache', () => ({
   saveSessionToCache: mocks.saveCache,
   loadSessionFromCache: mocks.loadCache,
   deleteSessionFromCache: mocks.deleteCache,
-  mergeServerAndCache: mocks.mergeServerAndCache,
 }))
 vi.mock('@/api/errors', () => ({
   classifyNetworkError: (e: any) => ({ type: 'network', message: String(e), retryable: true }),
@@ -329,7 +326,7 @@ describe('撤销 / 删除', () => {
 })
 
 describe('会话加载', () => {
-  it('loadConversation 合并服务器 + 缓存 + 同步工作目录', async () => {
+  it('loadConversation 在线以服务器为唯一真相源（不合并缓存）+ 同步工作目录', async () => {
     mocks.getConversation.mockResolvedValue({
       id: 'c1', title: '标题', directory: '/work',
       messages: [{
@@ -337,6 +334,7 @@ describe('会话加载', () => {
         files_changed: [{ file: 'docs/a.md', status: 'modified', additions: 5, deletions: 2 }],
       }],
     })
+    // [#11] 缓存里即使有服务器没有的「本地未同步」消息，在线时也不再补入
     mocks.loadCache.mockResolvedValue({
       messages: [{ id: 'local', role: 'user', content: '本地未同步', agents: [], timestamp: new Date() }],
     })
@@ -344,12 +342,13 @@ describe('会话加载', () => {
     await store.loadConversation('c1')
     expect(store.activeSessionId).toBe('c1')
     expect(store.sessionDirectory).toBe('/work')
-    const ids = store.messages.map(m => m.id)
-    expect(ids).toContain('m0')
-    expect(ids).toContain('local')
+    // 服务器为准：缓存里的 local 不再出现
+    expect(store.messages.map(m => m.id)).toEqual(['m0'])
     // 历史回放也携带 files_changed（assistant 消息 data.files_changed）
     const serverMsg = store.messages.find(m => m.id === 'm0')
     expect(serverMsg?.files_changed).toEqual([{ file: 'docs/a.md', status: 'modified', additions: 5, deletions: 2 }])
+    // 服务器消息整条覆盖缓存（离线回退以它为准）
+    expect(mocks.saveCache).toHaveBeenCalled()
   })
 
   it('[C8] 回放映射 plan_path（历史消息也要有「查看计划」入口）', async () => {

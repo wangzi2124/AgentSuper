@@ -41,7 +41,7 @@ from app.agent.base import AgentMessage
 
 
 
-from app.config import settings
+from app.config import settings, tool_execute_available
 
 
 
@@ -471,11 +471,12 @@ class RAGAgentTools(RAGAgentBase):
             if t.name == name:
                 args = _normalize_tool_args(t.fn, args)
                 # [P1 #8] tool_execute 总开关关闭：即使模型仍调用（未走 schema）也直接拒绝。
-                if name == "tool_execute" and not getattr(settings, "tool_execute_enabled", True):
+                if name == "tool_execute" and not tool_execute_available():
                     return (
-                        "Error: tool_execute is disabled (TOOL_EXECUTE_ENABLED=false). "
-                        "Use tool_code_exec with CODEACT_ENABLED=true for controlled code "
-                        "execution, or set TOOL_EXECUTE_ENABLED=true to re-enable."
+                        "Error: tool_execute is disabled. It is enabled only when "
+                        "TOOL_EXECUTE_ENABLED=true or ALLOW_SOURCE_WRITES=true. "
+                        "Use tool_code_exec with CODEACT_ENABLED=true for controlled "
+                        "code execution."
                     )
                 try:
                     # [opencode task tool] 主 Agent 自主委派子 Agent 的入口（注入任务深度 + 事件队列）

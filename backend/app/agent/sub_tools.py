@@ -20,7 +20,7 @@ from typing import Optional, Tuple
 import litellm
 
 from app.agent.stream_events import emit, step_event
-from app.config import settings
+from app.config import settings, tool_execute_available
 from app.context.token_counter import estimate_tokens, sanitize_tool_messages
 from app.context.tool_output import bound_tool_output
 from app.monitor import record_model_call
@@ -413,6 +413,12 @@ async def run_tool(name: str, args: dict, event_queue=None) -> str:
     fn = getattr(fs, name, None)
     if fn is None:
         return f"Error: unknown tool '{name}'"
+    # [P1 #8] tool_execute 关闭时子 Agent 同样硬拒绝（run_tool 绕过主 Agent 的 _execute_tool）
+    if name == "tool_execute" and not tool_execute_available():
+        return (
+            "Error: tool_execute is disabled. It is enabled only when "
+            "TOOL_EXECUTE_ENABLED=true or ALLOW_SOURCE_WRITES=true."
+        )
     try:
         return fs.unwrap(await asyncio.to_thread(fn, **_coerce_args(fn, args)))
     except NeedsPermission as e:
@@ -581,6 +587,9 @@ async def tool_loop_chat(
     # 显式传入 allowlist 时才按规则裁剪 schema + 运行时硬拒绝（对齐 opencode ruleset）。
     allowlist_defined = allowlist is not None
     allowed_names = list(_ALL_TOOL_NAMES if not allowlist_defined else tuple(allowlist))
+    # [P1 #8] tool_execute 不可用时从子 Agent 工具集中摘除（schema 层 + run_tool 硬拒绝兜底）
+    if not tool_execute_available():
+        allowed_names = [n for n in allowed_names if n != "tool_execute"]
     # [opencode task 对齐] plan 等可显式委派 explore：暴露 tool_task（需 bus + 委派白名单）
     if bus is not None and task_subagents and "tool_task" not in allowed_names:
         allowed_names.append("tool_task")

@@ -259,6 +259,13 @@ def build_system_prompt_no_kb(
     except Exception:  # noqa: BLE001
         _codeact_enabled = False
 
+    # [P1 #8] tool_execute 是否可用（显式开关或 allow_source_writes）。
+    try:
+        from app.config import tool_execute_available as _tool_exec_available
+        _tool_exec_ok = bool(_tool_exec_available())
+    except Exception:  # noqa: BLE001
+        _tool_exec_ok = False
+
     parts = [
         "You are a helpful AI assistant.",
     ]
@@ -266,20 +273,27 @@ def build_system_prompt_no_kb(
     tool_parts = []
 
     if include_filesystem:
-        tool_parts.append(
-            "Built-in filesystem tools (for reading/writing/searching local files):\n"
-            "   - tool_ls(path) - List directory contents (gitignored items omitted)\n"
-            "   - tool_read_file(path, offset, limit) - Read file content (default 2000 lines, max 50KB; paginate via offset)\n"
-            "   - tool_write_file(path, content, overwrite) - Create a new file\n"
-            "   - tool_append_file(path, content) - Append content to a file (creates if missing)\n"
-            "   - tool_edit_file(path, old_string, new_string, replace_all) - Edit a file\n"
-            "   - tool_glob(pattern, path) - Find files matching a pattern (path defaults to workspace)\n"
-            "   - tool_grep(pattern, include, context, count_only, files_only, path) - Search file contents\n"
-            "   - tool_execute(command, timeout, workdir) - Run a shell command (build/install/test/check, e.g. npm install, npm run build, python -m py_compile)\n"
-            "   - tool_delete_file(path) - Delete a file or empty directory\n"
-            "   - tool_rename_file(path, new_path) - Rename or move a file/directory\n"
-            "   - tool_apply_patch(patch_text) - Apply an apply-patch-format patch (Add/Update/Delete File)"
-        )
+        _fs_lines = [
+            "Built-in filesystem tools (for reading/writing/searching local files):",
+            "   - tool_ls(path) - List directory contents (gitignored items omitted)",
+            "   - tool_read_file(path, offset, limit) - Read file content (default 2000 lines, max 50KB; paginate via offset)",
+            "   - tool_write_file(path, content, overwrite) - Create a new file",
+            "   - tool_append_file(path, content) - Append content to a file (creates if missing)",
+            "   - tool_edit_file(path, old_string, new_string, replace_all) - Edit a file",
+            "   - tool_glob(pattern, path) - Find files matching a pattern (path defaults to workspace)",
+            "   - tool_grep(pattern, include, context, count_only, files_only, path) - Search file contents",
+        ]
+        # [P1 #8] tool_execute 仅在可用时列出（schema 里也会被摘除，避免提示已禁用工具）
+        if _tool_exec_ok:
+            _fs_lines.append(
+                "   - tool_execute(command, timeout, workdir) - Run a shell command (build/install/test/check, e.g. npm install, npm run build, python -m py_compile)"
+            )
+        _fs_lines += [
+            "   - tool_delete_file(path) - Delete a file or empty directory",
+            "   - tool_rename_file(path, new_path) - Rename or move a file/directory",
+            "   - tool_apply_patch(patch_text) - Apply an apply-patch-format patch (Add/Update/Delete File)",
+        ]
+        tool_parts.append("\n".join(_fs_lines))
         tool_parts.append(
             "   - tool_task(description, prompt, subagent_type) - Delegate a focused, independent subtask "
             "to a sub-agent ('explore' for read-only codebase exploration, 'plan' for producing a structured "

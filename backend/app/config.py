@@ -215,12 +215,13 @@ class Settings(BaseSettings):
     # 设为 true 后（如开发本系统自身时）允许 Agent 修改 backend 源码。
     # .git、.env、*.db、permissions.json 始终保护，不受此开关影响。
     allow_source_writes: bool = False
-    # [P1 #8] tool_execute 总开关（默认 true，保持既有能力不回归）。
+    # [P1 #8] tool_execute 开关（默认 false —— 开箱即用下 shell 执行不可用）。
     # tool_execute 的白名单/黑名单/SSRF/重定向校验只是「补丁」——解释器内联
-    # （python -c / node -e）、管道与重定向仍可绕过。需要更强隔离时置 false：
-    # tool_execute 从工具 schema 摘除且直接调用被拒，任意计算改走 CodeAct
-    # （CODEACT_ENABLED=true + tool_code_exec）。默认 true 不改变现有行为。
-    tool_execute_enabled: bool = True
+    # （python -c / node -e）、管道与重定向仍可绕过。开启方式（任一即可，见
+    # `tool_execute_available()`）：显式置 `TOOL_EXECUTE_ENABLED=true`，或开启受信任
+    # 的源码写入模式 `ALLOW_SOURCE_WRITES=true`。关闭时 tool_execute 从工具 schema
+    # 摘除且直接调用被拒，任意计算改走 CodeAct（CODEACT_ENABLED=true + tool_code_exec）。
+    tool_execute_enabled: bool = False
 
     # ── Agent 执行循环护栏（对齐 opencode prompt.ts / processor.ts / max-steps.ts）──
     # 主步骤上限（对齐 opencode agent.steps，默认 40）：到达上限的最后一轮注入收尾提示，
@@ -378,3 +379,15 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def tool_execute_available() -> bool:
+    """[P1 #8] tool_execute 是否可用（挂载 + 可执行）。
+
+    开箱即用为 False（两个开关默认均关闭）。任一为真即开启：
+    - `tool_execute_enabled`（`TOOL_EXECUTE_ENABLED`，显式开关）
+    - `allow_source_writes`（`ALLOW_SOURCE_WRITES`，受信任源码写入模式）
+    """
+    return bool(getattr(settings, "tool_execute_enabled", False)) or bool(
+        getattr(settings, "allow_source_writes", False)
+    )

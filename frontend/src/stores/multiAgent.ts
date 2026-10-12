@@ -21,7 +21,6 @@ import {
   saveSessionToCache,
   loadSessionFromCache,
   deleteSessionFromCache,
-  mergeServerAndCache,
 } from '../api/session-cache'
 import {
   interruptSession, revertSession, deleteSessionMessage, updateSession as apiUpdateSession,
@@ -325,11 +324,11 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         partial_error: (m as any).partial_error ?? null,
         timestamp: new Date(),
       }))
-      // 从 IndexedDB 加载本地缓存（后端只在 done/finally 落库，SSE 中断时可能
-      // 有尚未同步的整轮；以服务器为基准补入本地特有消息）
-      const cached = await loadSessionFromCache<MultiAgentMessage>(id)
-      session.messages = mergeServerAndCache(serverMessages, cached?.messages || [])
-      await saveSessionToCache(id, session.messages, id, detail.title)
+      // [#11 双真相源] 在线时服务端是唯一真相源：后端在回合开始即落库 user 消息、
+      // done/断连兜底落库 assistant，刷新直接取服务器消息，不再与本地缓存合并。
+      // 用服务器消息**整条覆盖**缓存（离线回退也以它为准）。
+      session.messages = serverMessages
+      await saveSessionToCache(id, serverMessages, id, detail.title)
       activeSessionId.value = id
     } catch (e) {
       console.error('Failed to load conversation:', e)

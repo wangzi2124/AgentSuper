@@ -404,3 +404,65 @@ def test_session_history_injects_image_caption(service, monkeypatch):
     assert "看图" in hist[0]["content"]
     assert "[用户上传的图片]" in hist[0]["content"]
     assert "[图片 cat.png]: 窗台上的猫" in hist[0]["content"]
+
+
+# ── _ensure_user_message（[#11] 流式开始即落库 user 消息）──────────────────
+
+@pytest.mark.asyncio
+async def test_ensure_user_message_creates_and_titles(service, monkeypatch):
+    """新会话首条消息 → 立即落库 user + 规则标题 + 后台 LLM 刷新。"""
+    svc, req = service
+    svc.create("u1", session_id="s1")
+    monkeypatch.setattr(p.session_repo, "latest_seq", lambda sid: 1)
+    async def noop(*a, **k): return None
+    monkeypatch.setattr(p, "_refresh_title_llm", noop)
+    uid = await p._ensure_user_message(svc, "u1", "s1", "问题", files=[], client_msg_id="c1")
+    assert uid == "m1"
+    assert [m.type for m in svc._msgs["s1"]] == ["user"]
+    assert svc._msgs["s1"][0].data["client_msg_id"] == "c1"
+    assert svc._msgs["s1"][0].data["content"] == "问题"
+    assert svc.updates[0][1].get("title") == "问题"
+
+
+@pytest.mark.asyncio
+async def test_ensure_user_message_idempotent(service, monkeypatch):
+    """同一 client_msg_id 重复调用 → 复用已落库 user，不重复写。"""
+    svc, req = service
+    svc.create("u1", session_id="s1")
+    svc.append_message("u1", "s1", "user", {"client_msg_id": "c1"})
+    uid = await p._ensure_user_message(svc, "u1", "s1", "再次", files=[], client_msg_id="c1")
+    assert uid == "m1"
+    assert len(svc._msgs["s1"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_persist_multi_agent_reuses_eager_user(service, monkeypatch):
+    """[#11] _persist_multi_agent 收到 user_msg_id → 只补 assistant，不重复写 user。"""
+    svc, req = service
+    svc.create("u1", session_id="s1")
+    svc.create("u1", session_id="c1")
+    svc.append_message("u1", "s1", "user", {"client_msg_id": "c1"})
+    monkeypatch.setattr(p, "_persist_multi_agent_parts", lambda *a, **k: None)
+    monkeypatch.setattr(p.session_repo, "add_session_usage", lambda *a, **k: None)
+    u, a = await p._persist_multi_agent(svc, "u1", "s1", "c1", "q", "A", [], [],
+                                        client_msg_id="c1", user_msg_id="m1")
+    assert (u, a) == ("m1", "m2")
+    assert [m.type for m in svc._msgs["s1"]] == ["user", "assistant"]
+    assert svc._msgs["s1"][1].data.get("parent_id") == "m1"
+
+
+@pytest.mark.asyncio
+async def test_persist_interrupted_partial_reuses_eager_user(service, monkeypatch):
+    """[#11] 断连兜底收到 user_msg_id → 部分回答挂在既存 user 下，不重复写 user。"""
+    svc, req = service
+    svc.create("u1", session_id="s1")
+    svc.append_message("u1", "s1", "user", {"client_msg_id": "c1"})
+    svc.create("u1", session_id="c1")
+    monkeypatch.setattr(p, "_persist_multi_agent_parts", lambda *a, **k: None)
+    await p._persist_interrupted_partial(svc, "u1", "s1", "c1", "q", "部分", [], "c1",
+                                         user_msg_id="m1")
+    assert [m.type for m in svc._msgs["s1"]] == ["user", "assistant"]  # 无重复 user
+    assert svc._msgs["s1"][1].data.get("interrupted") is True
+    assert svc._msgs["s1"][1].data.get("parent_id") == "m1"
+    # 子会话不接收主会话的 user_msg_id（独立恢复逻辑）
+    assert [m.type for m in svc._msgs["c1"]] == ["user", "assistant"]

@@ -87,6 +87,10 @@ def env(monkeypatch):
         return ("um1", "am1")
     monkeypatch.setattr(ep, "_persist_multi_agent", fake_persist)
 
+    async def fake_ensure(*a, **k):
+        return "um1"
+    monkeypatch.setattr(ep, "_ensure_user_message", fake_ensure)
+
     async def fake_history(svc, uid, sid):
         return []
     monkeypatch.setattr(ep, "_build_compressed_history", fake_history)
