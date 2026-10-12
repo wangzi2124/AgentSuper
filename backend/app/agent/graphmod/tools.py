@@ -470,6 +470,13 @@ class RAGAgentTools(RAGAgentBase):
         for t in self.tools:
             if t.name == name:
                 args = _normalize_tool_args(t.fn, args)
+                # [P1 #8] tool_execute 总开关关闭：即使模型仍调用（未走 schema）也直接拒绝。
+                if name == "tool_execute" and not getattr(settings, "tool_execute_enabled", True):
+                    return (
+                        "Error: tool_execute is disabled (TOOL_EXECUTE_ENABLED=false). "
+                        "Use tool_code_exec with CODEACT_ENABLED=true for controlled code "
+                        "execution, or set TOOL_EXECUTE_ENABLED=true to re-enable."
+                    )
                 try:
                     # [opencode task tool] 主 Agent 自主委派子 Agent 的入口（注入任务深度 + 事件队列）
                     if name == "tool_task":

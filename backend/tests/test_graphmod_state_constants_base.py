@@ -431,6 +431,28 @@ def test_build_tool_defs_pinned_and_used():
     assert "tool_grep" in names  # 已使用保留
 
 
+def test_build_tool_defs_tool_execute_gate(monkeypatch):
+    """[P1 #8] TOOL_EXECUTE_ENABLED=false 时 tool_execute 从 schema 摘除。"""
+    from app.config import settings
+    agent = build_agent()
+    names_on = {d.get("function", {}).get("name") for d in
+                agent._build_tool_defs("", model="deepseek/deepseek-v4-flash")}
+    assert "tool_execute" in names_on  # 默认开启 → 核心常驻
+    monkeypatch.setattr(settings, "tool_execute_enabled", False)
+    names_off = {d.get("function", {}).get("name") for d in
+                 agent._build_tool_defs("", conversation_id="gate-c", model="deepseek/deepseek-v4-flash")}
+    assert "tool_execute" not in names_off
+
+
+def test_execute_tool_respects_disable_gate(monkeypatch):
+    """[P1 #8] 关闭后即使模型仍调用 tool_execute 也直接拒绝（不走执行）。"""
+    from app.config import settings
+    agent = build_agent()
+    monkeypatch.setattr(settings, "tool_execute_enabled", False)
+    out = asyncio.run(agent._execute_tool("tool_execute", {"command": "echo hi"}))
+    assert "disabled" in out.lower()
+
+
 def test_build_tool_defs_weak_model_excludes_task_tool(monkeypatch):
     """[弱模型] 弱模型不挂任何工具（全部 schema 移除，纯文本问答）。
 

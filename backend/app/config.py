@@ -215,6 +215,12 @@ class Settings(BaseSettings):
     # 设为 true 后（如开发本系统自身时）允许 Agent 修改 backend 源码。
     # .git、.env、*.db、permissions.json 始终保护，不受此开关影响。
     allow_source_writes: bool = False
+    # [P1 #8] tool_execute 总开关（默认 true，保持既有能力不回归）。
+    # tool_execute 的白名单/黑名单/SSRF/重定向校验只是「补丁」——解释器内联
+    # （python -c / node -e）、管道与重定向仍可绕过。需要更强隔离时置 false：
+    # tool_execute 从工具 schema 摘除且直接调用被拒，任意计算改走 CodeAct
+    # （CODEACT_ENABLED=true + tool_code_exec）。默认 true 不改变现有行为。
+    tool_execute_enabled: bool = True
 
     # ── Agent 执行循环护栏（对齐 opencode prompt.ts / processor.ts / max-steps.ts）──
     # 主步骤上限（对齐 opencode agent.steps，默认 40）：到达上限的最后一轮注入收尾提示，

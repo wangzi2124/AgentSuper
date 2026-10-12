@@ -618,6 +618,13 @@ class RAGAgentBase:
                     d for d in filtered
                     if d.get("function", {}).get("name", "") != "tool_code_exec"
                 ]
+        # [P1 #8] tool_execute 总开关关闭 → 同样在最终阶段从 schema 摘除
+        # （即使会话级缓存已挂过该工具也能摘除，与 CodeAct 同法）。
+        if not getattr(settings, "tool_execute_enabled", True):
+            filtered = [
+                d for d in filtered
+                if d.get("function", {}).get("name", "") != "tool_execute"
+            ]
         return filtered
     def _remember_conversation_tools(self, conversation_id: str, used_names: set | str) -> None:
         """把本请求实际用到的工具名并入会话挂载缓存（只增不减，尾部追加）。
