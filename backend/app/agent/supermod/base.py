@@ -26,8 +26,6 @@ from app.agent.base import BaseAgent, AgentMessage
 
 from app.agent.bus import AgentBus
 
-from app.agent.agent_specs import iter_agent_specs
-
 from app.agent.memory import MemoryManager
 
 from app.config import settings
@@ -55,27 +53,16 @@ class SupervisorAgentBase(BaseAgent):
             self._api_base = None
         from app.models.catalog import provider_api as _provider_api, litellm_extra_kwargs as _llm_extra_kwargs
         self._llm_extra = _llm_extra_kwargs(_provider_api(self._model))
-        # 使用更长超时的子 Agent（工具密集型）：由规格注册表的 extended_timeout 驱动
-        #（默认 build），再加上 env 配置的扩展名单。
-        self._extended_timeout_agents = {
-            s.name for s in iter_agent_specs() if s.extended_timeout
-        }
-        self._extended_timeout_agents.update(
-            a.strip() for a in (settings.extended_timeout_agents or "").split(",") if a.strip()
-        )
     def _timeout_for(self, agent_id: str, model: Optional[str] = None) -> float:
-        """按 Agent 类型分级超时：工具密集型 Agent 使用更长等待，避免长任务被误判超时。
+        """按 Agent 类型分级超时：单张倍数表驱动（默认 build ×2），避免长任务被误判超时。
 
         `model` 为本次请求实际使用的模型（payload["model"]）。自托管/本地模型（Ollama 等）
         推理很慢，用 settings.local_model_timeout_factor 放大等待窗口（云端模型倍数为 1）。
+        倍数表见 settings.agent_timeout_multipliers（`app.agent.timeouts.agent_timeout`）。
         """
-        if agent_id in self._extended_timeout_agents:
-            base = settings.sub_agent_timeout_extended
-        else:
-            base = settings.sub_agent_timeout
-        from app.agent.timeouts import scale_timeout
+        from app.agent.timeouts import agent_timeout
 
-        return scale_timeout(base, model or getattr(self, "_request_model", None))
+        return agent_timeout(agent_id, model or getattr(self, "_request_model", None))
     @property
     def agent_id(self) -> str:
         return self._id

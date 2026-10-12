@@ -16,37 +16,15 @@ def _writable_workspaces() -> list[str]:
         return []
 
 
-# 长内容必须写文件、不得在回复中粘贴全文的硬性规则（对齐 opencode 长任务机制：
-# 长文用工具写入文件、回复只留摘要，避免单轮输出触发 finish_reason="length" 截断）。
-LONG_CONTENT_FILE_RULE = (
-    "IMPORTANT (only when the response is a file/artifact the user asked to generate) - Long content MUST be "
-    "written to files, NOT pasted in replies:\n"
-    "  If your reply would exceed roughly 500 Chinese characters (about 1000 tokens), "
-    "you MUST write the full content to a file instead of outputting it inline:\n"
-    "  1. Text or code -> tool_write_file(path, content, overwrite=True). For very large files, "
-    "write the first chunk with tool_write_file then append the rest with tool_append_file.\n"
-    "  2. Structured documents (.docx / .pdf / .xlsx / .pptx) -> use the corresponding generator plugin.\n"
-    "  3. In your reply, only output: the saved file path + a summary of the key points + structure overview. "
-    "Do NOT paste the full content.\n"
-    "  4. Do NOT add closing remarks asking the user to verify the file, e.g. never write "
-    "'文档已生成完毕，请验证文件完整性和内容结构' or similar verification notices. "
-    "Simply state the saved path and summary, then stop.\n"
-    "  Exception: ONLY if the user explicitly asks for the full text inline."
-)
-
-
-# [减少轮次 2026-10-11] 慢模型（本地/自托管）每轮 LLM 往返 60–120s，逐文件一轮会迅速耗尽
-# 超时预算。强制「一轮批量写多文件」：要么在同一条回复里并发发出多个 tool_write_file，
-# 要么用一条 tool_apply_patch（可含多个 *** Add File: 块）一次性建全部文件。
-BATCH_WRITES_RULE = (
-    "IMPORTANT (only when this request is a file-writing task) - Fewest rounds / batch file writes: create or update ALL files a task needs in "
-    "as FEW assistant turns as possible (each extra turn is another slow model round-trip and "
-    "risks the task timing out):\n"
-    "  - Put every tool_write_file / tool_append_file call for the whole project in ONE response "
-    "(multiple tool calls in parallel), instead of writing one file per turn;\n"
-    "  - OR issue a SINGLE tool_apply_patch whose patch_text contains multiple '*** Add File:' "
-    "blocks to create many files in one call.\n"
-    "  Do NOT write one file, wait for the result, then write the next."
+# [P0.2 提示词瘦身] 文件/制品任务的三组输出规则（长内容↔文件、一轮批量写、实施计划/完成情况报告）
+# 已迁到内置技能 artifact-writing（app/skills/bundled/productivity/artifact-writing/SKILL.md）：
+# 规则正文按需注入，不再每轮占据 system 预算、稀释其余段落的注意力。系统提示只保留下面这一行触发指引，
+# 表意与旧 LONG_CONTENT_FILE_RULE + BATCH_WRITES_RULE + 计划/报告段完全一致（防截断 / 防超时 / 报告格式）。
+ARTIFACT_SKILL_HINT = (
+    "IMPORTANT - File/artifact tasks (writing code, documents, reports, scripts, projects, or any multi-step "
+    "task that creates/modifies files): FIRST call load_skill_artifact_writing to load the required output rules "
+    "(long content -> file, NOT inline; batch ALL file writes into ONE turn; plan '## 实施计划' / report "
+    "'## 完成情况'). For plain Q&A, skip this and answer directly."
 )
 
 
@@ -213,6 +191,14 @@ def create_filesystem_tools() -> List[ToolDef]:
             "tool_rename_file": "Rename or move a file/dir",
             "tool_apply_patch": "Apply apply_patch text (Add/Update/Delete File); best for multiple files in one call",
         }
+        # [P0.2] Shell dialect moved out of the system prompt into the tool schema —
+        # the model already reads tool_execute's description, so this costs no system budget.
+        if sys.platform.startswith("win"):
+            _DESC["tool_execute"] += (
+                ". Runs via cmd.exe (Windows), NOT bash: use backslash paths for executables "
+                "(.venv\\Scripts\\python.exe — forward slashes fail), %ERRORLEVEL% instead of $?, "
+                "and & / && instead of ; as separator"
+            )
         tools.append(ToolDef(
             name=name,
             description=_DESC.get(name, name),
@@ -380,11 +366,6 @@ def build_system_prompt_no_kb(
         "- URL content: plugin_internet-search_tool_extract_urls.",
         "- HTTP: plugin_http-client_tool_http_get/_post/_request (headers as JSON string).",
         "- CRITICAL: tool_execute is for build/install/test/check/verify (npm install, npm run build, python -m py_compile, pytest, npm test, node --check). NEVER use it for curl/wget/ping/network — use http-client plugin.",
-        *([
-            "- IMPORTANT - Shell dialect: commands run via cmd.exe on Windows, NOT bash. Use backslash paths "
-            "for executables (.venv\\Scripts\\python.exe — forward slashes fail), %ERRORLEVEL% instead of $?, "
-            "and & / && instead of ; as command separator."
-        ] if sys.platform.startswith("win") else []),
         "- KB export: kb-export tools.",
         *([
             "- Voice/TTS: use tool_tts_synthesize to turn reply/text into a downloadable .wav "
@@ -413,11 +394,7 @@ def build_system_prompt_no_kb(
         "IMPORTANT - Projects: write ALL code files first via tool_write_file (auto-creates dirs); do NOT use "
         "mkdir/Set-Content or 'npm create'/'create-react-app'/'create vite'; only then run tool_execute for install/build/test.",
         "",
-        BATCH_WRITES_RULE,
-        "",
-        "IMPORTANT (only when the response is a file/artifact the user asked to generate) - Long content MUST be written to files, NOT pasted in replies (≈500 Chinese chars / 1000 tokens):",
-        "  Write text/code with tool_write_file (first chunk, then tool_append_file for large files); generator plugins for .docx/.pdf/.xlsx/.pptx.",
-        "  Reply with only: saved path + summary + structure. No 'please verify' closing remarks.",
+        ARTIFACT_SKILL_HINT,
         "",
         "IMPORTANT - Working paths / workspace:",
         "  The following absolute paths are writable workspaces (you MUST write files under one of them):",
@@ -431,10 +408,7 @@ def build_system_prompt_no_kb(
         "  To search files in a configured workspace, pass path=<absolute path> to tool_glob / tool_grep.",
         "  tool_grep / tool_glob return absolute paths when searching a custom path.",
         "",
-        "IMPORTANT - Multi-step FILE/project tasks only (when writing files/code): start with a plan block "
-        "'## 实施计划'; end with '## 完成情况' (已完成 / 未完成 / 下一步). At step limit, give this report "
-        "without calling more tools. For plain Q&A, skip the plan/report format entirely and just answer.",
-        "",
+
         # ── 本地模型工具调用格式（对原生 tool_calls 模型无影响，仅引导弱模型）──
         "Tool-call format (for models without native function-calling support):",
         "  When you need to call a tool, output EXACTLY this single line, with NO other text:",

@@ -80,3 +80,29 @@ def test_scale_timeout(monkeypatch):
     monkeypatch.setattr("app.config.settings.local_model_timeout_factor", 6.0)
     assert T.scale_timeout(300, "ollama/qwen2.5-coder:latest") == 1800.0
     assert T.scale_timeout(300, "deepseek/deepseek-v4-flash") == 300.0
+
+
+# ── agent_timeout_multiplier / agent_timeout（单一倍数表）───────────────────
+
+def test_agent_timeout_multiplier_default_and_missing(monkeypatch):
+    monkeypatch.setattr("app.config.settings.agent_timeout_multipliers", {"build": 2.0})
+    assert T.agent_timeout_multiplier("build") == 2.0
+    assert T.agent_timeout_multiplier("plan") == 1.0
+    assert T.agent_timeout_multiplier(None) == 1.0
+
+
+def test_timeout_multipliers_falls_back_to_default(monkeypatch):
+    # 空配置 → 内置默认（build ×2），不返回空表
+    monkeypatch.setattr("app.config.settings.agent_timeout_multipliers", {})
+    assert T.timeout_multipliers() == T.DEFAULT_TIMEOUT_MULTIPLIERS
+
+
+def test_agent_timeout_combines_base_and_factor(monkeypatch):
+    monkeypatch.setattr(T, "is_self_hosted_model", lambda m: m == "ollama/x")
+    monkeypatch.setattr("app.config.settings.local_model_timeout_factor", 6.0)
+    monkeypatch.setattr("app.config.settings.sub_agent_timeout", 150.0)
+    monkeypatch.setattr("app.config.settings.agent_timeout_multipliers", {"build": 2.0})
+    assert T.agent_timeout("build") == 300.0
+    assert T.agent_timeout("build", "ollama/x") == 1800.0
+    assert T.agent_timeout("plan") == 150.0
+    assert T.agent_timeout("unknown", "ollama/x") == 900.0

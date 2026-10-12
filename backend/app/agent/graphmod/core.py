@@ -46,7 +46,6 @@ from app.config import settings
 
 from app.agent.tools import (
     ToolDef,
-    LONG_CONTENT_FILE_RULE,
     build_system_prompt_no_kb,
 )
 

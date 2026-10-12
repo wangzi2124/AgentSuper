@@ -5,7 +5,7 @@
   - build/explore/plan 三个规格齐全，字段语义正确
   - explore.tools == 只读工具集（"*": deny + 只读 allowlist 的可编程来源）
   - plan.tools == ("tool_task",) + task_subagents == ("explore",)（可委派 explore 探索）
-  - build.mode == primary / tools is None / extended_timeout True
+  - build.mode == primary / tools is None
   - get_agent_spec 未知名称抛 KeyError、_or_none 返回 None
 
 运行：pytest tests/test_agent_specs.py
@@ -34,7 +34,6 @@ def test_build_spec():
     assert isinstance(spec, AgentSpec)
     assert spec.mode == "primary"
     assert spec.tools is None  # 主 Agent 自身 graph 工具，不裁剪
-    assert spec.extended_timeout is True
 
 
 def test_explore_spec_readonly_allowlist():
@@ -50,7 +49,6 @@ def test_plan_spec_delegates_explore():
     assert spec.mode == "primary"
     assert spec.tools == ("tool_task",)  # 唯一工具：委派 explore
     assert spec.task_subagents == ("explore",)
-    assert spec.extended_timeout is False
 
 
 def test_get_spec_unknown():

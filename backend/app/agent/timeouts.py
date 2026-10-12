@@ -59,3 +59,53 @@ def model_timeout_factor(model_id: Optional[str]) -> float:
 def scale_timeout(base: float, model_id: Optional[str]) -> float:
     """把基础超时按模型放大倍数缩放。"""
     return float(base) * model_timeout_factor(model_id)
+
+
+# ── Agent 超时倍数（单一概念）─────────────────────────────────────────────
+# 取代旧的「SUB_AGENT_TIMEOUT_EXTENDED + EXTENDED_TIMEOUT_AGENTS」双旋钮：
+# 最终等待 = SUB_AGENT_TIMEOUT × multiplier[agent] × 模型自托管倍数。
+# 默认 build（工具密集型主 Agent）为 2.0，其余 1.0。settings.agent_timeout_multipliers
+# 可覆盖（`AGENT_TIMEOUT_MULTIPLIERS` 环境变量，JSON）。
+DEFAULT_TIMEOUT_MULTIPLIERS: dict[str, float] = {"build": 2.0}
+
+
+def timeout_multipliers() -> dict[str, float]:
+    """当前生效的 Agent 超时倍数表（settings 覆盖 > 默认）。"""
+    try:
+        from app.config import settings
+
+        raw = getattr(settings, "agent_timeout_multipliers", None)
+    except Exception:  # noqa: BLE001
+        raw = None
+    if not raw:
+        return dict(DEFAULT_TIMEOUT_MULTIPLIERS)
+    try:
+        items = raw.items()
+    except AttributeError:
+        return dict(DEFAULT_TIMEOUT_MULTIPLIERS)
+    out: dict[str, float] = {}
+    for key, value in items:
+        try:
+            out[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def agent_timeout_multiplier(agent_id: Optional[str]) -> float:
+    """按 Agent 名称取超时倍数；未声明为 1.0。"""
+    try:
+        return max(0.0, float(timeout_multipliers().get(str(agent_id or ""), 1.0)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def agent_timeout(agent_id: Optional[str], model_id: Optional[str] = None) -> float:
+    """子 Agent 等待超时 = 基础超时 × Agent 倍数 × 模型倍数（自托管放大）。"""
+    try:
+        from app.config import settings
+
+        base = float(getattr(settings, "sub_agent_timeout", 150.0) or 150.0)
+    except Exception:  # noqa: BLE001
+        base = 150.0
+    return scale_timeout(base * agent_timeout_multiplier(agent_id), model_id)

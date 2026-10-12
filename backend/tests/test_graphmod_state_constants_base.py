@@ -341,7 +341,7 @@ def test_system_prompt_with_kb():
     sp = agent._system_prompt_with_kb()
     assert "knowledge base" in sp
     assert "tool_task" in sp
-    assert "LONG_CONTENT" in sp or "文件" in sp  # LONG_CONTENT_FILE_RULE 追加
+    assert "load_skill_artifact_writing" in sp  # P0.2: 文件输出规则迁到 artifact-writing 技能
 
 
 def test_tool_matches_intent():

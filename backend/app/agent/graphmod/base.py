@@ -7,10 +7,6 @@ import asyncio
 
 import logging
 
-import os
-
-
-
 import threading
 
 import time as tmod
@@ -42,8 +38,7 @@ from app.config import settings
 
 from app.agent.tools import (
     ToolDef,
-    LONG_CONTENT_FILE_RULE,
-    BATCH_WRITES_RULE,
+    ARTIFACT_SKILL_HINT,
     create_filesystem_tools,
     create_skill_tools,
     create_plugin_tools,
@@ -458,14 +453,6 @@ class RAGAgentBase:
             "it runs with fresh context, so include all needed details. Do NOT delegate work you can do directly."
             "\n\n"
             + (
-                "IMPORTANT - Shell dialect: commands run via cmd.exe on Windows, NOT bash. Use backslash paths "
-                "for executables (.venv\\Scripts\\python.exe — forward slashes fail), %ERRORLEVEL% instead of $?, "
-                "and & / && instead of ; as command separator."
-                "\n\n"
-                if os.name == "nt"
-                else ""
-            )
-            + (
                 "Voice/TTS: use tool_tts_synthesize to turn reply text into a downloadable .wav "
                 "(saved to data/generated); tool_voice_transcribe to transcribe a local audio file to text."
                 "\n\n"
@@ -473,9 +460,7 @@ class RAGAgentBase:
                 and getattr(getattr(self, "voice_service", None), "enabled", False)
                 else ""
             )
-            + LONG_CONTENT_FILE_RULE
-            + "\n\n"
-            + BATCH_WRITES_RULE
+            + ARTIFACT_SKILL_HINT
         )
 
     # 按需挂载工具 schema：核心文件工具 + 技能常驻，插件按意图关键词 + 已使用保留

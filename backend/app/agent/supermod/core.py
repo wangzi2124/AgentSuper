@@ -270,7 +270,7 @@ class SupervisorAgentCore(SupervisorAgentBase):
             completed = self._bus.agent_progress(target_agent)
             suggestion = (
                 f"如果任务仍在执行（如代码脚手架/构建），可提高 SUB_AGENT_TIMEOUT "
-                f"或 SUB_AGENT_TIMEOUT_EXTENDED，或改用普通对话模式重试。"
+                f"或该 Agent 的 AGENT_TIMEOUT_MULTIPLIERS 倍数，或改用普通对话模式重试。"
             )
             chainlog.error(
                 "agent", "supervisor", "route.timeout", agent_id=target_agent,

@@ -85,7 +85,7 @@ def test_is_greeting_and_timeout_for():
     assert ag._is_greeting("你好") is True
     assert ag._is_greeting("麻烦你帮我查资料") is True
     assert ag._is_greeting("今天天气如何") is False
-    assert ag._timeout_for("build") == settings.sub_agent_timeout_extended
+    assert ag._timeout_for("build") == settings.sub_agent_timeout * 2
     assert ag._timeout_for("unknown") == settings.sub_agent_timeout
 
 
@@ -95,11 +95,11 @@ def test_timeout_for_scales_for_local_model(monkeypatch):
                         lambda m: m == "ollama/x")
     monkeypatch.setattr("app.config.settings.local_model_timeout_factor", 6.0)
     ag = SupervisorAgent(_StubBus())
-    assert ag._timeout_for("build", "ollama/x") == settings.sub_agent_timeout_extended * 6.0
-    assert ag._timeout_for("build", "deepseek/deepseek-v4-flash") == settings.sub_agent_timeout_extended
+    assert ag._timeout_for("build", "ollama/x") == settings.sub_agent_timeout * 2 * 6.0
+    assert ag._timeout_for("build", "deepseek/deepseek-v4-flash") == settings.sub_agent_timeout * 2
     assert ag._timeout_for("rag", "ollama/x") == settings.sub_agent_timeout * 6.0
     # 未显式传 model 时退回云端倍数（不放大）
-    assert ag._timeout_for("build") == settings.sub_agent_timeout_extended
+    assert ag._timeout_for("build") == settings.sub_agent_timeout * 2
 
 
 

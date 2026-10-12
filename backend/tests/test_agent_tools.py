@@ -468,17 +468,22 @@ def test_prompt_with_plugins_skips_filesystem():
     assert "plugin_filesystem_tool_boom" not in p  # filesystem 插件工具被跳过
 
 
-def test_prompt_windows_shell_hint():
-    p = _prompt()
+def test_execute_tool_windows_shell_hint():
+    # [P0.2] Shell dialect 从系统提示移到 tool_execute 的 tool schema 描述（不占 system 预算）
+    desc = {t.name: t.description for t in at.create_filesystem_tools()}["tool_execute"]
     if sys.platform.startswith("win"):
-        assert "cmd.exe" in p
+        assert "cmd.exe" in desc
     else:
-        assert "cmd.exe" not in p
+        assert "cmd.exe" not in desc
+    # 系统提示里不再出现 shell dialect
+    assert "cmd.exe" not in _prompt()
 
 
-def test_prompt_batch_writes_rule():
-    # [减少轮次] 系统提示必须含「一轮批量写多文件」指引
+def test_prompt_file_rules_via_skill():
+    # [P0.2] 文件/制品输出规则已迁到内置技能 artifact-writing：系统提示只保留按需加载指引，
+    # 规则正文（长内容↔文件、一轮批量写、实施计划/完成情况）不再每轮占据 system 预算。
     p = _prompt()
-    assert "Fewest rounds / batch file writes" in p
-    assert "tool_apply_patch" in p
-    assert at.BATCH_WRITES_RULE in p
+    assert "load_skill_artifact_writing" in p
+    assert at.ARTIFACT_SKILL_HINT in p
+    assert not hasattr(at, "BATCH_WRITES_RULE")
+    assert not hasattr(at, "LONG_CONTENT_FILE_RULE")

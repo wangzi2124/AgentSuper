@@ -34,14 +34,12 @@ class AgentSpec:
         mode: "primary"（自身 graph 工具）| "subagent"（走 sub_tools 工具循环）。
         tools: 工具 allowlist —— None = 不裁剪（主 Agent）;
                空元组 = 无工具（纯 LLM）; 元组 = 只暴露这些工具。
-        extended_timeout: 是否使用扩展超时（工具密集型 Agent，默认 build）。
     """
 
     name: str
     description: str
     mode: str
     tools: Optional[Tuple[str, ...]]
-    extended_timeout: bool = False
     task_subagents: Tuple[str, ...] = ()
 
 
@@ -51,7 +49,6 @@ _AGENT_SPECS: dict[str, AgentSpec] = {
         description="默认主 Agent：知识库 + 代码/文件 + 内建 web 搜索（合并原 rag/code/web_search）。",
         mode="primary",
         tools=None,
-        extended_timeout=True,
     ),
     "explore": AgentSpec(
         name="explore",

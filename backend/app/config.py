@@ -257,13 +257,14 @@ class Settings(BaseSettings):
     # Doom-loop 升级：首次提示之后，再次连续触发 N 次相同指纹即强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具），
     # 对齐 opencode processor.ts 的 permission.ask(doom_loop) → deny 后 stop 语义
     doom_loop_max_strikes: int = 2
-    # 工具密集型子 Agent（如 build）的更长等待超时（秒），避免长任务被误判超时
-    sub_agent_timeout_extended: float = 300.0
-    # 使用 extended 超时的子 Agent 列表（逗号分隔）
-    extended_timeout_agents: str = "build"
+    # 各 Agent 的等待超时倍数表（单一概念，取代表旧的 「SUB_AGENT_TIMEOUT_EXTENDED +
+    # EXTENDED_TIMEOUT_AGENTS」双旋钮）：最终等待 = SUB_AGENT_TIMEOUT × multiplier[agent]。
+    # 默认 build（工具密集型主 Agent）为 2.0，其余 1.0。环境变量 AGENT_TIMEOUT_MULTIPLIERS
+    # 传 JSON 覆盖，如 {"build": 2.0, "plan": 1.0}。
+    agent_timeout_multipliers: dict = {"build": 2.0}
     # [慢模型自适应超时 2026-10-11] 自托管/本地模型（`ollama/` 前缀，或 provider api_base
     # 指向本机 localhost/127.0.0.1）每次 LLM 调用可慢至 60–120s（云端通常 3–15s）。基础超时
-    # （SUPERVISOR_TIMEOUT / SUB_AGENT_TIMEOUT[_EXTENDED]）是按云端模型设的，慢模型 5 轮就爆
+    # （SUPERVISOR_TIMEOUT / SUB_AGENT_TIMEOUT）是按云端模型设的，慢模型 5 轮就爆
     # ——用该倍数放大等待窗口，避免长任务被误判超时。云端模型倍数为 1（不受影响）。
     local_model_timeout_factor: float = 6.0
     # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth）。

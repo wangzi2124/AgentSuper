@@ -51,7 +51,6 @@ class FakeBus:
 
 @pytest.fixture
 def agent(monkeypatch):
-    monkeypatch.setattr(settings, "extended_timeout_agents", "code")
     return SupervisorAgent(FakeBus())
 
 
@@ -75,8 +74,8 @@ async def _collect_one(agen):
 
 def test_timeout_for(agent, monkeypatch):
     monkeypatch.setattr(settings, "sub_agent_timeout", 150.0)
-    monkeypatch.setattr(settings, "sub_agent_timeout_extended", 300.0)
-    # build 是默认主 Agent（工具密集型）→ 长超时
+    monkeypatch.setattr(settings, "agent_timeout_multipliers", {"build": 2.0})
+    # build 是默认主 Agent（工具密集型）→ ×2 长超时
     assert agent._timeout_for("build") == 300.0
     assert agent._timeout_for("plan") == 150.0
     assert agent._timeout_for("unknown") == 150.0

@@ -46,8 +46,9 @@ BUNDLED_DIRNAME = "bundled"
 #: 内置播种清单文件名（位于受管库内）
 BUNDLED_MANIFEST = ".bundled.json"
 #: 内置技能集版本。**改动内置技能内容时递增**：启动时补种新增技能，并刷新**用户未改动**
-#: 的已播种技能（摘要比对，见 `seed_bundled`）。v2 = 清单改存 `{name: {dir, digest}}`。
-BUNDLED_VERSION = 2
+#: 的已播种技能（摘要比对，见 `seed_bundled`）。v2 = 清单改存 `{name: {dir, digest}}`；
+#: v3 = 新增内置技能 artifact-writing（P0.2 文件输出规则迁到 Skill）。
+BUNDLED_VERSION = 3
 
 
 def backend_dir() -> Path:
