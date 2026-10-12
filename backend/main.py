@@ -19,7 +19,7 @@ from app.api.responses import ApiError, error_response
 from app.auth import AuthMiddleware
 from app.chainlog import ChainLogMiddleware
 from app.config import settings
-from app.monitor import RequestLogMiddleware, get_stats
+from app.monitor import RequestLogMiddleware, get_recent_stats, get_stats
 from app.runtime import ensure_runtime_state
 from app.session import SessionService, init_db
 from app.session import task_bridge
@@ -260,9 +260,11 @@ async def health():
 
 
 @app.get("/api/monitor/stats")
-async def monitor_stats():
-    """获取系统监控统计信息。"""
-    return get_stats()
+async def monitor_stats(window_hours: float = 24.0):
+    """获取系统监控统计信息（累积总量 + 最近 window_hours 小时窗口）。"""
+    stats = get_stats()
+    stats["recent"] = get_recent_stats(window_hours)
+    return stats
 
 
 @app.get("/api/monitor/usage")

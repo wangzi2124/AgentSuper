@@ -46,6 +46,19 @@ _STATS_FILE = Path(__file__).resolve().parents[1] / "data" / "monitor_stats.json
 _SAVE_INTERVAL_SECONDS = 5.0
 _last_save = 0.0
 
+# ── 时间窗指标 ring buffer（data/metrics.jsonl）──
+# 累积统计（monitor_stats.json）只有「生命周期总量」，看不到「最近 24h」。
+# 这里把每次模型调用/请求按时间写成 JSONL 追加日志，读取时按时间窗聚合；
+# 落盘与文件裁剪都做节流，避免高频写盘阻塞事件循环。
+_METRICS_FILE = Path(__file__).resolve().parents[1] / "data" / "metrics.jsonl"
+# 只保留最近 N 小时的事件（时间裁剪），读取窗口不超过该值
+_METRICS_RETENTION_HOURS = 24.0
+# 文件裁剪（读全量→重写）间隔：避免每次 flush 都重写整个文件
+_METRICS_PRUNE_INTERVAL_SECONDS = 300.0
+_metrics_buffer: list = []
+_last_metrics_flush = 0.0
+_last_metrics_prune = 0.0
+
 
 def _load_persisted():
     """从磁盘加载历史统计（若存在）。"""
@@ -95,6 +108,74 @@ def _save_persisted():
         logger.warning("Failed to persist monitor stats: %s", e)
 
 
+def _record_metric(kind: str, **fields):
+    """把一条带时间戳的事件追加到内存缓冲，并按节流 flush 到 metrics.jsonl。"""
+    with _stats_lock:
+        _metrics_buffer.append({"ts": time.time(), "kind": kind, **fields})
+    _flush_metrics()
+
+
+def _flush_metrics(force: bool = False):
+    """把缓冲的事件批量追加到 JSONL（节流：距上次 flush 至少 _SAVE_INTERVAL_SECONDS）。
+
+    force=True 时忽略节流立即写盘（读取窗口前调用，保证窗口完整）。
+    """
+    global _last_metrics_flush
+    with _stats_lock:
+        if not _metrics_buffer:
+            return
+        now = time.time()
+        if not force and (now - _last_metrics_flush) < _SAVE_INTERVAL_SECONDS:
+            return
+        _last_metrics_flush = now
+        rows = _metrics_buffer[:]
+        _metrics_buffer.clear()
+    try:
+        _METRICS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_METRICS_FILE, "a", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("Failed to append metrics: %s", e)
+        return
+    _prune_metrics()
+
+
+def _prune_metrics():
+    """时间裁剪 metrics.jsonl：只保留最近 _METRICS_RETENTION_HOURS 小时的事件。
+
+    读全量→重写成本随文件增长，故用 _METRICS_PRUNE_INTERVAL_SECONDS 节流。
+    """
+    global _last_metrics_prune
+    now = time.time()
+    if (now - _last_metrics_prune) < _METRICS_PRUNE_INTERVAL_SECONDS:
+        return
+    _last_metrics_prune = now
+    cutoff = now - _METRICS_RETENTION_HOURS * 3600
+    try:
+        if not _METRICS_FILE.exists():
+            return
+        kept: list = []
+        with open(_METRICS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    r = json.loads(s)
+                except Exception:
+                    continue
+                if float(r.get("ts") or 0) >= cutoff:
+                    kept.append(s)
+        tmp = _METRICS_FILE.with_suffix(".jsonl.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            if kept:
+                f.write("\n".join(kept) + "\n")
+        tmp.replace(_METRICS_FILE)
+    except Exception as e:
+        logger.warning("Failed to prune metrics: %s", e)
+
+
 _load_persisted()
 
 
@@ -104,6 +185,8 @@ def record_request(method: str, path: str, status: int, duration_ms: float):
         _stats["requests_total"] += 1
         _stats["requests_by_path"][f"{method} {path}"] += 1
         _stats["requests_by_status"][status] += 1
+    _record_metric("request", path=f"{method} {path}", status=status,
+                   duration_ms=round(duration_ms, 1))
     _save_persisted()
 
 
@@ -140,6 +223,13 @@ def record_model_call(
         _stats["cost_by_model"][model] += float(cost)
         _stats["tool_rounds_total"] += tool_rounds
         _stats["tool_calls_total"] += tool_calls
+    _record_metric(
+        "model", model=model, prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens, reasoning_tokens=reasoning_tokens,
+        cache_read=cache_read, cache_write=cache_write,
+        duration_ms=round(duration_ms, 1), tool_rounds=tool_rounds,
+        tool_calls=tool_calls, cost=round(float(cost), 8),
+    )
     _save_persisted()
 
 
@@ -178,9 +268,77 @@ def get_stats() -> dict:
         }
 
 
+def get_recent_stats(window_hours: float = 24.0) -> dict:
+    """聚合最近 window_hours 小时的事件（ring buffer → metrics.jsonl）。
+
+    窗口被夹在 (0, _METRICS_RETENTION_HOURS]；读取前先强制 flush，把未落盘的
+    缓冲一并计入，保证窗口完整。
+    """
+    try:
+        window = float(window_hours)
+    except (TypeError, ValueError):
+        window = 24.0
+    window = max(0.1, min(window, _METRICS_RETENTION_HOURS))
+    _flush_metrics(force=True)
+    cutoff = time.time() - window * 3600
+    calls = 0
+    by_model: dict = defaultdict(int)
+    prompt_tokens = completion_tokens = reasoning_tokens = 0
+    cache_read = cache_write = 0
+    duration_ms = 0.0
+    cost = 0.0
+    requests = 0
+    by_status: dict = defaultdict(int)
+    try:
+        if _METRICS_FILE.exists():
+            with open(_METRICS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if not s:
+                        continue
+                    try:
+                        r = json.loads(s)
+                    except Exception:
+                        continue
+                    if float(r.get("ts") or 0) < cutoff:
+                        continue
+                    kind = r.get("kind")
+                    if kind == "model":
+                        calls += 1
+                        by_model[r.get("model") or "?"] += 1
+                        prompt_tokens += int(r.get("prompt_tokens") or 0)
+                        completion_tokens += int(r.get("completion_tokens") or 0)
+                        reasoning_tokens += int(r.get("reasoning_tokens") or 0)
+                        cache_read += int(r.get("cache_read") or 0)
+                        cache_write += int(r.get("cache_write") or 0)
+                        duration_ms += float(r.get("duration_ms") or 0)
+                        cost += float(r.get("cost") or 0)
+                    elif kind == "request":
+                        requests += 1
+                        by_status[int(r.get("status") or 0)] += 1
+    except Exception as e:
+        logger.warning("Failed to read recent metrics: %s", e)
+    return {
+        "window_hours": window,
+        "model_calls": {
+            "total": calls,
+            "total_prompt_tokens": prompt_tokens,
+            "total_completion_tokens": completion_tokens,
+            "total_reasoning_tokens": reasoning_tokens,
+            "total_cache_read": cache_read,
+            "total_cache_write": cache_write,
+            "total_duration_ms": round(duration_ms, 1),
+            "avg_duration_ms": round(duration_ms / calls, 1) if calls else 0,
+            "total_cost": round(cost, 6),
+            "by_model": dict(by_model),
+        },
+        "requests": {"total": requests, "by_status": dict(by_status)},
+    }
+
+
 def reset_stats():
-    """清空统计并删除持久化文件（用于调试）。"""
-    global _stats
+    """清空统计并删除持久化文件（累积统计 + 时间窗指标，用于调试）。"""
+    global _stats, _metrics_buffer
     with _stats_lock:
         _stats = {
             "requests_total": 0,
@@ -204,8 +362,13 @@ def reset_stats():
             "cache_write_by_model": defaultdict(int),
             "cost_by_model": defaultdict(float),
         }
+        _metrics_buffer = []
     try:
         _STATS_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        _METRICS_FILE.unlink(missing_ok=True)
     except Exception:
         pass
 

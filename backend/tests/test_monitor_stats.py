@@ -25,7 +25,10 @@ def _iso(monkeypatch, tmp_path):
     tl._path = None
     monkeypatch.setenv("AGENTSUPER_LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setattr(mon, "_STATS_FILE", tmp_path / "monitor_stats.json")
+    monkeypatch.setattr(mon, "_METRICS_FILE", tmp_path / "metrics.jsonl")
     monkeypatch.setattr(mon, "_last_save", 0.0)
+    monkeypatch.setattr(mon, "_last_metrics_flush", 0.0)
+    monkeypatch.setattr(mon, "_last_metrics_prune", 0.0)
     mon.reset_stats()
 
 
@@ -137,6 +140,70 @@ async def test_middleware_non_http_passthrough():
     await mw({"type": "websocket", "path": "/ws"}, None, None)
     assert called == ["websocket"]
     assert get_stats()["requests"]["total"] == 0  # 不记录
+
+
+def test_recent_stats_aggregates_model_calls(tmp_path):
+    """[P1 #12] 最近窗口按 metrics.jsonl 聚合模型调用（未落盘缓冲也计入）。"""
+    mon.record_model_call("deepseek/x", prompt_tokens=100, completion_tokens=50,
+                          duration_ms=200, cost=0.01, reasoning_tokens=5,
+                          cache_read=3, cache_write=1)
+    mon.record_model_call("deepseek/x", prompt_tokens=300, completion_tokens=50,
+                          duration_ms=400, cost=0.02)
+    mon.record_model_call("ollama/y", prompt_tokens=10, completion_tokens=5)
+    recent = mon.get_recent_stats(24.0)
+    mc = recent["model_calls"]
+    assert recent["window_hours"] == 24.0
+    assert mc["total"] == 3
+    assert mc["by_model"] == {"deepseek/x": 2, "ollama/y": 1}
+    assert mc["total_prompt_tokens"] == 410
+    assert mc["total_completion_tokens"] == 105
+    assert mc["total_reasoning_tokens"] == 5
+    assert round(mc["total_cost"], 6) == 0.03
+    assert (tmp_path / "metrics.jsonl").exists()
+
+
+def test_recent_stats_window_excludes_old(tmp_path):
+    """窗口外（30h 前）的事件不计入 24h 聚合。"""
+    now = time.time()
+    (tmp_path / "metrics.jsonl").write_text(
+        json.dumps({"ts": now - 30 * 3600, "kind": "model", "model": "old",
+                    "prompt_tokens": 999}) + "\n"
+        + json.dumps({"ts": now - 60, "kind": "model", "model": "new",
+                      "prompt_tokens": 7}) + "\n",
+        encoding="utf-8",
+    )
+    mc = mon.get_recent_stats(24.0)["model_calls"]
+    assert mc["total"] == 1
+    assert mc["by_model"] == {"new": 1}
+    assert mc["total_prompt_tokens"] == 7
+
+
+def test_recent_stats_records_requests(tmp_path):
+    mon.record_request("GET", "/api/x", 200, 3.0)
+    mon.record_request("GET", "/api/x", 500, 4.0)
+    recent = mon.get_recent_stats(24.0)
+    assert recent["requests"]["total"] == 2
+    assert recent["requests"]["by_status"] == {200: 1, 500: 1}
+
+
+def test_prune_metrics_drops_old_entries(tmp_path):
+    now = time.time()
+    (tmp_path / "metrics.jsonl").write_text(
+        json.dumps({"ts": now - 48 * 3600, "kind": "model", "model": "old"}) + "\n"
+        + json.dumps({"ts": now - 60, "kind": "model", "model": "new"}) + "\n",
+        encoding="utf-8",
+    )
+    mon._last_metrics_prune = 0.0
+    mon._prune_metrics()
+    lines = [json.loads(l) for l in (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert [r["model"] for r in lines] == ["new"]
+
+
+def test_reset_stats_clears_metrics(tmp_path):
+    mon.record_model_call("m", prompt_tokens=1)
+    assert (tmp_path / "metrics.jsonl").exists()
+    mon.reset_stats()
+    assert not (tmp_path / "metrics.jsonl").exists()
 
 
 async def test_middleware_exception_still_records():

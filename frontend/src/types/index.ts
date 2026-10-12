@@ -200,6 +200,26 @@ export interface MonitorStats {
     cost_by_model?: Record<string, number>
   }
   total_cost?: number
+  // [P1 #12] 最近窗口（默认 24h）聚合，来自 data/metrics.jsonl ring buffer
+  recent?: {
+    window_hours: number
+    model_calls: {
+      total: number
+      by_model: Record<string, number>
+      total_prompt_tokens: number
+      total_completion_tokens: number
+      total_reasoning_tokens: number
+      total_cache_read: number
+      total_cache_write: number
+      total_duration_ms: number
+      avg_duration_ms: number
+      total_cost: number
+    }
+    requests: {
+      total: number
+      by_status: Record<string, number>
+    }
+  }
 }
 
 // 聊天错误分类

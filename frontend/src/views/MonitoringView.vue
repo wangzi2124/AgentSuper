@@ -59,6 +59,14 @@ const modelRows = computed<ModelRow[]>(() => {
     cost: mc.cost_by_model?.[m] ?? 0,
   })).sort((a, b) => b.calls - a.calls)
 })
+
+// [P1 #12] 最近窗口（默认 24h）按模型调用次数
+const recentModelRows = computed(() => {
+  const byModel = stats.value?.recent?.model_calls.by_model || {}
+  return Object.entries(byModel)
+    .map(([model, calls]) => ({ model, calls }))
+    .sort((a, b) => b.calls - a.calls)
+})
 </script>
 
 <template>
@@ -76,6 +84,47 @@ const modelRows = computed<ModelRow[]>(() => {
     </div>
 
     <div v-if="stats" class="monitor-wrap">
+      <!-- 最近窗口（时间窗 ring buffer，data/metrics.jsonl） -->
+      <section v-if="stats.recent" class="monitor-section">
+        <div class="section-head">
+          <span class="section-dot"></span>
+          <h3>最近 {{ stats.recent.window_hours }}h</h3>
+        </div>
+        <div class="card stat-card">
+          <div class="stat-grid stat-grid-4">
+            <div class="stat-item">
+              <div class="stat-value">{{ num(stats.recent.model_calls.total) }}</div>
+              <div class="stat-label">LLM 调用</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value">{{ num(stats.recent.model_calls.total_prompt_tokens) }}</div>
+              <div class="stat-label">输入 Token</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value">{{ num(stats.recent.model_calls.total_completion_tokens) }}</div>
+              <div class="stat-label">输出 Token</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value">{{ fmtCost(stats.recent.model_calls.total_cost) }}</div>
+              <div class="stat-label">成本 (USD)</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value">{{ num(stats.recent.requests.total) }}</div>
+              <div class="stat-label">HTTP 请求</div>
+            </div>
+          </div>
+          <div v-if="recentModelRows.length" class="list-block">
+            <h4>按模型调用次数</h4>
+            <div class="list-table">
+              <div v-for="row in recentModelRows" :key="row.model" class="list-row">
+                <span class="row-path">{{ row.model }}</span>
+                <span class="badge badge-count">{{ num(row.calls) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- Model Calls（置顶：LLM 调用为最重要的具体信息） -->
       <section class="monitor-section">
         <div class="section-head">
