@@ -94,7 +94,6 @@ interface SessionState {
   abortController: AbortController | null
   streamPhase: 'idle' | 'queued' | 'running'
   queuePosition: number | null
-  deletedIds: string[]
   /** [队列] 本会话「执行中追加」的待处理任务（后端 session_inputs；新→旧执行） */
   pendingPrompts: QueuedPrompt[]
 }
@@ -210,7 +209,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         abortController: null,
         streamPhase: 'idle',
         queuePosition: null,
-        deletedIds: [],
         pendingPrompts: [],
       }
     }
@@ -227,7 +225,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (t) { clearTimeout(t); delete _persistTimers[sessionId] }
   }
 
-  // 将会话消息持久化到 IndexedDB（过滤 live 占位 + 墓碑）
+  // 将会话消息持久化到 IndexedDB（过滤 live 占位；整条覆盖，不残留已删消息）
   async function persistSession(sessionId: string) {
     _clearPersistTimer(sessionId)
     const session = sessions.value[sessionId]
@@ -239,7 +237,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       messages,
       session.conversationId,
       session.conversationTitle,
-      session.deletedIds,
     )
     if (cacheKey !== sessionId) {
       await deleteSessionFromCache(sessionId)
@@ -328,20 +325,18 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         partial_error: (m as any).partial_error ?? null,
         timestamp: new Date(),
       }))
-      // 从 IndexedDB 加载本地缓存（SSE 中断时可能有未同步消息）
+      // 从 IndexedDB 加载本地缓存（后端只在 done/finally 落库，SSE 中断时可能
+      // 有尚未同步的整轮；以服务器为基准补入本地特有消息）
       const cached = await loadSessionFromCache<MultiAgentMessage>(id)
-      session.deletedIds = cached?.deletedIds || []
-      session.messages = mergeServerAndCache(serverMessages, cached?.messages || [], session.deletedIds)
-      await saveSessionToCache(id, session.messages, id, detail.title, session.deletedIds)
+      session.messages = mergeServerAndCache(serverMessages, cached?.messages || [])
+      await saveSessionToCache(id, session.messages, id, detail.title)
       activeSessionId.value = id
     } catch (e) {
       console.error('Failed to load conversation:', e)
-      // 服务器获取失败，尝试从 IndexedDB 恢复
+      // 服务器获取失败（离线），退化为只读缓存
       const cached = await loadSessionFromCache<MultiAgentMessage>(id)
       if (cached) {
-        session.deletedIds = cached.deletedIds || []
-        const tomb = new Set(session.deletedIds)
-        session.messages = cached.messages.filter(m => !m.live && !tomb.has(m.id))
+        session.messages = cached.messages.filter(m => !m.live)
         session.conversationTitle = cached.conversationTitle || session.conversationTitle
       }
       activeSessionId.value = id
@@ -946,7 +941,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   function clear() {
     if (activeSessionId.value) {
       const s = sessions.value[activeSessionId.value]
-      if (s) { s.messages = []; s.conversationId = undefined; s.conversationTitle = ''; s.deletedIds = [] }
+      if (s) { s.messages = []; s.conversationId = undefined; s.conversationTitle = '' }
       deleteSessionFromCache(activeSessionId.value)
     }
   }
@@ -972,15 +967,11 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       }
       // 目标保留消息 = 撤销点前一条；index===0 无保留消息，仅本地清空
       const target = index > 0 ? s.messages[index - 1] : undefined
-      const removedIds = s.messages.slice(index).map(m => m.id)
       if (s.conversationId && target) {
         try { await revertSession(s.conversationId, target.id) } catch (e) { console.error('Failed to sync undo:', e) }
       }
+      // 以服务器 revert 为准，本地同步裁剪；persistSession 整条覆盖缓存，无需墓碑
       s.messages = s.messages.slice(0, index)
-      // 记录墓碑，防止 IndexedDB 缓存把已撤销消息合并复活
-      if (removedIds.length) {
-        s.deletedIds = [...new Set([...s.deletedIds, ...removedIds])]
-      }
       await persistSession(activeSessionId.value)
     }
   }
@@ -1039,7 +1030,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       }
       if (s) {
         s.messages = s.messages.filter(m => m.id !== messageId)
-        if (!s.deletedIds.includes(messageId)) s.deletedIds.push(messageId)
         await persistSession(activeSessionId.value)
       }
     }

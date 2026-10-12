@@ -27,8 +27,6 @@ interface CachedSession<M extends CacheMessage> {
   messages: M[]
   conversationId?: string
   conversationTitle?: string
-  /** 已删除消息 id（墓碑：防止 merge 时复活已删消息） */
-  deletedIds?: string[]
   updatedAt: number
 }
 
@@ -63,7 +61,6 @@ export async function saveSessionToCache<M extends CacheMessage>(
   messages: M[],
   conversationId?: string,
   conversationTitle?: string,
-  deletedIds?: string[],
 ): Promise<void> {
   try {
     const db = await openDB()
@@ -80,7 +77,6 @@ export async function saveSessionToCache<M extends CacheMessage>(
         })),
         conversationId,
         conversationTitle,
-        deletedIds,
         updatedAt: Date.now(),
       }
       const data: CachedSession<M> = JSON.parse(JSON.stringify(raw))
@@ -144,23 +140,23 @@ export async function deleteSessionFromCache(sessionId: string): Promise<void> {
  *
  * 策略：
  * - 以服务器数据为基准（服务器是 source of truth）
- * - 本地缓存中如果有服务器没有的消息（比如 SSE 中断时的 user 消息），补入
+ * - 本地缓存中如果有服务器没有的消息（比如 SSE 中断时后端尚未落库的整轮），补入
  * - 如果同一 ID 的消息两端都有，取 content 更长的版本（服务器的 assistant 回答通常更完整）
  *
- * deletedIds：本端已删除的消息 id（墓碑）。被删除的消息不再从缓存复活——
- * 修复 deleteMessage/undoMessage 后服务器已删除、但 IndexedDB 仍残留旧数据被合并回来的问题。
+ * 说明：曾有一层「墓碑」(deletedIds) 防止已删消息从缓存复活，现已移除——
+ * 每次 persistSession 都会整条覆盖缓存（不会残留已删消息），且撤销/删除都会先
+ * abort 在途流（SSE 事件顶部 `if (signal.aborted) return`），删除以服务器为准；
+ * 服务器删成功而缓存未更新的极端情况下，以服务器为准（显示服务器内容）才是正确语义。
  */
 export function mergeServerAndCache<M extends CacheMessage>(
   serverMessages: M[],
   cachedMessages: M[],
-  deletedIds?: string[],
 ): M[] {
-  const tomb = new Set(deletedIds || [])
-  // 过滤：已删除消息（墓碑）+ 流式占位消息（live）一律不参与合并
-  const filterDeleted = (m: M) => !m.live && !tomb.has(m.id)
+  // 流式占位消息（live）不参与合并
+  const filterLive = (m: M) => !m.live
 
-  const server = serverMessages.filter(filterDeleted)
-  const cached = cachedMessages.filter(filterDeleted)
+  const server = serverMessages.filter(filterLive)
+  const cached = cachedMessages.filter(filterLive)
 
   if (cached.length === 0) return server
   if (server.length === 0) return cached
