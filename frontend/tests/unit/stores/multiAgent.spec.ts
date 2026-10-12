@@ -1,5 +1,5 @@
 ﻿/**
- * multiAgent store：发送流（SSE 驱动）、错误分类、撤销/删除墓碑、会话迁移、重试。
+ * multiAgent store：发送流（SSE 驱动）、错误分类、撤销/删除、会话迁移、重试。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
@@ -269,8 +269,8 @@ describe('错误分类与自动重试', () => {
   })
 })
 
-describe('撤销 / 删除（墓碑）', () => {
-  it('undoMessage 切片 + 墓碑 + 同步后端', async () => {
+describe('撤销 / 删除', () => {
+  it('undoMessage 切片 + 同步后端', async () => {
     const store = useMultiAgentStore()
     store.activeSessionId = 's1'
     store.sessions['s1'] = {
@@ -281,11 +281,10 @@ describe('撤销 / 删除（墓碑）', () => {
         { id: 'm3', role: 'assistant', content: 'B', agents: [], timestamp: new Date() },
       ],
       conversationId: 'c1', conversationTitle: '', loading: false, abortController: null,
-      streamPhase: 'idle', queuePosition: null, deletedIds: [],
+      streamPhase: 'idle', queuePosition: null,
     }
     await store.undoMessage(2)
     expect(store.messages.map(m => m.id)).toEqual(['m0', 'm1'])
-    expect(store.sessions['s1'].deletedIds).toEqual(['m2', 'm3'])
     expect(mocks.revertSession).toHaveBeenCalledWith('c1', 'm1')
     expect(mocks.saveCache).toHaveBeenCalled()
   })
@@ -301,7 +300,7 @@ describe('撤销 / 删除（墓碑）', () => {
       ],
       conversationId: 'c1', conversationTitle: '', loading: true,
       abortController: { abort } as unknown as AbortController,
-      streamPhase: 'running', queuePosition: null, deletedIds: [],
+      streamPhase: 'running', queuePosition: null,
     }
     await store.undoMessage(1)
     expect(abort).toHaveBeenCalled()
@@ -312,7 +311,7 @@ describe('撤销 / 删除（墓碑）', () => {
     expect(mocks.revertSession).toHaveBeenCalledWith('c1', 'm0')
   })
 
-  it('deleteMessage 过滤 + 墓碑', async () => {
+  it('deleteMessage 过滤 + 同步后端', async () => {
     const store = useMultiAgentStore()
     store.activeSessionId = 's1'
     store.sessions['s1'] = {
@@ -321,11 +320,10 @@ describe('撤销 / 删除（墓碑）', () => {
         { id: 'm1', role: 'assistant', content: 'A', agents: [], timestamp: new Date() },
       ],
       conversationId: 'c1', conversationTitle: '', loading: false, abortController: null,
-      streamPhase: 'idle', queuePosition: null, deletedIds: [],
+      streamPhase: 'idle', queuePosition: null,
     }
     await store.deleteMessage('m1')
     expect(store.messages.map(m => m.id)).toEqual(['m0'])
-    expect(store.sessions['s1'].deletedIds).toContain('m1')
     expect(mocks.deleteSessionMessage).toHaveBeenCalledWith('c1', 'm1')
   })
 })
@@ -341,7 +339,6 @@ describe('会话加载', () => {
     })
     mocks.loadCache.mockResolvedValue({
       messages: [{ id: 'local', role: 'user', content: '本地未同步', agents: [], timestamp: new Date() }],
-      deletedIds: [],
     })
     const store = useMultiAgentStore()
     await store.loadConversation('c1')
@@ -363,7 +360,7 @@ describe('会话加载', () => {
         plan_path: 'backend/data/plans/c9/plan.md',
       }],
     })
-    mocks.loadCache.mockResolvedValue({ messages: [], deletedIds: [] })
+    mocks.loadCache.mockResolvedValue({ messages: [] })
     const store = useMultiAgentStore()
     await store.loadConversation('c9')
     expect(store.messages.find(m => m.id === 'm9')?.plan_path).toBe('backend/data/plans/c9/plan.md')
@@ -378,7 +375,7 @@ describe('会话加载', () => {
         snapshot_restored: true,
       }],
     })
-    mocks.loadCache.mockResolvedValue({ messages: [], deletedIds: [] })
+    mocks.loadCache.mockResolvedValue({ messages: [] })
     const store = useMultiAgentStore()
     await store.loadConversation('c2')
     expect(store.messages.find(m => m.id === 'm1')?.snapshotRestored).toBe(true)
@@ -400,7 +397,7 @@ describe('[撤回改动] restoreSnapshot store 方法', () => {
         },
       ],
       conversationId: 'c1', conversationTitle: '', loading: false, abortController: null,
-      streamPhase: 'idle', queuePosition: null, deletedIds: [],
+      streamPhase: 'idle', queuePosition: null,
     }
     mocks.saveCache.mockResolvedValue(undefined)
     const result = await store.restoreSnapshot('m1')
@@ -416,7 +413,7 @@ describe('[撤回改动] restoreSnapshot store 方法', () => {
     store.sessions['s1'] = {
       messages: [{ id: 'm1', role: 'assistant', content: 'A', agents: [], timestamp: new Date() }],
       conversationId: '', conversationTitle: '', loading: false, abortController: null,
-      streamPhase: 'idle', queuePosition: null, deletedIds: [],
+      streamPhase: 'idle', queuePosition: null,
     }
     await expect(store.restoreSnapshot('m1')).rejects.toThrow('会话尚未在服务器创建')
     expect(mocks.restoreSnapshot).not.toHaveBeenCalled()
@@ -466,7 +463,7 @@ describe('send 请求载荷（对齐后端 ChatRequest）', () => {
     store.activeSessionId = 's1'
     store.sessions['s1'] = {
       messages: [], conversationId: 'c1', conversationTitle: '', loading: false, abortController: null,
-      streamPhase: 'idle', queuePosition: null, deletedIds: [],
+      streamPhase: 'idle', queuePosition: null,
     }
     await store.send('hi')
     expect((mocks.sendStream.mock.calls[0][0] as any).conversation_id).toBe('c1')
@@ -579,7 +576,7 @@ describe('手动重试（S2 幂等）', () => {
         { id: 'm1', role: 'assistant', content: '服务器错误（500）', isError: true, agents: [], timestamp: new Date() },
       ],
       conversationId: 'c1', conversationTitle: '', loading: false, abortController: null,
-      streamPhase: 'idle', queuePosition: null, deletedIds: [],
+      streamPhase: 'idle', queuePosition: null,
     }
     await store.manualRetry('m1')
     expect(mocks.sendStream).toHaveBeenCalledTimes(1) // 只重发一次

@@ -20,16 +20,15 @@ describe('mergeServerAndCache', () => {
     expect(mergeServerAndCache(s, [])).toEqual(s)
   })
 
-  it('无服务器 → 返回缓存（过滤墓碑/live）', () => {
+  it('无服务器 → 返回缓存（过滤 live）', () => {
     const c = [msg('a', 'user', 'hi'), msg('live', 'assistant', 'x', { live: true })]
     expect(mergeServerAndCache([], c)).toEqual([c[0]])
   })
 
-  it('墓碑过滤：deletedIds 中的消息两端都不复活', () => {
-    const s = [msg('a', 'user', 'hi'), msg('b', 'user', 'gone')]
-    const c = [msg('b', 'user', 'gone')]
-    const out = mergeServerAndCache(s, c, ['b'])
-    expect(out.map(m => m.id)).toEqual(['a'])
+  it('以服务器为准：服务器有而缓存没有的消息保留', () => {
+    const s = [msg('a', 'user', 'hi'), msg('b', 'user', 'server-only')]
+    const c = [msg('a', 'user', 'hi')]
+    expect(mergeServerAndCache(s, c).map(m => m.id)).toEqual(['a', 'b'])
   })
 
   it('缓存独有消息（SSE 中断的 user 消息）补入末尾', () => {
@@ -73,11 +72,10 @@ describe('IndexedDB 往返（fake-indexeddb）', () => {
   // 模块缓存了打开的 dbInstance，deleteDatabase 会被阻塞导致钩子超时。
 
   it('save → load 往返（timestamp 反序列化为 Date）', async () => {
-    await saveSessionToCache('s1', [msg('a', 'user', 'hi')], 's1', '会话标题', ['del1'])
+    await saveSessionToCache('s1', [msg('a', 'user', 'hi')], 's1', '会话标题')
     const loaded = await loadSessionFromCache('s1')
     expect(loaded?.messages[0].content).toBe('hi')
     expect(loaded?.messages[0].timestamp).toBeInstanceOf(Date)
-    expect(loaded?.deletedIds).toEqual(['del1'])
   })
 
   it('load 不存在 → null；save 后按 updatedAt 排序稳定', async () => {
