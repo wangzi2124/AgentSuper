@@ -23,7 +23,7 @@ Each extra assistant turn is another slow-model round-trip that risks a timeout.
 - Put every `tool_write_file` / `tool_append_file` call for the whole project in **one** response (multiple parallel tool calls); **or**
 - issue a **single** `tool_apply_patch` whose `patch_text` contains multiple `*** Add File:` blocks.
 
-Do **not** write one file, wait for the result, then write the next.
+Do **not** write one file, wait for the result, then write the next. Do **not** scaffold projects via `mkdir` / `Set-Content` / `npm create` / `create-react-app` / `create vite` — `tool_write_file` auto-creates parent dirs, so write all source files first, then run `tool_execute` only for install/build/test.
 
 ## 3. Plan & completion report (multi-step file/project tasks)
 

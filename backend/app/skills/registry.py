@@ -47,8 +47,10 @@ BUNDLED_DIRNAME = "bundled"
 BUNDLED_MANIFEST = ".bundled.json"
 #: 内置技能集版本。**改动内置技能内容时递增**：启动时补种新增技能，并刷新**用户未改动**
 #: 的已播种技能（摘要比对，见 `seed_bundled`）。v2 = 清单改存 `{name: {dir, digest}}`；
-#: v3 = 新增内置技能 artifact-writing（P0.2 文件输出规则迁到 Skill）。
-BUNDLED_VERSION = 3
+#: v3 = 新增内置技能 artifact-writing（P0.2 文件输出规则迁到 Skill）；
+#: v4 = artifact-writing 补充「禁用 mkdir/Set-Content/npm create 脚手架」规则（该条从
+#:      no-KB 系统提示移到按需技能，避免常驻稀释注意力）。
+BUNDLED_VERSION = 4
 
 
 def backend_dir() -> Path:

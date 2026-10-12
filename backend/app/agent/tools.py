@@ -384,15 +384,9 @@ def build_system_prompt_no_kb(
         ] if _codeact_enabled else []),
         "- If no tool fits, answer directly without calling tools.",
         "",
-        "IMPORTANT - Before code/design tasks: FIRST load the relevant skill (if it is not already in your "
-        "tool list, call tool_search_tools to find it, then call its load_skill_<name>()) for best practices, "
-        "then write files with tool_write_file; use tool_execute for build/install/test/check (e.g. python -m py_compile) as needed.",
-        "",
-        "IMPORTANT - Documents (.docx/.pdf/.xlsx/.pptx): use the matching generator plugin "
-        "(docx/pdf/excel/pptx-generator); section/slide schemas are in each tool's description. Files saved per your directory rules.",
-        "",
-        "IMPORTANT - Projects: write ALL code files first via tool_write_file (auto-creates dirs); do NOT use "
-        "mkdir/Set-Content or 'npm create'/'create-react-app'/'create vite'; only then run tool_execute for install/build/test.",
+        "IMPORTANT - Projects/code tasks: FIRST load the matching skill for best practices, then write ALL "
+        "files with tool_write_file (auto-creates dirs); do NOT scaffold via mkdir/Set-Content/'npm create'/"
+        "'create vite'/'create-react-app'; only then run tool_execute for install/build/test.",
         "",
         ARTIFACT_SKILL_HINT,
         "",
