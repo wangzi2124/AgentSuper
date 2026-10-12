@@ -1,9 +1,9 @@
 import logging
-import os
 import threading
 from pathlib import Path
 
 from app.config import settings
+from app.env_boot import load_env_to_os as _load_env_to_os
 from app.agent.graph import RAGAgent
 from app.permission import PermissionManager, set_manager as set_perm_manager
 from app.plugins.loader import PluginLoader
@@ -30,20 +30,6 @@ from app.agent.supervisor import SupervisorAgent
 logger = logging.getLogger(__name__)
 
 _init_lock = threading.Lock()
-
-
-def _load_env_to_os():
-    """将 .env 文件中的配置注入到 os.environ，供插件等模块读取。"""
-    env_path = Path(__file__).resolve().parents[1] / ".env"
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key, val = key.strip(), val.strip().strip("\"'")
-            if key not in os.environ:
-                os.environ[key] = val
 
 
 def _build_bm25_index(vs: VectorStore) -> BM25Index:

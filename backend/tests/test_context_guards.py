@@ -357,3 +357,26 @@ async def test_generate_freezes_tool_defs_for_cache(monkeypatch, tmp_path):
     # 冻结：只有入口构建一次，循环不再重挂载、每轮 tools 参数为同一对象
     assert len(seen) == 1, f"tool_defs 应只构建一次，实际 {len(seen)} 次"
     assert all(td is td_by_call[0] for td in td_by_call[1:])
+
+def test_budget_layer_invariants(monkeypatch):
+    """[P1 #5] 上下文各层共享同一预算模型，且触发顺序可验证：
+    reserve 至多占窗口一半 → 0 < prune_protect < compaction_threshold <= usable。
+    把「该在什么时候触发哪一层」从散落的注释变成可断言的属性。"""
+    for window in (160_000, 32_768, 16_384, 8_192):
+        monkeypatch.setattr(settings, "max_context_tokens", window, raising=False)
+        monkeypatch.setattr(settings, "context_reserve_tokens", 32_768, raising=False)
+        monkeypatch.setattr(settings, "compaction_threshold_tokens", 0, raising=False)
+        monkeypatch.setattr(settings, "compaction_threshold_ratio", 0.65, raising=False)
+        monkeypatch.setattr(settings, "tool_output_protect_tokens", 40_000, raising=False)
+
+        usable = budget.usable_context_tokens()
+        reserve = window - usable
+        threshold = budget.compaction_threshold_tokens()
+        protect = budget.prune_protect_tokens()
+        minimum = budget.prune_minimum_tokens()
+
+        assert reserve <= window // 2, f"reserve 至多占窗口一半 (window={window})"
+        assert usable >= window // 2, f"usable 至少留一半 (window={window})"
+        assert 0 < protect < threshold, f"prune 必须早于压缩触发 (window={window})"
+        assert threshold <= usable, f"压缩阈值不得超过可用预算 (window={window})"
+        assert 0 < minimum <= protect, f"prune 下限不得高于保护预算 (window={window})"

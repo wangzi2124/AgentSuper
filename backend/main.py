@@ -3,7 +3,14 @@ import json
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+# [P1 #7] 在 import 任何应用模块之前把 backend/.env 注入 os.environ，保证 import 期
+# 读 os.environ.get() 的模块也能看到配置（settings 由 pydantic-settings 直接读 .env）。
+# 刻意置于 app.* import 之前，故 noqa: E402。
+from app.env_boot import load_env_to_os  # noqa: E402
+
+load_env_to_os()
+
+from fastapi import FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
