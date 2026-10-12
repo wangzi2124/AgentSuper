@@ -9,6 +9,7 @@ langgraph
 litellm
 pyyaml
 python-multipart
+watchdog
 chromadb
 sentence-transformers
 modelscope

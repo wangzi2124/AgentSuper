@@ -502,8 +502,11 @@ class TestShell:
 
 
 class TestWatcher:
-    def test_has_native_binding_false(self):
-        assert watcher_mod.has_native_binding() is False
+    def test_has_native_binding_matches_watchdog(self):
+        import importlib.util
+
+        expected = importlib.util.find_spec("watchdog") is not None
+        assert watcher_mod.has_native_binding() is expected
 
     def test_event_enum(self):
         assert Event.Updated.value == "updated"
@@ -577,11 +580,32 @@ class TestWatcher:
         w.subscribe(cb)
         w.start()
         try:
-            assert hasattr(w, "_thread") and w._thread.daemon
+            # 原生优先(watchdog observer);否则回退轮询线程
+            assert w._observer is not None or getattr(w._thread, "daemon", False)
             time.sleep(0.05)
         finally:
             w.close()
         assert w._closed is True
+
+    def test_start_prefers_native_then_close(self, tmp_path):
+        d = tmp_path / "w"
+        d.mkdir()
+        seen = []
+        w = watcher_mod.FileSystemWatcher(str(d), interval_ms=50)
+        w.subscribe(seen.append)
+        w.start()
+        try:
+            _mk(d, "a.txt", "x")
+            # 原生事件异步到达;轮询回退需要 >= 一个间隔
+            for _ in range(40):
+                if seen:
+                    break
+                time.sleep(0.05)
+            if watcher_mod.has_native_binding():
+                assert seen, "watchdog native binding should emit create event"
+            assert all(ev.operation in ("create", "update", "delete") for ev in seen)
+        finally:
+            w.close()
 
 
 # ---------------------------------------------------------------------------
