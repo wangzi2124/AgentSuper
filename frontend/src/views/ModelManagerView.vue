@@ -65,10 +65,34 @@ async function saveDefaults() {
 
 // ── Provider 编辑 ──
 const showProviderForm = ref(false)
+// 正在编辑已有 Provider（而非新增）：此时前缀不可改
+const providerIsEdit = ref(false)
+// 「自定义模型前缀」高级项：默认收起，留空则按 Label / api_base 自动生成
+const providerAdvanced = ref(false)
 const providerForm = reactive<{ name: string; label: string; api_base: string; api_key: string; enabled: boolean }>({
   name: '', label: '', api_base: '', api_key: '', enabled: true,
 })
+
+// 生成 litellm 前缀的 slug（只保留 ASCII 字母数字，其余折叠为 '-'）
+function _slug(s: string): string {
+  return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+}
+// 前缀留空时的自动推导：优先 Label，其次 api_base 主机名，最后兜底 custom
+function deriveProviderName(): string {
+  const fromLabel = _slug(providerForm.label)
+  if (fromLabel) return fromLabel
+  const raw = providerForm.api_base.trim()
+  try {
+    const u = new URL(/^https?:\/\//i.test(raw) ? raw : `http://${raw}`)
+    const host = _slug((u.hostname || '').replace(/\./g, '-'))
+    if (host) return `prov-${host}${u.port ? '-' + u.port : ''}`
+  } catch { /* 解析失败按兜底 */ }
+  return 'custom'
+}
+
 function openProviderForm(p?: ProviderInfo) {
+  providerIsEdit.value = !!p
+  providerAdvanced.value = !!p // 编辑时始终展示前缀（只读），便于看到模型 id 的前半段
   providerForm.name = p?.provider || ''
   providerForm.label = p?.label || ''
   providerForm.api_base = p?.api_base || ''
@@ -77,15 +101,26 @@ function openProviderForm(p?: ProviderInfo) {
   showProviderForm.value = true
 }
 async function submitProvider() {
-  const name = providerForm.name.trim()
-  if (!name || !providerForm.api_base.trim()) return
+  if (!providerForm.api_base.trim()) {
+    mm.setError('请填写 api_base（OpenAI 兼容服务地址，如 http://127.0.0.1:8001/v1）')
+    return
+  }
+  // 新增时前缀留空 → 自动生成；编辑时不可改
+  const name = (providerIsEdit.value
+    ? providerForm.name
+    : (providerForm.name.trim() || deriveProviderName())).trim()
+  if (!name) {
+    mm.setError('无法自动生成前缀，请展开「高级：自定义模型前缀」填写（如 vllm）')
+    return
+  }
   if (name.includes('/')) {
     // Provider 名称是 litellm 前缀，不含 '/'；模型 id 形如 deepseek/deepseek-v4-flash
     mm.setError(`Provider 名称不能包含「/」，请只填前缀（如想让「deepseek/deepseek-v4-flash」可用，名称填 deepseek）`)
     return
   }
-  await mm.updateProvider(name, { label: providerForm.label, api_base: providerForm.api_base, api_key: providerForm.api_key, enabled: providerForm.enabled })
-  showProviderForm.value = false
+  // 仅在保存成功时关闭弹窗：失败时保留用户输入，否则错误 toast 容易被错过
+  const ok = await mm.updateProvider(name, { label: providerForm.label, api_base: providerForm.api_base, api_key: providerForm.api_key, enabled: providerForm.enabled })
+  if (ok) showProviderForm.value = false
 }
 async function toggleProvider(p: ProviderInfo) {
   await mm.updateProvider(p.provider, { enabled: !p.enabled })
@@ -324,13 +359,25 @@ function capOf(m: ModelInfo) {
   <!-- Provider 编辑弹窗 -->
   <div v-if="showProviderForm" class="overlay">
     <div class="dialog">
-      <div class="form-title">{{ providerForm.name ? '编辑 Provider' : '新增 Provider' }}</div>
+      <div class="form-title">{{ providerIsEdit ? '编辑 Provider' : '新增 Provider' }}</div>
       <div class="form-row">
-        <label class="mm-field"><span>名称（litellm 前缀）</span>
-          <input v-model="providerForm.name" class="ctrl" placeholder="vllm" :disabled="!!providerForm.name" />
+        <label class="mm-field mm-wide"><span>Label</span>
+          <input v-model="providerForm.label" class="ctrl" placeholder="本地 vLLM" />
         </label>
-        <label class="mm-field"><span>Label</span><input v-model="providerForm.label" class="ctrl" placeholder="本地 vLLM" /></label>
       </div>
+      <div class="form-row" v-if="providerIsEdit || providerAdvanced">
+        <label class="mm-field mm-wide">
+          <span>模型前缀（litellm）<template v-if="providerIsEdit"> — 不可修改</template></span>
+          <input v-model="providerForm.name" class="ctrl" :placeholder="deriveProviderName()" :disabled="providerIsEdit" />
+        </label>
+      </div>
+      <div class="form-row" v-if="!providerIsEdit">
+        <button type="button" class="mm-adv-toggle" @click="providerAdvanced = !providerAdvanced">
+          {{ providerAdvanced ? '收起自定义前缀' : '高级：自定义模型前缀' }}
+          <span class="mm-adv-current" v-if="!providerAdvanced">（当前：{{ deriveProviderName() }}）</span>
+        </button>
+      </div>
+      <p class="hint provider-prefix-hint">模型 id = <code>前缀/模型名</code>，前缀决定模型列表里的 id（如 <code>vllm/deepseek-r1:latest</code>）。留空自动按 Label / 服务地址生成，一般无需修改。</p>
       <div class="form-row">
         <label class="mm-field mm-wide"><span>api_base（OpenAI 兼容）</span>
           <input v-model="providerForm.api_base" class="ctrl" placeholder="http://127.0.0.1:8001/v1" />
@@ -444,6 +491,19 @@ function capOf(m: ModelInfo) {
 .mm-field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 180px; }
 .mm-field > span { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
 .mm-field.mm-wide { flex: 2; }
+.mm-adv-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.mm-adv-toggle:hover { text-decoration: underline; }
+.mm-adv-current { color: var(--text-secondary); font-weight: 400; }
+.provider-prefix-hint { margin: 0 0 2px; }
 
 /* ── 默认/轻量模型选择：与聊天框模型胶囊同款样式（横向排列） ── */
 .mm-defaults-row { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }

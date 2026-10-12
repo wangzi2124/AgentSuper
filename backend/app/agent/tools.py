@@ -19,7 +19,8 @@ def _writable_workspaces() -> list[str]:
 # 长内容必须写文件、不得在回复中粘贴全文的硬性规则（对齐 opencode 长任务机制：
 # 长文用工具写入文件、回复只留摘要，避免单轮输出触发 finish_reason="length" 截断）。
 LONG_CONTENT_FILE_RULE = (
-    "IMPORTANT - Long content MUST be written to files, NOT pasted in replies:\n"
+    "IMPORTANT (only when the response is a file/artifact the user asked to generate) - Long content MUST be "
+    "written to files, NOT pasted in replies:\n"
     "  If your reply would exceed roughly 500 Chinese characters (about 1000 tokens), "
     "you MUST write the full content to a file instead of outputting it inline:\n"
     "  1. Text or code -> tool_write_file(path, content, overwrite=True). For very large files, "
@@ -38,7 +39,7 @@ LONG_CONTENT_FILE_RULE = (
 # 超时预算。强制「一轮批量写多文件」：要么在同一条回复里并发发出多个 tool_write_file，
 # 要么用一条 tool_apply_patch（可含多个 *** Add File: 块）一次性建全部文件。
 BATCH_WRITES_RULE = (
-    "IMPORTANT - Fewest rounds / batch file writes: create or update ALL files a task needs in "
+    "IMPORTANT (only when this request is a file-writing task) - Fewest rounds / batch file writes: create or update ALL files a task needs in "
     "as FEW assistant turns as possible (each extra turn is another slow model round-trip and "
     "risks the task timing out):\n"
     "  - Put every tool_write_file / tool_append_file call for the whole project in ONE response "
@@ -315,7 +316,10 @@ def build_system_prompt_no_kb(
             "   Remember SPARINGLY: ONLY store durable, cross-turn facts worth keeping. Do NOT store "
             "trivial or transient details, and do NOT duplicate what the conversation history already "
             "contains — history + compaction handles the process; memory is only for facts that must "
-            "survive reliably across turns."
+            "survive reliably across turns.\n"
+            "   Memory tools are NOT for producing an answer: if the user asks for a piece of text "
+            "(self-introduction, copywriting, explanation, chat), reply directly in plain text and "
+            "NEVER call tool_memory_set just to 'store the answer'."
         )
 
     if enabled_plugins:
@@ -358,6 +362,13 @@ def build_system_prompt_no_kb(
     parts.extend([
         "",
         "Instructions:",
+        "- DECIDE FIRST what the user actually wants (most important, applies to EVERY request):\n"
+        "    * Pure Q&A (asking, explaining, summarizing, translating, self-introduction, chat, opinions): "
+        "answer directly in plain text. Do NOT create files, do NOT call tools, and do NOT output a plan/report. "
+        "A request like \"introduce yourself\" or \"write a short text/a few sentences\" is plain Q&A, NOT a file task.\n"
+        "    * File/project task: only when the user explicitly asks to create, modify, build, or save files, "
+        "code, or projects → then use file tools and follow the planning/report conventions below.\n"
+        "    * Never write files just to \"have done something\". If no tool is genuinely needed, just answer.",
         "- WORKFLOW (call tool → execute → summarize): call tools to gather info / perform actions; "
         "AFTER tool results come back, ALWAYS reply with a natural-language summary for the user. "
         "Do NOT keep calling the same tool, do NOT output an empty JSON like {}, and do NOT print "
@@ -404,7 +415,7 @@ def build_system_prompt_no_kb(
         "",
         BATCH_WRITES_RULE,
         "",
-        "IMPORTANT - Long content MUST be written to files, NOT pasted in replies (≈500 Chinese chars / 1000 tokens):",
+        "IMPORTANT (only when the response is a file/artifact the user asked to generate) - Long content MUST be written to files, NOT pasted in replies (≈500 Chinese chars / 1000 tokens):",
         "  Write text/code with tool_write_file (first chunk, then tool_append_file for large files); generator plugins for .docx/.pdf/.xlsx/.pptx.",
         "  Reply with only: saved path + summary + structure. No 'please verify' closing remarks.",
         "",
@@ -420,8 +431,9 @@ def build_system_prompt_no_kb(
         "  To search files in a configured workspace, pass path=<absolute path> to tool_glob / tool_grep.",
         "  tool_grep / tool_glob return absolute paths when searching a custom path.",
         "",
-        "IMPORTANT - Multi-step tasks: start with plan block '## 实施计划'; end with '## 完成情况' "
-        "(已完成 / 未完成 / 下一步). At step limit, give this report without calling more tools.",
+        "IMPORTANT - Multi-step FILE/project tasks only (when writing files/code): start with a plan block "
+        "'## 实施计划'; end with '## 完成情况' (已完成 / 未完成 / 下一步). At step limit, give this report "
+        "without calling more tools. For plain Q&A, skip the plan/report format entirely and just answer.",
         "",
         # ── 本地模型工具调用格式（对原生 tool_calls 模型无影响，仅引导弱模型）──
         "Tool-call format (for models without native function-calling support):",

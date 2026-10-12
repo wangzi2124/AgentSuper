@@ -357,7 +357,14 @@ def get_catalog(force_reload: bool = False) -> list[dict[str, Any]]:
                 probe = probe_ollama_models(known, force=force_reload)
                 known |= {e["id"] for e in probe}
                 probe = probe + probe_configured_providers(known, force=force_reload)
-                cached = _apply_ollama_native(static + probe)
+                merged = _apply_ollama_native(static + probe)
+                # 隐藏集合：用户显式删除过的模型 id（含 Provider 探测增量/内置条目）。
+                # 探测会在每次重建时把端点上仍在线的模型自动注册回来，仅删 overrides/
+                # extra 会被下个请求「复活」；这里统一过滤，使删除真正持久。
+                hidden = read_hidden()
+                if hidden:
+                    merged = [e for e in merged if e.get("id") not in hidden]
+                cached = merged
                 _catalog_cache[key] = cached
     return cached
 
@@ -383,6 +390,17 @@ def read_providers() -> dict[str, dict[str, Any]]:
     """返回 providers 注册表（键 = provider 名）。"""
     cfg = load_config()
     return {k: dict(v) for k, v in (cfg.get("providers") or {}).items()}
+
+
+def read_hidden() -> set[str]:
+    """返回用户隐藏（已删除）的模型 id 集合。
+
+    用于抑制 Provider 探测增量与内置条目在目录快照里出现：删除一个端点仍在线的
+    探测模型时只清 overrides/extra 无效（下次重建探测又把它注册回来），故删除同时
+    记入 `hidden`，由 `get_catalog` 过滤。
+    """
+    cfg = load_config()
+    return {str(x) for x in (cfg.get("hidden") or []) if x}
 
 
 def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -423,6 +441,11 @@ def upsert_custom_model(entry: dict[str, Any]) -> dict[str, Any]:
     if not mid:
         raise ValueError("model id is required")
     cfg = load_config()
+    # 用户显式新增/重新添加该 id → 解除隐藏（提供「删除后想找回」的逃生舱）。
+    hidden = {str(x) for x in (cfg.get("hidden") or []) if x}
+    if mid in hidden:
+        hidden.discard(mid)
+        cfg["hidden"] = sorted(hidden)
     by_id = {e["id"]: e for e in build_catalog()}
     if mid in by_id:
         overrides = dict(cfg.get("overrides") or {})
@@ -445,7 +468,13 @@ def upsert_custom_model(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def remove_custom_model(mid: str) -> bool:
-    """删除自定义模型（overrides 或 extra 中的同名条目）。"""
+    """删除自定义模型（overrides / extra 中的同名条目），并隐藏防「探测复活」。
+
+    仅清 overrides/extra 不足以真正删除：对于 Provider（vLLM/LM Studio/私服）探测
+    自动注册的模型，端点 `/v1/models` 仍列出该模型，下一次 `get_catalog` 探测会把它
+    重新注册进目录 —— 表现为「删除不了 / 删了又回来」。因此这里同时把 id 记入
+    `hidden`，由 `get_catalog` 在快照组装时过滤；内置目录条目同样可被隐藏。
+    """
     cfg = load_config()
     changed = False
     overrides = dict(cfg.get("overrides") or {})
@@ -456,6 +485,11 @@ def remove_custom_model(mid: str) -> bool:
     extra = [e for e in (cfg.get("extra") or []) if e.get("id") != mid]
     if len(extra) != len(cfg.get("extra") or []):
         cfg["extra"] = extra
+        changed = True
+    hidden = {str(x) for x in (cfg.get("hidden") or []) if x}
+    if mid not in hidden:
+        hidden.add(mid)
+        cfg["hidden"] = sorted(hidden)
         changed = True
     if changed:
         _clear_invalid_defaults(cfg)
@@ -471,9 +505,10 @@ def _clear_invalid_defaults(cfg: dict[str, Any]) -> None:
     运行时注册）的 id 不在其列，由 getter 的运行时守卫兜底，避免误清。
     """
     ids = {e["id"] for e in build_catalog(cfg)}
+    hidden = {str(x) for x in (cfg.get("hidden") or []) if x}
     for key in ("default_model", "small_model", "image_caption_model"):
         v = cfg.get(key)
-        if v and str(v) not in ids:
+        if v and (str(v) not in ids or str(v) in hidden):
             cfg[key] = None
 
 
@@ -533,7 +568,11 @@ def probe_provider_models(provider_name: str, api_base: str, api_key: str,
         return []
     try:
         import urllib.request
-        url = base + "/v1/models"
+        # 兼容 api_base 已带 /v1 的写法（OpenAI 兼容地址通常就是 <host>/v1，前端占位符
+        # 就是 http://127.0.0.1:8001/v1）：先去掉尾部 /v1 再拼 /v1/models，否则会请求
+        # <host>/v1/v1/models → 404 → 新增 Provider 后模型永远不自动注册（"模型数"恒 0）。
+        norm = base[:-3] if base.lower().endswith("/v1") else base
+        url = norm + "/v1/models"
         req = urllib.request.Request(url, headers={"User-Agent": "agentsuper/0.1",
                                                    **(dict({"Authorization": f"Bearer {api_key}"}) if api_key else {})})
         with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:

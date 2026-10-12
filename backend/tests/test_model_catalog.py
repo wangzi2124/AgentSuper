@@ -743,3 +743,62 @@ def test_probe_configured_providers_runs_in_parallel(monkeypatch):
     out = catalog.probe_configured_providers(set(), force=True)
     assert {e["id"] for e in out} == {"a/m", "b/m", "c/m"}
 
+
+def test_remove_custom_model_hides_probe_registered_model(tmp_path, monkeypatch):
+    """[回归] 删除 Provider 探测注册的模型必须真正生效，不能被下次探测复活。
+
+    场景：vLLM/LM Studio 等 OpenAI 兼容 provider 的 /v1/models 仍列出该模型，
+    旧实现只从 overrides/extra 删除，`get_catalog` 探测又把它注册回来 →
+    用户看到「library deepseek-r1:latest 删除不了」。修复后删除同时记入 hidden，
+    目录组装时过滤，并使重新新增该 id 可解除隐藏。
+    """
+    from app.models import catalog_db
+
+    mid = "vllm/deepseek-r1:latest"
+    monkeypatch.setenv("AGENTSUPER_DATA", str(tmp_path))
+    monkeypatch.setattr("app.models.catalog_db.backends.is_sqlite", lambda: True)
+    catalog_db._initialized_paths.clear()
+    catalog_db._json_imported_non_sqlite = False
+    monkeypatch.setattr(catalog, "_catalog_cache", {})
+    monkeypatch.setattr(catalog, "probe_ollama_models", lambda known, force=False: [])
+
+    def _still_advertised(known, force=False):
+        if mid in known:
+            return []
+        return [{
+            "id": mid, "provider": "vllm", "family": "vllm",
+            "name": "library deepseek-r1:latest", "description": "探测自 vllm /v1/models",
+            "capabilities": {"tool_use": True, "vision": False, "reasoning": False},
+            "context_length": 32768, "limits": {"max_output_tokens": 8192},
+            "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
+                     "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
+        }]
+
+    monkeypatch.setattr(catalog, "probe_configured_providers", _still_advertised)
+    monkeypatch.setattr(catalog, "read_providers", lambda: {
+        "vllm": {"enabled": True, "api_base": "http://127.0.0.1:8001/v1"},
+    })
+
+    # 预置一条 extra（探测模型被用户编辑后落库）
+    cfg = catalog.load_config()
+    cfg["extra"] = [{
+        "id": mid, "name": "library deepseek-r1:latest", "provider": "vllm",
+        "family": "vllm", "description": "探测自 vllm /v1/models",
+        "context_length": 32768, "limits": {"max_output_tokens": 8192},
+        "capabilities": {"tool_use": True, "vision": False, "reasoning": True},
+        "cost": {"input_per_1m": 0.0, "output_per_1m": 0.0,
+                 "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
+    }]
+    catalog.save_config(cfg)
+    assert mid in {e["id"] for e in catalog.get_catalog(force_reload=True)}
+
+    # 删除 → 探测仍在播报该模型，但 hidden 过滤使其消失
+    assert catalog.remove_custom_model(mid) is True
+    assert mid not in {e["id"] for e in catalog.get_catalog(force_reload=True)}
+    assert mid in catalog.read_hidden()
+
+    # 逃生舱：显式重新新增该 id → 解除隐藏、模型回归
+    catalog.upsert_custom_model({"id": mid, "name": "Re-added", "provider": "vllm"})
+    assert mid not in catalog.read_hidden()
+    assert mid in {e["id"] for e in catalog.get_catalog(force_reload=True)}
+

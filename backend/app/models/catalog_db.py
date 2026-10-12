@@ -29,7 +29,7 @@ from app.storage import backends, schema as storage_schema
 
 _SCHEMA = storage_schema.derive_sqlite_ddl(storage_schema.CATALOG_TABLES)
 
-_SETTING_KEYS = ("default_model", "small_model", "image_caption_model", "voice_model_size")
+_SETTING_KEYS = ("default_model", "small_model", "image_caption_model", "voice_model_size", "hidden")
 
 _lock = threading.RLock()
 _initialized_paths: set[str] = set()
@@ -351,7 +351,7 @@ def import_config(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("config must be a JSON object")
     allowed = {"default_model", "small_model", "image_caption_model",
-               "voice_model_size", "providers", "overrides", "extra"}
+               "voice_model_size", "providers", "overrides", "extra", "hidden"}
     clean = {k: v for k, v in data.items() if k in allowed}
     save_config(clean)
     return clean

@@ -53,6 +53,10 @@ from app.agent.sub_tools import _permission_request_payload
 from .base import RAGAgentBase
 # ── 跨子模块依赖（自动生成）──
 from .constants import _TASK_TOOL_SUBAGENTS
+
+# [防重复记忆] tool_memory_set 去重存储的全局条目上限：超过后按写入时间淘汰最旧记录，
+# 防单例 RAGAgent 上按会话累积的 _memory_seen 无界增长。
+_MEMORY_SEEN_LIMIT = 3000
 from .constants import _is_multi_agent_queue
 from .constants import _permission_denied_msg
 from .task_permission import resolve as _resolve_task_permission
@@ -335,6 +339,12 @@ class RAGAgentTools(RAGAgentBase):
         if mm is None:
             return "Error: memory is unavailable."
         namespace = str((state or {}).get("conversation_id") or "")
+        # [防重复记忆] 每会话记录 tool_memory_set 写过的 key→{值: 写入时间戳}：
+        # 完全相同内容再次写入时返回硬提示（doom-loop 前拦截）；值在主存成功后才记录；
+        # 超 TTL 过期后放行重存；条目总数封顶 + 最旧淘汰，防单例 RAGAgent 上无界增长。
+        if not hasattr(self, "_memory_seen"):
+            self._memory_seen = {}
+        seen = self._memory_seen.setdefault(namespace, {})
 
         try:
             if name == "tool_memory_set":
@@ -342,11 +352,31 @@ class RAGAgentTools(RAGAgentBase):
                 value = args.get("value")
                 if not key:
                     return "Error: 'key' is required."
+                value_s = str(value)
+                ttl = float(max(0, int(getattr(settings, "memory_ttl_seconds", 300) or 0)))
+                now = tmod.time()
+                stamps = seen.get(key)
+                if stamps is None:
+                    stamps = seen[key] = {}
+                elif ttl:
+                    # TTL 到期后放行重存：过期记忆清理后同一 key/value 不再被误拦截
+                    for v in [v for v, ts in stamps.items() if now - ts >= ttl]:
+                        stamps.pop(v, None)
+                    if not stamps:
+                        seen.pop(key, None)
+                        stamps = seen[key] = {}
+                if value_s in stamps:
+                    return (
+                        f"警告：key='{key}' 已在本次会话保存过完全相同的内容（且记忆未过期），"
+                        "重复写入不会新增任何信息。请**停止**再次调用 tool_memory_set，直接以文字回答用户即可。"
+                    )
                 tags = args.get("tags") or []
                 if not isinstance(tags, list):
                     tags = [str(tags)] if tags else []
                 tags = [str(t) for t in tags if str(t).strip()]
                 await mm.set(key, value, ttl=settings.memory_ttl_seconds, tags=tags, namespace=namespace)
+                stamps[value_s] = now
+                self._prune_memory_seen()
                 return f"记住成功: key='{key}' (会话内有效, 标签: {tags or '无'})"
             if name == "tool_memory_get":
                 key = str(args.get("key") or "").strip()
@@ -369,6 +399,35 @@ class RAGAgentTools(RAGAgentBase):
         except Exception as e:
             logger.warning("Memory tool %s failed: %s", name, e)
             return f"Error executing {name}: {e}"
+
+    def _prune_memory_seen(self) -> None:
+        """全局封顶：条目总数超过上限时按写入时间淘汰最旧记录，防 _memory_seen 无界增长。"""
+        seen_all = getattr(self, "_memory_seen", None)
+        if not seen_all:
+            return
+        total = sum(len(v) for d in seen_all.values() for v in d.values())
+        if total <= _MEMORY_SEEN_LIMIT:
+            return
+        oldest = [
+            (ts, ns, k, v)
+            for ns, d in seen_all.items()
+            for k, stamps in d.items()
+            for v, ts in stamps.items()
+        ]
+        oldest.sort(key=lambda x: x[0])
+        for _, ns, k, v in oldest[: total - _MEMORY_SEEN_LIMIT]:
+            d = seen_all.get(ns)
+            if not d:
+                continue
+            stamps = d.get(k)
+            if not stamps:
+                continue
+            stamps.pop(v, None)
+            if not stamps:
+                d.pop(k, None)
+            if not d:
+                seen_all.pop(ns, None)
+
     async def _tool_voice(self, name: str, args: dict) -> str:
         """[语音] 主 Agent 语音合成/转写：本地 Qwen3-TTS 子进程（无外部 HTTP）。
 
