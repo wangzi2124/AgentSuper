@@ -56,6 +56,49 @@ def _catalog_voice_size() -> "str | None":
         return None
 
 
+def _terminate_process(proc: "subprocess.Popen | None") -> None:
+    """尽力优雅关闭常驻子进程并释放其管道；**任何异常都吞掉**。
+
+    背景（pytest unraisable exception 修复）：直接 `self._proc = None` 丢弃 Popen 时，
+    其 stdin/stderr 的 `BufferedWriter` 会在 GC/解释器退出阶段自动 flush，此时管道已不可写，
+    抛 `OSError: [Errno 22] Invalid argument`（"Exception ignored in: <_io.BufferedWriter ...>"）。
+    显式、受保护地关闭这些句柄可让 flush 发生在我们的 try/except 内；terminate/wait/kill
+    在解释器退出时同样可能抛 OSError，故全部兜住，保证 shutdown 永不 raise。
+    """
+    if proc is None:
+        return
+    # 1) 优雅通知（失败无所谓，EOF 也会让子进程自退）
+    try:
+        if proc.stdin:
+            proc.stdin.write(b"shutdown\n")
+            proc.stdin.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    # 2) 显式关闭管道句柄（避免 GC 时 flush 抛 unraisable OSError）
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if stream:
+                stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+    # 3) 终止并回收
+    try:
+        proc.terminate()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        proc.wait(timeout=3)
+    except Exception:  # noqa: BLE001
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.wait(timeout=3)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class _WhisperWorker:
     """常驻 Whisper 转写子进程（`clone.py transcribe-serve`），模型只加载一次。
 
@@ -124,20 +167,9 @@ class _WhisperWorker:
     def _stop_unlocked(self) -> None:
         if self._proc is None:
             return
+        proc = self._proc
         try:
-            try:
-                self._proc.stdin.write(b"shutdown\n")
-                self._proc.stdin.flush()
-            except Exception:  # noqa: BLE001
-                pass
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                try:
-                    self._proc.kill()
-                except Exception:  # noqa: BLE001
-                    pass
+            _terminate_process(proc)
         finally:
             self._proc = None
             self._reader = None
@@ -227,20 +259,9 @@ class _TtsWorker:
     def _stop_unlocked(self) -> None:
         if self._proc is None:
             return
+        proc = self._proc
         try:
-            try:
-                self._proc.stdin.write(b"shutdown\n")
-                self._proc.stdin.flush()
-            except Exception:  # noqa: BLE001
-                pass
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                try:
-                    self._proc.kill()
-                except Exception:  # noqa: BLE001
-                    pass
+            _terminate_process(proc)
         finally:
             self._proc = None
             self._reader = None

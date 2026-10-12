@@ -603,7 +603,7 @@ class TestWorkspace:
 
     def test_resolve_relative_worktree(self, monkeypatch, ws):
         import app.tools.fstools.workspace as ws_mod
-        monkeypatch.setitem(ws_mod.__dict__, "_workspace", lambda: ws)
+        monkeypatch.setitem(ws_mod.__dict__, "_default_workspace", lambda: ws)
         got = _resolve("sub/x.txt")
         assert got == (ws / "sub" / "x.txt").resolve()
 

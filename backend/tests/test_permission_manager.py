@@ -552,7 +552,8 @@ def test_bad_whitelist_json_no_crash(tmp_path):
     assert mgr.extra_workspaces == []
 
 
-def test_default_constructor(tmp_path):
+def test_default_constructor(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     mgr = PermissionManager()
     assert mgr.workspace == Path.cwd().resolve()
     assert mgr.extra_workspaces == []
