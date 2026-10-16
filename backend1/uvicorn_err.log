@@ -1,34 +1,0 @@
-E:\AgentSuper\backend\.venv\Lib\site-packages\jieba\_compat.py:18: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
-  import pkg_resources
-INFO:     Started server process [17496]
-INFO:     Waiting for application startup.
-2026-08-15 12:55:04,600 - modelscope - INFO - Creating symbolic link [E:\AgentSuper\backend\data\models\BAAI\bge-small-zh-v1.5].
-2026-08-15 12:55:04,602 - modelscope - WARNING - Failed to create symbolic link E:\AgentSuper\backend\data\models\BAAI\bge-small-zh-v1.5 for E:\AgentSuper\backend\data\models\BAAI\bge-small-zh-v1___5.
-12:55:04 [INFO] sentence_transformers.base.model: Loading SentenceTransformer model from E:\AgentSuper\backend\data\models\BAAI\bge-small-zh-v1___5.
-Loading weights:   0%|          | 0/71 [00:00<?, ?it/s]Loading weights: 100%|██████████| 71/71 [00:00<00:00, 12115.36it/s]
-12:55:04 [INFO] app.rag.reranker: Loading reranker from local path: E:\AgentSuper\backend\data\models\cross-encoder\ms-marco-MiniLM-L6-v2
-12:55:04 [INFO] sentence_transformers.base.model: No device provided, using cpu
-12:55:04 [INFO] sentence_transformers.base.model: No modules.json found for E:\AgentSuper\backend\data\models\cross-encoder\ms-marco-MiniLM-L6-v2, initializing a new CrossEncoder model.
-Loading weights:   0%|          | 0/105 [00:00<?, ?it/s]Loading weights: 100%|██████████| 105/105 [00:00<00:00, 21014.55it/s]
-12:55:05 [WARNING] app.filesystem.project: cannot persist project id to E:\AgentSuper\.git\opencode\project.json (non-git dir or read-only)
-12:55:05 [INFO] app.runtime: project initialized: id=git:f6621fe7ae62 worktree=E:\AgentSuper
-12:55:05 [INFO] app.permission.manager: Loaded 2 runtime workspaces
-12:55:05 [INFO] app.agent.memory: MemoryManager loaded 0 entries from data\agent_memory.json
-12:55:05 [INFO] app.agent.bus: \u2705 Agent registered: rag
-12:55:05 [INFO] app.agent.bus: \u2705 Agent registered: web_search
-12:55:05 [INFO] app.agent.bus: \u2705 Agent registered: code
-12:55:05 [INFO] app.agent.bus: \u2705 Agent registered: supervisor
-12:55:05 [INFO] app.runtime: Multi-agent system initialized: ['rag', 'web_search', 'code', 'supervisor']
-12:55:05 [INFO] app.agent.bus: Started 4 agent event loops
-12:55:05 [INFO] app.agent.bus: \U0001f501 Agent event loop started: rag
-12:55:05 [INFO] app.agent.bus: \U0001f501 Agent event loop started: web_search
-12:55:05 [INFO] app.agent.bus: \U0001f501 Agent event loop started: code
-12:55:05 [INFO] app.agent.bus: \U0001f501 Agent event loop started: supervisor
-INFO:     Application startup complete.
-ERROR:    [Errno 10048] error while attempting to bind on address ('0.0.0.0', 8000): [winerror 10048] 通常每个套接字地址(协议/网络地址/端口)只允许使用一次。
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
-12:55:05 [INFO] app.agent.bus: \u23f9 Agent event loop cancelled: rag
-12:55:05 [INFO] app.agent.bus: \u23f9 Agent event loop cancelled: code
-12:55:05 [INFO] app.agent.bus: \u23f9 Agent event loop cancelled: web_search
-12:55:05 [INFO] app.agent.bus: \u23f9 Agent event loop cancelled: supervisor

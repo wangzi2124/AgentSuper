@@ -1,7 +1,0 @@
-{
-  "allowed_commands": [
-    "copy",
-    "del",
-    "if"
-  ]
-}
