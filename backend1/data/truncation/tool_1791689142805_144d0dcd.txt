@@ -1,0 +1,491 @@
+<file>
+1: # CipherIDaaS 单点登录(SSO)实现分析
+2: 
+3: ## 项目概述
+4: 
+5: CipherIDaaS 是由杭州赛赋发起的开源 IAM/IDaaS 项目，是一个符合 5A 机制的身份安全认证和审计系统。支持 CAS、SAML、OAuth2 等主流 SSO 协议，实现门户与外部应用系统的单点登录。
+6: 
+7: ---
+8: 
+9: ## 目录
+10: 
+11: - [项目结构](#项目结构)
+12: - [SSO协议支持](#sso协议支持)
+13: - [CAS协议实现](#cas协议实现)
+14: - [SAML协议实现](#saml协议实现)
+15: - [OAuth2协议实现](#oauth2协议实现)
+16: - [钉钉账号同步](#钉钉账号同步)
+17: - [从账号机制](#从账号机制)
+18: - [核心API汇总](#核心api汇总)
+19: 
+20: ---
+21: 
+22: ## 项目结构
+23: 
+24: ```
+25: CipherIDaaS-master/
+26: ├── identity-portal/          # 身份门户(用户认证中心)
+27: │   ├── controller/
+28: │   │   ├── CopyCasServerController.java   # CAS协议核心入口
+29: │   │   ├── SSOController.java             # CAS Ticket验证
+30: │   │   ├── SamlController.java            # SAML协议核心入口
+31: │   │   ├── Auth2LoginController.java      # OAuth2协议核心入口
+32: │   │   ├── OidcController.java            # 应用跳转统一入口
+33: │   │   ├── FirstAuthController.java       # 首次认证控制器
+34: │   │   └── UserBindingController.java     # 用户绑定(含钉钉绑定)
+35: │   ├── saml/
+36: │   │   └── SamlServiceImpl.java           # SAML断言构建和签名
+37: │   ├── auth2/
+38: │   │   └── model/                         # OAuth2模型(AccessToken等)
+39: │   ├── event/
+40: │   │   └── CasServerRedirec.java          # CAS/RDSG跳转事件处理
+41: │   ├── service/impl/sso/
+42: │   │   ├── SsoLoginServiceImpl.java       # SSO分发服务
+43: │   │   ├── CasSsoServiceImpl.java         # CAS协议跳转实现
+44: │   │   ├── SamlSsoServiceImpl.java        # SAML协议跳转实现
+45: │   │   └── Auth2SsoServiceImpl.java       # OAuth2协议跳转实现
+46: │   └── utils/
+47: │       ├── TicketUtil.java                # CAS Ticket生成
+48: │       ├── TokenUtils.java                # JWT Token生成
+49: │       └── UrlUtils.java                  # URL构建工具
+50: ├── cipher-console/           # 管理控制台
+51: │   ├── controller/web/
+52: │   │   ├── AppController.java             # 应用管理
+53: │   │   ├── DingConfigController.java      # 钉钉配置管理
+54: │   │   ├── DingGroupController.java       # 钉钉组织架构同步
+55: │   │   └── DingUserController.java        # 钉钉用户同步
+56: │   ├── service/impl/
+57: │   │   ├── DingConfigServiceImpl.java     # 钉钉配置服务
+58: │   │   ├── DingGroupServiceImpl.java      # 钉钉组织架构同步实现
+59: │   │   └── DingUserServiceImpl.java       # 钉钉用户同步实现
+60: │   ├── job/
+61: │   │   └── DingDingSyncJob.java           # 钉钉定时同步任务
+62: │   └── common/
+63: │       └── DingUrlConstants.java          # 钉钉API常量
+64: ├── dingpush-in/              # 钉钉推送服务(二次认证)
+65: └── dingpush-fe/              # 钉钉推送前端
+66: ```
+67: 
+68: ---
+69: 
+70: ## SSO协议支持
+71: 
+72: 系统支持 **5 种SSO协议类型**：
+73: 
+74: | 协议 | 枚举值 | 对应Service Bean | 说明 |
+75: |------|--------|------------------|------|
+76: | CAS | `CAS` | `casSsoService` | 仿CAS Server协议 |
+77: | SAML | `SAML` | `smmlSsoService` | SAML 2.0 协议 |
+78: | OAuth2 | `AUTH2` | `authSsoService` | 自定义OAuth2协议 |
+79: | RDSG | `RDSG` | `rdsgSsoService` | 动态密码网关协议 |
+80: | NORMAL | `NORMAL` | - | 普通门户内跳转 |
+81: 
+82: ---
+83: 
+84: ## CAS协议实现
+85: 
+86: ### 核心文件
+87: 
+88: - `CopyCasServerController.java` - CAS协议核心入口
+89: - `SSOController.java` - CAS Ticket验证
+90: - `TicketUtil.java` - Ticket生成工具
+91: - `CasServerRedirec.java` - 跳转事件处理
+92: 
+93: ### 流程图
+94: 
+95: ```
+96: 外部应用(CAS Client)
+97:     │
+98:     │ 302重定向
+99:     ▼
+100: /cipher/cas/login?service=http://app.com/callback
+101:     │
+102:     ▼
+103: ┌─────────────────────┐
+104: │ 检查Session是否已登录 │
+105: └──────────┬──────────┘
+106:            │
+107:     ┌──────┴──────┐
+108:     │ 未登录       │ 已登录
+109:     ▼             ▼
+110: 存储ServiceURL   根据service查找应用
+111: 重定向到认证首页   生成从账号(subAccount)
+112:     │            TicketUtil.getCasSTTicket()
+113:     ▼            → "ST-" + UUID
+114: 用户完成认证     Redis存储: ticket → 用户信息
+115:     │            重定向: app.com?ticket=ST-xxx
+116:     ▼                 │
+117: /flowSuccess          ▼
+118: 分发跳转         外部应用验证ticket
+119:                 /cipher/cas/serviceValidate
+120:                       │
+121:                       ▼
+122:                 Redis.get(ticket) → 用户信息
+123:                 Redis.remove(ticket) 一次性消费
+124:                 返回CAS XML响应
+125: ```
+126: 
+127: ### 核心代码
+128: 
+129: **Ticket生成** (`TicketUtil.java`):
+130: ```java
+131: public static String getCasSTTicket() {
+132:     UUID uuid = UUID.randomUUID();
+133:     return "ST-" + uuid.toString().toLowerCase().replaceAll("-", "");
+134: }
+135: ```
+136: 
+137: **Ticket存储** (`CasServerRedirec.java`):
+138: ```java
+139: // Redis存储: key=ticket, value=JSON(用户信息), TTL=5分钟
+140: CasUserDomain casUser = new CasUserDomain();
+141: casUser.setUuid(uuid);
+142: casUser.setSubAccount(subAccount);
+143: redisClient.put(ticket, JSON.toJSONString(casUser), 5 * 60 * 1000);
+144: ```
+145: 
+146: **Ticket验证** (`SSOController.java`):
+147: ```java
+148: // 从Redis取出并删除(一次性)
+149: String obj = redisClient.get(ticket);
+150: redisClient.remove(ticket);
+151: CasUserDomain casUser = JSON.parseObject(obj, CasUserDomain.class);
+152: // 返回CAS标准XML: <cas:user>, <cas:uuid>, <cas:userName>等
+153: ```
+154: 
+155: ---
+156: 
+157: ## SAML协议实现
+158: 
+159: ### 核心文件
+160: 
+161: - `SamlController.java` - SAML协议核心入口
+162: - `SamlServiceImpl.java` - SAML断言构建和签名
+163: - `cipher-console/.../SamlController.java` - SAML IDP元数据生成
+164: 
+165: ### 流程图
+166: 
+167: ```
+168: 外部应用(SP)
+169:     │
+170:     │ HTTP POST (SAMLRequest=Base64编码)
+171:     ▼
+172: /cipher/saml/login
+173:     │
+174:     ▼
+175: 解码并解析AuthnRequest
+176: 获取ACS URL(回调地址)
+177: 根据ACS查找应用
+178: 检查Session是否已登录
+179:     │
+180:     ├───────┬───────┐
+181:     │ 未登录         │ 已登录
+182:     ▼               ▼
+183: 存储SAMLRequest   构建SAML Response
+184: 重定向到认证首页   设置NameID=子账号
+185:     │             RSA_SHA256签名
+186:     ▼             HTTP POST到ACS URL
+187: 用户完成认证
+188:     │
+189:     ▼
+190: 构建SAML Response
+191: RSA_SHA256签名
+192: 返回到SP的ACS URL
+193: ```
+194: 
+195: ### 核心代码
+196: 
+197: **SAML断言构建** (`SamlServiceImpl.java`):
+198: ```java
+199: // 构建SAML Response
+200: Assertion assertion = new Assertion();
+201: assertion.setSubject(new Subject(nameID));  // NameID = 子账号
+202: assertion.setConditions(new Conditions(notOnOrAfter));  // 5分钟有效期
+203: assertion.setAuthnStatement(new AuthnStatement(issueInstant));
+204: 
+205: // 使用IDP私钥签名(RSA_SHA256)
+206: openSamlImplementation.signObject(assertion, privateKey);
+207: 
+208: // 返回到SP的ACS URL (HTTP POST Binding)
+209: ```
+210: 
+211: **SAML元数据生成** (`cipher-console/.../SamlController.java`):
+212: ```java
+213: // 生成IDP Metadata XML
+214: EntityDescriptor entityDescriptor = ...
+215: IDPSSODescriptor idpssoDescriptor = ...
+216: singleSignOnService.setLocation(portalServerUrl + "/cipher/saml/sso");
+217: // 返回给SP导入
+218: ```
+219: 
+220: ---
+221: 
+222: ## OAuth2协议实现
+223: 
+224: ### 核心文件
+225: 
+226: - `Auth2LoginController.java` - OAuth2协议核心入口
+227: - `Auth2SsoServiceImpl.java` - OAuth2跳转实现
+228: - `AuthSsoService.java` - OAuth2 Token服务接口
+229: - `auth2/model/` - OAuth2模型(AccessToken, RefreshToken等)
+230: 
+231: ### 流程图
+232: 
+233: ```
+234: 外部应用
+235:     │
+236:     │ 302重定向
+237:     ▼
+238: /cipher/oauth/authorize?redirect_uri=http://app.com&state=xxx
+239:     │
+240:     ▼
+241: 重定向到门户登录页
+242: 用户完成认证
+243:     │
+244:     ▼
+245: 生成 access_token + refresh_token
+246: 重定向: app.com?code={accessToken}&state=xxx
+247:     │
+248:     ▼
+249: 外部应用 POST /cipher/oauth/access_token (用code换token)
+250: 外部应用 GET  /cipher/oauth/user (获取用户信息)
+251: ```
+252: 
+253: ### Token配置
+254: 
+255: | Token类型 | 有效期 | 存储位置 |
+256: |-----------|--------|----------|
+257: | Access Token | 30天 | 数据库表 `sso_access_token` |
+258: | Refresh Token | 365天 | 数据库表 `sso_refresh_token` |
+259: 
+260: ### 核心代码
+261: 
+262: **Token生成** (`AuthSsoService.java`):
+263: ```java
+264: // 生成 access_token
+265: SsoAccessToken accessToken = authSsoService.createAccessToken(clientDetails, user);
+266: 
+267: // 生成 refresh_token
+268: SsoRefreshToken refreshToken = authSsoService.createRefreshToken(clientDetails, user);
+269: ```
+270: 
+271: **Token验证** (`Auth2LoginController.java`):
+272: ```java
+273: // 从Header Authorization: Bearer {token} 提取
+274: String token = request.getHeader("Authorization").replace("Bearer ", "");
+275: // 查询数据库验证token有效性
+276: ```
+277: 
+278: ---
+279: 
+280: ## 钉钉账号同步
+281: 
+282: ### 核心文件
+283: 
+284: - `DingConfigController.java` - 钉钉基础配置管理
+285: - `DingConfigServiceImpl.java` - 钉钉配置服务(含access_token获取)
+286: - `DingGroupController.java` - 钉钉组织架构同步控制器
+287: - `DingGroupServiceImpl.java` - 钉钉组织架构同步实现
+288: - `DingUserController.java` - 钉钉用户同步控制器
+289: - `DingUserServiceImpl.java` - 钉钉用户同步实现
+290: - `DingDingSyncJob.java` - 钉钉定时同步任务
+291: 
+292: ### 调用的钉钉API
+293: 
+294: | API | 用途 |
+295: |-----|------|
+296: | `https://oapi.dingtalk.com/gettoken` | 获取access_token |
+297: | `https://oapi.dingtalk.com/department/list` | 获取部门列表 |
+298: | `https://oapi.dingtalk.com/user/listbypage` | 分页获取用户 |
+299: 
+300: ### 组织架构同步流程
+301: 
+302: ```
+303: 1. 管理员点击"扫描钉钉组织结构"
+304:    │
+305:    ▼
+306: 2. 调用钉钉API获取所有部门
+307:    GET /department/list?fetch_child=true&id=1
+308:    │
+309:    ▼
+310: 3. 存入缓冲表 cipher_ding_group_buffer
+311:    │
+312:    ▼
+313: 4. 管理员确认后，点击"同步"
+314:    │
+315:    ▼
+316: 5. 从缓冲表同步到正式表 cipher_group_info
+317:    (递归处理父子关系，支持10级嵌套)
+318: ```
+319: 
+320: ### 用户同步流程
+321: 
+322: ```
+323: 1. 管理员点击"扫描钉钉用户"
+324:    │
+325:    ▼
+326: 2. 获取钉钉所有部门(线程池并发)
+327:    GET /department/list?fetch_child=true&id=1
+328:    │
+329:    ▼
+330: 3. 并发获取各部门用户(50线程)
+331:    GET /user/listbypage?department_id={id}&offset=0&size=100
+332:    │
+333:    ▼
+334: 4. 去重(已绑定/已在缓冲表的用户)
+335:    │
+336:    ▼
+337: 5. 存入缓冲表 cipher_ding_user_buffer
+338:    │
+339:    ▼
+340: 6. 根据匹配规则判断用户状态
+341:    matchRule: 0-手机号, 1-邮箱, 2-手机号AND邮箱, 3-手机号OR邮箱
+342:    │
+343:    ├──── 待绑定用户 → 建立关联关系
+344:    │
+345:    └──── 新增用户 → 创建本地用户 + 组织架构映射
+346: ```
+347: 
+348: ### 钉钉配置管理
+349: 
+350: **基础配置** (`/cipher/dingConfig/baseConfig`):
+351: - appKey: 钉钉应用AppKey
+352: - appSecret: 钉钉应用AppSecret
+353: 
+354: **属性映射** (`/cipher/dingConfig/editAttrConfig`):
+355: ```json
+356: [
+357:   {"localKey": "userName",      "dingKey": "name"},
+358:   {"localKey": "dingUserId",    "dingKey": "userid"},
+359:   {"localKey": "groupNames",    "dingKey": "departmentStr"},
+360:   {"localKey": "accountNumber", "dingKey": "mobile"},
+361:   {"localKey": "dingUnionId",   "dingKey": "unionid"}
+362: ]
+363: ```
+364: 
+365: **匹配规则** (`/cipher/dingConfig/editMatchRule`):
+366: - rule=0: 手机号匹配
+367: - rule=1: 邮箱匹配
+368: - rule=2: 手机号 AND 邮箱
+369: - rule=3: 手机号 OR 邮箱
+370: 
+371: **自动同步配置** (`/cipher/dingConfig/editAttrConfig`):
+372: - isAutoSync: 是否开启自动同步
+373: - autoSyncDate: 同步时间(cron表达式)
+374: - interval: 同步间隔
+375: 
+376: ---
+377: 
+378: ## 从账号机制
+379: 
+380: 用户登录外部应用时，使用的是根据**从账号规则**生成的子账号，而非门户主账号。
+381: 
+382: ### 规则配置
+383: 
+384: | 规则 | 说明 | 字段 |
+385: |------|------|------|
+386: | `assPrimaryAccount` | 与主账号一致 | accountNumber |
+387: | `assEmail` | 与主账号邮箱一致 | mail |
+388: | `assEmailPrefix` | 邮箱前缀 | mail@前 |
+389: | `assTelephone` | 与主账号手机号一致 | phoneNumber |
+390: | `assWorkers` | 与主账号工号一致 | jobNo |
+391: | `assManual` | 手动配置 | 自定义 |
+392: 
+393: ### 核心代码
+394: 
+395: ```java
+396: // SubAccountRuleService.getSubAccountRule()
+397: switch (rule) {
+398:     case 0: subAccount = user.getAccountNumber();  break;  // 主账号
+399:     case 1: subAccount = user.getMail();           break;  // 邮箱
+400:     case 2: subAccount = user.getMailPrefix();     break;  // 邮箱前缀
+401:     case 3: subAccount = user.getPhoneNumber();    break;  // 手机号
+402:     case 4: subAccount = user.getJobNo();          break;  // 工号
+403: }
+404: ```
+405: 
+406: ---
+407: 
+408: ## 核心API汇总
+409: 
+410: ### SSO相关接口
+411: 
+412: | 接口路径 | 协议 | 用途 |
+413: |----------|------|------|
+414: | `/cipher/cas/login` | CAS | CAS入口，生成ticket |
+415: | `/cipher/cas/serviceValidate` | CAS | 验证ticket |
+416: | `/cipher/saml/login` | SAML | SAML入口，处理SAMLRequest |
+417: | `/cipher/oauth/authorize` | OAuth2 | 授权入口 |
+418: | `/cipher/oauth/access_token` | OAuth2 | 用code换token |
+419: | `/cipher/oauth/user` | OAuth2 | 获取用户信息 |
+420: | `/cipher/user/flowsuccess` | 统一 | 认证完成后分发跳转 |
+421: 
+422: ### 钉钉相关接口
+423: 
+424: | 接口路径 | 用途 |
+425: |----------|------|
+426: | `/cipher/dingConfig/baseConfig` | 钉钉基础配置(appKey/appSecret) |
+427: | `/cipher/dingConfig/getBaseConfig` | 获取基础配置 |
+428: | `/cipher/dingConfig/editAttrConfig` | 编辑属性映射配置 |
+429: | `/cipher/dingConfig/editMatchRule` | 编辑匹配规则 |
+430: | `/cipher/dingGroup/getGroupTreeList` | 获取钉钉部门树结构 |
+431: | `/cipher/dingGroup/scanDingGroup` | 扫描钉钉组织架构 |
+432: | `/cipher/dingGroup/getGroupList` | 获取缓冲表部门列表 |
+433: | `/cipher/dingGroup/sync` | 同步部门到正式表 |
+434: | `/cipher/dingUser/getUserList` | 获取缓冲表用户列表 |
+435: | `/cipher/dingUser/scanDingUser` | 扫描钉钉用户 |
+436: | `/cipher/dingUser/sync` | 部分同步钉钉用户 |
+437: | `/cipher/dingUser/syncAll` | 全部同步钉钉用户 |
+438: 
+439: ---
+440: 
+441: ## 部署说明
+442: 
+443: ### 环境要求
+444: 
+445: - JDK 1.8+
+446: - MySQL 5.7+
+447: - Redis 5.0+
+448: - Maven 3.6+
+449: 
+450: ### 启动顺序
+451: 
+452: 1. 导入数据库脚本
+453: 2. 启动 Redis
+454: 3. 启动 cipher-console (管理控制台)
+455: 4. 启动 identity-portal (身份门户)
+456: 5. 启动 dingpush-in (钉钉推送服务，可选)
+457: 
+458: ### 配置说明
+459: 
+460: 1. **钉钉配置**: 在管理控制台配置 appKey 和 appSecret
+461: 2. **应用配置**: 添加CAS/SAML/OAuth2类型的应用
+462: 3. **从账号规则**: 为每个应用配置从账号生成规则
+463: 4. **属性映射**: 配置钉钉用户字段与本地用户字段的映射关系
+464: 
+465: ---
+466: 
+467: ## 技术栈
+468: 
+469: - **后端**: Spring Boot + MyBatis + Redis
+470: - **前端**: Vue.js
+471: - **协议**: CAS / SAML 2.0 / OAuth2
+472: - **签名**: RSA SHA256
+473: - **缓存**: Redis
+474: - **数据库**: MySQL
+475: 
+476: ---
+477: 
+478: ## 许可证
+479: 
+480: GNU GPL v2.0
+481: 
+482: ---
+483: 
+484: ## 联系方式
+485: 
+486: - 官网: www.cipherchina.com
+487: - QQ群: 732326053
+
+(End of file - total 487 lines)
+</file>

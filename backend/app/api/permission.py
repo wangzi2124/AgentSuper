@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.permission import get_manager
+from execution.permission import get_manager
 from app.api.deps import require_admin
 
 logger = logging.getLogger(__name__)

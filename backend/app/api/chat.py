@@ -1,10 +1,71 @@
-"""app.api.chat 拆分 facade —— 代码已拆入 `chatmod/`（helpers, persist, endpoints），
-本模块保持原有 import 路径（含下划线私有符号）与 __all__。"""
-# 由 split_module.py 生成，勿手工改动此文件头
-from .chatmod.helpers import *
-from .chatmod.persist import *
-from .chatmod.endpoints import *
-import logging
-logger = logging.getLogger(__name__)
+"""对话接口（对齐 agent.md §9 app/api/chat.py）。
 
-__all__ = ["MAX_HISTORY_TOKENS", "MAX_MESSAGE_LENGTH", "_ALLOWED_HISTORY_KEYS", "_DEFAULT_USER_ID", "_generate_title", "_get_session_service", "_get_summarizer", "_get_user_id", "_msg_type_to_role", "_sanitize_history", "_summarizer", "_summarizer_model", "_truncate_history", "_validate_chat_message", "reset_summarizer", "_begin_task_session", "_build_compressed_history", "_ensure_child_pair", "_existing_pair", "_persist_interrupted_partial", "_persist_multi_agent", "_persist_multi_agent_parts", "_resolve_multi_agent_parent", "_session_history_for", "MAX_CONCURRENT_AGENTS", "MAX_QUEUE_SIZE", "_agent_semaphore", "_get_agent_semaphore", "_queue_counter", "chat_multi_agent", "chat_multi_agent_stream", "router", "logger"]
+- `POST /chat`：非流式，跑完整个主图返回最终状态摘要。
+- `POST /chat/stream`：SSE 流式，逐节点推送 `start`/`node`/`done` 事件。
+
+响应契约（agent.md §10.4 / §10.8）：`output`（最终回答）、`thread_id`、
+`resumed`（携带的 thread_id 已存在 → 续跑），并保留 `session_id`/`final_output`/`state`。
+契约遵循 agent.md 简洁风格（直接 JSON，不套 {code,message,data} 信封）；
+校验错误仍走全局统一信封（{code:422,...}）。
+"""
+
+from __future__ import annotations
+
+import json
+
+from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from ..deps import PlatformContext, get_context
+
+router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, description="用户输入")
+    session_id: str | None = Field(default=None, description="会话 id（兼容别名）")
+    thread_id: str | None = Field(
+        default=None, description="续跑线程 id；已存在则在该线程上继续（§10.8）"
+    )
+    user_id: str = Field(default="anonymous")
+    directory: str | None = Field(default=None, description="会话工作目录")
+
+
+@router.post("")
+async def chat(body: ChatRequest, ctx: PlatformContext = Depends(get_context)) -> dict:
+    tid = body.thread_id or body.session_id
+    resumed = tid is not None and ctx.sessions.get(tid) is not None
+    sess = ctx.sessions.ensure(
+        tid, directory=body.directory, user_id=body.user_id
+    )
+    state = await ctx.run(body.message, session_id=sess.id, user_id=body.user_id)
+    output = state.get("final_output", "")
+    return {
+        "output": output,
+        "thread_id": sess.thread_id,
+        "resumed": resumed,
+        "session_id": sess.id,
+        "final_output": output,
+        "state": state,
+    }
+
+
+@router.post("/stream")
+async def chat_stream(
+    body: ChatRequest, ctx: PlatformContext = Depends(get_context)
+) -> StreamingResponse:
+    sess = ctx.sessions.ensure(
+        body.session_id, directory=body.directory, user_id=body.user_id
+    )
+
+    async def event_source():
+        async for ev in ctx.stream(body.message, session_id=sess.id, user_id=body.user_id):
+            payload = json.dumps(ev, ensure_ascii=False, default=str)
+            yield f"event: {ev['event']}\ndata: {payload}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

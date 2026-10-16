@@ -1,0 +1,65 @@
+{
+  "requests_total": 37,
+  "requests_by_path": {
+    "POST /api/boom": 1,
+    "GET /api/auth/status": 2,
+    "GET /api/auth/account/me": 2,
+    "GET /api/sessions": 4,
+    "GET /api/models": 2,
+    "GET /api/permission/workspaces": 3,
+    "GET /api/permission/pending": 2,
+    "GET /api/sessions/ses_209jmurs2rl63acff": 6,
+    "GET /api/sessions/ses_209jmurs2rl63acff/messages": 6,
+    "POST /api/sessions/ses_209jmurs2rl63acff/revert": 1,
+    "POST /api/chat/multi-agent/stream": 2,
+    "GET /api/monitor/usage": 1,
+    "GET /api/monitor/stats": 1,
+    "GET /api/plugins/weather-alert/status": 1,
+    "POST /api/plugins/weather-alert/call/tool_get_typhoon_info": 1,
+    "POST /api/models/estimate-tokens": 1,
+    "GET /api/models/config": 1
+  },
+  "requests_by_status": {
+    "0": 1,
+    "200": 19,
+    "200": 17
+  },
+  "model_calls_total": 17,
+  "model_calls_by_model": {
+    "deepseek/deepseek-v4-flash": 13,
+    "ollama/qwen2.5-coder:latest": 4
+  },
+  "total_prompt_tokens": 64984,
+  "total_completion_tokens": 12705,
+  "total_reasoning_tokens": 0,
+  "total_cache_read": 39040,
+  "total_cache_write": 20747,
+  "total_duration_ms": 266438.18640708923,
+  "total_cost": 0.013455080000000001,
+  "tool_rounds_total": 3,
+  "tool_calls_total": 6,
+  "prompt_tokens_by_model": {
+    "deepseek/deepseek-v4-flash": 46327,
+    "ollama/qwen2.5-coder:latest": 18657
+  },
+  "completion_tokens_by_model": {
+    "deepseek/deepseek-v4-flash": 12314,
+    "ollama/qwen2.5-coder:latest": 391
+  },
+  "reasoning_tokens_by_model": {
+    "deepseek/deepseek-v4-flash": 0,
+    "ollama/qwen2.5-coder:latest": 0
+  },
+  "cache_read_by_model": {
+    "deepseek/deepseek-v4-flash": 39040,
+    "ollama/qwen2.5-coder:latest": 0
+  },
+  "cache_write_by_model": {
+    "deepseek/deepseek-v4-flash": 6264,
+    "ollama/qwen2.5-coder:latest": 14483
+  },
+  "cost_by_model": {
+    "deepseek/deepseek-v4-flash": 0.013455080000000001,
+    "ollama/qwen2.5-coder:latest": 0.0
+  }
+}

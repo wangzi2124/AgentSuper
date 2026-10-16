@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-from app.config import settings
+from config import settings
 
 logger = logging.getLogger(__name__)
 

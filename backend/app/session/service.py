@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def _auto_tail_limit() -> int:
     """自动压缩时保留的最近消息条数（compaction_tail_messages，0 → 按轮次折算）。"""
-    from app.config import settings
+    from config import settings
 
     n = settings.compaction_tail_messages
     if n > 0:

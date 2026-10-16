@@ -130,7 +130,7 @@ def tool_create_pptx(title: str = "Presentation", slides: str = "[]",
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path:
-        from app.plugins._output import resolve_output_path
+        from plugins._output import resolve_output_path
         try:
             target = resolve_output_path(output_path, ".pptx")
         except ValueError as e:

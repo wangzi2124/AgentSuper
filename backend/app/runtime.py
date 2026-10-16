@@ -2,30 +2,21 @@ import logging
 import threading
 from pathlib import Path
 
-from app.config import settings
-from app.env_boot import load_env_to_os as _load_env_to_os
-from app.agent.graph import RAGAgent
-from app.permission import PermissionManager, set_manager as set_perm_manager
-from app.plugins.loader import PluginLoader
-from app.rag.bm25_index import BM25Index
-from app.rag.chapter_store import ChapterStore
-from app.rag.document_processor import DocumentProcessor
-from app.rag.embeddings import LocalEmbeddings
-from app.rag.reranker import Reranker
-from app.rag.retriever import Retriever
-from app.rag.vector_store import VectorStore
+from config import settings
+from env_boot import load_env_to_os as _load_env_to_os
+from execution.permission import PermissionManager, set_manager as set_perm_manager
+from extensions.plugins import PluginLoader
+from cognition.bm25_index import BM25Index
+from cognition.chapter_store import ChapterStore
+from cognition.document_processor import DocumentProcessor
+from cognition.embeddings import LocalEmbeddings
+from cognition.reranker import Reranker
+from cognition.retriever import Retriever
+from cognition.vector_store import VectorStore
 from app.services.task_manager import TaskManager
 from app.services.voice import VoiceService
-from app.storage.file_store import FileStore
+from storage.file_store import FileStore
 from app.snapshot import Snapshot  # [snapshot 快照层] 规格模块 B
-
-# ── 多 Agent 系统 ──
-from app.agent.bus import AgentBus
-from app.agent.memory import MemoryManager
-from app.agent.rag_wrapper import RAGAgentWrapper
-from app.agent.explore_agent import ExploreAgent
-from app.agent.plan_agent import PlanAgent
-from app.agent.supervisor import SupervisorAgent
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +55,8 @@ def _do_init(app):
     chapter_store = ChapterStore("data/chapter_store.db")
     retriever = Retriever(vs, emb, bm25_index=bm25, chapter_store=chapter_store)
 
-    from app.rag.plugin_bridge import set_retriever as _bridge_set_retriever
-    from app.rag.plugin_bridge import set_vector_store as _bridge_set_vector_store
+    from cognition.plugin_bridge import set_retriever as _bridge_set_retriever
+    from cognition.plugin_bridge import set_vector_store as _bridge_set_vector_store
     _bridge_set_retriever(retriever)
     _bridge_set_vector_store(vs)
 
@@ -87,7 +78,7 @@ def _do_init(app):
     # [DeepSeek 兼容补丁] litellm 的 deepseek provider：(1) 会把 content 列表扁平化、
     # 丢弃 image_url 分块；(2) 思考模式下不回填 assistant 的 reasoning_content（未知
     # 模型 supports_reasoning()=False 门控失效）。安装两个补丁修复（详见模块 docstring）。
-    from app.models.litellm_vision_patch import (
+    from models.litellm_vision_patch import (
         install_litellm_vision_patch,
         install_litellm_reasoning_patch,
     )
@@ -132,7 +123,7 @@ def _do_init(app):
     # ── opencode 风格文件系统:项目模型 + 分层存储 + 目录扫描缓存 ──
     # 项目:优先 git rev-parse 定位 worktree,ID 取 git 根哈希(持久化到 .git/opencode)
     from app.filesystem import Project, ScanCache, set_project
-    from app.storage.paths import global_paths, project_scoped
+    from storage.paths import global_paths, project_scoped
 
     project = Project.from_git(_base_dir)
     set_project(project)
@@ -147,7 +138,7 @@ def _do_init(app):
 
     # [snapshot 快照层] 规格模块 B：针对项目 worktree 的步骤级快照/回滚。
     # 内部 git 仓库只写对象（write-tree），不建 commit、不碰用户 index/分支/HEAD → 零干扰；
-    # 由 chat 轮次钩子（chatmod/snapshot_diff.py）在每次用户请求前/后自动 track，
+    # 由 chat 轮次钩子（`app/snapshot/` snapshot_begin/snapshot_end）在每次用户请求前/后自动 track，
     # diff_full 出「本次改动的文件 + 行数」随 assistant 消息展示（原 /api/snapshot 管理路由已移除）。
     app.state.snapshot = Snapshot(worktree=project.worktree, data_dir=str(_data_dir))
 
@@ -169,10 +160,6 @@ def _do_init(app):
     )
     set_perm_manager(perm_mgr)
 
-    # ── 初始化多 Agent 系统（bus 创建 + 注册，但 start_all 在异步上下文中调用）──
-    agent_bus = AgentBus()
-    shared_memory = MemoryManager(default_ttl=300)  # 共享记忆，5 分钟过期
-
     # [语音] 本地 Qwen3-TTS 服务（子进程，无外部 HTTP）：启用时注入主线，
     # 后台线程启动下载模型（同向量模型：ModelScope 优先，失败降级不阻断启动）
     voice_service = VoiceService() if settings.voice_tts_enabled else None
@@ -183,42 +170,12 @@ def _do_init(app):
         threading.Thread(target=voice_service.warmup, daemon=True, name="voice-whisper-warmup").start()
         logger.info("Voice service enabled (dir=%s)", voice_service.tts_dir)
 
-    agent = RAGAgent(
-        retriever, skill_loader, plugin_loader,
-        reranker=reranker, custom_tools=custom_tools,
-        memory=shared_memory,  # [opencode memory] 主 Agent 记忆读写工具
-        voice_service=voice_service,  # [语音] 主 Agent 语音合成/转写工具
-    )
-
-    # [opencode task tool] 主 Agent 注入总线引用，供其自主委派子 Agent
-    agent.task_bus = agent_bus
-
-    # ── 多 Agent 系统（对齐 opencode：rag/code/web_search 合并为单一 build agent）──
-    # build = 默认主 Agent（共享 RAGAgent：知识库检索 + 代码/文件 + 内建 tool_web_search），
-    # explore/plan 为只读探索/规划两个聚焦子 Agent，supervisor 只在这些之间编排。
-    build_agent = RAGAgentWrapper(agent, agent_id="build", heartbeat=agent_bus.touch)
-    agent_bus.register(build_agent)
-
-    explore_agent = ExploreAgent(memory=shared_memory, agent_id="explore")
-    agent_bus.register(explore_agent)
-
-    plan_agent = PlanAgent(memory=shared_memory, agent_id="plan", bus=agent_bus)
-    agent_bus.register(plan_agent)
-
-    supervisor = SupervisorAgent(agent_bus, memory=shared_memory)
-    agent_bus.register(supervisor)
-
-    logger.info("Multi-agent system initialized: %s", agent_bus.list_agents())
-
     app.state.vector_store = vs
     app.state.embeddings = emb
-    app.state.agent_bus = agent_bus
-    app.state.shared_memory = shared_memory
     app.state.retriever = retriever
     app.state.bm25_index = bm25
     app.state.chapter_store = chapter_store
     app.state.reranker = reranker
-    app.state.agent = agent
     app.state.file_store = FileStore(str(_storage_paths["data"] / "uploads"))
     app.state.doc_processor = DocumentProcessor(
         chunk_size=settings.chunk_size,

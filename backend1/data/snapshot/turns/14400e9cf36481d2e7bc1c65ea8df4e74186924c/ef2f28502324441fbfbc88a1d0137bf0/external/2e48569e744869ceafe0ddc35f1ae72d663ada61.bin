@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>俄罗斯方块</title>
+    <style>
+        body { display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #000; }
+        canvas { border: 1px solid #fff; }
+    </style>
+</head>
+<body>
+    <canvas id="tetris" width="300" height="600"></canvas>
+    <script>
+        const canvas = document.getElementById('tetris');
+        const ctx = canvas.getContext('2d');
+        const gridSize = 30;
+        const boardWidth = canvas.width / gridSize;
+        const boardHeight = canvas.height / gridSize;
+        const colors = [
+            null,
+            '#FF0000',
+            '#00FF00',
+            '#0000FF',
+            '#FFFF00',
+            '#00FFFF',
+            '#FF00FF',
+            '#FFFFFF'
+        ];
+
+        function createBoard() {
+            return Array.from({ length: boardHeight }, () => Array(boardWidth).fill(0));
+        }
+
+        function drawBoard() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            board.forEach((row, y) => {
+                row.forEach((cell, x) => {
+                    if (cell) {
+                        ctx.fillStyle = colors[cell];
+                        ctx.fillRect(x * gridSize, y * gridSize, gridSize, gridSize);
+                    }
+                });
+            });
+        }
+
+        function mergePiece(board, piece, offsetX, offsetY) {
+            piece.shape.forEach((row, y) => {
+                row.forEach((cell, x) => {
+                    if (cell) {
+                        board[offsetY + y][offsetX + x] = cell;
+                    }
+                });
+            });
+        }
+
+        function checkCollision(board, piece, offsetX, offsetY) {
+            return piece.shape.some((row, y) => {
+                return row.some((cell, x) => {
+                    if (cell && (offsetX + x < 0 || offsetX + x >= boardWidth || offsetY + y >= boardHeight || board[offsetY + y][offsetX + x])) {
+                        return true;
+                    }
+                });
+            });
+        }
+
+        function clearLines(board) {
+            let linesCleared = 0;
+            board.forEach((row, y) => {
+                if (row.every(cell => cell)) {
+                    board.splice(y, 1);
+                    board.unshift(Array(boardWidth).fill(0));
+                    linesCleared++;
+                }
+            });
+            return linesCleared;
+        }
+
+        function newPiece() {
+            const pieces = [
+                { shape: [[1, 1, 1, 1]] },
+                { shape: [[1, 1], [1, 1]] },
+                { shape: [[1, 1, 0], [0, 1, 1]] },
+                { shape: [[0, 1, 1], [1, 1, 0]] },
+                { shape: [[1, 1, 1], [0, 1, 0]] },
+                { shape: [[1, 1, 1], [1, 0, 0]] },
+                { shape: [[1, 1, 1], [0, 0, 1]] }
+            ];
+            return pieces[Math.floor(Math.random() * pieces.length)];
+        }
+
+        let board = createBoard();
+        let currentPiece = newPiece();
+        let offsetX = Math.floor(boardWidth / 2) - Math.floor(currentPiece.shape[0].length / 2);
+        let offsetY = 0;
+        let score = 0;
+
+        function gameLoop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            drawBoard();
+            mergePiece(board, currentPiece, offsetX, offsetY);
+            drawBoard();
+            mergePiece(board, currentPiece, offsetX, offsetY);
+            if (checkCollision(board, currentPiece, offsetX, offsetY + 1)) {
+                mergePiece(board, currentPiece, offsetX, offsetY);
+                score += clearLines(board) * 10;
+                currentPiece = newPiece();
+                offsetX = Math.floor(boardWidth / 2) - Math.floor(currentPiece.shape[0].length / 2);
+                offsetY = 0;
+                if (checkCollision(board, currentPiece, offsetX, offsetY)) {
+                    alert('Game Over! Your score: ' + score);
+                    board = createBoard();
+                    score = 0;
+                }
+            } else {
+                offsetY++;
+            }
+            requestAnimationFrame(gameLoop);
+        }
+
+        document.addEventListener('keydown', (e) => {
+            switch (e.key) {
+                case 'ArrowLeft':
+                    if (!checkCollision(board, currentPiece, offsetX - 1, offsetY)) {
+                        offsetX--;
+                    }
+                    break;
+                case 'ArrowRight':
+                    if (!checkCollision(board, currentPiece, offsetX + 1, offsetY)) {
+                        offsetX++;
+                    }
+                    break;
+                case 'ArrowDown':
+                    if (!checkCollision(board, currentPiece, offsetX, offsetY + 1)) {
+                        offsetY++;
+                    }
+                    break;
+                case 'ArrowUp':
+                    const rotatedPiece = currentPiece.shape[0].map((_, i) => currentPiece.shape.map(row => row[i]).reverse());
+                    if (!checkCollision(board, { shape: rotatedPiece }, offsetX, offsetY)) {
+                        currentPiece.shape = rotatedPiece;
+                    }
+                    break;
+            }
+        });
+
+        gameLoop();
+    </script>
+</body>
+</html>

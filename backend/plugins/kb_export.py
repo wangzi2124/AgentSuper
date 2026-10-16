@@ -46,7 +46,7 @@ def tool_export_kb_to_docx(query: str, title: str = "", top_k: int = 10) -> str:
     - title: document title (auto-generated from query if empty)
     - top_k: number of results to include (1-20)
     """
-    from app.rag.plugin_bridge import get_retriever
+    from cognition.plugin_bridge import get_retriever
 
     retriever = get_retriever()
     if not retriever:
@@ -100,7 +100,7 @@ def tool_export_kb_to_docx(query: str, title: str = "", top_k: int = 10) -> str:
             doc.add_paragraph("")
 
     # Save via file_generator
-    from app.storage.file_generator import save_file as _save_file
+        from storage.file_generator import save_file as _save_file
     safe_name = "".join(c for c in doc_title if c.isascii() and (c.isalnum() or c in " _-")).strip()
     if not safe_name:
         safe_name = "kb_export"

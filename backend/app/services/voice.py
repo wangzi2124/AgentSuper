@@ -19,7 +19,7 @@ import sys
 import threading
 from pathlib import Path
 
-from app.config import settings
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def _normalize_model_size(raw: "str | None") -> str:
 def _catalog_voice_size() -> "str | None":
     """[模型管理] 语音模型规格（model_catalog.json）；未配置返回 None。"""
     try:
-        from app.models.catalog import voice_model_size
+        from models.catalog import voice_model_size
         return _normalize_model_size(voice_model_size())
     except Exception:  # noqa: BLE001 —— 目录异常不阻断语音
         return None
@@ -402,7 +402,7 @@ class VoiceService:
         """
         if not self.has_model:
             try:
-                from app.utils.model_download import download_model
+                from utils.model_download import download_model
                 models_dir = self.tts_dir / "models"
                 models_dir.mkdir(parents=True, exist_ok=True)
                 logger.info("[voice] 启动下载模型 %s → %s", self.model_id, models_dir)

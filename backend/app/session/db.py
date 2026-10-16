@@ -21,8 +21,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from app.config import settings
-from app.storage import backends, schema as storage_schema
+from config import settings
+from storage import backends, schema as storage_schema
 
 DB_PATH = Path(__file__).resolve().parents[2] / "data" / "session.db"
 

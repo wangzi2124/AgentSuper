@@ -2,16 +2,16 @@ import asyncio
 import uuid
 from typing import Optional, TYPE_CHECKING
 
-from app.storage.file_store import FileStore
-from app.rag.bm25_index import BM25Index
-from app.rag.document_processor import DocumentProcessor
-from app.rag.embeddings import LocalEmbeddings
-from app.rag.vector_store import VectorStore
-from app.models.schemas import DocumentResponse
+from storage.file_store import FileStore
+from cognition.bm25_index import BM25Index
+from cognition.document_processor import DocumentProcessor
+from cognition.embeddings import LocalEmbeddings
+from cognition.vector_store import VectorStore
+from models.schemas import DocumentResponse
 from datetime import datetime
 
 if TYPE_CHECKING:
-    from app.rag.chapter_store import ChapterStore
+    from cognition.chapter_store import ChapterStore
 
 
 class ProcessingTask:

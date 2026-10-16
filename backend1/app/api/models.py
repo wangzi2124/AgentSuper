@@ -1,0 +1,176 @@
+"""模型目录 API：GET /api/models 动态驱动前端模型选择器 + 模型/Provider 管理。
+
+- `GET /api/models`：目录快照与默认/轻量模型（前端选择器）。
+- `GET /api/models/config`：完整配置（目录 + providers + defaults），模型管理面板。
+- `POST /api/models/estimate-tokens`：按 DeepSeek V4 官方 tokenizer 估算上下文 token。
+- 写操作（custom/providers/defaults）持久化到 data/model_catalog.db（SQLite）并即时生效；
+  旧 data/model_catalog.json 在首次启动自动导入后仅作备份，不再写入。
+- 鉴权：所有涉及 Provider 凭证或状态变更的路由（config/reload/export/catalog-full 与全部
+  写路由）都挂 `require_admin` —— 响应体含明文 api_key，或会触发重探测。
+- 迁移：`GET /api/models/export` 导出当前配置（与旧 JSON 同构），
+  `POST /api/models/import` 导入配置（跨机器迁移用）。
+"""
+
+from fastapi import APIRouter, Depends, Request
+
+from app.api.deps import require_admin
+from app.api.responses import fail, ok
+from app.models import catalog
+from app.models.deepseek_tokenizer import count_messages_tokens, count_or_estimate, tokenizer_available
+
+router = APIRouter()
+
+
+@router.get("/models")
+async def list_models():
+    """模型目录：{models, default_model, small_model, image_caption_model, voice_model_size}。"""
+    return ok({
+        "models": catalog.get_catalog(),
+        "default_model": catalog.default_model(),
+        "small_model": catalog.small_model(),
+        "image_caption_model": catalog.image_caption_model(),
+        "voice_model_size": catalog.voice_model_size(),
+    })
+
+
+@router.get("/models/config", dependencies=[Depends(require_admin)])
+async def get_models_config():
+    """模型管理面板全量配置：目录条目 + providers + 默认/轻量/图片/语音模型。
+
+    响应含各 Provider 的明文 api_key（模型管理页需要回填编辑表单），因此要求管理端
+    鉴权：ADMIN_TOKEN 已配置时需 Bearer 凭证，未配置时仅放行本机。
+    """
+    return ok({
+        "models": catalog.get_catalog(),
+        "providers": catalog.provider_models_source(),
+        "default_model": catalog.default_model(),
+        "small_model": catalog.small_model(),
+        "image_caption_model": catalog.image_caption_model(),
+        "voice_model_size": catalog.voice_model_size(),
+        "source_path": str(catalog.catalog_db_path()),
+    })
+
+
+@router.post("/models/estimate-tokens")
+async def estimate_tokens(req: Request):
+    """按官方 tokenizer 估算 token：{text?: str} 或 {messages: [...]}。"""
+    body = await req.json()
+    method = "deepseek-native" if tokenizer_available() else "chars-estimate"
+    text = body.get("text")
+    messages = body.get("messages")
+    if messages is not None and isinstance(messages, list):
+        tokens = count_messages_tokens(messages)
+        if tokens <= 0:
+            from app.context.token_counter import estimate_tokens_messages as est
+            tokens = est(messages)
+            method = "estimate-fallback"
+        return ok({"tokens": int(tokens), "chars": sum(len(str(m.get('content') or '')) for m in messages), "method": method})
+    if not text:
+        return fail(message="text or messages is required")
+    tokens = count_or_estimate(text)
+    return ok({"tokens": int(tokens), "chars": len(str(text)), "method": method})
+
+
+@router.post("/models/custom", dependencies=[Depends(require_admin)])
+async def upsert_custom(req: Request):
+    """新增/更新自定义模型（写 model_catalog.json）。"""
+    body = await req.json()
+    try:
+        entry = catalog.upsert_custom_model(body)
+    except ValueError as e:
+        return fail(message=str(e))
+    return ok({"model": entry, "models": catalog.get_catalog()})
+
+
+@router.delete("/models/custom/{mid}", dependencies=[Depends(require_admin)])
+async def delete_custom(mid: str):
+    removed = catalog.remove_custom_model(mid)
+    return ok({"removed": removed, "models": catalog.get_catalog()})
+
+
+@router.put("/models/providers/{name:path}", dependencies=[Depends(require_admin)])
+async def upsert_prov(name: str, req: Request):
+    """新增/更新 provider（api_base 指向 OpenAI 兼容服务，启动探测自动注册其模型）。
+
+    name 为 litellm 前缀（不含 '/'）。用 {name:path} 捕获可能 URL 编码后的 '/'，
+    在业务层给出友好提示，避免裸 404（如误把完整模型 id 当作 provider 名时）。
+    """
+    if "/" in name:
+        return fail(message=f"Provider 名称不能包含「/」：{name}，请填写 litellm 前缀（如 deepseek）")
+    body = await req.json()
+    entry = catalog.upsert_provider(name, body)
+    return ok({"provider": entry, "providers": catalog.provider_models_source(),
+               "models": catalog.get_catalog()})
+
+
+@router.delete("/models/providers/{name:path}", dependencies=[Depends(require_admin)])
+async def delete_prov(name: str):
+    if "/" in name:
+        return fail(message=f"Provider 名称不能包含「/」：{name}，请填写 litellm 前缀")
+    removed = catalog.remove_provider(name)
+    return ok({"removed": removed, "providers": catalog.provider_models_source(),
+               "models": catalog.get_catalog()})
+
+
+@router.put("/models/defaults", dependencies=[Depends(require_admin)])
+async def put_defaults(req: Request):
+    """设置默认模型 + 轻量模型 + 图片解析模型 + 语音模型规格。"""
+    body = await req.json()
+    result = catalog.set_defaults(
+        body.get("default_model"),
+        body.get("small_model"),
+        body.get("image_caption_model"),
+        body.get("voice_model_size"),
+    )
+    return ok({**result, "models": catalog.get_catalog()})
+
+
+@router.post("/models/reload", dependencies=[Depends(require_admin)])
+async def reload_models():
+    """重新读取配置（DB）+ 重探测（不重启即可生效）。
+
+    会逐个 Provider 重新发起探测请求（外部副作用 + 状态变更），故要求管理端鉴权。
+    """
+    catalog.reload_catalog()
+    return ok({
+        "models": catalog.get_catalog(),
+        "default_model": catalog.default_model(),
+        "small_model": catalog.small_model(),
+        "image_caption_model": catalog.image_caption_model(),
+        "voice_model_size": catalog.voice_model_size(),
+    })
+
+
+@router.get("/models/export", dependencies=[Depends(require_admin)])
+async def export_models():
+    """导出当前模型配置（与旧 model_catalog.json 同构，跨机器迁移载体）。
+
+    导出体含 Provider 明文 api_key，故要求管理端鉴权。
+    """
+    from app.models import catalog_db
+    return ok(catalog_db.export_config())
+
+
+@router.get("/models/catalog-full", dependencies=[Depends(require_admin)])
+async def export_catalog_full():
+    """全量模型快照：settings + providers + catalog_entries（含 kind 字段）。
+
+    与 /models/export 不同：export 只含用户覆盖层（overrides/extras），catalog-full
+    包含所有 kind=builtin/override/extra 的原始条目，供跨机器迁移或 DB 快照。
+    同样含明文 api_key，故要求管理端鉴权。
+    """
+    from app.models import catalog_db
+    return ok(catalog_db.export_full())
+
+
+@router.post("/models/import", dependencies=[Depends(require_admin)])
+async def import_models(req: Request):
+    """导入模型配置（覆盖写库；body 为与旧 model_catalog.json 同构的对象）。"""
+    from app.models import catalog_db
+    body = await req.json()
+    try:
+        result = catalog_db.import_config(body)
+    except ValueError as e:
+        return fail(message=str(e))
+    catalog.reload_catalog()
+    return ok({**result, "models": catalog.get_catalog()})

@@ -7,7 +7,8 @@
 - history.py      历史装载 + 上下文纪元（对齐 SessionHistory.load）
 - service.py      业务门面（组合 repository+history）
 - deps.py         FastAPI 隔离依赖（User/Project/Session 三级）
-- router.py       /api/sessions REST 路由
+
+注：/api/sessions REST 路由由平台层 `app/api/sessions.py` 提供（旧的 router.py 已删除）。
 """
 
 from .db import init_db

@@ -12,7 +12,7 @@ PLUGIN_DESCRIPTION = "Analyze characters and dialogues from documents in the kno
 
 
 def _get_vector_store():
-    from app.rag.plugin_bridge import get_vector_store
+    from cognition.plugin_bridge import get_vector_store
     return get_vector_store()
 
 

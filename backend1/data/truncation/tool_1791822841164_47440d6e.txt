@@ -1,0 +1,564 @@
+<file>
+0: <file>
+1: 0: <task id="task:72242fe5" state="completed"><task_result>我需要先说明一个限制：**我当前只具备只读工具**（ls / read_file / glob / grep），系统已强制禁用写入、编辑、创建目录、执行命令等所有工具。因此我**无法在 D 盘创建文件夹，也无法写入任何代码文件**。
+2: 1: 
+3: 2: 不过，我可以为你提供一份**完整、可直接使用的俄罗斯方块游戏代码**。你只需手动创建文件夹并把代码保存进去即可。
+4: 3: 
+5: 4: ---
+6: 5: 
+7: 6: ## 一、目录结构建议
+8: 7: 
+9: 8: 在 `D:\俄罗斯方块游戏\` 下创建如下结构：
+10: 9: 
+11: 10: ```
+12: 11: 俄罗斯方块游戏/
+13: 12: ├── index.html          # 页面结构
+14: 13: ├── css/
+15: 14: │   └── style.css       # 样式
+16: 15: └── js/
+17: 16:     ├── config.js       # 游戏配置常量
+18: 17:     ├── board.js        # 棋盘逻辑
+19: 18:     ├── tetromino.js    # 方块定义与旋转
+20: 19:     ├── score.js        # 计分系统
+21: 20:     ├── game.js         # 游戏主循环与状态管理
+22: 21:     └── main.js         # 入口与事件绑定
+23: 22: ```
+24: 23: 
+25: 24: ---
+26: 25: 
+27: 26: ## 二、完整代码
+28: 27: 
+29: 28: ### 1. `index.html`
+30: 29: 
+31: 30: ```html
+32: 31: <!DOCTYPE html>
+33: 32: <html lang="zh-CN">
+34: 33: <head>
+35: 34:   <meta charset="UTF-8" />
+36: 35:   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+37: 36:   <title>俄罗斯方块</title>
+38: 37:   <link rel="stylesheet" href="css/style.css" />
+39: 38: </head>
+40: 39: <body>
+41: 40:   <div class="game-container">
+42: 41:     <canvas id="board" width="300" height="600"></canvas>
+43: 42: 
+44: 43:     <aside class="sidebar">
+45: 44:       <div class="panel">
+46: 45:         <h2>下一个</h2>
+47: 46:         <canvas id="next" width="120" height="120"></canvas>
+48: 47:       </div>
+49: 48: 
+50: 49:       <div class="panel score-panel">
+51: 50:         <div class="score-item">
+52: 51:           <span class="label">分数</span>
+53: 52:           <span id="score" class="value">0</span>
+54: 53:         </div>
+55: 54:         <div class="score-item">
+56: 55:           <span class="label">消行</span>
+57: 56:           <span id="lines" class="value">0</span>
+58: 57:         </div>
+59: 58:         <div class="score-item">
+60: 59:           <span class="label">等级</span>
+61: 60:           <span id="level" class="value">1</span>
+62: 61:         </div>
+63: 62:         <div class="score-item">
+64: 63:           <span class="label">最高分</span>
+65: 64:           <span id="highScore" class="value">0</span>
+66: 65:         </div>
+67: 66:       </div>
+68: 67: 
+69: 68:       <div class="panel controls">
+70: 69:         <h2>操作</h2>
+71: 70:         <p>← → 移动</p>
+72: 71:         <p>↑ 旋转</p>
+73: 72:         <p>↓ 加速下落</p>
+74: 73:         <p>空格 直接落下</p>
+75: 74:         <p>P 暂停 / 继续</p>
+76: 75:       </div>
+77: 76: 
+78: 77:       <button id="restartBtn">重新开始</button>
+79: 78:     </aside>
+80: 79:   </div>
+81: 80: 
+82: 81:   <div id="overlay" class="overlay hidden">
+83: 82:     <div class="overlay-content">
+84: 83:       <h1 id="overlayTitle">游戏结束</h1>
+85: 84:       <p id="overlayText">最终得分：0</p>
+86: 85:       <button id="overlayBtn">再来一局</button>
+87: 86:     </div>
+88: 87:   </div>
+89: 88: 
+90: 89:   <script src="js/config.js"></script>
+91: 90:   <script src="js/tetromino.js"></script>
+92: 91:   <script src="js/board.js"></script>
+93: 92:   <script src="js/score.js"></script>
+94: 93:   <script src="js/game.js"></script>
+95: 94:   <script src="js/main.js"></script>
+96: 95: </body>
+97: 96: </html>
+98: 97: ```
+99: 98: 
+100: 99: ### 2. `css/style.css`
+101: 100: 
+102: 101: ```css
+103: 102: * {
+104: 103:   margin: 0;
+105: 104:   padding: 0;
+106: 105:   box-sizing: border-box;
+107: 106: }
+108: 107: 
+109: 108: body {
+110: 109:   min-height: 100vh;
+111: 110:   display: flex;
+112: 111:   align-items: center;
+113: 112:   justify-content: center;
+114: 113:   background: radial-gradient(circle at 50% 0%, #1e2a4a, #0b0f1a 70%);
+115: 114:   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+116: 115:   color: #e8eefc;
+117: 116: }
+118: 117: 
+119: 118: .game-container {
+120: 119:   display: flex;
+121: 120:   gap: 24px;
+122: 121:   padding: 24px;
+123: 122:   background: rgba(255, 255, 255, 0.04);
+124: 123:   border: 1px solid rgba(255, 255, 255, 0.08);
+125: 124:   border-radius: 16px;
+126: 125:   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+127: 126: }
+128: 127: 
+129: 128: #board {
+130: 129:   background: #0a0e18;
+131: 130:   border-radius: 8px;
+132: 131:   box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.06);
+133: 132: }
+134: 133: 
+135: 134: .sidebar {
+136: 135:   width: 180px;
+137: 136:   display: flex;
+138: 137:   flex-direction: column;
+139: 138:   gap: 16px;
+140: 139: }
+141: 140: 
+142: 141: .panel {
+143: 142:   background: rgba(255, 255, 255, 0.05);
+144: 143:   border-radius: 10px;
+145: 144:   padding: 12px;
+146: 145: }
+147: 146: 
+148: 147: .panel h2 {
+149: 148:   font-size: 14px;
+150: 149:   font-weight: 600;
+151: 150:   letter-spacing: 1px;
+152: 151:   color: #8fa3c8;
+153: 152:   margin-bottom: 8px;
+154: 153:   text-transform: uppercase;
+155: 154: }
+156: 155: 
+157: 156: #next {
+158: 157:   display: block;
+159: 158:   margin: 0 auto;
+160: 159:   background: #0a0e18;
+161: 160:   border-radius: 6px;
+162: 161: }
+163: 162: 
+164: 163: .score-item {
+165: 164:   display: flex;
+166: 165:   justify-content: space-between;
+167: 166:   align-items: baseline;
+168: 167:   padding: 4px 0;
+169: 168: }
+170: 169: 
+171: 170: .score-item .label {
+172: 171:   font-size: 13px;
+173: 172:   color: #8fa3c8;
+174: 173: }
+175: 174: 
+176: 175: .score-item .value {
+177: 176:   font-size: 20px;
+178: 177:   font-weight: 700;
+179: 178:   color: #4fd1c5;
+180: 179:   font-variant-numeric: tabular-nums;
+181: 180: }
+182: 181: 
+183: 182: .controls p {
+184: 183:   font-size: 13px;
+185: 184:   color: #b8c6e0;
+186: 185:   line-height: 1.8;
+187: 186: }
+188: 187: 
+189: 188: button {
+190: 189:   padding: 10px;
+191: 190:   border: none;
+192: 191:   border-radius: 8px;
+193: 192:   background: linear-gradient(135deg, #4fd1c5, #3b82f6);
+194: 193:   color: #06121f;
+195: 194:   font-size: 15px;
+196: 195:   font-weight: 700;
+197: 196:   cursor: pointer;
+198: 197:   transition: transform 0.15s, filter 0.15s;
+199: 198: }
+200: 199: 
+201: 200: button:hover {
+202: 201:   transform: translateY(-2px);
+203: 202:   filter: brightness(1.1);
+204: 203: }
+205: 204: 
+206: 205: .overlay {
+207: 206:   position: fixed;
+208: 207:   inset: 0;
+209: 208:   display: flex;
+210: 209:   align-items: center;
+211: 210:   justify-content: center;
+212: 211:   background: rgba(4, 8, 16, 0.8);
+213: 212:   backdrop-filter: blur(4px);
+214: 213:   z-index: 10;
+215: 214: }
+216: 215: 
+217: 216: .overlay.hidden {
+218: 217:   display: none;
+219: 218: }
+220: 219: 
+221: 220: .overlay-content {
+222: 221:   text-align: center;
+223: 222:   padding: 40px 56px;
+224: 223:   background: #131a2b;
+225: 224:   border-radius: 16px;
+226: 225:   border: 1px solid rgba(255, 255, 255, 0.1);
+227: 226: }
+228: 227: 
+229: 228: .overlay-content h1 {
+230: 229:   font-size: 28px;
+231: 230:   margin-bottom: 12px;
+232: 231:   color: #4fd1c5;
+233: 232: }
+234: 233: 
+235: 234: .overlay-content p {
+236: 235:   margin-bottom: 24px;
+237: 236:   color: #b8c6e0;
+238: 237: }
+239: 238: ```
+240: 239: 
+241: 240: ### 3. `js/config.js`
+242: 241: 
+243: 242: ```js
+244: 243: /**
+245: 244:  * 全局配置常量
+246: 245:  * 集中管理尺寸、速度、计分规则，便于调整与维护
+247: 246:  */
+248: 247: const CONFIG = {
+249: 248:   // 棋盘：10 列 × 20 行
+250: 249:   COLS: 10,
+251: 250:   ROWS: 20,
+252: 251:   BLOCK_SIZE: 30, // 每个格子的像素大小
+253: 252: 
+254: 253:   // 下落速度（毫秒/格），随等级递减
+255: 254:   BASE_DROP_INTERVAL: 800,
+256: 255:   MIN_DROP_INTERVAL: 100,
+257: 256:   SPEED_STEP: 70, // 每升一级减少的毫秒数
+258: 257: 
+259: 258:   // 计分规则：一次消除 n 行的基础分
+260: 259:   LINE_SCORES: { 1: 100, 2: 300, 3: 500, 4: 800 },
+261: 260:   SOFT_DROP_BONUS: 1,  // 软降每格加分
+262: 261:   HARD_DROP_BONUS: 2,  // 硬降每格加分
+263: 262: 
+264: 263:   // 每消除多少行升一级
+265: 264:   LINES_PER_LEVEL: 10,
+266: 265: 
+267: 266:   // 本地存储键名
+268: 267:   STORAGE_KEY: "tetris_high_score",
+269: 268: };
+270: 269: ```
+271: 270: 
+272: 271: ### 4. `js/tetromino.js`
+273: 272: 
+274: 273: ```js
+275: 274: /**
+276: 275:  * 七种标准方块（Tetromino）定义与旋转逻辑
+277: 276:  * 使用矩阵表示形状，旋转即矩阵转置 + 反转
+278: 277:  */
+279: 278: const SHAPES = {
+280: 279:   I: [[1, 1, 1, 1]],
+281: 280:   O: [
+282: 281:     [1, 1],
+283: 282:     [1, 1],
+284: 283:   ],
+285: 284:   T: [
+286: 285:     [0, 1, 0],
+287: 286:     [1, 1, 1],
+288: 287:   ],
+289: 288:   S: [
+290: 289:     [0, 1, 1],
+291: 290:     [1, 1, 0],
+292: 291:   ],
+293: 292:   Z: [
+294: 293:     [1, 1, 0],
+295: 294:     [0, 1, 1],
+296: 295:   ],
+297: 296:   J: [
+298: 297:     [1, 0, 0],
+299: 298:     [1, 1, 1],
+300: 299:   ],
+301: 300:   L: [
+302: 301:     [0, 0, 1],
+303: 302:     [1, 1, 1],
+304: 303:   ],
+305: 304: };
+306: 305: 
+307: 306: /** 每种方块对应的颜色 */
+308: 307: const COLORS = {
+309: 308:   I: "#4fd1c5",
+310: 309:   O: "#f6c445",
+311: 310:   T: "#b06cf0",
+312: 311:   S: "#5ad469",
+313: 312:   Z: "#ef5b6b",
+314: 313:   J: "#4f8ef7",
+315: 314:   L: "#f0913f",
+316: 315: };
+317: 316: 
+318: 317: class Tetromino {
+319: 318:   /**
+320: 319:    * @param {string} type 方块类型（I/O/T/S/Z/J/L）
+321: 320:    */
+322: 321:   constructor(type) {
+323: 322:     this.type = type;
+324: 323:     // 深拷贝形状，避免旋转时污染原始定义
+325: 324:     this.matrix = SHAPES[type].map((row) => [...row]);
+326: 325:     this.color = COLORS[type];
+327: 326:     // 初始位置：水平居中，顶部
+328: 327:     this.x = Math.floor((CONFIG.COLS - this.matrix[0].length) / 2);
+329: 328:     this.y = 0;
+330: 329:   }
+331: 330: 
+332: 331:   /** 顺时针旋转 90°，返回新矩阵（不修改自身） */
+333: 332:   rotatedMatrix() {
+334: 333:     const rows = this.matrix.length;
+335: 334:     const cols = this.matrix[0].length;
+336: 335:     const result = Array.from({ length: cols }, () => Array(rows).fill(0));
+337: 336:     for (let r = 0; r < rows; r++) {
+338: 337:       for (let c = 0; c < cols; c++) {
+339: 338:         result[c][rows - 1 - r] = this.matrix[r][c];
+340: 339:       }
+341: 340:     }
+342: 341:     return result;
+343: 342:   }
+344: 343: 
+345: 344:   /** 执行旋转 */
+346: 345:   rotate() {
+347: 346:     this.matrix = this.rotatedMatrix();
+348: 347:   }
+349: 348: 
+350: 349:   /** 返回方块占据的绝对坐标列表 [{x, y}] */
+351: 350:   cells(matrix = this.matrix, offsetX = this.x, offsetY = this.y) {
+352: 351:     const list = [];
+353: 352:     matrix.forEach((row, r) => {
+354: 353:       row.forEach((val, c) => {
+355: 354:         if (val) list.push({ x: offsetX + c, y: offsetY + r });
+356: 355:       });
+357: 356:     });
+358: 357:     return list;
+359: 358:   }
+360: 359: }
+361: 360: 
+362: 361: /** 随机生成一个方块类型 */
+363: 362: function randomType() {
+364: 363:   const types = Object.keys(SHAPES);
+365: 364:   return types[Math.floor(Math.random() * types.length)];
+366: 365: }
+367: 366: ```
+368: 367: 
+369: 368: ### 5. `js/board.js`
+370: 369: 
+371: 370: ```js
+372: 371: /**
+373: 372:  * 棋盘：负责网格数据、碰撞检测、锁定方块、消行
+374: 373:  */
+375: 374: class Board {
+376: 375:   constructor() {
+377: 376:     this.reset();
+378: 377:   }
+379: 378: 
+380: 379:   reset() {
+381: 380:     // 二维数组，null 表示空格，否则存储颜色
+382: 381:     this.grid = Array.from({ length: CONFIG.ROWS }, () =>
+383: 382:       Array(CONFIG.COLS).fill(null)
+384: 383:     );
+385: 384:   }
+386: 385: 
+387: 386:   /** 判断一组坐标是否越界或与已锁定方块重叠 */
+388: 387:   isCollision(cells) {
+389: 388:     return cells.some(({ x, y }) => {
+390: 389:       if (x < 0 || x >= CONFIG.COLS || y >= CONFIG.ROWS) return true;
+391: 390:       if (y < 0) return false; // 允许在顶部之上（生成时）
+392: 391:       return this.grid[y][x] !== null;
+393: 392:     });
+394: 393:   }
+395: 394: 
+396: 395:   /** 将方块锁定进网格 */
+397: 396:   lock(tetromino) {
+398: 397:     tetromino.cells().forEach(({ x, y }) => {
+399: 398:       if (y >= 0 && y < CONFIG.ROWS && x >= 0 && x < CONFIG.COLS) {
+400: 399:         this.grid[y][x] = tetromino.color;
+401: 400:       }
+402: 401:     });
+403: 402:   }
+404: 403: 
+405: 404:   /**
+406: 405:    * 消除已填满的行
+407: 406:    * @returns {number} 消除的行数
+408: 407:    */
+409: 408:   clearLines() {
+410: 409:     let cleared = 0;
+411: 410:     for (let r = CONFIG.ROWS - 1; r >= 0; r--) {
+412: 411:       if (this.grid[r].every((cell) => cell !== null)) {
+413: 412:         this.grid.splice(r, 1);
+414: 413:         this.grid.unshift(Array(CONFIG.COLS).fill(null));
+415: 414:         cleared++;
+416: 415:         r++; // 重新检查当前行（因为上方行下移了）
+417: 416:       }
+418: 417:     }
+419: 418:     return cleared;
+420: 419:   }
+421: 420: 
+422: 421:   /** 绘制棋盘与已锁定方块 */
+423: 422:   draw(ctx) {
+424: 423:     const { BLOCK_SIZE, COLS, ROWS } = CONFIG;
+425: 424:     ctx.clearRect(0, 0, COLS * BLOCK_SIZE, ROWS * BLOCK_SIZE);
+426: 425: 
+427: 426:     // 网格线
+428: 427:     ctx.strokeStyle = "rgba(255,255,255,0.05)";
+429: 428:     ctx.lineWidth = 1;
+430: 429:     for (let c = 0; c <= COLS; c++) {
+431: 430:       ctx.beginPath();
+432: 431:       ctx.moveTo(c * BLOCK_SIZE, 0);
+433: 432:       ctx.lineTo(c * BLOCK_SIZE, ROWS * BLOCK_SIZE);
+434: 433:       ctx.stroke();
+435: 434:     }
+436: 435:     for (let r = 0; r <= ROWS; r++) {
+437: 436:       ctx.beginPath();
+438: 437:       ctx.moveTo(0, r * BLOCK_SIZE);
+439: 438:       ctx.lineTo(COLS * BLOCK_SIZE, r * BLOCK_SIZE);
+440: 439:       ctx.stroke();
+441: 440:     }
+442: 441: 
+443: 442:     // 已锁定方块
+444: 443:     this.grid.forEach((row, r) => {
+445: 444:       row.forEach((color, c) => {
+446: 445:         if (color) drawBlock(ctx, c, r, color);
+447: 446:       });
+448: 447:     });
+449: 448:   }
+450: 449: }
+451: 450: 
+452: 451: /** 通用方块绘制函数（带高光效果） */
+453: 452: function drawBlock(ctx, col, row, color) {
+454: 453:   const { BLOCK_SIZE } = CONFIG;
+455: 454:   const x = col * BLOCK_SIZE;
+456: 455:   const y = row * BLOCK_SIZE;
+457: 456:   const pad = 1;
+458: 457: 
+459: 458:   ctx.fillStyle = color;
+460: 459:   ctx.fillRect(x + pad, y + pad, BLOCK_SIZE - pad * 2, BLOCK_SIZE - pad * 2);
+461: 460: 
+462: 461:   // 顶部/左侧高光
+463: 462:   ctx.fillStyle = "rgba(255,255,255,0.25)";
+464: 463:   ctx.fillRect(x + pad, y + pad, BLOCK_SIZE - pad * 2, 4);
+465: 464:   ctx.fillRect(x + pad, y + pad, 4, BLOCK_SIZE - pad * 2);
+466: 465: }
+467: 466: ```
+468: 467: 
+469: 468: ### 6. `js/score.js`
+470: 469: 
+471: 470: ```js
+472: 471: /**
+473: 472:  * 计分系统：负责分数、消行、等级、最高分
+474: 473:  */
+475: 474: class ScoreSystem {
+476: 475:   constructor() {
+477: 476:     this.score = 0;
+478: 477:     this.lines = 0;
+479: 478:     this.level = 1;
+480: 479:     this.highScore = this.loadHighScore();
+481: 480:   }
+482: 481: 
+483: 482:   reset() {
+484: 483:     this.score = 0;
+485: 484:     this.lines = 0;
+486: 485:     this.level = 1;
+487: 486:   }
+488: 487: 
+489: 488:   /**
+490: 489:    * 根据消除行数计算并累加分数
+491: 490:    * 分数 = 基础分 × 当前等级
+492: 491:    * @param {number} clearedLines 本次消除的行数
+493: 492:    */
+494: 493:   addLines(clearedLines) {
+495: 494:     if (clearedLines <= 0) return;
+496: 495:     const base = CONFIG.LINE_SCORES[clearedLines] || 0;
+497: 496:     this.score += base * this.level;
+498: 497:     this.lines += clearedLines;
+499: 498:     this.updateLevel();
+500: 499:     this.updateHighScore();
+501: 500:   }
+502: 501: 
+503: 502:   /** 软降/硬降奖励分 */
+504: 503:   addDropBonus(cells, isHard) {
+505: 504:     const bonus = isHard ? CONFIG.HARD_DROP_BONUS : CONFIG.SOFT_DROP_BONUS;
+506: 505:     this.score += cells * bonus;
+507: 506:     this.updateHighScore();
+508: 507:   }
+509: 508: 
+510: 509:   /** 每消除 LINES_PER_LEVEL 行升一级 */
+511: 510:   updateLevel() {
+512: 511:     this.level = Math.floor(this.lines / CONFIG.LINES_PER_LEVEL) + 1;
+513: 512:   }
+514: 513: 
+515: 514:   /** 当前等级对应的下落间隔（毫秒） */
+516: 515:   getDropInterval() {
+517: 516:     const interval =
+518: 517:       CONFIG.BASE_DROP_INTERVAL - (this.level - 1) * CONFIG.SPEED_STEP;
+519: 518:     return Math.max(interval, CONFIG.MIN_DROP_INTERVAL);
+520: 519:   }
+521: 520: 
+522: 521:   updateHighScore() {
+523: 522:     if (this.score > this.highScore) {
+524: 523:       this.highScore = this.score;
+525: 524:       this.saveHighScore();
+526: 525:     }
+527: 526:   }
+528: 527: 
+529: 528:   loadHighScore() {
+530: 529:     try {
+531: 530:       return Number(localStorage.getItem(CONFIG.STORAGE_KEY)) || 0;
+532: 531:     } catch {
+533: 532:       return 0;
+534: 533:     }
+535: 534:   }
+536: 535: 
+537: 536:   saveHighScore() {
+538: 537:     try {
+539: 538:       localStorage.setItem(CONFIG.STORAGE_KEY, String(this.highScore));
+540: 539:     } catch {
+541: 540:       /* 忽略存储异常 */
+542: 541:     }
+543: 542:   }
+544: 543: }
+545: 544: ```
+546: 545: 
+547: 546: ### 7. `js/game.js`
+548: 547: 
+549: 548: ```js
+550: 549: /**
+551: 550:  * 游戏核心：状态管理、主循环、输入处理
+552: 551:  */
+553: 552: class Game {
+554: 553:   constructor(boardCanvas, nextCanvas, scoreSystem, ui) {
+555: 554:     this.boardCanvas = boardCanvas;
+556: 555:     this.boardCtx = boardCanvas.get</task_result></task>
+557: 
+558: (End of file - total 556 lines)
+559: </file>
+
+(End of file - total 560 lines)
+</file>

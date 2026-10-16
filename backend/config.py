@@ -1,0 +1,308 @@
+from pathlib import Path
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
+
+
+class Settings(BaseSettings):
+    """应用配置，从 .env 文件读取环境变量。"""
+
+    model_config = SettingsConfigDict(
+        env_file=Path(__file__).resolve().parent / ".env",
+        env_file_encoding="utf-8",
+        extra="allow",
+    )
+
+    llm_model: str = "deepseek-chat"
+    llm_api_key: Optional[str] = None
+    llm_api_base: Optional[str] = "https://api.deepseek.com"
+
+    # ── 持久化后端（session.db / model_catalog.db / chapter_store.db / tasks.db 的统一后端）──
+    # DB_TYPE: sqlite | mysql | postgresql
+    # - sqlite（默认）：各子系统沿用各自 data/*.db 文件（建表零回归，测试/迁移工具不变）。
+    # - mysql / postgresql：四个子系统的表统一落在同一个 DB_URL 数据库内，schema 由
+    #   Alembic 迁移链管理（backend/alembic，`upgrade head` 在启动时执行）。
+    # DB_URL 优先；未提供时按 DB_HOST/DB_PORT/DB_USERNAME/DB_PASSWORD/DB_NAME 拼装。
+    db_type: str = "sqlite"
+    db_url: Optional[str] = None
+    db_host: str = "127.0.0.1"
+    db_port: int = 0  # 0 = 按类型取默认（mysql 3306 / postgresql 5432）
+    db_username: str = "root"
+    db_password: str = ""
+    db_name: str = "agentsuper"
+
+    vector_store_path: str = "data/vector_store"
+    upload_dir: str = "data/uploads"
+
+    chunk_size: int = 500
+    chunk_overlap: int = 200
+
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+
+    enable_reranker: bool = True
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    # ── 模型下载容错（C3）──
+    # 单次 snapshot_download 调用超时（秒）；0 = 不设整体超时（依赖底层库自身重试/续传）
+    model_download_timeout: int = 600
+    # 单个下载源（ModelScope / HuggingFace）内的重试次数（不含首次尝试）
+    model_download_retries: int = 2
+
+    skills_dir: str = "skills"
+    plugins_dir: str = "plugins"
+
+    summarization_model: Optional[str] = None
+    summarization_api_key: Optional[str] = None
+    summarization_api_base: Optional[str] = None
+    summarization_keep_messages: int = 20
+
+    # ── 语音 / TTS（本地 Qwen3-TTS 子进程，无外部 HTTP 接口调用）──
+    # 目录固定为 backend/ttsclone（不配置路径）；模型不自动下载，
+    # 先用 scripts/download_tts_model.py 预下载到 backend/ttsclone/models
+    voice_tts_enabled: bool = False
+    voice_tts_speaker: str = "Vivian"
+    # 交互默认 0.6B（本机 CPU 单句 ~5s，1.7B ~38s 太慢，仅离线批量质检用大模型）
+    voice_tts_model_size: str = "0.6B"
+    voice_tts_timeout: int = 600
+
+    # 多 Agent 超时（秒）
+    # supervisor 转发到子 Agent 的等待上限（单次生成可能因 LLM 延迟/tool 循环超 60s）
+    sub_agent_timeout: float = 150.0
+    # 端点层等待 supervisor 返回的上限（需 > decompose + sub_agent + synthesize）
+    supervisor_timeout: float = 300.0
+
+# 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
+    # 默认 16_384 ≈ 模型原生上限的常用值；长任务配合系统提示"长内容写文件"规则避免截断。
+    # [token 优化 v9] 16_384 → 8_192：普通问答用不到那么大输出，压低超长输出兜底成本。
+    # [输出上限 2026-10-03] 8_192 → 16_384：实测写俄罗斯方块时整份代码塞进单次
+    # tool_write_file 参数（24,528 字符）正好撞 8K 被腰斩。注意这只在**模型目录也放开**
+    # 时才有效 —— resolve_max_output_tokens 取 min(模型声明, 本值) 且绝不放大，
+    # 故 builtin_catalog.py 里 deepseek 的 limits.max_output_tokens 同步提到 16_384。
+    # [思考预算 2026-10-09] 16_384 → 32_000：deepseek-v4-flash 默认开思考，且思考 token
+    # 计入 max_tokens（实测 ct==reasoning==16_384、finish=length、content=0），16K 上限被
+    # 思考吃光 → 正文与工具调用皆空、任务失败。对齐 opencode `OUTPUT_TOKEN_MAX=32000`，
+    # 给「思考 + 正文」留总预算。⚠ 必须同步抬高 CONTEXT_RESERVE_TOKENS（预留 ≥ 输出上限），
+    # 并同步 builtin_catalog deepseek 条目的 limits.max_output_tokens（resolve 取 min）。
+    llm_max_tokens: int = 32_000
+
+    # Token 成本控制
+    # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
+    # 对齐 opencode overflow.ts：usable = max_context_tokens - context_reserve_tokens
+    # [token 优化 v5] 48K → 32K：配合 v4 压缩（信息不丢），单次调用天花板 -33%
+    # [token 优化 v9] 32K → 24K：usable ≈ 15.8K，进一步压平单次调用体积（配套 MAX_HISTORY_TOKENS 16K）
+    # [输出上限 2026-10-03] 24K → 32K：**不是**为了放大单次调用体积（那会让每轮 prompt 成本涨 33%），
+    # 而是为了给上调后的输出预留腾地方 —— 预留必须 ≥ 输出上限，否则 usable = 32K-16K = 16K
+    # 会比调前的 15.8K 还小，历史可用量反而缩水。32K-16K = 16K ≈ 原来的 15.8K，
+    # 即「输出天花板翻倍、单次调用体积基本不变」，成本中性。
+    max_context_tokens: int = 32_768
+    # 输出预留：留给模型回答的 token（≈ min(20_000, maxOutputTokens)）
+    # [输出上限 2026-10-03] 8_192 → 16_384，与 llm_max_tokens 对齐（预留 < 输出上限是自相矛盾的：
+    # 模型一次输出就能吃掉全部 usable，留给历史的窗口归零）。
+    # [思考预算 2026-10-09] 16_384 → 32_768：预留必须 ≥ llm_max_tokens（32_000），
+    # 否则一次输出就能吃光 usable、历史窗口归零（见 test_output_budget.py）。
+    context_reserve_tokens: int = 32_768
+    # [token 优化 P8] cl100k_base 对 DeepSeek tokenizer 系统性低估（实测 +13.2%：
+    # round8 估算 20,851 vs 实际 23,599）。用于 token_counter 估算校正，避免
+    # 截断/压缩判断"以为没超、实际已超"（实测 round9 实际 25,779 超 usable 23,808）
+    token_estimate_correction: float = 1.13
+    # [token 优化 P8] 压缩触发比例：usable × ratio。原 0.8 实测 round 8 才触发、
+    # 压缩后下一轮仍超限；降到 0.65 提前 2-3 轮介入，压平长工具循环 token 曲线
+    # [token 优化 v9] 0.65 → 0.6：usable 降为 15.8K 后保持"压缩早于截断"的窗口
+    compaction_threshold_ratio: float = 0.6
+    # 压缩触发阈值（token）；0 表示自动 = usable × compaction_threshold_ratio，长工具循环在截断兜底之前先压缩
+    compaction_threshold_tokens: int = 0
+    # 压缩时尾部保留的最近轮次（对齐 opencode tail_turns，默认 2）
+    context_tail_turns: int = 2
+    # 尾部保留的 token 预算（对齐 opencode preserve_recent_tokens，默认 8_000）
+    context_preserve_recent_tokens: int = 8_000
+    # 回溯式工具输出清理：最近 N 轮之内累计工具输出超过该值时，清理更旧输出。
+    # 注意：这里只是「原始配置值」，实际生效值由 budget.py 与压缩阈值联动钳制
+    # （protect = min(配置值, compaction_threshold_tokens()//2)，minimum = protect//2），
+    # 保证 prune 先于压缩回收旧输出（[token 优化 v12]）。
+    tool_output_protect_tokens: int = 24_000
+    # 清理收益低于该值时不做（避免微小收益的频繁改写）；生效值同样经联动钳制。
+    tool_output_prune_minimum_tokens: int = 12_000
+    # [C5 长任务上下文越界根治] 单次 LLM 调用预算的安全系数：截断/压缩目标
+    # 使用 usable × context_safety_ratio（默认 0.9），为估算误差预留 ≥10% 余量，
+    # 避免「截断按估算放行、Provider 按实际拒绝」。见 budget.llm_call_budget。
+    context_safety_ratio: float = 0.9
+    # [C5] 压缩目标系数：压缩后的上下文应尽量落到 usable × compaction_target_ratio
+    # 之下（默认 0.5），保证压缩后仍有充足余量继续多轮工具循环。
+    compaction_target_ratio: float = 0.5
+    # [C5] 单条工具输出 token 上限（对齐 opencode 按 token 截断语义）：中文场景
+    # 32KB 字符 ≈ 48K token 单条过大，bound_tool_output 在字符/行限之外再按 token
+    # 封顶，超限写盘 + 续读提示。0 = 不启用 token 封顶。
+    tool_output_max_tokens: int = 8_000
+    # [C5 · 方案 D 小步快走] 长任务周期性地把旧轮次压成摘要（HierarchicalSummarization
+    # Middleware），上下文只装 [摘要 checkpoint + 最近一轮 + 当前步]，不随轮次线性膨胀。
+    step_summary_enabled: bool = True
+    # 从第几步起进入小步快走（短任务保持 in-loop 快路径，不做多余摘要调用）
+    step_summary_min_rounds: int = 3
+    # 每隔几步做一次摘要替换（间隔 1 = 每轮都压，成本高；间隔 2 = 折中）
+    step_summary_interval: int = 2
+    # 摘要后原样保留的最近消息条数（覆盖最近一轮 assistant+tool 结果）
+    step_summary_keep_messages: int = 4
+    # ── [C5 · 方案 E/F] 长任务小步快走（多请求接力）──
+    # code 子 Agent 对多步骤实现类任务先拆解计划、每步一个独立 fresh-context 请求执行，
+    # 步间只传落盘 STEP_STATE（上下文永不膨胀）。默认开启（用 LONG_TASK_MIN_QUESTION_CHARS
+    # 门控，短问题不触发规划调用，零额外开销）。
+    long_task_step_mode: bool = True
+    # 接力规划门控：问题字符数低于该阈值时不拆计划（保持普通单请求路径）
+    long_task_min_question_chars: int = 30
+    # 接力时计划最多拆几步
+    long_task_max_steps: int = 6
+    # ── [F8/F9] 图片上传解析给模型（多模态附件管线）──
+    # 上传图片先规格化（缩放+JPEG 压缩）再投递给模型，避免大图 base64 撑爆上下文。
+    image_max_dimension: int = 1024          # 长边缩放上限（px）
+    image_max_kb: int = 512                  # 压缩后单图字节上限（KB）
+    image_token_cap: int = 6000              # 单请求图片 token 预算上限（超限进一步降采样）
+    image_thumbnail_px: int = 256            # 回显/缓存缩略图边长
+    image_use_ocr: bool = False              # 图片 OCR 提取文本（截图/文档图，需 OCR 库）
+    image_vlm_caption: bool = True           # 图片描述桥：视觉 LLM 生成 caption 注入文本
+    image_caption_model: str = "openai/gpt-4o-mini"  # caption VLM（litellm 前缀；内网改 ollama/llava）
+    image_caption_api_base: str = ""
+    image_caption_api_key: str = ""
+    image_caption_prompt: str = ""           # 空用默认「用中文简洁描述图片内容与关键细节」
+    image_caption_timeout: int = 15          # caption 调用超时（秒），失败快速降级
+    # 摘要中间件缓存大小（按历史分块缓存，避免每请求全量重算）
+    summarization_cache_size: int = 200
+
+    # 可选：管理端鉴权 token。设置后插件 toggle/call、权限审批等敏感接口需携带
+    # Authorization: Bearer <token>；不设置时这些接口仅允许本机来源（deps.require_admin）。
+    admin_token: Optional[str] = None
+
+    # ── 向量库 / 章节库清理 ──
+    # 启动时清空全部向量库 + 章节库 + BM25 + 上传文件（默认 false，谨慎开启）
+    vector_store_auto_clear: bool = False
+    # 数据保留天数（TTL）：>0 时按文档创建时间定期清理过期数据；0 = 不启用
+    vector_store_ttl_days: int = 0
+    # 定时清理检查间隔（小时），配合 VECTOR_STORE_TTL_DAYS 使用
+    vector_store_cleanup_interval_hours: int = 24
+
+    # ── 并发控制 ──
+    # 全局同时执行的 Agent 任务上限（chat.py `_agent_semaphore`，多 Agent 请求排队）。
+    # 默认 4：RAG Agent 单次执行主要耗时在 LLM 调用（I/O 等待），提高并发不会打满 CPU，
+    # 但 SQLite 连接与 ChromaDB 会有锁竞争，需配合 session.db 连接池（app/session/db.py）。
+    max_concurrent_agents: int = 4
+
+    # CORS 允许的源（JSON 数组，环境变量 CORS_ORIGINS）。默认仅本机前端
+    # （vite dev 5173 / preview 4173），避免局域网/公网页面调用本服务接口。
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ]
+
+    # ── 权限 / 工作区（对齐 opencode external_directory 设计）──
+    # 可写工作目录由前端「工作目录」面板配置（运行时生效，持久化到 data/runtime_workspaces.json）。
+    # external 路径（工作区/临时目录之外）的默认策略：ask | allow | deny
+    external_path_default: str = "ask"
+    # 权限审批等待超时（秒），默认 180；超时视为拒绝
+    # 60s 对人工审批偏紧（弹窗出现后要留给用户阅读与决策时间），配合前端倒计时自动拒绝
+    permission_approval_timeout: int = 180
+    # 是否放行主工作区内受保护源码路径（app/、plugins/、skills/、config/、main.py 等）的写/执行。
+    # 默认 false：这些路径硬保护，添加再多工作区也不能改；
+    # 设为 true 后（如开发本系统自身时）允许 Agent 修改 backend 源码。
+    # .git、.env、*.db、permissions.json 始终保护，不受此开关影响。
+    allow_source_writes: bool = False
+    # [P1 #8] tool_execute 开关（默认 false —— 开箱即用下 shell 执行不可用）。
+    # tool_execute 的白名单/黑名单/SSRF/重定向校验只是「补丁」——解释器内联
+    # （python -c / node -e）、管道与重定向仍可绕过。开启方式（任一即可，见
+    # `tool_execute_available()`）：显式置 `TOOL_EXECUTE_ENABLED=true`，或开启受信任
+    # 的源码写入模式 `ALLOW_SOURCE_WRITES=true`。关闭时 tool_execute 从工具 schema
+    # 摘除且直接调用被拒，任意计算改走 CodeAct（CODEACT_ENABLED=true + tool_code_exec）。
+    tool_execute_enabled: bool = False
+
+    # ── Agent 执行循环护栏（对齐 opencode prompt.ts / processor.ts / max-steps.ts）──
+    # 主步骤上限（对齐 opencode agent.steps，默认 40）：到达上限的最后一轮注入收尾提示，
+    # 并禁用工具，强制"已完成/未完成/下一步"式总结。生效上限 = min(MAX_STEPS, MAX_TOOL_ROUNDS)。
+    max_steps: int = 24
+    # 硬兜底：单次请求内最多 LLM 调用轮数（每轮都是一次完整 LLM 调用）。
+    # 当 MAX_STEPS >= MAX_TOOL_ROUNDS 时，MAX_STEPS 生效上限即等于该值。
+    # [token 优化 v9] 16 → 8：每轮工具调用都会重发整段上下文，减少轮数即减少 token 累积。
+    max_tool_rounds: int = 8
+    # [思考模式 2026-10-09] DeepSeek V4 思考开关：enabled / disabled / adaptive。
+    # 默认 disabled —— 实测 agentic 工具循环里思考会吃光 max_tokens 预算
+    # （reasoning == ct == 上限，finish=length，零工具 / 零正文），且思考轮要求把
+    # reasoning_content 回传（依赖 litellm 补丁）。关闭后 finish=stop、正常产出。
+    # adaptive = 不显式下发，交服务端默认（DeepSeek V4 默认 enabled）；
+    # enabled 时经 extra_body 下发 thinking={"type":"enabled"}（litellm 顶层 kwarg 会被丢弃）。
+    deepseek_thinking: str = "disabled"
+    # [思考模式 2026-10-11] Ollama 思考开关（全局兜底默认）：enabled / disabled / adaptive。
+    # 现已优先使用每模型 `thinking` 字段（前端「模型管理 → 思考模式」）；仅当模型条目未设
+    # `thinking` 时才回落到此处。默认 disabled —— 实测（qwen3.5:4b）litellm+ollama 下
+    # think=True 会把**最终回答**全部塞进 reasoning_content、content 恒空（工具调用也进
+    # reasoning，工具循环报废），与 DeepSeek 同理。关闭后 finish=stop、content 正常产出
+    # （含标准 tool_calls）。adaptive = 不显式下发，交推理服务默认；enabled 时顶层传 think=True。
+    ollama_thinking: str = "disabled"
+    # Doom-loop 检测：同一组工具调用指纹连续重复 N 轮后，注入策略变更提示（≥2）
+    doom_loop_threshold: int = 3
+    # Doom-loop 升级：首次提示之后，再次连续触发 N 次相同指纹即强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具），
+    # 对齐 opencode processor.ts 的 permission.ask(doom_loop) → deny 后 stop 语义
+    doom_loop_max_strikes: int = 2
+    # 工具密集型子 Agent（如 code）的更长等待超时（秒），避免长任务被误判超时
+    sub_agent_timeout_extended: float = 300.0
+    # 使用 extended 超时的子 Agent 列表（逗号分隔）
+    extended_timeout_agents: str = "code"
+    # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth）。
+    # [C10] 默认 1 = 与「实际可达深度」一致：build/plan 委派 explore 仅 1 跳，
+    # 且 explore 的只读 allowlist 不含 tool_task，无法再嵌套 → 原默认值 4 永不触发，
+    # 且与 graphmod/tools.py 的错误文案「(default 1)」自相矛盾。
+    # 放开到 >1 需要同时给子 Agent 挂上 tool_task，否则该守卫仍是不可达代码。
+    subagent_depth: int = 1
+
+    # Ollama 上下文窗口（num_ctx，传给本地推理服务的 options）。Ollama 默认 2048，
+    # 超出窗口的 prompt 会被服务器截断 -> 历史/长上下文静默丢失（模型答"记不清/无历史"）。
+    # 按本机内存/显存调大，例：3090 可 32768；OOM 则下调。
+    ollama_num_ctx: int = 8192
+
+    # ── 共享记忆持久化 ──
+    # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失
+    memory_persist_path: str = "data/agent_memory.json"
+    # tool_memory_set 记忆的有效期（秒），默认 300（5 分钟）
+    memory_ttl_seconds: int = 300
+
+    # ── 用户身份签名（可选，默认关闭）──
+    # 设置 AUTH_TOKEN_SECRET 后启用：X-User-Id 必须携带对应的签名 token
+    # （前端通过 /login 页面注册账号/登录后换取 token），
+    # 防止仅伪造 X-User-Id 头越权读取他人会话。默认（本地部署）不校验。
+    # validation_alias 保证 .env 中的 AUTH_TOKEN_SECRET 正确映射到该字段。
+    auth_secret: Optional[str] = Field(default=None, validation_alias="AUTH_TOKEN_SECRET")
+    # token 有效期（秒），默认 30 天
+    auth_token_ttl: int = 2592000
+    # 已注册用户（user_id → 设备密钥哈希）的持久化文件
+    auth_users_path: str = "data/auth_users.json"
+
+    # ── 全链路日志（app/chainlog/，落库 data/chain_logs.db 或统一 DB）──
+    # 总开关：关闭后所有埋点为 no-op（仅一次 settings 读取，无额外开销）
+    chain_log_enabled: bool = True
+    # 内存缓冲队列长度（条）。写入是异步批量落库，队列满时丢弃最旧的非关键节点
+    # （http.request / agent.start 等关键节点走同步直写，见 app/chainlog/store.py）
+    chain_log_queue_size: int = 5000
+    # 批量落盘间隔（秒）与单批最大条数
+    chain_log_flush_interval: float = 1.0
+    chain_log_flush_batch: int = 200
+    # 保留天数（TTL）：>0 时按 ts 定期/启动时清理过期链路日志；0 = 永久保留
+    chain_log_retention_days: int = 7
+    # 行数上限（防爆）：>0 时每批落盘后按 ts 裁剪到该行数
+    chain_log_max_rows: int = 200000
+    # 单条 data（JSON 负载）的最大字符数，超出截断并标记
+    chain_log_max_data_chars: int = 4000
+    # 记录链路上的工具调用明细（tool_start/tool_end）。关闭可显著降低写入量
+    chain_log_tool_calls: bool = True
+
+
+settings = Settings()
+
+
+def tool_execute_available() -> bool:
+    """[P1 #8] tool_execute 是否可用（挂载 + 可执行）。
+
+    开箱即用为 False（两个开关默认均关闭）。任一为真即开启：
+    - `tool_execute_enabled`（`TOOL_EXECUTE_ENABLED`，显式开关）
+    - `allow_source_writes`（`ALLOW_SOURCE_WRITES`，受信任源码写入模式）
+    """
+    return bool(getattr(settings, "tool_execute_enabled", False)) or bool(
+        getattr(settings, "allow_source_writes", False)
+    )

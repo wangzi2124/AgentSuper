@@ -15,8 +15,8 @@ from fastapi import APIRouter, Depends, Request
 
 from app.api.deps import require_admin
 from app.api.responses import fail, ok
-from app.models import catalog
-from app.models.deepseek_tokenizer import count_messages_tokens, count_or_estimate, tokenizer_available
+from models import catalog
+from models.deepseek_tokenizer import count_messages_tokens, count_or_estimate, tokenizer_available
 
 router = APIRouter()
 
@@ -61,7 +61,7 @@ async def estimate_tokens(req: Request):
     if messages is not None and isinstance(messages, list):
         tokens = count_messages_tokens(messages)
         if tokens <= 0:
-            from app.context.token_counter import estimate_tokens_messages as est
+            from cognition.token_counter import estimate_tokens_messages as est
             tokens = est(messages)
             method = "estimate-fallback"
         return ok({"tokens": int(tokens), "chars": sum(len(str(m.get('content') or '')) for m in messages), "method": method})
@@ -147,7 +147,7 @@ async def export_models():
 
     导出体含 Provider 明文 api_key，故要求管理端鉴权。
     """
-    from app.models import catalog_db
+    from models import catalog_db
     return ok(catalog_db.export_config())
 
 
@@ -159,14 +159,14 @@ async def export_catalog_full():
     包含所有 kind=builtin/override/extra 的原始条目，供跨机器迁移或 DB 快照。
     同样含明文 api_key，故要求管理端鉴权。
     """
-    from app.models import catalog_db
+    from models import catalog_db
     return ok(catalog_db.export_full())
 
 
 @router.post("/models/import", dependencies=[Depends(require_admin)])
 async def import_models(req: Request):
     """导入模型配置（覆盖写库；body 为与旧 model_catalog.json 同构的对象）。"""
-    from app.models import catalog_db
+    from models import catalog_db
     body = await req.json()
     try:
         result = catalog_db.import_config(body)

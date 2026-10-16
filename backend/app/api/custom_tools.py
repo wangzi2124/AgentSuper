@@ -41,15 +41,17 @@ def _store(request: Request):
 
 
 async def _reload(request: Request) -> None:
-    """热加载：重新扫描插件 + 刷新 agent 工具（与插件 toggle 相同链路）。"""
+    """热加载：重新扫描插件 + 刷新工具表（与插件 toggle 相同链路）。"""
     try:
         request.app.state.plugin_loader.load_all()
     except Exception as e:  # noqa: BLE001
         logger.warning("plugin reload failed: %s", e)
-    try:
-        await request.app.state.agent.refresh_tools()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("refresh_tools failed: %s", e)
+    agent = getattr(request.app.state, "agent", None)
+    if agent is not None and hasattr(agent, "refresh_tools"):
+        try:
+            await agent.refresh_tools()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("refresh_tools failed: %s", e)
 
 
 @router.get("/")

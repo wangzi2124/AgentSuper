@@ -1,0 +1,53 @@
+# LiteLLM Proxy 配置（对齐 agent.md §2.1）
+# 启动：litellm --config models/litellm_config.yaml --port 4000
+# 业务侧设置 LITELLM_PROXY_URL=http://localhost:4000 后，get_model() 自动走 Proxy。
+model_list:
+  - model_name: tier-simple
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: tier-simple
+    litellm_params:
+      model: anthropic/claude-haiku-4
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: tier-medium
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: tier-complex
+    litellm_params:
+      model: anthropic/claude-opus-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: embedding
+    litellm_params:
+      model: openai/text-embedding-3-small
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: smart-router
+    litellm_params:
+      model: auto_router/complexity_router
+      complexity_router_config:
+        tiers:
+          SIMPLE: tier-simple
+          MEDIUM: tier-medium
+          COMPLEX: tier-complex
+          REASONING: tier-complex
+        default_model: tier-medium
+
+router_settings:
+  routing_strategy: "latency-based-routing"
+  enable_pre_call_checks: true
+  num_retries: 3
+  fallbacks:
+    - tier-complex: ["tier-medium"]
+    - tier-medium: ["tier-simple"]
+
+litellm_settings:
+  drop_params: true
+  cache: true
+  cache_params:
+    type: redis
+    ttl: 3600

@@ -19,12 +19,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    from app.storage import schema as storage_schema
+    from storage import schema as storage_schema
 
     storage_schema.metadata.create_all(bind=op.get_bind())
 
 
 def downgrade() -> None:
-    from app.storage import schema as storage_schema
+    from storage import schema as storage_schema
 
     storage_schema.metadata.drop_all(bind=op.get_bind())

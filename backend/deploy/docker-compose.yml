@@ -1,0 +1,74 @@
+# Agent Platform 本地/演示栈（对齐 agent.md §11.1 部署拓扑）
+# 启动：docker compose -f deploy/docker-compose.yml up -d
+# 说明：build 上下文为 backend/（compose 文件在 deploy/ 下，故 context 用 ..）。
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: agent-platform:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      # 生产：经 LiteLLM Proxy 统一路由与缓存（§2.1）
+      LITELLM_PROXY_URL: http://litellm:4000
+      LITELLM_PROXY_KEY: sk-litellm-proxy
+      # 状态持久化改为 Postgres（§11.2）
+      POSTGRES_DSN: postgresql://agent:agent@postgres:5432/agent
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - workspace:/app/workspace
+      - chroma_db:/app/chroma_db
+    restart: unless-stopped
+
+  # 模型路由代理：分层路由 + 缓存 + fallback（§2.1）
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - "4000:4000"
+    volumes:
+      - ../models/litellm_config.yaml:/app/config.yaml:ro
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    restart: unless-stopped
+
+  # Postgres：LangGraph checkpoint / 会话状态表（deploy/migrations/）
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 首次启动自动执行状态表迁移
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Redis：LiteLLM 响应缓存 + 租户配额计数（§2.1 / M5）
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  workspace:
+  chroma_db:

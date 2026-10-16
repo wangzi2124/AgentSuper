@@ -9,7 +9,7 @@ import urllib.request
 import urllib.parse
 import ssl
 
-from app.utils.ssrf import check_url
+from utils.ssrf import check_url
 
 PLUGIN_NAME = "http-client"
 PLUGIN_VERSION = "0.1.0"

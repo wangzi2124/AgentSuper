@@ -61,7 +61,7 @@ def tool_create_pdf(title: str = "Document", sections: str = "[]", output_path: 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path:
-        from app.plugins._output import resolve_output_path
+        from plugins._output import resolve_output_path
         try:
             target = resolve_output_path(output_path, ".pdf")
         except ValueError as e:

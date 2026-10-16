@@ -297,7 +297,7 @@ def _line_stats(before: bytes, after: bytes) -> tuple[int, int, bool]:
     return add, delete, False
 
 
-# ── contextvar 门面（供 chatmod / file_tools 调用）─────────────────────────
+# ── contextvar 门面（供 file_tools / 平台层调用）─────────────────────────
 
 
 def start_turn(snap: Snapshot, turn_id: str | None = None) -> "TurnSnapshot":

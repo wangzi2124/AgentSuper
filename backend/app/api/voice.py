@@ -29,7 +29,7 @@ MAX_VOICE_SECONDS = 60.0
 
 def _voice_dir() -> Path:
     """语音消息音频根目录：backend/data/voice/（原始 webm/ogg 原样留存，不转码）。"""
-    from app.storage.paths import global_paths
+    from storage.paths import global_paths
     d = global_paths()["data"] / "voice"
     d.mkdir(parents=True, exist_ok=True)
     return d

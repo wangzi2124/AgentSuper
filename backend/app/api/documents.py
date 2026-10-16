@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Request
 
-from app.models.schemas import (
+from models.schemas import (
     DocumentResponse,
     DocumentListResponse,
     DeleteResponse,

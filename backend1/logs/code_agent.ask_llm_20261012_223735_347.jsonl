@@ -1,0 +1,1 @@
+{"ts": 1791815855.347, "call_type": "code_agent.ask_llm", "messages": [{"role": "system", "content": "sys"}, {"role": "user", "content": "user"}], "model": "deepseek/deepseek-v4-flash"}

@@ -1,0 +1,556 @@
+<task id="task:72242fe5" state="completed"><task_result>我需要先说明一个限制：**我当前只具备只读工具**（ls / read_file / glob / grep），系统已强制禁用写入、编辑、创建目录、执行命令等所有工具。因此我**无法在 D 盘创建文件夹，也无法写入任何代码文件**。
+
+不过，我可以为你提供一份**完整、可直接使用的俄罗斯方块游戏代码**。你只需手动创建文件夹并把代码保存进去即可。
+
+---
+
+## 一、目录结构建议
+
+在 `D:\俄罗斯方块游戏\` 下创建如下结构：
+
+```
+俄罗斯方块游戏/
+├── index.html          # 页面结构
+├── css/
+│   └── style.css       # 样式
+└── js/
+    ├── config.js       # 游戏配置常量
+    ├── board.js        # 棋盘逻辑
+    ├── tetromino.js    # 方块定义与旋转
+    ├── score.js        # 计分系统
+    ├── game.js         # 游戏主循环与状态管理
+    └── main.js         # 入口与事件绑定
+```
+
+---
+
+## 二、完整代码
+
+### 1. `index.html`
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>俄罗斯方块</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="game-container">
+    <canvas id="board" width="300" height="600"></canvas>
+
+    <aside class="sidebar">
+      <div class="panel">
+        <h2>下一个</h2>
+        <canvas id="next" width="120" height="120"></canvas>
+      </div>
+
+      <div class="panel score-panel">
+        <div class="score-item">
+          <span class="label">分数</span>
+          <span id="score" class="value">0</span>
+        </div>
+        <div class="score-item">
+          <span class="label">消行</span>
+          <span id="lines" class="value">0</span>
+        </div>
+        <div class="score-item">
+          <span class="label">等级</span>
+          <span id="level" class="value">1</span>
+        </div>
+        <div class="score-item">
+          <span class="label">最高分</span>
+          <span id="highScore" class="value">0</span>
+        </div>
+      </div>
+
+      <div class="panel controls">
+        <h2>操作</h2>
+        <p>← → 移动</p>
+        <p>↑ 旋转</p>
+        <p>↓ 加速下落</p>
+        <p>空格 直接落下</p>
+        <p>P 暂停 / 继续</p>
+      </div>
+
+      <button id="restartBtn">重新开始</button>
+    </aside>
+  </div>
+
+  <div id="overlay" class="overlay hidden">
+    <div class="overlay-content">
+      <h1 id="overlayTitle">游戏结束</h1>
+      <p id="overlayText">最终得分：0</p>
+      <button id="overlayBtn">再来一局</button>
+    </div>
+  </div>
+
+  <script src="js/config.js"></script>
+  <script src="js/tetromino.js"></script>
+  <script src="js/board.js"></script>
+  <script src="js/score.js"></script>
+  <script src="js/game.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
+```
+
+### 2. `css/style.css`
+
+```css
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 50% 0%, #1e2a4a, #0b0f1a 70%);
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #e8eefc;
+}
+
+.game-container {
+  display: flex;
+  gap: 24px;
+  padding: 24px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+#board {
+  background: #0a0e18;
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.06);
+}
+
+.sidebar {
+  width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.panel {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.panel h2 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: #8fa3c8;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+
+#next {
+  display: block;
+  margin: 0 auto;
+  background: #0a0e18;
+  border-radius: 6px;
+}
+
+.score-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 4px 0;
+}
+
+.score-item .label {
+  font-size: 13px;
+  color: #8fa3c8;
+}
+
+.score-item .value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #4fd1c5;
+  font-variant-numeric: tabular-nums;
+}
+
+.controls p {
+  font-size: 13px;
+  color: #b8c6e0;
+  line-height: 1.8;
+}
+
+button {
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #4fd1c5, #3b82f6);
+  color: #06121f;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.15s, filter 0.15s;
+}
+
+button:hover {
+  transform: translateY(-2px);
+  filter: brightness(1.1);
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 8, 16, 0.8);
+  backdrop-filter: blur(4px);
+  z-index: 10;
+}
+
+.overlay.hidden {
+  display: none;
+}
+
+.overlay-content {
+  text-align: center;
+  padding: 40px 56px;
+  background: #131a2b;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.overlay-content h1 {
+  font-size: 28px;
+  margin-bottom: 12px;
+  color: #4fd1c5;
+}
+
+.overlay-content p {
+  margin-bottom: 24px;
+  color: #b8c6e0;
+}
+```
+
+### 3. `js/config.js`
+
+```js
+/**
+ * 全局配置常量
+ * 集中管理尺寸、速度、计分规则，便于调整与维护
+ */
+const CONFIG = {
+  // 棋盘：10 列 × 20 行
+  COLS: 10,
+  ROWS: 20,
+  BLOCK_SIZE: 30, // 每个格子的像素大小
+
+  // 下落速度（毫秒/格），随等级递减
+  BASE_DROP_INTERVAL: 800,
+  MIN_DROP_INTERVAL: 100,
+  SPEED_STEP: 70, // 每升一级减少的毫秒数
+
+  // 计分规则：一次消除 n 行的基础分
+  LINE_SCORES: { 1: 100, 2: 300, 3: 500, 4: 800 },
+  SOFT_DROP_BONUS: 1,  // 软降每格加分
+  HARD_DROP_BONUS: 2,  // 硬降每格加分
+
+  // 每消除多少行升一级
+  LINES_PER_LEVEL: 10,
+
+  // 本地存储键名
+  STORAGE_KEY: "tetris_high_score",
+};
+```
+
+### 4. `js/tetromino.js`
+
+```js
+/**
+ * 七种标准方块（Tetromino）定义与旋转逻辑
+ * 使用矩阵表示形状，旋转即矩阵转置 + 反转
+ */
+const SHAPES = {
+  I: [[1, 1, 1, 1]],
+  O: [
+    [1, 1],
+    [1, 1],
+  ],
+  T: [
+    [0, 1, 0],
+    [1, 1, 1],
+  ],
+  S: [
+    [0, 1, 1],
+    [1, 1, 0],
+  ],
+  Z: [
+    [1, 1, 0],
+    [0, 1, 1],
+  ],
+  J: [
+    [1, 0, 0],
+    [1, 1, 1],
+  ],
+  L: [
+    [0, 0, 1],
+    [1, 1, 1],
+  ],
+};
+
+/** 每种方块对应的颜色 */
+const COLORS = {
+  I: "#4fd1c5",
+  O: "#f6c445",
+  T: "#b06cf0",
+  S: "#5ad469",
+  Z: "#ef5b6b",
+  J: "#4f8ef7",
+  L: "#f0913f",
+};
+
+class Tetromino {
+  /**
+   * @param {string} type 方块类型（I/O/T/S/Z/J/L）
+   */
+  constructor(type) {
+    this.type = type;
+    // 深拷贝形状，避免旋转时污染原始定义
+    this.matrix = SHAPES[type].map((row) => [...row]);
+    this.color = COLORS[type];
+    // 初始位置：水平居中，顶部
+    this.x = Math.floor((CONFIG.COLS - this.matrix[0].length) / 2);
+    this.y = 0;
+  }
+
+  /** 顺时针旋转 90°，返回新矩阵（不修改自身） */
+  rotatedMatrix() {
+    const rows = this.matrix.length;
+    const cols = this.matrix[0].length;
+    const result = Array.from({ length: cols }, () => Array(rows).fill(0));
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        result[c][rows - 1 - r] = this.matrix[r][c];
+      }
+    }
+    return result;
+  }
+
+  /** 执行旋转 */
+  rotate() {
+    this.matrix = this.rotatedMatrix();
+  }
+
+  /** 返回方块占据的绝对坐标列表 [{x, y}] */
+  cells(matrix = this.matrix, offsetX = this.x, offsetY = this.y) {
+    const list = [];
+    matrix.forEach((row, r) => {
+      row.forEach((val, c) => {
+        if (val) list.push({ x: offsetX + c, y: offsetY + r });
+      });
+    });
+    return list;
+  }
+}
+
+/** 随机生成一个方块类型 */
+function randomType() {
+  const types = Object.keys(SHAPES);
+  return types[Math.floor(Math.random() * types.length)];
+}
+```
+
+### 5. `js/board.js`
+
+```js
+/**
+ * 棋盘：负责网格数据、碰撞检测、锁定方块、消行
+ */
+class Board {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    // 二维数组，null 表示空格，否则存储颜色
+    this.grid = Array.from({ length: CONFIG.ROWS }, () =>
+      Array(CONFIG.COLS).fill(null)
+    );
+  }
+
+  /** 判断一组坐标是否越界或与已锁定方块重叠 */
+  isCollision(cells) {
+    return cells.some(({ x, y }) => {
+      if (x < 0 || x >= CONFIG.COLS || y >= CONFIG.ROWS) return true;
+      if (y < 0) return false; // 允许在顶部之上（生成时）
+      return this.grid[y][x] !== null;
+    });
+  }
+
+  /** 将方块锁定进网格 */
+  lock(tetromino) {
+    tetromino.cells().forEach(({ x, y }) => {
+      if (y >= 0 && y < CONFIG.ROWS && x >= 0 && x < CONFIG.COLS) {
+        this.grid[y][x] = tetromino.color;
+      }
+    });
+  }
+
+  /**
+   * 消除已填满的行
+   * @returns {number} 消除的行数
+   */
+  clearLines() {
+    let cleared = 0;
+    for (let r = CONFIG.ROWS - 1; r >= 0; r--) {
+      if (this.grid[r].every((cell) => cell !== null)) {
+        this.grid.splice(r, 1);
+        this.grid.unshift(Array(CONFIG.COLS).fill(null));
+        cleared++;
+        r++; // 重新检查当前行（因为上方行下移了）
+      }
+    }
+    return cleared;
+  }
+
+  /** 绘制棋盘与已锁定方块 */
+  draw(ctx) {
+    const { BLOCK_SIZE, COLS, ROWS } = CONFIG;
+    ctx.clearRect(0, 0, COLS * BLOCK_SIZE, ROWS * BLOCK_SIZE);
+
+    // 网格线
+    ctx.strokeStyle = "rgba(255,255,255,0.05)";
+    ctx.lineWidth = 1;
+    for (let c = 0; c <= COLS; c++) {
+      ctx.beginPath();
+      ctx.moveTo(c * BLOCK_SIZE, 0);
+      ctx.lineTo(c * BLOCK_SIZE, ROWS * BLOCK_SIZE);
+      ctx.stroke();
+    }
+    for (let r = 0; r <= ROWS; r++) {
+      ctx.beginPath();
+      ctx.moveTo(0, r * BLOCK_SIZE);
+      ctx.lineTo(COLS * BLOCK_SIZE, r * BLOCK_SIZE);
+      ctx.stroke();
+    }
+
+    // 已锁定方块
+    this.grid.forEach((row, r) => {
+      row.forEach((color, c) => {
+        if (color) drawBlock(ctx, c, r, color);
+      });
+    });
+  }
+}
+
+/** 通用方块绘制函数（带高光效果） */
+function drawBlock(ctx, col, row, color) {
+  const { BLOCK_SIZE } = CONFIG;
+  const x = col * BLOCK_SIZE;
+  const y = row * BLOCK_SIZE;
+  const pad = 1;
+
+  ctx.fillStyle = color;
+  ctx.fillRect(x + pad, y + pad, BLOCK_SIZE - pad * 2, BLOCK_SIZE - pad * 2);
+
+  // 顶部/左侧高光
+  ctx.fillStyle = "rgba(255,255,255,0.25)";
+  ctx.fillRect(x + pad, y + pad, BLOCK_SIZE - pad * 2, 4);
+  ctx.fillRect(x + pad, y + pad, 4, BLOCK_SIZE - pad * 2);
+}
+```
+
+### 6. `js/score.js`
+
+```js
+/**
+ * 计分系统：负责分数、消行、等级、最高分
+ */
+class ScoreSystem {
+  constructor() {
+    this.score = 0;
+    this.lines = 0;
+    this.level = 1;
+    this.highScore = this.loadHighScore();
+  }
+
+  reset() {
+    this.score = 0;
+    this.lines = 0;
+    this.level = 1;
+  }
+
+  /**
+   * 根据消除行数计算并累加分数
+   * 分数 = 基础分 × 当前等级
+   * @param {number} clearedLines 本次消除的行数
+   */
+  addLines(clearedLines) {
+    if (clearedLines <= 0) return;
+    const base = CONFIG.LINE_SCORES[clearedLines] || 0;
+    this.score += base * this.level;
+    this.lines += clearedLines;
+    this.updateLevel();
+    this.updateHighScore();
+  }
+
+  /** 软降/硬降奖励分 */
+  addDropBonus(cells, isHard) {
+    const bonus = isHard ? CONFIG.HARD_DROP_BONUS : CONFIG.SOFT_DROP_BONUS;
+    this.score += cells * bonus;
+    this.updateHighScore();
+  }
+
+  /** 每消除 LINES_PER_LEVEL 行升一级 */
+  updateLevel() {
+    this.level = Math.floor(this.lines / CONFIG.LINES_PER_LEVEL) + 1;
+  }
+
+  /** 当前等级对应的下落间隔（毫秒） */
+  getDropInterval() {
+    const interval =
+      CONFIG.BASE_DROP_INTERVAL - (this.level - 1) * CONFIG.SPEED_STEP;
+    return Math.max(interval, CONFIG.MIN_DROP_INTERVAL);
+  }
+
+  updateHighScore() {
+    if (this.score > this.highScore) {
+      this.highScore = this.score;
+      this.saveHighScore();
+    }
+  }
+
+  loadHighScore() {
+    try {
+      return Number(localStorage.getItem(CONFIG.STORAGE_KEY)) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  saveHighScore() {
+    try {
+      localStorage.setItem(CONFIG.STORAGE_KEY, String(this.highScore));
+    } catch {
+      /* 忽略存储异常 */
+    }
+  }
+}
+```
+
+### 7. `js/game.js`
+
+```js
+/**
+ * 游戏核心：状态管理、主循环、输入处理
+ */
+class Game {
+  constructor(boardCanvas, nextCanvas, scoreSystem, ui) {
+    this.boardCanvas = boardCanvas;
+    this.boardCtx = boardCanvas.get</task_result></task>

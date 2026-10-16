@@ -2,7 +2,7 @@
 
 连接串来源优先级：
 1. alembic.config 的 sqlalchemy.url（启动时由 app.storage.migrations.run_migrations() 注入）
-2. app.config.settings → app.storage.backends.database_url()
+2. config.settings → storage.backends.database_url()
 
 相关：backend/alembic/versions/0001_initial.py（初始迁移 = metadata.create_all）。
 """
@@ -17,7 +17,7 @@ _BACKEND = Path(__file__).resolve().parents[1]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from app.storage import schema as storage_schema  # noqa: E402
+from storage import schema as storage_schema  # noqa: E402
 
 config = context.config
 
@@ -32,7 +32,7 @@ def _url() -> str:
     configured = config.get_main_option("sqlalchemy.url")
     if configured:
         return configured
-    from app.storage.backends import database_url
+    from storage.backends import database_url
 
     return database_url()
 

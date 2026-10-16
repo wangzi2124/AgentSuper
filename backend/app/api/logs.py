@@ -25,7 +25,7 @@ def _caller(request: Request) -> str:
 
 
 def _store():
-    from app.chainlog.tracer import store
+    from observability.chainlog.tracer import store
 
     return store()
 
@@ -138,7 +138,7 @@ def logs_clear(
 
 def _is_admin(request: Request) -> bool:
     """判断当前请求是否具备管理员权限（复用 require_admin 的判定逻辑，不抛异常）。"""
-    from app.config import settings
+    from config import settings
 
     token = settings.admin_token
     if token:

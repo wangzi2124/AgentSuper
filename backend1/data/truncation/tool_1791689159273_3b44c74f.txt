@@ -1,0 +1,358 @@
+<file>
+1: import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+2: import {
+3:   COLS,
+4:   ROWS,
+5:   COLORS,
+6:   createBoard,
+7:   createBag,
+8:   spawnPiece,
+9:   rotateMatrix,
+10:   collides,
+11:   merge,
+12:   clearLines,
+13:   calcScore,
+14:   ghostY,
+15:   levelSpeed,
+16: } from './tetris.js'
+17: 
+18: const BEST_KEY = 'tetris-react-best'
+19: 
+20: export default function App() {
+21:   const [board, setBoard] = useState(createBoard)
+22:   const [piece, setPiece] = useState(null)
+23:   const [nextType, setNextType] = useState(null)
+24:   const [score, setScore] = useState(0)
+25:   const [lines, setLines] = useState(0)
+26:   const [level, setLevel] = useState(1)
+27:   const [combo, setCombo] = useState(-1)
+28:   const [status, setStatus] = useState('ready') // ready | playing | paused | over
+29:   const [best, setBest] = useState(() => Number(localStorage.getItem(BEST_KEY) || 0))
+30: 
+31:   // 用 ref 保存 7-bag 队列，避免闭包问题
+32:   const bagRef = useRef([])
+33:   const nextBag = useCallback(() => {
+34:     if (bagRef.current.length === 0) bagRef.current = createBag()
+35:     return bagRef.current.shift()
+36:   }, [])
+37: 
+38:   // ---------- 游戏流程 ----------
+39:   const startGame = useCallback(() => {
+40:     bagRef.current = createBag()
+41:     const first = bagRef.current.shift()
+42:     setBoard(createBoard())
+43:     setPiece(spawnPiece(first))
+44:     setNextType(bagRef.current.shift())
+45:     setScore(0)
+46:     setLines(0)
+47:     setLevel(1)
+48:     setCombo(-1)
+49:     setStatus('playing')
+50:   }, [])
+51: 
+52:   // 方块落地后的处理：固定 → 消行 → 计分 → 出新块
+53:   const lockPiece = useCallback(
+54:     (current) => {
+55:       const merged = merge(board, current)
+56:       const { board: clearedBoard, cleared } = clearLines(merged)
+57: 
+58:       let gained = 0
+59:       let newCombo = -1
+60:       if (cleared > 0) {
+61:         newCombo = combo + 1
+62:         gained = calcScore(cleared, level, newCombo)
+63:       }
+64: 
+65:       const newLines = lines + cleared
+66:       const newLevel = Math.floor(newLines / 10) + 1
+67: 
+68:       setBoard(clearedBoard)
+69:       setScore((s) => {
+70:         const total = s + gained
+71:         if (total > best) {
+72:           setBest(total)
+73:           localStorage.setItem(BEST_KEY, String(total))
+74:         }
+75:         return total
+76:       })
+77:       setLines(newLines)
+78:       setLevel(newLevel)
+79:       setCombo(newCombo)
+80: 
+81:       // 生成下一个方块
+82:       const type = nextType
+83:       const upcoming = nextBag()
+84:       const nextPiece = spawnPiece(type)
+85:       if (collides(clearedBoard, nextPiece)) {
+86:         setPiece(null)
+87:         setStatus('over')
+88:         return
+89:       }
+90:       setPiece(nextPiece)
+91:       setNextType(upcoming)
+92:     },
+93:     [board, combo, level, lines, nextType, nextBag, best]
+94:   )
+95: 
+96:   // ---------- 操作 ----------
+97:   const move = useCallback(
+98:     (dx) => {
+99:       if (status !== 'playing' || !piece) return
+100:       const moved = { ...piece, x: piece.x + dx }
+101:       if (!collides(board, moved)) setPiece(moved)
+102:     },
+103:     [board, piece, status]
+104:   )
+105: 
+106:   const rotate = useCallback(() => {
+107:     if (status !== 'playing' || !piece) return
+108:     const rotated = { ...piece, matrix: rotateMatrix(piece.matrix) }
+109:     // 踢墙：左右各尝试偏移，让贴边旋转也能成功
+110:     for (const dx of [0, -1, 1, -2, 2]) {
+111:       const candidate = { ...rotated, x: rotated.x + dx }
+112:       if (!collides(board, candidate)) {
+113:         setPiece(candidate)
+114:         return
+115:       }
+116:     }
+117:   }, [board, piece, status])
+118: 
+119:   const softDrop = useCallback(() => {
+120:     if (status !== 'playing' || !piece) return
+121:     const dropped = { ...piece, y: piece.y + 1 }
+122:     if (!collides(board, dropped)) {
+123:       setPiece(dropped)
+124:       setScore((s) => s + 1) // 软降每格 +1 分
+125:     } else {
+126:       lockPiece(piece)
+127:     }
+128:   }, [board, piece, status, lockPiece])
+129: 
+130:   const hardDrop = useCallback(() => {
+131:     if (status !== 'playing' || !piece) return
+132:     const gy = ghostY(board, piece)
+133:     const dropped = { ...piece, y: gy }
+134:     setScore((s) => s + (gy - piece.y) * 2) // 硬降每格 +2 分
+135:     lockPiece(dropped)
+136:   }, [board, piece, status, lockPiece])
+137: 
+138:   const togglePause = useCallback(() => {
+139:     setStatus((s) => (s === 'playing' ? 'paused' : s === 'paused' ? 'playing' : s))
+140:   }, [])
+141: 
+142:   // ---------- 自动下落 ----------
+143:   useEffect(() => {
+144:     if (status !== 'playing') return
+145:     const id = setInterval(() => {
+146:       setPiece((p) => {
+147:         if (!p) return p
+148:         const dropped = { ...p, y: p.y + 1 }
+149:         if (!collides(board, dropped)) return dropped
+150:         lockPiece(p)
+151:         return p
+152:       })
+153:     }, levelSpeed(level))
+154:     return () => clearInterval(id)
+155:   }, [status, level, board, lockPiece])
+156: 
+157:   // ---------- 键盘控制：↑ 旋转 / ↓ 软降 / ← → 移动 / 空格 硬降 ----------
+158:   useEffect(() => {
+159:     const onKeyDown = (e) => {
+160:       const keys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'Enter', 'p', 'P']
+161:       if (keys.includes(e.key)) e.preventDefault()
+162: 
+163:       if (e.key === 'Enter' && (status === 'ready' || status === 'over')) {
+164:         startGame()
+165:         return
+166:       }
+167:       if (e.key === 'p' || e.key === 'P') {
+168:         togglePause()
+169:         return
+170:       }
+171:       if (status !== 'playing') return
+172: 
+173:       switch (e.key) {
+174:         case 'ArrowLeft':
+175:           move(-1)
+176:           break
+177:         case 'ArrowRight':
+178:           move(1)
+179:           break
+180:         case 'ArrowUp':
+181:           rotate()
+182:           break
+183:         case 'ArrowDown':
+184:           softDrop()
+185:           break
+186:         case ' ':
+187:           hardDrop()
+188:           break
+189:         default:
+190:           break
+191:       }
+192:     }
+193:     window.addEventListener('keydown', onKeyDown)
+194:     return () => window.removeEventListener('keydown', onKeyDown)
+195:   }, [status, move, rotate, softDrop, hardDrop, togglePause, startGame])
+196: 
+197:   // ---------- 渲染数据 ----------
+198:   const displayBoard = useMemo(() => {
+199:     const grid = board.map((row) => row.map((cell) => (cell ? { type: cell, ghost: false } : null)))
+200:     if (piece && status !== 'over') {
+201:       const gy = ghostY(board, piece)
+202:       // 幽灵落点
+203:       piece.matrix.forEach((row, py) => {
+204:         row.forEach((v, px) => {
+205:           if (!v) return
+206:           const by = gy + py
+207:           const bx = piece.x + px
+208:           if (by >= 0 && by < ROWS && bx >= 0 && bx < COLS && !grid[by][bx]) {
+209:             grid[by][bx] = { type: piece.type, ghost: true }
+210:           }
+211:         })
+212:       })
+213:       // 当前方块
+214:       piece.matrix.forEach((row, py) => {
+215:         row.forEach((v, px) => {
+216:           if (!v) return
+217:           const by = piece.y + py
+218:           const bx = piece.x + px
+219:           if (by >= 0 && by < ROWS && bx >= 0 && bx < COLS) {
+220:             grid[by][bx] = { type: piece.type, ghost: false }
+221:           }
+222:         })
+223:       })
+224:     }
+225:     return grid
+226:   }, [board, piece, status])
+227: 
+228:   const nextCells = useMemo(() => {
+229:     if (!nextType) return []
+230:     const m = spawnPiece(nextType).matrix
+231:     return m
+232:   }, [nextType])
+233: 
+234:   return (
+235:     <div className="app">
+236:       <h1 className="title">俄罗斯方块</h1>
+237: 
+238:       <div className="game">
+239:         {/* 主棋盘 */}
+240:         <div className="board-wrap">
+241:           <div className="board" style={{ '--cols': COLS, '--rows': ROWS }}>
+242:             {displayBoard.map((row, y) =>
+243:               row.map((cell, x) => (
+244:                 <div
+245:                   key={`${y}-${x}`}
+246:                   className={
+247:                     'cell' +
+248:                     (cell ? ' filled' : '') +
+249:                     (cell && cell.ghost ? ' ghost' : '')
+250:                   }
+251:                   style={
+252:                     cell
+253:                       ? {
+254:                           background: cell.ghost ? 'transparent' : COLORS[cell.type],
+255:                           borderColor: cell.ghost ? COLORS[cell.type] : 'rgba(255,255,255,.35)',
+256:                         }
+257:                       : undefined
+258:                   }
+259:                 />
+260:               ))
+261:             )}
+262:           </div>
+263: 
+264:           {status !== 'playing' && (
+265:             <div className="overlay">
+266:               {status === 'ready' && (
+267:                 <>
+268:                   <h2>准备开始</h2>
+269:                   <p>按 <kbd>Enter</kbd> 开始游戏</p>
+270:                 </>
+271:               )}
+272:               {status === 'paused' && (
+273:                 <>
+274:                   <h2>已暂停</h2>
+275:                   <p>按 <kbd>P</kbd> 继续</p>
+276:                 </>
+277:               )}
+278:               {status === 'over' && (
+279:                 <>
+280:                   <h2>游戏结束</h2>
+281:                   <p>本局得分：<b>{score}</b></p>
+282:                   <p>按 <kbd>Enter</kbd> 重新开始</p>
+283:                 </>
+284:               )}
+285:             </div>
+286:           )}
+287:         </div>
+288: 
+289:         {/* 侧边信息栏 */}
+290:         <aside className="panel">
+291:           <div className="card">
+292:             <span className="label">得分</span>
+293:             <span className="value">{score}</span>
+294:           </div>
+295:           <div className="card">
+296:             <span className="label">最高分</span>
+297:             <span className="value small">{best}</span>
+298:           </div>
+299:           <div className="card">
+300:             <span className="label">消除行数</span>
+301:             <span className="value small">{lines}</span>
+302:           </div>
+303:           <div className="card">
+304:             <span className="label">等级</span>
+305:             <span className="value small">{level}</span>
+306:           </div>
+307: 
+308:           <div className="card next">
+309:             <span className="label">下一个</span>
+310:             <div className="next-grid" style={{ '--n': nextCells.length || 4 }}>
+311:               {nextCells.map((row, y) =>
+312:                 row.map((v, x) => (
+313:                   <div
+314:                     key={`n-${y}-${x}`}
+315:                     className={'cell' + (v ? ' filled' : '')}
+316:                     style={v ? { background: COLORS[nextType] } : undefined}
+317:                   />
+318:                 ))
+319:               )}
+320:             </div>
+321:           </div>
+322: 
+323:           <div className="card keys">
+324:             <span className="label">操作说明</span>
+325:             <ul>
+326:               <li><kbd>←</kbd> <kbd>→</kbd> 左右移动</li>
+327:               <li><kbd>↑</kbd> 旋转</li>
+328:               <li><kbd>↓</kbd> 加速下落（+1分/格）</li>
+329:               <li><kbd>空格</kbd> 直接落底（+2分/格）</li>
+330:               <li><kbd>P</kbd> 暂停 / 继续</li>
+331:               <li><kbd>Enter</kbd> 开始 / 重开</li>
+332:             </ul>
+333:           </div>
+334: 
+335:           <div className="btns">
+336:             <button onClick={startGame}>重新开始</button>
+337:             <button onClick={togglePause} disabled={status === 'ready' || status === 'over'}>
+338:               {status === 'paused' ? '继续' : '暂停'}
+339:             </button>
+340:           </div>
+341:         </aside>
+342:       </div>
+343: 
+344:       {/* 移动端触控按钮 */}
+345:       <div className="touch">
+346:         <button onClick={() => move(-1)}>←</button>
+347:         <button onClick={rotate}>↑</button>
+348:         <button onClick={() => move(1)}>→</button>
+349:         <button onClick={softDrop}>↓</button>
+350:         <button onClick={hardDrop}>落底</button>
+351:       </div>
+352:     </div>
+353:   )
+354: }
+
+(End of file - total 354 lines)
+</file>

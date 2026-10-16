@@ -18,7 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    from app.storage import schema as storage_schema
+    from storage import schema as storage_schema
 
     # create_all(bind=..., tables=[...]) 只建本次新增的表，不触碰已有表
     storage_schema.metadata.create_all(
@@ -28,7 +28,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    from app.storage import schema as storage_schema
+    from storage import schema as storage_schema
 
     storage_schema.metadata.drop_all(
         bind=op.get_bind(),

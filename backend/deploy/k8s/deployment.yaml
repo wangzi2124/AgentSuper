@@ -1,0 +1,83 @@
+# Agent Platform K8s Deployment（对齐 agent.md §11.1）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-platform
+  labels:
+    app: agent-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-platform
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: agent-platform
+    spec:
+      containers:
+        - name: app
+          image: agent-platform:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: agent-platform-secrets
+            - configMapRef:
+                name: agent-platform-config
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          readinessProbe:
+            httpGet:
+              path: /api/monitor/stats
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/monitor/stats
+              port: 8000
+            initialDelaySeconds: 40
+            periodSeconds: 20
+          volumeMounts:
+            - name: workspace
+              mountPath: /app/workspace
+            - name: chroma-db
+              mountPath: /app/chroma_db
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: agent-workspace
+        - name: chroma-db
+          persistentVolumeClaim:
+            claimName: agent-chroma-db
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-workspace
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-chroma-db
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi

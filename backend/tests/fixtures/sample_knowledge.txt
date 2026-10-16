@@ -1,0 +1,11 @@
+Agent Platform 测试夹具样例知识文本。
+
+本文件用于 RAG / 检索类测试的固定输入数据（agent.md §9 tests/fixtures/）。
+
+第一章 平台架构
+平台由 LangGraph 主图驱动，supervisor 节点负责规划与分派，
+rag / memory_recall / execute_subagent 等节点按需执行，最终 synthesize 汇总。
+
+第二章 沙箱与审批
+VirtualFileSystem 以 ./workspace 为沙箱根，越界写入触发审批；
+获批后路径被加入允许根，工具重试即可通过。

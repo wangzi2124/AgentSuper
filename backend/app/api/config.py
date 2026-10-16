@@ -8,8 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 
-from app.config import settings
-from app.api.chat import reset_summarizer
+from config import settings
 from app.api.deps import require_admin
 
 logger = logging.getLogger(__name__)
@@ -48,8 +47,6 @@ async def update_summarization_config(body: SummarizationConfig, request: Reques
         settings.summarization_model = body.model if body.model else None
     if body.keep_messages is not None:
         settings.summarization_keep_messages = max(1, body.keep_messages)
-
-    reset_summarizer()
 
     logger.info(
         "Summarization config updated: model=%s, keep=%d",

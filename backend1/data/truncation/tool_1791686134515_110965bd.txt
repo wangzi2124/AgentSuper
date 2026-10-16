@@ -1,0 +1,1010 @@
+<file>
+67: | Complete | 100% | 处理完成，文档可用 |
+68: 
+69: **工作流程：**
+70: 
+71: 1. `POST /api/documents/upload` 立即返回 `{ task_id }`
+72: 2. 后端 `TaskManager` 在后台依次执行：保存→分块→嵌入→入库
+73: 3. 前端每 400ms 轮询 `GET /api/documents/tasks/{task_id}` 获取 `{ progress, stage }`
+74: 4. 进度 100% 后，前端将文档加入列表
+75: 
+76: 实现路径：
+77: - 后端：`backend/app/services/task_manager.py` — `TaskManager.process_document()`
+78: - 前端：`frontend/src/api/documents.ts` — `uploadDocument()` → `pollTask()`
+79: 
+80: ---
+81: 
+82: ## 中文支持与混合检索
+83: 
+84: ### 中文嵌入模型
+85: 
+86: 默认嵌入模型为 `BAAI/bge-small-zh-v1.5`，专门针对中文优化。在 `.env` 中可切换：
+87: 
+88: ```ini
+89: EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5    # 中文（推荐）
+90: # EMBEDDING_MODEL=all-MiniLM-L6-v2        # 英文
+91: ```
+92: 
+93: 模型通过 ModelScope 自动下载。
+94: 
+95: ### 分块机制
+96: 
+97: 上传文档后，`document_processor.py` 执行四步分块：
+98: 
+99: **① 章节检测** — 正则匹配 `第X章` / `Chapter X` / `CHAPTER X` 自动识别章节边界，无标记则整篇作为一章。
+100: 
+101: **② 父子文档结构** — 每章生成两类文档块：
+102: 
+103: | 类型 | 内容 | 用途 |
+104: |------|------|------|
+105: | **父文档** | 章节标题 + 前 300 字摘要（`is_parent: true`） | 章节概览检索，精确回答"第一章讲了什么" |
+106: | **子文档** | 正文按 500 字滑动窗口切分（`is_parent: false`） | 细节检索，覆盖全文 |
+107: 
+108: **③ 滑动窗口分块** (`_chunk_text`)：
+109: 
+110: ```
+111: CHUNK_SIZE=500     # 每块最大字数
+112: CHUNK_OVERLAP=200  # 块间重叠 200 字，避免切句时断裂
+113: ```
+114: 
+115: **④ 角色-台词锚点块** — 每章扫描对话模式（`张三说："..."` / `"..."张三说`），为每句台词生成独立锚点：
+116: 
+117: ```
+118: text: 张三说：“你好吗？”
+119: metadata: {is_dialogue: true, speaker: "张三", dialogue: "你好吗？"}
+120: ```
+121: 
+122: 台词锚点块角色名+台词语义高度集中，搜索"张三说了什么"可直接命中。
+123: 
+124: 子文档保留 `chapter_title`/`chapter_number` 元数据，检索后强制注入父文档标题到 LLM 上下文。
+125: 
+126: 实现路径：`backend/app/rag/document_processor.py` — `process()` → `_split_chapters()` → `_chunk_text()` → `_extract_dialogues()`
+127: 
+128: ### 混合检索（Hybrid Search）
+129: 
+130: 结合两种检索方式：
+131: 
+132: | 方式 | 优势 | 适用场景 |
+133: |------|------|----------|
+134: | **向量检索** | 语义理解，找"意思相近" | 开放式问题、概括性查询 |
+135: | **BM25 关键词** | 精确匹配，找"字面相同" | 章节名、人名、术语等事实查询 |
+136: 
+137: 两者通过 **RRF（Reciprocal Rank Fusion）** 算法融合，权重向量 0.7 + BM25 0.3。
+138: 
+139: **多路台词召回** — 检索时额外执行一路台词锚点搜索（`where={"is_dialogue": true}`），与主路径结果经 RRF 融合（台词权重 0.4），确保角色台词不被正文淹没。
+140: 
+141: 实现路径：
+142: - BM25 索引：`backend/app/rag/bm25_index.py` — `BM25Index`
+143: - 混合检索：`backend/app/rag/retriever.py` — `Retriever.invoke()`（含 RRF 融合 + 多路台词召回）
+144: 
+145: ### 结构化章节检索（两步走）
+146: 
+147: 解决"RAG 不能说出准确章节名"的工业级方案：
+148: 
+149: ```
+150: 用户问 "第一章讲了什么"
+151:   │
+152:   ├─ intent.py: 正则匹配 → {chapter_number: 1}
+153:   │     ↓
+154:   ├─ 前置过滤：直接查 ChapterStore（SQLite 章节元数据表）
+155:   │     ├─ 返回精确的 chapter_title + summary
+156:   │     └─ 不再走向量检索
+157:   │     ↓
+158:   └─ LLM context 中携带 chapter_title + content
+159:        → 准确回答，不再"猜章节名"
+160: ```
+161: 
+162: **两步走策略**：
+163: 
+164: | 步骤 | 触发条件 | 行为 |
+165: |------|----------|------|
+166: | **1. 前置过滤** | 问题含 `第X章`/`Chapter X`/`关于...章节` 等关键词 | 关闭向量检索，精确查章节元数据表 |
+167: | **2. 混合检索** | 无章节关键词 | 正常向量+BM25 混合检索，但结果自动携带父文档章节标题 |
+168: 
+169: **父子文档结构**：
+170: 
+171: 上传文档时，每个章节生成两种文档块：
+172: - **父文档**：章节标题 + 前 300 字摘要 → 用于章节概览
+173: - **子文档**：正文 1000 字分块 → 用于细节检索
+174: 
+175: 子文档 metadata 中保留 `chapter_title`，检索后强制注入父文档章节标题到 LLM Prompt。
+176: 
+177: 实现路径：
+178: - 章节元数据表：`backend/app/rag/chapter_store.py` — `ChapterStore`
+179: - 意图识别：`backend/app/rag/intent.py` — `detect_chapter_intent()`
+180: - 父子分块：`backend/app/rag/document_processor.py` — `process()` 返回 `(chunks, chapter_metas)`
+181: - 两步检索：`backend/app/rag/retriever.py` — `Retriever.invoke()` → `_chapter_lookup()` / `_enrich_with_parent()`
+182: 
+183: ---
+184: 
+185: ### Vector DB 开关控制
+186: 
+187: 用户通过前端聊天界面的 **Vector DB** 开关手动控制是否启用知识库检索，系统不自动判断：
+188: 
+189: ```
+190: 前端 Toggle（useVectorDb）
+191:        │
+192:        ▼
+193: ChatRequest.use_vector_db: bool
+194:        │
+195:        ▼
+196: AgentState.use_vector_db
+197:        │
+198:        ▼
+199: _retrieve(state)
+200:    │
+201:    ├─ use_vector_db = false
+202:    │     └─ return {context: [], sources: []}    ← 跳过向量库
+203:    │
+204:    └─ use_vector_db = true
+205:          ├─ 向量检索 + BM25 混合检索
+206:          └─ return {context, sources}             ← 注入知识库内容
+207:               │
+208:               ▼
+209:          _generate(state)
+210:               ├─ context 不为空 → system prompt 拼接知识库内容 → LLM 基于知识库回答
+211:               └─ context 为空   → 纯 LLM system prompt（不携带知识库上下文）
+212: ```
+213: 
+214: **关键点**：LLM **始终被调用**，区别只在于 prompt 中是否包含检索到的知识库内容。开关关闭后 Agent 仅凭模型自身知识回答（联网搜索等插件工具仍可用）。
+215: 
+216: 实现路径：`backend/app/agent/graph.py:64-78` — `_retrieve()` 检查 `state.get("use_vector_db", True)`
+217: 
+218: ---
+219: 
+220: ## 技术栈
+221: 
+222: | 层 | 技术 |
+223: |---|---|
+224: | **后端框架** | Python 3.14+, FastAPI, Uvicorn |
+225: | **AI Agent** | LangGraph（retrieve → rerank → generate 工作流）, LangChain |
+226: | **LLM 调用** | LiteLLM（统一 DeepSeek / OpenAI / Ollama API） |
+227: | **向量数据库** | ChromaDB（本地持久化，余弦相似度） |
+228: | **文本嵌入** | sentence-transformers（all-MiniLM-L6-v2，通过 ModelScope 下载） |
+229: | **检索重排序** | Cross-encoder（cross-encoder/ms-marco-MiniLM-L-6-v2，通过 ModelScope 下载） |
+230: | **对话存储** | SQLite（本地持久化对话历史） |
+231: | **前端框架** | Vue 3, TypeScript 5.7, Vite 6 |
+232: | **状态管理** | Pinia |
+233: | **路由** | Vue Router 4 |
+234: | **文档解析** | LangChain 文档加载器：pypdf（PDF）、python-docx（Word）、openpyxl（Excel）、TextLoader（TXT/MD/JSON/CSV）——聊天附件与知识库上传共用 |
+235: | **关键词检索** | BM25（rank_bm25）+ jieba 中文分词 |
+236: | **文档生成** | python-docx（Word）、reportlab（PDF，微软雅黑字体）、openpyxl（Excel）三大生成引擎 |
+237: | **互联网搜索** | Tavily API 实时搜索新闻、网页、财经信息 |
+238: | **天气查询** | Open-Meteo API（免费，无需 key）获取天气实况和预报 |
+239: | **生成文件管理** | Web 页面浏览/搜索/下载/删除 Agent 生成的 .docx/.pdf/.xlsx 文件 |
+240: | **文本分块** | 父子文档分块（parent=章节摘要，child=正文块），按 `第X章`/`Chapter X` 边界 |
+241: | **章节元数据** | SQLite 章节映射表（`ChapterStore`），支持章节号/标题精确查询 |
+242: | **查询意图识别** | 正则匹配 `第X章`/`Chapter X`/`关于...章节`，自动选择检索策略 |
+243: 
+244: ---
+245: 
+246: ## 环境安装
+247: 
+248: ### 前置要求
+249: 
+250: - Python >= 3.14
+251: - Node.js >= 18
+252: - LLM API Key（DeepSeek / OpenAI）
+253: 
+254: ### 后端
+255: 
+256: ```bash
+257: cd backend
+258: 
+259: # （可选）创建虚拟环境
+260: python -m venv .venv
+261: # Windows
+262: .venv\Scripts\activate
+263: # Linux/Mac
+264: # source .venv/bin/activate
+265: 
+266: # 安装依赖（推荐 uv，速度更快）
+267: pip install uv
+268: uv sync
+269: # 或直接用 pip
+270: # pip install -r requirements.txt
+271: 
+272: # 配置环境变量（首次需要）
+273: cp .env.example .env
+274: # 编辑 .env，填入 LLM_API_KEY
+275: 
+276: # 模型（首次启动通过 ModelScope 自动下载 Embedding 和 Reranker 模型）
+277: ```
+278: 
+279: ### 前端
+280: 
+281: ```bash
+282: cd frontend
+283: npm install
+284: ```
+285: 
+286: ---
+287: 
+288: ## 启动与停止
+289: 
+290: ### 启动后端
+291: 
+292: ```powershell
+293: cd backend
+294: .venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+295: ```
+296: 
+297: - 启动后访问 `http://localhost:8000` 查看服务信息
+298: - API 文档：`http://localhost:8000/docs`（Swagger UI）
+299: - 健康检查：`http://localhost:8000/health`
+300: 
+301: ### 停止后端
+302: 
+303: 按 `Ctrl + C` 终止 uvicorn 进程即可。
+304: 
+305: ### 启动前端
+306: 
+307: ```bash
+308: cd frontend
+309: npm run dev
+310: ```
+311: 
+312: - 前端默认运行在 `http://localhost:5173`
+313: - Vite 自动代理 `/api` 请求到后端 `localhost:8000`
+314: 
+315: ### 停止前端
+316: 
+317: 按 `Ctrl + C` 终止 Vite 进程即可。
+318: 
+319: ### 生产构建
+320: 
+321: ```bash
+322: cd frontend
+323: npm run build          # 构建到 frontend/dist/
+324: npm run preview        # 本地预览构建产物
+325: ```
+326: 
+327: ---
+328: 
+329: ## 配置说明
+330: 
+331: 编辑 `backend/.env`：
+332: 
+333: ```ini
+334: # ===== LLM =====
+335: LLM_MODEL=deepseek/deepseek-v4-flash
+336: LLM_API_KEY=sk-xxxxxxxxxxxx
+337: LLM_API_BASE=https://api.deepseek.com
+338: 
+339: # ===== Embedding =====
+340: EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5     # 中文模型；英文文档可用 all-MiniLM-L6-v2  也需要 重排序模型  ms-marco-MiniLM-L-6-v2
+341: 
+342: # ===== RAG =====
+343: VECTOR_STORE_PATH=data/vector_store
+344: UPLOAD_DIR=data/uploads
+345: CHUNK_SIZE=1000
+346: CHUNK_OVERLAP=200
+347: 
+348: # ===== Reranker =====
+349: ENABLE_RERANKER=true
+350: RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+351: 
+352: # ===== Skills & Plugins =====
+353: SKILLS_DIR=skills
+354: PLUGINS_DIR=plugins
+355: 
+356: # ===== Tavily（互联网搜索）======
+357: TAVILY_API_KEY=tvly-xxxxxxxxxxxxxx
+358: 
+359: # ===== LLM 输出上限 =====
+360: # 每次 LLM 调用的输出 token 上限（默认 16384）；长任务配合系统提示"长内容写文件"规则避免截断
+361: # LLM_MAX_TOKENS=16384
+362: ```
+363: 
+364: ### 上下文预算与压缩
+365: 
+366: 所有配置项均可在 `backend/.env` 中调整（默认值见注释，全部默认开启无需手动配置）：
+367: 
+368: ```ini
+369: # ===== Context Budget & Compaction =====
+370: # 单次 LLM 调用的上下文上限（默认 160000）
+371: # MAX_CONTEXT_TOKENS=160000
+372: # 输出预留 token（默认 8192）——usable = MAX_CONTEXT_TOKENS - CONTEXT_RESERVE_TOKENS
+373: # CONTEXT_RESERVE_TOKENS=8192
+374: # 压缩触发阈值；0 = 自动（0.6 × usable ≈ 91084）
+375: # COMPACTION_THRESHOLD_TOKENS=0
+376: # 压缩保留的最近轮次（默认 2）
+377: # CONTEXT_TAIL_TURNS=2
+378: # 尾部保留 token 预算（默认 8000）
+379: # CONTEXT_PRESERVE_RECENT_TOKENS=8000
+380: # 工具输出回溯清理：保护下限 / 生效下限（默认 40000 / 20000）
+381: # TOOL_OUTPUT_PROTECT_TOKENS=40000
+382: # TOOL_OUTPUT_PRUNE_MINIMUM_TOKENS=20000
+383: ```
+384: 
+385: ### 安全与系统
+386: 
+387: ```ini
+388: # ===== Security =====
+389: # 可选：启用签名身份校验（默认关闭）。设置后中间件强制每个 /api/* 请求携带 X-User-Id + X-Auth-Token
+390: # AUTH_TOKEN_SECRET=change-me-to-a-long-random-secret
+391: # 认证 token 有效期（秒，默认 2592000 = 30 天）
+392: # AUTH_TOKEN_TTL=2592000
+393: # 注册用户存储路径
+394: # AUTH_USERS_PATH=data/auth_users.json
+395: # SSRF 防护：设为 true 时跳过内网/回环校验（仅本地调试用，勿在生产开启）
+396: # SSRF_ALLOW_INTERNAL=true
+397: # 并发 Agent 上限（默认 4），与 session 协调器共享
+398: # MAX_CONCURRENT_AGENTS=4
+399: # Agent 记忆持久化路径
+400: # MEMORY_PERSIST_PATH=data/agent_memory.json
+401: # 工具审批超时（秒，默认 60）
+402: # PERMISSION_APPROVAL_TIMEOUT=60
+403: # 外部路径默认策略：ask / allow / deny
+404: # EXTERNAL_PATH_DEFAULT=ask
+405: ```
+406: 
+407: ### 切换 LLM 提供商
+408: 
+409: | 提供商 | LLM_API_BASE | LLM_MODEL 示例 |
+410: |--------|-------------|----------------|
+411: | DeepSeek | `https://api.deepseek.com` | `deepseek/deepseek-v4-flash` / `deepseek/deepseek-v4-pro` |
+412: | OpenAI | 留空 | `gpt-4o` / `gpt-4o-mini` |
+413: | Ollama（本地） | `http://localhost:11434` | `ollama/qwen2.5:7b` |
+414: 
+415: ---
+416: 
+417: ## 用户身份认证
+418: 
+419: 默认（`AUTH_TOKEN_SECRET` 未设置）下，所有 API 请求通过 `X-User-Id` 请求头标识用户身份，未携带时后端默认使用 `"anonymous"`。
+420: 
+421: ```javascript
+422: fetch("http://localhost:8000/api/chat/multi-agent", {
+423:   method: "POST",
+424:   headers: {
+425:     "Content-Type": "application/json",
+426:     "X-User-Id": "user_xxx",  // ← 用户身份
+427:   },
+428:   body: JSON.stringify({ message: "你好" }),
+429: })
+430: ```
+431: 
+432: ### 可选：签名身份校验（`AUTH_TOKEN_SECRET`）
+433: 
+434: 在 `.env` 设置 `AUTH_TOKEN_SECRET` 后启用可信身份签名，防止伪造用户 ID：
+435: 
+436: 1. **Trust-on-first-use 注册**：前端生成随机 `user_id` + `device_secret`，`POST /api/auth/register` 上报，服务端仅存 HMAC 哈希（不存明文密钥）
+437: 2. **签发 token**：`POST /api/auth/token` 返回签名 token（`base64(uid).base64(exp).hmac(uid:exp:reg_hash)`），有效期 `auth_token_ttl`（默认 30 天）
+438: 3. **强制校验**：`AuthMiddleware` 要求每个 `/api/*` 请求携带 `X-User-Id` + `X-Auth-Token`（跳过 `/api/auth/*`、非 `/api` 路径、OPTIONS），校验签名与过期时间
+439: 
+440: | 文件 | 作用 |
+441: |------|------|
+442: | `backend/app/auth.py` | HMAC 哈希、token 签名/校验（`create_signed_token` / `verify_signed_token`）+ `AuthMiddleware`（未配置密钥时跳过） |
+443: | `backend/app/api/auth.py` | `POST /api/auth/register` + `POST /api/auth/token` 路由（账户登录见 `backend/app/api/auth.py` 的 `/api/auth/account/*`，PBKDF2 哈希 + JWT） |
+444: | `frontend/src/api/auth.ts` | `ensureAuth()` — 生成/读取 `user_id` + `device_secret`，自动注册并换取 token（`main.ts` 启动时调用） |
+445: | `frontend/src/api/fetch.ts` | `addAuthHeaders()` 自动注入 `X-User-Id` + `X-Auth-Token`；`fetchWithTimeout` 封装自动带认证头 |
+446: 
+447: 后端通过 `_get_user_id(request)` 统一提取；启用签名校验后该函数同时验证 token，前端接口不变。
+448: 
+449: ### 会话类型隔离
+450: 
+451: 聊天对话按类型隔离存储，不同前端会话列表互不干扰：
+452: 
+453: | 类型 | 前端页面 | kind 值 |
+454: |------|----------|-------------|
+455: | **多 Agent 编排** | MultiAgentView | `multi-agent`（默认） |
+456: | **任务子会话** | 内部使用 | `task` |
+457: 
+458: > 单 Agent 聊天（`chat` 类型）及其前端入口（ChatView / MobileView）已随单 Agent 模式移除，`/chat`、`/m` 路由删除，`/` 重定向到 `/multi-agent`。
+459: 
+460: 前端通过 `GET /api/sessions?kind=multi-agent` 过滤多 Agent 会话列表。
+461: 
+462: ---
+463: 
+464: ## API 接口
+465: 
+466: | 方法 | 路径 | 说明 |
+467: |------|------|------|
+468: | GET | `/` | 服务信息 |
+469: | GET | `/health` | 健康检查 |
+470: | POST | `/api/chat/multi-agent/` | 发送聊天消息（多 Agent Supervisor） |
+471: | POST | `/api/chat/multi-agent/stream` | 流式聊天 SSE（多 Agent），支持 queued/routing/agent_start/agent_stream/agent_done/agent_error/permission_request/done/error 事件 |
+472: | POST | `/api/sessions` | 创建会话 |
+473: | GET | `/api/sessions` | 会话列表（`project`/`roots`/`search`/`archived`/`kind`） |
+474: | GET / PATCH / DELETE | `/api/sessions/{id}` | 详情 / 更新 / 删除（级联子会话） |
+475: | POST | `/api/sessions/{id}/fork` | 在指定 `message_id` 处 fork 子会话 |
+476: | GET | `/api/sessions/{id}/messages?after_seq=` | 分页消息（每条附 `parts`） |
+477: | DELETE | `/api/sessions/{id}/messages/{message_id}` | 删除单条消息 |
+478: | GET | `/api/sessions/{id}/context` | 模型视角上下文（epoch + 过滤后历史） |
+479: | POST | `/api/sessions/{id}/compact` | 手动压缩（可选 `checkpoint`） |
+480: | POST | `/api/sessions/{id}/revert` | 撤销到指定 `message_id` |
+481: | POST | `/api/sessions/{id}/interrupt` | 打断（级联子会话 + 取消任务） |
+482: | GET | `/api/sessions/{id}/children` | 子会话列表 |
+483: | GET | `/api/sessions/{id}/status` | 状态 + 队列深度 |
+484: | POST | `/api/documents/upload` | 上传文档（multipart），返回 task_id 异步处理 |
+485: | GET | `/api/documents/tasks/{task_id}` | 查询上传任务进度（progress + stage） |
+486: | GET | `/api/documents/` | 文档列表 |
+487: | DELETE | `/api/documents/{id}` | 删除文档 |
+488: | GET | `/api/skills/` | 技能列表 |
+489: | POST | `/api/skills/{name}/toggle` | 启用/禁用技能 |
+490: | GET | `/api/plugins/` | 插件列表 |
+491: | POST | `/api/plugins/{name}/toggle` | 启用/禁用插件 |
+492: | GET | `/api/vectors/?offset=0&limit=50&query=xxx&document_id=xxx` | 查看/搜索向量库内容（分页+全文检索） |
+493: | GET | `/api/generated/` | 列出 Agent 生成的文档（可选 `?q=关键字` 搜索文件名） |
+494: | GET | `/api/generated/download/{filename}` | 下载生成的文档（.docx/.pdf/.xlsx 等） |
+495: | DELETE | `/api/generated/{filename}` | 删除生成的文档 |
+496: | GET | `/api/monitor/stats` | 系统监控统计（请求量/模型调用/token 用量/耗时） |
+497: | POST | `/api/auth/register` | 注册设备身份（`user_id` + `device_secret`，仅存 HMAC 哈希） |
+498: | POST | `/api/auth/token` | 签发签名 token（需 `AUTH_TOKEN_SECRET`） |
+499: | GET | `/api/auth/status` | 查询是否启用签名校验（前端据此决定是否自动注册） |
+500: | GET | `/api/config/summarization` | 查看摘要模型配置 |
+501: | POST | `/api/config/summarization` | 运行时切换摘要模型 |
+502: 
+503: ---
+504: 
+505: ## 聊天界面控制
+506: 
+507: | 控制项 | 说明 |
+508: |--------|------|
+509: | **Vector DB 开关** | 控制是否启用向量库检索。开启后 Agent 会检索上传的文档内容辅助回答；关闭后仅凭 LLM 自身知识回答，适合闲聊或通用问题。 |
+510: | **模型选择** | 下拉切换 DeepSeek / OpenAI 等 LLM 模型。 |
+511: | **流式状态** | Header 实时显示当前会话状态：排队中（⏳ #N）或流式传输中（● streaming）。Sidebar 每个会话旁也有状态标签。 |
+512: 
+513: ---
+514: 
+515: ## 智能体上下文管理
+516: 
+517: 每次对话请求通过 `conversation_id` 进行会话关联：
+518: 
+519: 1. **自动生成 ID**：首次对话不传 `conversation_id`，后端创建 `kind='multi-agent'` 会话并返回
+520: 2. **历史加载**：`_session_history_for()` 传 `conversation_id` 则从 SQLite 恢复完整历史（正文优先取 `message_parts` 的 text part）
+521: 3. **滑动窗口截断**：`_truncate_history()` 限制 16000 tokens，超出的最早消息被丢弃，插入 `[earlier history truncated]` 占位
+522: 4. **摘要压缩（可选，分层）**：配置 `SUMMARIZATION_MODEL` 后在截断前先尝试用 LLM 压缩早期消息。旧消息按 `CHUNK_PAIRS`（默认 10 对）分批，每批独立压缩为子摘要，若子摘要合并后仍超阈值则递归合并，直到适应预算。保留最近的 `SUMMARIZATION_KEEP_MESSAGES`（默认 20）条完整消息。摘要失败时自动回退为截断。
+523: 5. **持久化**：每次回答后，user/assistant 消息对追加写入 `data/session.db`（主会话 + `kind='task'` 子会话各一份，含 sources/steps/agents/tokens）
+524: 
+525: > 截断在 LLM 调用前发生，仅影响 prompt 传入的历史，不影响数据库中的完整记录。
+526: 
+527: 实现路径：`backend/app/api/chat.py` — `_session_history_for` / `_truncate_history` / `_persist_multi_agent`，`backend/app/middleware/summarization.py` — `HierarchicalSummarizationMiddleware`
+528: 
+529: ### 共享记忆持久化（Memory）
+530: 
+531: `MemoryManager`（`backend/app/agent/memory.py`）提供跨会话的短期记忆（Agent 主动记录的临时事实/偏好），未过期条目在 set/delete/clear 时写入 `settings.memory_persist_path`（默认 `data/agent_memory.json`），启动时重载，服务重启不丢失。`persist_path` 为构造函数注入，便于测试隔离。
+532: 
+533: **主 Agent 记忆工具**：主 RAG Agent（`graph.py`）注入共享 `MemoryManager`（`runtime.py`），模型可自主调用 `tool_memory_set(key, value, tags?)` / `tool_memory_get(key)` / `tool_memory_search(tag)` 记忆、回忆、按标签检索关键信息（对齐 opencode memory 语义）。记忆按 `conversation_id` 命名空间隔离，跨会话不可见；未注入记忆管理器时不注册工具。子 Agent（`code`/`web_search`）复用同一实例，主 Agent 记住的信息子 Agent 也可检索到。
+534: 
+535: **持久化优化**：`_persist_sync()` 保持"set 返回即落盘"的同步语义；另提供 `_persist_async_debounced()`（异步 `asyncio.to_thread` + 1 秒去抖窗口），用于高并发多 Agent 写共享记忆时避免阻塞各自事件循环（对齐 opencode 异步 storage 语义）。
+536: 
+537: ---
+538: 
+539: ## 会话管理系统（Session Management）
+540: 
+541: 基于 SQLite（`backend/data/session.db`）的归一化会话体系，对齐 OpenCode 的 session 模型，为多 Agent 编排与任务执行提供统一底座。旧 `conversations.db` 保持只读，首次访问时惰性迁移（`conversation_id == session.id`），前端无需改动。
+542: 
+543: ### 核心概念
+544: 
+545: | 概念 | 说明 |
+546: |------|------|
+547: | **会话（Session）** | 用户/项目/工作区三级隔离；`parent_id` 构成子会话树（fork / 任务共享） |
+548: | **消息日志** | `session_messages` append-only 事件日志，会话内自增 `seq` 水位 |
+549: | **上下文纪元（Context Epoch）** | 每个会话持久化系统上下文快照 + `baseline_seq`，恢复/压缩后精确定位历史水位 |
+550: | **压缩基线（Compaction Baseline）** | 压缩发生时落 `compaction` 消息 + 重建 epoch；checkpoint 作为 system 上下文带回，重启不丢摘要 |
+551: | **撤销（Revert）** | 删除指定消息之后的所有消息与部件，并回滚纪元水位 |
+552: 
+553: ### 特性
+554: 
+555: - **per-session 串行 + 全局并发上限**：`service.write_lock(session_id)` 保证同一会话串行；`_agent_semaphore`（`app/api/chat.py`）受 `MAX_CONCURRENT_AGENTS` 全局限流（超出自动排队，SSE 发 `queued` 事件）
+556: - **fork**：在任意消息处克隆子会话，独立消息日志与上下文，与父会话互不污染
+557: - **级联删除 / 取消**：删除或打断会话时级联其子会话，并取消对应的 AgentBus 后台任务（`task_bridge.cancel_children`）
+558: - **多 Agent 任务**：`/api/chat/multi-agent` 与 `/stream` 把每次任务登记为 `kind='task'` 子会话，父/子消息同步回写
+559: - **压缩基线持久化**：历史超阈值被摘要/截断时落 `compaction` 消息 + 置 `time_compacted`；`history.load` 始终带回最新 checkpoint
+560: 
+561: ### REST API（前缀 `/api/sessions`）
+562: 
+563: | 方法 | 路径 | 说明 |
+564: |------|------|------|
+565: | POST | `/api/sessions` | 创建会话 |
+566: | GET | `/api/sessions` | 列表（`project`/`roots`/`search`/`archived`/`kind`） |
+567: | GET / PATCH / DELETE | `/api/sessions/{id}` | 详情 / 更新 / 删除（级联） |
+568: | POST | `/api/sessions/{id}/fork` | 在指定 `message_id` 处 fork 子会话 |
+569: | GET | `/api/sessions/{id}/messages` | 分页消息（`after_seq`，每条附 `parts`） |
+570: | DELETE | `/api/sessions/{id}/messages/{message_id}` | 删除单条消息 |
+571: | GET | `/api/sessions/{id}/context` | 模型视角上下文（epoch + 过滤后历史） |
+572: | POST | `/api/sessions/{id}/compact` | 手动压缩（可选 `checkpoint`） |
+573: | POST | `/api/sessions/{id}/revert` | 撤销到指定 `message_id` |
+574: | POST | `/api/sessions/{id}/interrupt` | 打断（级联子会话） |
+575: | GET | `/api/sessions/{id}/children` | 子会话列表 |
+576: | GET | `/api/sessions/{id}/status` | 状态 + 队列深度 |
+577: 
+578: > 所有 `/api/sessions` 请求经 `X-User-Id` 头隔离（默认 `anonymous`），跨用户访问返回 403。
+579: 
+580: 实现路径：`backend/app/session/`（db / models / repository / history / service / deps / router / agent_executor / task_bridge；`coordinator.py` 已随单 Agent 移除）；设计文档见 `docs/session-management-design.md`。
+581: 
+582: ---
+583: 
+584: ## 会话隔离（Session Isolation）
+585: 
+586: 前端采用**按会话隔离**的消息存储架构，确保切换历史会话时消息互不干扰：
+587: 
+588: ### 数据结构
+589: 
+590: ```typescript
+591: // 每个会话独立存储
+592: const sessions = ref<Record<string, SessionState>>({
+593:   'session-id-1': {
+594:     messages: [...],
+595:     conversationId: 'conv-123',
+596:     conversationTitle: '第一章讲了什么...',
+597:     currentSteps: [],
+598:     loading: false,
+599:     abortController: null,
+600:     streamPhase: 'running',   // 'idle' | 'queued' | 'running'
+601:     queuePosition: null,       // 排队位置，null 表示不在排队
+602:   },
+603:   'session-id-2': { ... }
+604: })
+605: 
+606: // 当前活跃会话
+607: const activeSessionId = ref<string | undefined>(undefined)
+608: ```
+609: 
+610: ### 核心优势
+611: 
+612: | 特性 | 说明 |
+613: |------|------|
+614: | **消息隔离** | 切换会话时，每个会话显示自己的消息列表 |
+615: | **后台请求** | 流式请求在后台继续运行，完成时消息保存到对应会话 |
+616: | **状态独立** | 每个会话有自己的 loading、currentSteps、streamPhase 状态 |
+617: | **即时切换** | 已加载的会话切换时无需重新请求服务器，本地消息完整保留 |
+618: | **内容不丢失** | 切换会话时，正在 streaming 的消息保留在本地，切回时立即可见 |
+619: 
+620: ### 双重持久化（IndexedDB + 服务器）
+621: 
+622: 解决 SSE 中断/页面刷新时消息丢失的问题：
+623: 
+624: ```
+625: 发送消息
+626:   │
+627:   ├─ 1. 立即写入 IndexedDB（防 SSE 中断丢失 user 消息）
+628:   ├─ 2. SSE 流式接收 → 消息在前端内存中累积
+629:   ├─ 3. done 事件 → 写入 assistant 消息
+630:   │     ├─ 写入 IndexedDB（本地缓存）
+631:   │     └─ 后端写入 SQLite（持久化，含 sources/steps）
+632:   │
+633:   ▼
+634: 切换会话 → loadConversation()
+635:   │
+636:   ├─ 始终从服务器获取最新数据（不再跳过）
+637:   ├─ 从 IndexedDB 加载本地缓存
+638:   └─ 合并策略：
+639:        ├─ 服务器有、缓存没有 → 用服务器数据
+640:        ├─ 缓存有、服务器没有 → 补入（SSE 中断时的 user 消息）
+641:        └─ 两端都有 → 取 content 更长或有 sources/steps 的版本
+642: ```
+643: 
+644: **解决的场景：**
+645: 
+646: | 场景 | 旧行为 | 新行为 |
+647: |------|--------|--------|
+648: | SSE 中途断开 | user 消息丢失，assistant 为空 | IndexedDB 保留 user 消息，下次加载时从服务器合并 |
+649: | 页面刷新 | 内存清空，服务器 assistant 为空 | 从 IndexedDB 恢复 + 服务器合并 |
+650: | 切换会话再切回 | 有时消息丢失 | 始终从服务器同步，合并本地缓存 |
+651: 
+652: 实现路径：
+653: - 缓存层：`frontend/src/api/session-cache.ts` — IndexedDB CRUD + 合并逻辑
+654: - Store 集成：`frontend/src/stores/multiAgent.ts` — `loadConversation()` / `persistSession()`
+655: - 后端持久化：`backend/app/api/chat.py` — `_persist_multi_agent()` 在 `done`/`error` 事件时保存 `sources`/`steps`/`agents`/`tokens` 到 SQLite（主会话 + task 子会话）
+656: 
+657: ### 工作流程
+658: 
+659: ```
+660: 用户在会话A发送消息
+661:     │
+662:     ├─ 创建 AbortController (key: session-A)
+663:     ├─ streamPhase = 'queued' → 等待并发 slot
+664:     ├─ 收到执行事件 → streamPhase = 'running'
+665:     ├─ 开始流式接收
+666:     │
+667:     ▼
+668: 用户切换到会话B
+669:     │
+670:     ├─ activeSessionId = B
+671:     ├─ 会话A的本地消息保留（不从服务器覆盖）
+672:     ├─ 显示会话B的消息
+673:     └─ 会话A的流式请求继续在后台运行
+674:          │
+675:          ▼
+676:     会话A请求完成
+677:          │
+678:          ├─ streamPhase = 'idle'
+679:          ├─ 消息保存到 sessions['session-A'].messages
+680:          └─ 如果用户切回会话A，消息仍在（无需重新加载）
+681: ```
+682: 
+683: 实现路径：`frontend/src/stores/multiAgent.ts` — `useMultiAgentStore`（按会话ID存储消息，支持 agents 面板、routing 状态与目录绑定，`kind='multi-agent'`）
+684: - 单 Agent 版本（`stores/chat.ts`）与移动端（`stores/mobileChat.ts`）已随单 Agent 模式移除
+685: 
+686: ### 并发控制
+687: 
+688: 后端使用全局信号量（`_agent_semaphore`，`settings.max_concurrent_agents` 默认 4）限制同时运行的 Agent 任务数，防止多会话同时 streaming 导致资源争抢。多 Agent 请求经 `/api/chat/multi-agent` 与 `/stream` 进入队列，同一会话内仍严格串行执行（`service.write_lock`）：
+689: 
+690: ```
+691: Session A 发消息 → 获取 slot #1 → 开始执行
+692: Session B 发消息 → 获取 slot #2 → 开始执行
+693: Session C 发消息 → slot 已满 → 排队等待
+694:     │
+695:     ├─ SSE 事件: {type: "queued", queue_position: 1}
+696:     ├─ Sidebar 显示 "⏳ #1"
+697:     ├─ MultiAgentView Header 显示 "排队中 #1"
+698:     │
+699:     ▼
+700: Session A 完成 → slot #1 释放 → Session C 获得 slot
+701:     │
+702:     ├─ SSE 事件: {type: "routing"} → 进入 running 阶段
+703:     ├─ Sidebar 显示 "● streaming"
+704:     └─ 开始流式输出
+705: ```
+706: 
+707: | 配置 | 默认值 | 说明 |
+708: |------|--------|------|
+709: | `MAX_CONCURRENT_AGENTS` | 4 | 同时运行的最大 Agent 任务数 |
+710: 
+711: **session.db 连接池**：`app/session/db.py` 的 `_ConnectionPool` 维持固定连接（池大小 = `max(6, max_concurrent_agents + 2)`），`_get_db()` 借出、`close()` 归还；WAL 模式 + `busy_timeout=10000` 保证并发写安全。非默认路径的 DB 连接绕过池。
+712: 
+713: > 旧的状态 API `GET /api/chat/stream/status`（单 Agent 时期）已随单 Agent 模式移除；排队状态现在由 SSE `queued` 事件 + `queue_position` 承载，前端 `streamPhase` 跟踪。
+714: 
+715: 实现路径：
+716: - 后端：`backend/app/api/chat.py` — `_agent_semaphore` + `run_agent()` / `_run_multi_agent_stream()` 的 `async with sem`
+717: - 连接池：`backend/app/session/db.py` — `_ConnectionPool._get_db()` / `close()`
+718: - 前端状态：`frontend/src/stores/multiAgent.ts` — `SessionState.streamPhase` / `queuePosition`
+719: - 前端显示：`frontend/src/components/MultiAgentChatHistory.vue`（Sidebar 排队/运行中 badge）、`frontend/src/views/MultiAgentView.vue`（Header 标签）
+720: 
+721: ---
+722: 
+723: ## 错误重试机制（Error Retry）
+724: 
+725: 参考 OpenCode 的重试架构，实现三层重试机制，覆盖 LLM API 故障、网络中断、SSE 断连等场景：
+726: 
+727: ### 三层重试架构
+728: 
+729: ```
+730: ┌─────────────────────────────────────────────────────┐
+731: │                    前端层                             │
+732: │  SSE 断连检测 + 重试按钮 + 自动重试倒计时(5s×2次)     │
+733: └──────────────────────┬──────────────────────────────┘
+734:                        │ SSE error / 断连
+735: ┌──────────────────────▼──────────────────────────────┐
+736: │                   API 层                             │
+737: │  错误分类(retryable/non-retryable) + 用户提示        │
+738: └──────────────────────┬──────────────────────────────┘
+739:                        │ 429/500/503
+740: ┌──────────────────────▼──────────────────────────────┐
+741: │                 后端层                                │
+742: │  litellm num_retries=2 + AgentBus 事件循环自愈(5次)  │
+743: └─────────────────────────────────────────────────────┘
+744: ```
+745: 
+746: ### 错误分类
+747: 
+748: | 错误类型 | 分类依据 | 可重试 | 后端重试 | 前端自动重试 |
+749: |----------|----------|--------|----------|-------------|
+750: | 429 Rate Limit | `RateLimitError` / `429` | ✅ | litellm 2次 + AgentBus 5次 | 5s 倒计时，最多 2 次 |
+751: | 500/502/503 | `InternalServerError` / `5xx` | ✅ | litellm 2次 + AgentBus 5次 | 5s 倒计时，最多 2 次 |
+752: | 网络断开 | `Failed to fetch` / SSE 断连 | ✅ | — | 5s 倒计时，最多 2 次 |
+753: | 超时 | `timeout` / `timed out` | ✅ | litellm 2次 | 5s 倒计时，最多 2 次 |
+754: | Context Overflow | `context_length_exceeded` | ❌ | — | — |
+755: | 401/403 | 认证失败 | ❌ | — | — |
+756: | 用户取消 | `AbortError` | ❌ | — | — |
+757: 
+758: ### 退避策略
+759: 
+760: ```
+761: retryAfter header → 使用 header 值（上限 60s）
+762: 无 header → litellm 递增间隔；AgentBus 崩溃自愈按重试次数递增延迟（1s→5s）
+763: 最大重试次数: AgentBus 事件循环 5 次
+764: ```
+765: 
+766: ### 重试流程
+767: 
+768: ```
+769: LLM API 报错 (429/500)
+770:   │
+771:   ├─ 1. litellm num_retries=2（自动，~1s/2s 间隔）
+772:   │
+773:   ├─ 2. AgentBus 事件循环崩溃自愈（最多 5 次，按重试次数递增延迟）
+774:   │     └─ 每次重试推送 step 事件 → 前端显示 "重试中..."
+775:   │
+776:   └─ 3. 如果仍然失败 → SSE error 事件（retryable=true）
+777:         │
+778:         ├─ 前端显示红色错误消息 + ⚠️ 图标 + 重试按钮
+779:         │
+780:         └─ 自动重试倒计时（5s）
+781:               ├─ 倒计时结束 → 自动重新发送
+782:               ├─ 用户点击"取消" → 停止自动重试
+783:               └─ 超过 2 次 → 停止自动重试，只保留手动重试按钮
+784: ```
+785: 
+786: ### SSE 断连检测
+787: 
+788: 前端 `sendMessageStream()` 追踪是否收到 `done`/`error` 终端事件：
+789: - 收到终端事件 → 正常结束
+790: - 未收到终端事件就断开 → 抛出 `network` 类型错误，触发重试
+791: 
+792: ### 前端 UI
+793: 
+794: - **错误消息**：红色边框 + ⚠️ 图标，区别于正常 assistant 消息
+795: - **重试按钮**：仅对 `retryable=true` 的错误显示
+796: - **自动重试横幅**：底部显示倒计时 + 取消按钮
+797: 
+798: 实现路径：
+799: - 后端重试：`backend/app/agent/graph.py` — `_llm_call()` num_retries
+800: - 后端自愈：`backend/app/agent/bus.py` — `run_agent()` 事件循环崩溃重启（递增延迟，最多 5 次）
+801: - 后端分类：`backend/app/api/chat.py` — SSE error 事件携带 retryable/statusCode
+802: - 前端分类：`frontend/src/api/multiAgent.ts` / `frontend/src/stores/multiAgent.ts` — `classifyNetworkError()` + SSE 断连检测
+803: - 前端重试：`frontend/src/stores/multiAgent.ts` — `retryLastMessage()` / `manualRetry()` / `cancelAutoRetry()`（5s 自动倒计时，最多 2 次）
+804: - 前端 UI：`frontend/src/views/MultiAgentView.vue` — 错误样式 + 重试按钮 + 倒计时徽标
+805: 
+806: ---
+807: 
+808: ## 摘要模型配置（可选）
+809: 
+810: ```ini
+811: # .env 可选配置
+812: SUMMARIZATION_MODEL=ollama/qwen2.5:3b     # 摘要用模型（推荐免费方案），不设置则只用截断
+813: SUMMARIZATION_API_KEY=                    # 摘要模型的 API key（可选，不设置则复用 LLM_API_KEY）
+814: SUMMARIZATION_API_BASE=                   # 摘要模型的 API base（可选，不设置则复用 LLM_API_BASE）
+815: SUMMARIZATION_KEEP_MESSAGES=20            # 摘要时保留的最近完整消息数
+816: CHUNK_PAIRS=10                            # 每批摘要的消息对数量（用户+助手为一对）
+817: ```
+818: 
+819: **推荐免费摘要模型：**
+820: | 方案 | 模型 | 说明 |
+821: |------|------|------|
+822: | **本地（推荐）** | `ollama/qwen2.5:3b` | ~1.7GB，中文摘要够用，完全免费，无需 API key |
+823: | 本地 | `ollama/qwen2.5:7b` | ~4.2GB，中文摘要质量更好，但摘要用小模型即可 |
+824: | 免费 API | `gemini/gemini-2.0-flash-lite` | 1500 次/天免费，需配 `SUMMARIZATION_API_KEY` |
+825: | 免费 API | `groq/llama3-8b-8192` | 30 req/min，完全免费，需配 `SUMMARIZATION_API_KEY` |
+826: 
+827: **运行时切换摘要模型：**
+828: 
+829: ```bash
+830: # 查看当前配置
+831: curl http://localhost:8000/api/config/summarization
+832: 
+833: # 切换到 Gemini（免费）
+834: curl -X POST http://localhost:8000/api/config/summarization \
+835:   -H "Content-Type: application/json" \
+836:   -d '{"model": "gemini/gemini-2.0-flash-lite"}'
+837: 
+838: # 切换到 DeepSeek（复用主 LLM）
+839: curl -X POST http://localhost:8000/api/config/summarization \
+840:   -H "Content-Type: application/json" \
+841:   -d '{"model": "deepseek/deepseek-v4-flash"}'
+842: 
+843: # 关闭摘要（仅截断）
+844: curl -X POST http://localhost:8000/api/config/summarization \
+845:   -H "Content-Type: application/json" \
+846:   -d '{"model": ""}'
+847: ```
+848: 
+849: ## 生成文件管理
+850: 
+851: Agent 创建的文档（通过 docx-generator、pdf-generator、excel-generator、kb-export 等插件）自动保存到 `backend/data/generated/`，可在前端 **Generated** 页面管理：
+852: 
+853: - **列表查看**：按创建时间倒序排列
+854: - **搜索**：按文件名关键字过滤
+855: - **下载**：点击 Download 按钮下载原始文件
+856: - **删除**：点击 Delete 按钮从磁盘删除
+857: - **运行 JS**：`.js` 文件显示"Run"按钮，可在浏览器沙箱中执行（含 mock `fs`/`require`）
+858: 
+859: ---
+860: 
+861: ## 系统监控
+862: 
+863: 可在前端 **Monitoring** 页面查看系统运行统计：
+864: 
+865: ### HTTP 请求统计
+866: 
+867: | 指标 | 说明 |
+868: |------|------|
+869: | 总请求数 | 服务启动以来的所有 HTTP 请求 |
+870: | 按路径 | 每个 API 端点的调用次数 |
+871: | 按状态码 | 200/404/500 等状态码分布 |
+872: 
+873: ### LLM 调用统计
+874: 
+875: | 指标 | 说明 |
+876: |------|------|
+877: | 总调用次数 | 包括工具轮次内的每次 LLM 请求 |
+878: | Prompt/Completion Tokens | 累计输入/输出 token 数 |
+879: | 总耗时 / 平均耗时 | 每次 LLM 调用的响应时间 |
+880: | 工具轮数 | 累计 / 平均每次生成的 tool-call 轮次 |
+881: | 按模型 | 不同模型（DeepSeek / GPT / Ollama）的调用分布 |
+882: 
+883: 数据在内存中实时累计，服务重启后重置。实现路径：`backend/app/monitor.py` — `record_request()` / `record_model_call()`
+884: 
+885: ---
+886: 
+887: ## Skills & Plugins
+888: 
+889: ### Skills（技能）
+890: 
+891: 已预装以下技能包，直接输入需求即可自动触发。技能分为两大来源：
+892: 
+893: - **Anthropic Agent Skills** — 文档处理、设计、开发工具类
+894: - **Matt Pocock Skills** — 软件工程实践、代码质量、需求管理类（来自 [mattpocock/skills](https://github.com/mattpocock/skills)）
+895: 
+896: #### 📝 文档处理与创作
+897: 
+898: | Skill | 触发示例 |
+899: |-------|----------|
+900: | **Word 文档** (`docx`) | *"帮我创建一个 Word 文档，内容是产品介绍"* · *"把这个内容导出为 .docx 文件"* · *"帮我写一份报告，格式要好看"* |
+901: | **PPT 演示文稿** (`pptx`) | *"给我做一份 6 页的 PPT，主题是新能源"* · *"把这份大纲变成幻灯片"* · *"帮我美化这个 .pptx 文件"* |
+902: | **PDF 处理** (`pdf`) | *"把这份文档转成 PDF"* · *"提取这个 PDF 中的表格"* · *"合并这几个 PDF 文件"* · *"给 PDF 添加水印"* |
+903: | **Excel 表格** (`xlsx`) | *"创建一个 Excel 表格，包含销售数据"* · *"帮我把这份 CSV 转成 .xlsx"* · *"在这个表格里加个图表"* |
+904: 
+905: #### 🎨 设计与视觉创作
+906: 
+907: | Skill | 触发示例 |
+908: |-------|----------|
+909: | **前端界面设计** (`frontend-design`) | *"帮我设计一个产品展示的 Landing Page"* · *"做一个仪表盘风格的页面"* · *"美化这个 React 组件"* |
+910: | **算法艺术** (`algorithmic-art`) | *"用 p5.js 画一个粒子系统动画"* · *"生成一张算法艺术图，流场风格"* · *"创建一个创意编程作品"* |
+911: | **海报/画布设计** (`canvas-design`) | *"帮我设计一张海报，主题是科技论坛"* · *"创建一张艺术画布，输出 PNG"* · *"做一个活动宣传图"* |
+912: | **品牌风格** (`brand-guidelines`) | *"应用 Anthropic 的品牌风格到这个页面"* · *"使用品牌的配色方案"* · *"按品牌规范调整这个设计"* |
+913: | **主题定制** (`theme-factory`) | *"给这份 PPT 应用海洋主题"* · *"帮我生成一个自定义主题，暖色调"* · *"应用 sunset-boulevard 主题"* |
+914: 
+915: #### 🔧 开发与工具
+916: 
+917: | Skill | 触发示例 |
+918: |-------|----------|
+919: | **Claude API 开发** (`claude-api`) | *"帮我写一个调用 Claude API 的代码"* · *"给这段代码加上 prompt caching"* · *"从 Claude 3.5 迁移到 Claude 4"* |
+920: | **文档协作编写** (`doc-coauthoring`) | *"帮我写一份技术方案文档"* · *"一起协作写一篇提案"* · *"帮我起草一份设计文档"* |
+921: | **MCP 服务器构建** (`mcp-builder`) | *"创建一个 MCP 服务器，对接 GitHub API"* · *"用 FastMCP 写一个天气查询工具"* · *"帮我构建一个 MCP server"* |
+922: | **Web 应用测试** (`webapp-testing`) | *"帮我测试本地运行的 Web 应用"* · *"用 Playwright 跑一下这个页面的 E2E 测试"* · *"截图看看这个页面长什么样"* |
+923: | **Web Artifacts 构建** (`web-artifacts-builder`) | *"创建一个多组件交互的 HTML Artifact"* · *"用 React + Tailwind 搭建一个复杂的仪表盘"* · *"使用 shadcn/ui 构建这个页面"* |
+924: | **Slack GIF 制作** (`slack-gif-creator`) | *"帮我做一个欢迎新同事的 GIF，用于 Slack"* · *"创建一个产品发布的动画 GIF"* · *"做一个搞笑的 GIF"* |
+925: | **Skill 创建器** (`skill-creator`) | *"帮我创建一个自定义技能"* · *"优化这个技能的触发描述"* · *"测试这个技能的效果"* |
+926: 
+927: #### ⚙️ 工程实践（Matt Pocock Skills）
+928: 
+929: 这些技能来自 [mattpocock/skills](https://github.com/mattpocock/skills)，专注于软件工程最佳实践。Agent 会根据你的描述自动匹配并加载对应技能。
+930: 
+931: **需求与规划**
+932: 
+933: | Skill | 触发示例 | 说明 |
+934: |-------|----------|------|
+935: | **需求追问** (`grill-me`) | *"我想做一个用户管理系统，帮我梳理需求"* · *"帮我把这个想法想清楚"* | 追问式需求分析，适用于无代码库场景 |
+936: | **需求追问+文档** (`grill-with-docs`) | *"帮我梳理这个项目的需求，顺便更新文档"* · *"我想加一个新功能，先帮我理清思路"* | 追问式需求分析 + 自动生成术语表和 ADR |
+937: | **追问核心** (`grilling`) | *"压力测试一下我的方案"* · *"这个设计有没有漏洞"* | 追问原语，逐个问题深挖直到达成共识 |
+938: | **会话交接** (`handoff`) | *"把当前对话总结一下，我要开新会话"* · *"交接一下上下文"* | 生成交接文档，让新会话无缝继续 |
+939: | **对话转规格** (`to-spec`) | *"把我们讨论的内容整理成规格文档"* · *"生成一份 PRD"* | 综合对话上下文，输出结构化规格文档 |
+940: | **规格转票据** (`to-tickets`) | *"把这个规格拆分成开发任务"* · *"拆分成可执行的 ticket"* | 将规格文档拆分为垂直切片的开发票据 |
+941: | **任务实现** (`implement`) | *"按照这个规格开始实现"* · *"实现这个 ticket"* | 按规格/票据实现功能，集成 TDD 和代码审查 |
+942: | **大型项目规划** (`wayfinder`) | *"这个项目太大了，帮我规划一下"* · *"从零开始规划一个大功能"* | 将大型项目拆分为决策票据，逐步推进 |
+943: 
+944: **代码质量**
+945: 
+946: | Skill | 触发示例 | 说明 |
+947: |-------|----------|------|
+948: | **测试驱动开发** (`tdd`) | *"用 TDD 方式实现这个功能"* · *"先写测试再实现"* · *"红色-绿色-重构"* | 红-绿循环 TDD，含测试规范和反模式 |
+949: | **代码审查** (`code-review`) | *"帮我审查一下这个分支的代码"* · *"review 一下最近的改动"* · *"检查代码质量"* | 双轴审查：标准（编码规范）+ 规格（需求匹配） |
+950: | **Bug 诊断** (`diagnosing-bugs`) | *"帮我调试这个 bug"* · *"这个 bug 很难复现"* · *"帮我诊断这个问题"* | 6 阶段诊断循环：反馈环 → 复现 → 假设 → 排查 → 修复 → 复盘 |
+951: | **合并冲突解决** (`resolving-merge-conflicts`) | *"帮我解决这个 merge conflict"* · *"rebase 冲突了"* | 系统化解决 Git 合并冲突，保留双方意图 |
+952: 
+953: **架构设计**
+954: 
+955: | Skill | 触发示例 | 说明 |
+956: |-------|----------|------|
+957: | **模块设计** (`codebase-design`) | *"这个模块的接口怎么设计"* · *"怎样让代码更可测试"* · *"什么是深度模块"* | 深度模块设计词汇：模块、接口、深度、接缝、适配器 |
+958: | **架构改进** (`improve-codebase-architecture`) | *"帮我看看这个代码库有什么架构问题"* · *"扫描一下有哪些可以改进的地方"* | 扫描代码库，生成 HTML 架构改进报告 |
+959: | **领域建模** (`domain-modeling`) | *"帮我梳理项目的领域术语"* · *"这个概念用什么名字好"* · *"更新一下术语表"* | 建立和维护项目领域词汇表 + ADR |
+960: 
+961: **研究与学习**
+962: 
+963: | Skill | 触发示例 | 说明 |
+964: |-------|----------|------|
+965: | **后台研究** (`research`) | *"帮我调研一下 GraphQL 和 REST 的区别"* · *"查一下这个 API 的文档"* | 后台代理研究，输出引用 Markdown 文件 |
+966: | **教学** (`teach`) | *"教我学习 Rust"* · *"帮我系统学习 Docker"* | 多会话教学系统，含课程、学习记录、术语表 |
+967: | **原型验证** (`prototype`) | *"帮我做个原型验证一下这个状态机"* · *"做个 UI 原型看看效果"* | 抛弃型原型：状态逻辑原型 或 UI 多方案对比 |
+968: | **技能编写参考** (`writing-great-skills`) | *"怎么写一个好用的技能"* · *"优化这个技能的描述"* | 技能编写最佳实践参考 |
+969: | **技能路由器** (`ask-matt`) | *"我不知道该用哪个技能"* · *"有什么技能可以用"* | 路由器：根据场景推荐合适的技能 |
+970: 
+971: **问题分流**
+972: 
+973: | Skill | 触发示例 | 说明 |
+974: |-------|----------|------|
+975: | **问题分流** (`triage`) | *"帮我看看有哪些 issue 需要处理"* · *"把 #42 标记为 ready-for-agent"* | 问题状态机分流：分类 → 验证 → 追问 → 写 Agent 简报 |
+976: | **技能配置** (`setup-matt-pocock-skills`) | *"配置一下 issue tracker"* · *"设置分流标签"* | 首次使用前配置 issue tracker 和分流标签 |
+977: 
+978: ### Plugins（插件）
+979: 
+980: 预装插件可通过输入需求自动触发：
+981: 
+982: | Plugin | 工具函数 | 触发示例 |
+983: |--------|----------|----------|
+984: | **example-plugin** | `tool_calculate(expression)` — 计算数学表达式 | *"计算 3.14 * 25 的结果"* · *"算一下 1024 / 8"* |
+985: | | `tool_get_current_time(format)` — 获取当前时间 | *"现在几点了？"* · *"获取当前日期和时间"* |
+986: | | `tool_hello(name)` — 返回问候语 | *"跟张三打个招呼"* |
+987: | **docx-generator** | `tool_create_docx(title, sections)` — 创建 Word 文档 | *"帮我创建一个 Word 文档，内容是产品介绍"* · *"把这段内容导出为 .docx"* |
+988: | **pdf-generator** | `tool_create_pdf(title, sections)` — 创建 PDF 文档（支持中文，内置微软雅黑字体） | *"把这份报告导出为 PDF"* · *"帮我创建一个 PDF 文档"* |
+989: | **excel-generator** | `tool_create_excel(sheets)` — 创建 Excel 表格 | *"创建一个 Excel 表格，包含销售数据"* · *"导出数据为 .xlsx"* |
+990: | **pptx-generator** | `tool_create_pptx(title, slides)` — 创建 PPT 演示文稿 | *"帮我创建一个 PPT，主题是新能源"* · *"把这份大纲变成幻灯片"* |
+991: | **kb-export** | `tool_export_kb_to_docx(query, title)` — 知识库导出为 Word | *"把知识库中关于 XX 的内容导出为 Word"* |
+992: | **filesystem** | `tool_write_file/read_file/ls/grep/glob/edit_file/execute` — 文件操作套件 | Agent 自动用于创建项目、读写文件 |
+993: | **internet-search** | `tool_internet_search(query, max_results, topic)` — 搜索互联网 | *"今天有什么新闻？"* · *"搜索一下 Python 的最新动态"* |
+994: | | `tool_extract_urls(urls, format)` — 按 URL 提取页面内容 | *"打开这篇文章看看"* · *"查看某个网站的具体内容"* |
+995: | **weather** | `tool_get_weather(city, forecast_days)` — 查询天气 | *"今天北京天气怎么样？"* · *"伦敦未来三天的天气预报"* |
+996: | **http-client** | `tool_http_request(method, url, headers, body)` — 发送 HTTP 请求 | *"测试一下 localhost:8000 的 health 接口"* · *"帮我调用这个 API"* |
+997: | | `tool_http_get(url, headers)` — 快捷 GET 请求 | *"GET 请求这个地址"* · *"查看这个 API 的返回"* |
+998: | | `tool_http_post(url, body, headers)` — 快捷 POST 请求 | *"POST 一段 JSON 到这个接口"* · *"提交表单数据"* |
+999: 
+1000: **HTTP 客户端能力与限制：**
+1001: 
+1002: | 能力 | 说明 |
+1003: |------|------|
+1004: | 支持方法 | GET / POST / PUT / DELETE / PATCH / HEAD / OPTIONS |
+1005: | 自定义 Headers | Authorization、Content-Type 等任意 header |
+1006: | 请求体 | JSON Body、Form 表单（`application/x-www-form-urlencoded`） |
+1007: | 目标地址 | 本地接口（`localhost`）、外部 API 均可（受 SSRF 防护限制，见下） |
+1008: | SSL 证书 | 跳过验证，支持自签名证书的本地/开发环境 |
+1009: 
+1010: | 限制 | 说明 |
+1011: |------|------|
+1012: | 响应截断 | 超过 5000 字符自动截断，防止 token 爆炸 |
+1013: | 不支持文件上传 | 无 `multipart/form-data` 编码 |
+1014: | 不支持流式响应 | SSE / chunked 响应一次性读取 |
+1015: | 不支持 WebSocket | urllib 不支持 |
+1016: | 超时 | 默认 30 秒，可调整 |
+1017: | **SSRF 防护** | 所有出站请求经 `check_url` 校验（`app/utils/ssrf.py`）：拦截私网/回环/链路本地/元数据地址（含 `169.254.169.254`）及其解析目标；`tool_execute` 中 curl/wget/ssh/scp/rsync/ping 等网络命令同样校验。本地调试可用 `SSRF_ALLOW_INTERNAL=true` 绕过 |
+1018: 
+1019: 在聊天框中直接输入需求，Agent 会自动判断需要调用哪些工具来完成你的请求。
+1020: 
+1021: **PDF 中文支持**：pdf-generator 插件内置微软雅黑字体（`backend/fonts/msyh.ttc` + `msyhbd.ttc`），支持中文、日文、韩文及常见 Unicode 符号（天气图标、数学符号等）正常显示。
+1022: 
+1023: 支持两种文件格式：
+1024: 
+1025: **格式一：平铺 `.md` 文件**
+1026: 
+1027: `backend/skills/*.md`，YAML 头 + Markdown 内容：
+1028: 
+1029: ```yaml
+1030: ---
+1031: name: my-skill
+1032: description: 技能描述
+1033: enabled: true
+1034: ---
+1035: 技能内容 Markdown ...
+1036: ```
+1037: 
+1038: **格式二：子目录 + `SKILL.md`（兼容 [Anthropic Agent Skills](https://github.com/anthropics/skills) 标准）**
+1039: 
+1040: `backend/skills/<skill-name>/SKILL.md`，支持打包脚本、模板、资源文件：
+1041: 
+1042: ```
+1043: backend/skills/
+1044:   pdf/
+1045:     SKILL.md         # 核心定义（YAML 头 + 指令）
+1046:     scripts/         # Python 工具脚本
+1047:     reference.md     # 参考文档
+1048:     forms.md         # 子主题
+1049:     LICENSE.txt
+1050: ```
+1051: 
+1052: 两种格式可以混用，`SkillLoader` 在启动时自动检测并加载。目录型 skill 中的脚本/资源文件保持原位，LLM 通过 `load_skill_<name>()` 工具获取 `SKILL.md` 内容后按指令引用。
+1053: 
+1054: ---
+1055: 
+1056: ## 权限系统（Permission System）
+1057: 
+1058: 当 AI Agent 尝试写入工作区之外的路径时（如 `D:\`），系统会通过前端弹窗请求用户授权。
+1059: 
+1060: ### 路径分级
+1061: 
+1062: | 级别 | 行为 | 示例 |
+1063: |------|------|------|
+1064: | **工作区内** | 静默允许 | `backend/` 下任意路径 |
+1065: | **会话工作目录** | 静默允许（本会话内） | 新建会话时选择的工作目录 |
+1066: | **系统临时目录** | 静默允许 | `%TEMP%` |
+1067: | **系统敏感目录** | 永远拒绝，不弹窗 | `C:\Windows\`, `/etc` |
+1068: | **白名单路径** | 静默允许 | `permissions.json` 中记录的路径 |
+1069: | **其他外盘路径** | 弹窗询问 | `D:\projects\` |
+1070: 
+1071: **会话工作目录**：新建会话时选择的工作目录（opencode `ctx.directory`）在 `classify_path` 中优先于临时目录判定（workspace → 会话目录 → system → temp → …）——即使该目录恰好位于系统临时目录下，也被识别为信任目录而非被 temp 分支"劫持"，其下敏感文件仍走 workspace 分支的保护检查。会话目录为会话级 contextvar 隔离，并发会话互不干扰，会话结束后目录自动失效回落外部路径 `ask`。
+1072: 
+
+(Output capped at 50 KB. Showing lines 67-1072. Use offset=1073 to continue.)
+</file>

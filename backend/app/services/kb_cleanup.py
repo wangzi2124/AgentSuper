@@ -52,7 +52,7 @@ async def clear_all_kb(app_state) -> dict:
 
 async def clear_expired(app_state, now: Optional[datetime] = None) -> int:
     """按 TTL 清理过期文档（以文档创建时间计），返回清理数量。"""
-    from app.config import settings
+    from config import settings
 
     ttl_days = settings.vector_store_ttl_days
     if ttl_days <= 0:

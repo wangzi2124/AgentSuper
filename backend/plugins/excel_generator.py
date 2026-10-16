@@ -30,7 +30,7 @@ def tool_create_excel(sheets: str = "[]", output_path: str = "") -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path:
-        from app.plugins._output import resolve_output_path
+        from plugins._output import resolve_output_path
         try:
             target = resolve_output_path(output_path, ".xlsx")
         except ValueError as e:

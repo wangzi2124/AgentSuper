@@ -10,7 +10,7 @@ def require_admin(request: Request) -> None:
     未配置 ADMIN_TOKEN 时仅允许本机来源（127.0.0.1 / ::1 / localhost）访问，
     阻止局域网/公网上的未授权调用（ADMIN_TOKEN 为空时管理接口不可远程操作）。
     """
-    from app.config import settings
+    from config import settings
 
     token = settings.admin_token
     auth = request.headers.get("Authorization", "")

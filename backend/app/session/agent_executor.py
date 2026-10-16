@@ -53,7 +53,7 @@ def friendly_chat_error(exc: BaseException, *, model: Optional[str] = None, fall
     # 先尝试归一器：能识别的（Ollama 未装/连接/鉴权）一律归一为中文；
     # 已在调用点通过 provider_config_hint/normalize 升格的 RuntimeError 中文提示原样透传。
     try:
-        from app.models.catalog import normalize_llm_exception
+        from models.catalog import normalize_llm_exception
         friendly = normalize_llm_exception(exc, model)
         if friendly:
             return friendly

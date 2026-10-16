@@ -1,0 +1,13 @@
+# Agent Platform 非敏感配置（对齐 agent.md §11.2）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-platform-config
+data:
+  LITELLM_PROXY_URL: "http://litellm:4000"
+  OLLAMA_THINKING: "disabled"
+  ENABLE_RERANKER: "true"
+  MAX_CONCURRENT_AGENTS: "4"
+  # 状态持久化（LangGraph Postgres Checkpointer，见 deploy/migrations）
+  POSTGRES_DSN: "postgresql://agent:agent@postgres:5432/agent"
+  REDIS_URL: "redis://redis:6379/0"

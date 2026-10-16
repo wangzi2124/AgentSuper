@@ -6,8 +6,8 @@
 from fastapi import APIRouter, HTTPException, Request, Query
 
 from app.api.deps import require_admin
-from app.config import settings
-from app.models.schemas import ChunkListResponse
+from config import settings
+from models.schemas import ChunkListResponse
 from app.services.kb_cleanup import clear_all_kb, clear_expired
 
 router = APIRouter()
