@@ -39,6 +39,44 @@ def reset_permission_hook(token: contextvars.Token) -> None:
     _permission_hook_var.reset(token)
 
 
+_TEXT_BLOCK_TYPES = ("text", "input_text")
+_IMAGE_BLOCK_TYPES = ("image_url", "image", "input_image")
+
+
+def content_text(content: Any) -> str:
+    """把消息 content 压成纯文本（分块列表 → 拼接 text 块，图片块 → `[图片]`）。
+
+    多模态 content 是分块数组（image_url 块含 base64）。凡需要「纯文本视图」的地方
+    （路由判据 / 规划取词 / 历史回显）都必须走这里 —— `str(content)` 会把 base64
+    整个灌进提示词或接口响应。
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") in _IMAGE_BLOCK_TYPES:
+                    parts.append("[图片]")
+                elif block.get("type") in _TEXT_BLOCK_TYPES or "text" in block:
+                    parts.append(str(block.get("text", "")))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(p for p in parts if p)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def has_image_content(content: Any) -> bool:
+    """content 是否为含图片分块的多模态列表。"""
+    if isinstance(content, list):
+        return any(
+            isinstance(b, dict) and b.get("type") in _IMAGE_BLOCK_TYPES for b in content
+        )
+    return False
+
+
 def _type_to_schema(tp: Any) -> dict[str, Any]:
     origin = typing.get_origin(tp)
     if origin is typing.Union:

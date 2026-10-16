@@ -14,6 +14,7 @@ from prompts.loader import PromptLoader
 
 from ..tasks import KNOWN_AGENTS, parse_task_specs
 from ..usage import usage_from_result
+from .base import content_text
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +25,10 @@ def _last_user_text(state: dict[str, Any]) -> str:
     for msg in reversed(state.get("messages") or []):
         role = getattr(msg, "type", None)
         if role in ("human", "user"):
-            content = getattr(msg, "content", "")
-            return content if isinstance(content, str) else str(content)
+            return content_text(getattr(msg, "content", ""))
     messages = state.get("messages") or []
     if messages:
-        content = getattr(messages[-1], "content", "")
-        return content if isinstance(content, str) else str(content)
+        return content_text(getattr(messages[-1], "content", ""))
     return ""
 
 

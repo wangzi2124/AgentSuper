@@ -300,7 +300,12 @@ async def multi_agent_stream(
                     seen: list[str] = []
                     snap_begin = snapshot_begin(ctx.vfs)
                     before_usage = await _current_usage(ctx, sess.id)
-                    state = initial_state(turn_question, user_id)
+                    state = initial_state(
+                        turn_question,
+                        user_id,
+                        files=body.files if turn_user_msg_id == user_msg_id else None,
+                        model=sess.model,
+                    )
                     async for ev in _graph_events(ctx, sess, state, seen, cancel):
                         yield _sse(ev)
 
@@ -401,7 +406,9 @@ async def multi_agent(
 
         token = set_permission_hook(_hook)
         try:
-            state = await ctx.run(body.message, session_id=sess.id, user_id=user_id)
+            state = await ctx.run(
+                body.message, session_id=sess.id, user_id=user_id, files=body.files
+            )
         finally:
             reset_permission_hook(token)
         files_changed, descriptor = snapshot_end(ctx.vfs, snap_begin)

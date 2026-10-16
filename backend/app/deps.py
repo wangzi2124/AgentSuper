@@ -29,6 +29,7 @@ from execution.filesystem import (
 )
 from execution.tool_registry import ToolRegistry
 from graph.main_graph import build_main_graph, default_registry
+from graph.nodes.base import content_text
 from graph.subagent import SUBAGENTS
 from models.router import reset_request_model, set_request_model
 from observability.metrics import MetricsRecorder, get_recorder
@@ -49,17 +50,77 @@ def jsonable(obj: Any) -> Any:
     return str(obj)
 
 
-def initial_state(question: str, user_id: str = "anonymous") -> dict[str, Any]:
+def _vision_capable(model: str | None) -> bool:
+    """模型是否声明「图像理解」能力（`模型管理` 的 capabilities.vision）。"""
+    if not model:
+        return False
+    try:
+        from models.catalog import get_catalog, read_capabilities
+
+        caps = read_capabilities(model)
+        if not caps:  # 未按全名收录 → 按末段名匹配（无 provider 前缀时）
+            mid = str(model).rsplit("/", 1)[-1]
+            for entry in get_catalog():
+                if str(entry.get("id", "")).rsplit("/", 1)[-1] == mid:
+                    caps = entry.get("capabilities") or {}
+                    break
+        return bool(caps.get("vision"))
+    except Exception:  # noqa: BLE001 - 目录不可用时按「无视觉」降级
+        return False
+
+
+def _attachment_content(
+    question: str, files: list[Any] | None, model: str | None
+) -> Any:
+    """把聊天附件并入用户消息 content：图片（模型声明 vision 时）→ `image_url` 分块。
+
+    非图片附件 / 模型无视觉能力 → 只在文本里列出文件名（不臆造解析结果）。
+    返回 `str`（纯文本）或分块 `list[dict]`（多模态）——两者 litellm 均接受。
+    """
+    items = [f for f in (files or []) if isinstance(f, dict) and f.get("data")]
+    if not items:
+        return question
+    names = [str(f.get("filename") or "附件") for f in items]
+    text = f"{question}\n\n[附件：{'、'.join(names)}]"
+    images = [f for f in items if str(f.get("mime_type") or "").startswith("image/")]
+    if not images:
+        return text
+    if not _vision_capable(model):
+        return text + "\n（当前模型未声明图像理解能力，图片未随请求发送）"
+    text += (
+        "\n（图片已随本条消息内联提供，请直接依据图像内容作答；"
+        "不要在工作区中搜索该文件——它不在磁盘上。）"
+    )
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for f in images:
+        mime = str(f.get("mime_type") or "image/png")
+        data = str(f.get("data"))
+        url = data if data.startswith("data:") else f"data:{mime};base64,{data}"
+        blocks.append({"type": "image_url", "image_url": {"url": url}})
+    return blocks
+
+
+def initial_state(
+    question: str,
+    user_id: str = "anonymous",
+    *,
+    files: list[Any] | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
     """构造一轮的输入状态。
 
     同一 thread 的 checkpoint 会保留上一轮的派生态（final_output / task_plan /
     sub_results 等），导致后续轮次被 supervisor 立即判定为「已完成」而短路。
     故每轮显式重置这些「本轮输出」字段（token_usage 走增量 reducer，不在此重置）。
+
+    `files`（前端聊天附件，`{filename, mime_type, data(base64)}`）与 `model`（本回合
+    选中模型 id）一并传入 → 图片按模型 `vision` 能力组装成多模态 content 分块。
+    此前该参数从未被转发，图片在 API 边界即被静默丢弃（「后端不解析图片」根因）。
     """
     from langchain_core.messages import HumanMessage
 
     return {
-        "messages": [HumanMessage(content=question)],
+        "messages": [HumanMessage(content=_attachment_content(question, files, model))],
         "iteration_count": 0,
         "user_id": user_id,
         "task_plan": [],
@@ -270,13 +331,21 @@ class PlatformContext:
         sess = self.sessions.get(session_id)
         return getattr(sess, "model", None) if sess is not None else None
 
-    async def run(self, question: str, *, session_id: str, user_id: str = "anonymous") -> dict[str, Any]:
+    async def run(
+        self,
+        question: str,
+        *,
+        session_id: str,
+        user_id: str = "anonymous",
+        files: list[Any] | None = None,
+    ) -> dict[str, Any]:
         """执行一轮问答，返回最终状态（不含 BaseMessage 原始对象）。"""
         token = set_allowed_roots(self.allowed_roots_for(session_id))
-        model_token = set_request_model(self.session_model(session_id))
+        model = self.session_model(session_id)
+        model_token = set_request_model(model)
         try:
             result = await self.graph.ainvoke(
-                initial_state(question, user_id),
+                initial_state(question, user_id, files=files, model=model),
                 config={"configurable": {"thread_id": session_id}},
             )
         finally:
@@ -286,13 +355,19 @@ class PlatformContext:
         return jsonable(result)
 
     async def stream(
-        self, question: str, *, session_id: str, user_id: str = "anonymous"
+        self,
+        question: str,
+        *,
+        session_id: str,
+        user_id: str = "anonymous",
+        files: list[Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """逐节点流式执行，产出 `{event, node, data}` 事件。"""
-        state = initial_state(question, user_id)
+        model = self.session_model(session_id)
+        state = initial_state(question, user_id, files=files, model=model)
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))
-        model_token = set_request_model(self.session_model(session_id))
+        model_token = set_request_model(model)
         try:
             async for chunk in self.graph.astream(
                 state,
@@ -369,10 +444,7 @@ class PlatformContext:
             if mid in hidden or idx <= baseline:
                 continue
             mtype = _role.get(str(msg.get("role", "system")), "system")
-            content = msg.get("content", "")
-            if not isinstance(content, str):
-                content = jsonable(content)
-                content = content if isinstance(content, str) else str(content)
+            content = content_text(msg.get("content", ""))
             out.append(
                 {
                     "id": mid,
@@ -411,10 +483,7 @@ class PlatformContext:
         out: list[dict[str, Any]] = []
         for idx, msg in enumerate(self.messages(state), start=1):
             mtype = _role.get(str(msg.get("role", "system")), "system")
-            content = msg.get("content", "")
-            if not isinstance(content, str):
-                content = jsonable(content)
-                content = content if isinstance(content, str) else str(content)
+            content = content_text(msg.get("content", ""))
             out.append({"id": self.message_id(session_id, idx), "seq": idx, "type": mtype, "content": content})
         return out
 
