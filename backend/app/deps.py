@@ -30,6 +30,7 @@ from execution.filesystem import (
 from execution.tool_registry import ToolRegistry
 from graph.main_graph import build_main_graph, default_registry
 from graph.subagent import SUBAGENTS
+from models.router import reset_request_model, set_request_model
 from observability.metrics import MetricsRecorder, get_recorder
 
 
@@ -264,9 +265,15 @@ class PlatformContext:
         event.set()
         return True
 
+    def session_model(self, session_id: str) -> str | None:
+        """会话当前选中的模型 id（前端「模型管理」选择器写入；未选时为 None）。"""
+        sess = self.sessions.get(session_id)
+        return getattr(sess, "model", None) if sess is not None else None
+
     async def run(self, question: str, *, session_id: str, user_id: str = "anonymous") -> dict[str, Any]:
         """执行一轮问答，返回最终状态（不含 BaseMessage 原始对象）。"""
         token = set_allowed_roots(self.allowed_roots_for(session_id))
+        model_token = set_request_model(self.session_model(session_id))
         try:
             result = await self.graph.ainvoke(
                 initial_state(question, user_id),
@@ -274,6 +281,7 @@ class PlatformContext:
             )
         finally:
             reset_allowed_roots(token)
+            reset_request_model(model_token)
         self.sessions.touch(session_id)
         return jsonable(result)
 
@@ -284,6 +292,7 @@ class PlatformContext:
         state = initial_state(question, user_id)
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))
+        model_token = set_request_model(self.session_model(session_id))
         try:
             async for chunk in self.graph.astream(
                 state,
@@ -294,6 +303,7 @@ class PlatformContext:
                     yield {"event": "node", "node": node, "data": jsonable(update)}
         finally:
             reset_allowed_roots(token)
+            reset_request_model(model_token)
         self.sessions.touch(session_id)
         snapshot = await self.state(session_id)
         yield {

@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from graph.nodes.base import reset_permission_hook, set_permission_hook
 from graph.usage import merge_usage, usage_delta
+from models.router import reset_request_model, set_request_model
 
 from execution.filesystem import reset_allowed_roots, set_allowed_roots
 
@@ -130,6 +131,9 @@ async def _graph_events(
         )
 
     token = set_permission_hook(hook)
+    # 本回合选中的模型（模型管理页）随 contextvar 传播到图节点任务；此前 body.model
+    # 只写进会话元数据、不参与调用（改 key/换模型都不生效的根因）。
+    model_token = set_request_model(getattr(sess, "model", None))
     agen = ctx.graph.astream(
         state, config={"configurable": {"thread_id": sess.id}}, stream_mode="updates"
     ).__aiter__()
@@ -186,6 +190,7 @@ async def _graph_events(
         if not next_task.done():
             next_task.cancel()
         reset_permission_hook(token)
+        reset_request_model(model_token)
 
 
 async def _current_usage(ctx: PlatformContext, session_id: str) -> dict:

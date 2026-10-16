@@ -419,6 +419,24 @@ describe.skipIf(!RUN)('Plugins /api/plugins/*', () => {
       if (!wasEnabled) await plugins.togglePlugin('example-plugin', false)
     }
   })
+  it('POST /api/plugins/weather-alert/call/tool_get_typhoon_info（WeatherAlert.vue 直连，非 api/ 包装）', async () => {
+    // 前端 WeatherAlert.vue 直接 fetch 该端点（bug 回归面：直连调用最易漏测）。
+    // 该工具走外网（NMC 台风数据），受限网络下插件内会抛错 → 500；两者都接受。
+    const before = list.find(p => p.name === 'weather-alert')
+    const wasEnabled = before ? !!before.enabled : false
+    await plugins.togglePlugin('weather-alert', true)
+    try {
+      const r = await raw('POST', '/api/plugins/weather-alert/call/tool_get_typhoon_info', { args: {} })
+      expect([200, 500]).toContain(r.status)
+      if (r.status === 200) {
+        expect(typeof (await r.json())).toBe('object')
+      } else {
+        console.warn('[skip] weather-alert 返回 500（外网受限），已容忍')
+      }
+    } finally {
+      if (!wasEnabled) await plugins.togglePlugin('weather-alert', false)
+    }
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -523,15 +541,19 @@ describe.skipIf(!RUN)('Multi-Agent /api/chat/multi-agent*', () => {
     const r = await raw('POST', '/api/chat/multi-agent', { message: '只回复两个字：收到', use_vector_db: false })
     expect(r.ok).toBe(true)
     const j = await r.json()
-    expect(typeof j.code).toBe('number')
-    if (j.code === 0) {
-      expect(j.data.conversation_id).toBeTruthy()
-    } else {
-      // LLM provider 不可用（如 API key 失效）时后端以统一信封返回业务错误——
-      // 仍验证契约（code/message 齐备），并在报告里提示这是环境依赖而非接口缺陷。
-      expect(typeof j.message).toBe('string')
-      console.warn('[api-live] multi-agent 非流式未成功（多为 LLM_API_KEY 失效）：', String(j.message).slice(0, 160))
-    }
+    expect(j.code).toBe(0)
+    expect(j.data.conversation_id).toBeTruthy()
+    expect(typeof j.data.answer).toBe('string')
+  }, T_HEAVY)
+  it.skipIf(!RUN_LLM)('POST /api/chat/multi-agent（body.model 真实透传给上游）', async () => {
+    // 回归护栏：此前 body.model 只写进会话元数据、不参与调用（改密钥/换模型都不生效），
+    // 上游永远拿到 .env 默认模型 → 传一个不存在的模型 id 也会「成功」。
+    // 现在必须真实透传 → 上游报错信息里应出现该模型 id。
+    const bogus = 'deepseek/nonexistent-xyz-zzz'
+    const r = await raw('POST', '/api/chat/multi-agent', { message: 'hi', model: bogus, use_vector_db: false })
+    const j = await r.json()
+    expect(j.code).not.toBe(0)
+    expect(String(j.message)).toContain('nonexistent-xyz-zzz')
   }, T_HEAVY)
   it.skipIf(!RUN_LLM)('POST /api/chat/multi-agent/stream（SSE，sendMultiAgentStream）', async () => {
     const events: any[] = []
@@ -542,6 +564,7 @@ describe.skipIf(!RUN)('Multi-Agent /api/chat/multi-agent*', () => {
     )
     expect(gotDone).toBe(true)
     expect(events.length).toBeGreaterThan(0)
+    expect(events.some((e) => e.type === 'done')).toBe(true)
   }, T_HEAVY)
 })
 
@@ -551,33 +574,17 @@ describe.skipIf(!RUN)('Multi-Agent /api/chat/multi-agent*', () => {
 describe.skipIf(!RUN || !RUN_LLM)('Chat /api/chat*', () => {
   it('POST /api/chat（非流式）', async () => {
     const r = await raw('POST', '/api/chat', { message: '你好', user_id: UID })
-    if (r.status === 200) {
-      const j = await r.json()
-      expect('output' in j).toBe(true)
-    } else {
-      // LLM provider 不可用（如 API key 失效）→ 后端 5xx（环境依赖，非接口缺陷）
-      expect(r.status).toBeGreaterThanOrEqual(500)
-      console.warn('[api-live] /api/chat 返回 5xx（多为 LLM_API_KEY 失效）：', r.status)
-    }
+    expect(r.status).toBe(200)
+    const j = await r.json()
+    expect('output' in j).toBe(true)
+    expect(typeof j.output).toBe('string')
   }, T_HEAVY)
   it('POST /api/chat/stream（SSE）', async () => {
-    let r: Response
-    try {
-      r = await raw('POST', '/api/chat/stream', { message: '你好', user_id: UID })
-    } catch (e) {
-      console.warn('[api-live] /api/chat/stream 连接失败（多为 LLM_API_KEY 失效）：', (e as Error).message)
-      return
-    }
+    const r = await raw('POST', '/api/chat/stream', { message: '你好', user_id: UID })
     expect(r.status).toBe(200)
-    let text = ''
-    try {
-      text = await r.text()
-    } catch (e) {
-      // provider 失效时后端会在流中途断开 → 以告警收尾，不判失败
-      console.warn('[api-live] /api/chat/stream 中途断开（多为 LLM_API_KEY 失效）：', (e as Error).message)
-      return
-    }
+    const text = await r.text()
     expect(text.length).toBeGreaterThan(0)
+    expect(text).toContain('event:')
   }, T_HEAVY)
 })
 
@@ -636,10 +643,19 @@ describe.skipIf(!RUN)('Logs /api/logs/*', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 describe.skipIf(!RUN)('Generated /api/generated/*', () => {
   const FNAME = '__apitest_generated.txt'
+  const IMG = '__apitest_image.png'
+  // 1x1 PNG（有效图片；用于验证 .png 下载路径 + content-type）
+  const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
   const GEN_DIR = path.resolve(process.cwd(), '..', 'backend', 'data', 'generated')
   beforeAll(() => {
     fs.mkdirSync(GEN_DIR, { recursive: true })
     fs.writeFileSync(path.join(GEN_DIR, FNAME), 'apitest generated content', 'utf-8')
+    fs.writeFileSync(path.join(GEN_DIR, IMG), Buffer.from(PNG_B64, 'base64'))
+  })
+  afterAll(() => {
+    for (const f of [FNAME, IMG]) {
+      try { fs.rmSync(path.join(GEN_DIR, f), { force: true }) } catch { /* noop */ }
+    }
   })
   it('GET /api/generated/（listGenerated）', async () => {
     const list = await generated.listGenerated()
@@ -648,13 +664,28 @@ describe.skipIf(!RUN)('Generated /api/generated/*', () => {
   it('GET /api/generated/?q=（关键字过滤）', async () => {
     const list = await generated.listGenerated('__apitest')
     expect(list.files.some(f => f.filename === FNAME)).toBe(true)
+    expect(list.files.some(f => f.filename === IMG)).toBe(true)
   })
-  it('GET /api/generated/download/{f}（getGeneratedContent）', async () => {
+  it('GET /api/generated/download/{f}（getGeneratedContent，文本）', async () => {
     const content = await generated.getGeneratedContent(FNAME)
     expect(content).toContain('apitest generated content')
   })
+  it('GET /api/generated/download/{img}.png → image/png（图片路径）', async () => {
+    const r = await raw('GET', '/api/generated/download/' + IMG)
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type') || '').toContain('image/png')
+    const buf = Buffer.from(await r.arrayBuffer())
+    expect(buf.length).toBeGreaterThan(0)
+    expect(buf[0]).toBe(0x89)
+    expect(buf.toString('ascii', 1, 4)).toBe('PNG')
+  })
+  it('GET /api/generated/download/{穿越路径} → 404（防逃逸）', async () => {
+    const r = await raw('GET', '/api/generated/download/..%2F..%2F..%2F%2Eenv')
+    expect(r.status).toBe(404)
+  })
   it('DELETE /api/generated/{f}（deleteGenerated，清理）', async () => {
     await generated.deleteGenerated(FNAME)
+    await generated.deleteGenerated(IMG)
   })
 })
 
@@ -760,6 +791,21 @@ describe.skipIf(!RUN)('Voice /api/voice/*', () => {
   }, T_WRITE)
   it('POST /api/voice/tts（未启用 → 抛错）', async () => {
     await expect(voice.synthesize('测试', 'Vivian', 'Chinese')).rejects.toBeTruthy()
+  }, T_WRITE)
+  it('voiceAudioUrl：完整 url / 裸 id 均可回放（剥路径 + 编码）', () => {
+    expect(voice.voiceAudioUrl('/api/voice/audio/abc.webm')).toContain('/audio/abc.webm')
+    expect(voice.voiceAudioUrl('abc.webm')).toContain('/audio/abc.webm')
+    expect(voice.voiceAudioUrl('a b.webm')).toContain('a%20b.webm')
+  })
+  it('GET /api/voice/audio/{不存在} → 404 信封', async () => {
+    const r = await realFetch(LIVE + '/api/voice/audio/__apitest_missing__.webm', { headers: authHeaders() })
+    expect(r.status).toBe(404)
+    const j = await r.json()
+    expect(j.code).not.toBe(0)
+  })
+  it('POST /api/voice/message（时长无效 → 400 抛错）', async () => {
+    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' })
+    await expect(voice.uploadVoiceMessage(blob, 0, [], '')).rejects.toBeTruthy()
   }, T_WRITE)
 })
 

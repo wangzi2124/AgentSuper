@@ -13,6 +13,7 @@ litellm 为底座实现 `invoke` / `ainvoke`，返回带 `content` / `tool_calls
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 from dataclasses import dataclass, field
@@ -25,6 +26,29 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 litellm.drop_params = True
+
+# 本回合请求选中的模型（前端模型选择器 / 「模型管理」页）。
+# 由运行时按回合注入 contextvar（deps.PlatformContext.run/stream、compat._graph_events），
+# 随 context 传播到图节点任务（与 graph/nodes/base.py 的 permission hook 同一机制）。
+# 目的：让用户在「模型管理」里选的模型真正参与调用，而不是只写进会话元数据。
+_request_model_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "request_model", default=None
+)
+
+
+def set_request_model(model: str | None) -> contextvars.Token:
+    """注入本回合选中的模型 id（None 表示沿用默认），返回 token 供 reset。"""
+    return _request_model_var.set(model or None)
+
+
+def reset_request_model(token: contextvars.Token) -> None:
+    _request_model_var.reset(token)
+
+
+def request_model() -> str | None:
+    """当前回合选中的模型 id（未注入时为 None）。"""
+    return _request_model_var.get()
+
 
 TIER_ORDER = ("simple", "medium", "complex", "reasoning")
 
@@ -168,6 +192,15 @@ class TierModel:
         self.extra = extra
 
     def _direct_model(self) -> str:
+        """直连模式下的模型 id：请求选中 > `TIER_{tier}_MODEL` > `settings.llm_model`。
+
+        请求选中（前端模型选择器）/ `TIER_*_MODEL` 优先于 `.env` 的 `LLM_MODEL`，
+        使用户在「模型管理」里选的模型真正生效；无请求模型时（后台任务、子 Agent）
+        回落到 tier 环境变量或全局默认。
+        """
+        model = _request_model_var.get()
+        if model:
+            return model
         env_key = f"TIER_{self.tier.upper()}_MODEL"
         model = os.environ.get(env_key)
         if model:
@@ -179,6 +212,16 @@ class TierModel:
         return str(self._endpoint().get("model", ""))
 
     def _endpoint(self) -> dict[str, Any]:
+        """解析本次调用的模型 / 端点 / 凭证（对齐 `models/catalog.provider_api`）。
+
+        优先级：`LITELLM_PROXY_URL` 代理 > 模型目录 Provider 注册（模型管理页保存的
+        `api_base`/`api_key`）> `.env` 的 `LLM_API_BASE`/`LLM_API_KEY`。此前这里直取
+        `.env`，导致用户在「模型管理」里改的密钥/端点不参与聊天调用（只在连通性自检
+        生效）——这就是「改了 key 聊天仍报旧 key 无效」的根因。
+
+        `options`（Ollama `num_ctx`/`think`、DeepSeek `thinking`）由
+        `_kwargs`/`astream` 经 `litellm_extra_kwargs()` 展开，不直接透传给 litellm。
+        """
         proxy = os.environ.get("LITELLM_PROXY_URL")
         if proxy:
             return {
@@ -186,19 +229,39 @@ class TierModel:
                 "api_base": proxy,
                 "api_key": os.environ.get("LITELLM_PROXY_KEY", "sk-litellm-proxy"),
             }
-        api_base = settings.llm_api_base
+        mid = ensure_provider(self._direct_model(), settings.llm_api_base)
+        try:
+            from .catalog import provider_api
+
+            creds = provider_api(mid)
+        except Exception as exc:  # noqa: BLE001 - 目录/DB 异常不得中断 LLM 调用
+            logger.warning("provider_api(%s) 解析失败，回退 .env 凭证：%s", mid, exc)
+            creds = {}
         return {
-            "model": ensure_provider(self._direct_model(), api_base),
-            "api_base": api_base,
-            "api_key": settings.llm_api_key,
+            "model": mid,
+            "api_base": creds.get("api_base") or settings.llm_api_base,
+            "api_key": creds.get("api_key") or settings.llm_api_key,
+            "options": creds.get("options"),
         }
+
+    def _provider_kwargs(self, endpoint: dict[str, Any]) -> dict[str, Any]:
+        """把 `_endpoint()` 的 provider `options` 展开成 litellm 顶层 kwargs。"""
+        try:
+            from .catalog import litellm_extra_kwargs
+
+            return litellm_extra_kwargs(endpoint)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("litellm_extra_kwargs 展开失败：%s", exc)
+            return {}
 
     def _kwargs(
         self, messages: list[Any], tools: list[dict] | None
     ) -> dict[str, Any]:
         endpoint = self._endpoint()
         kwargs: dict[str, Any] = {
-            **endpoint,
+            "model": endpoint["model"],
+            "api_base": endpoint.get("api_base"),
+            "api_key": endpoint.get("api_key"),
             "messages": [_render_message(m) for m in messages],
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
@@ -207,6 +270,7 @@ class TierModel:
         }
         if tools:
             kwargs["tools"] = tools
+        kwargs.update(self._provider_kwargs(endpoint))
         kwargs.update(self.extra)
         return kwargs
 
@@ -243,13 +307,14 @@ class TierModel:
         from .stream import stream_chat
 
         endpoint = self._endpoint()
+        extra_kwargs = {**self._provider_kwargs(endpoint), **self.extra, **extra}
         return await stream_chat(
             [_render_message(m) for m in messages],
             model=endpoint["model"],
             tools=tools,
             api_key=endpoint.get("api_key"),
             api_base=endpoint.get("api_base"),
-            extra={**self.extra, **extra},
+            extra=extra_kwargs,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             timeout=self.timeout,
