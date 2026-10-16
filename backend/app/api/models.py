@@ -82,8 +82,10 @@ async def upsert_custom(req: Request):
     return ok({"model": entry, "models": catalog.get_catalog()})
 
 
-@router.delete("/models/custom/{mid}", dependencies=[Depends(require_admin)])
+@router.delete("/models/custom/{mid:path}", dependencies=[Depends(require_admin)])
 async def delete_custom(mid: str):
+    # {mid:path}: 模型 id 普遍含 '/'（如 deepseek/deepseek-v4-flash、ollama/llama3.1:latest），
+    # 用普通 {mid} 只能匹配单段路径 → 删除目录模型时 404。
     removed = catalog.remove_custom_model(mid)
     return ok({"removed": removed, "models": catalog.get_catalog()})
 

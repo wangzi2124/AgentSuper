@@ -167,5 +167,5 @@ export function cleanupLogs(): Promise<{ expired: number; overflow: number }> {
 
 // 清理日志：按 trace_id / before 水位 / 全量（管理员）
 export function clearLogs(payload: { trace_id?: string; before?: number; all?: boolean } = {}): Promise<{ deleted: number }> {
-  return apiRequest(`${BASE}/clear`, { method: 'POST', body: JSON.stringify(payload) })
+  return apiRequest(`${BASE}/clear`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
 }
