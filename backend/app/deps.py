@@ -50,6 +50,32 @@ def jsonable(obj: Any) -> Any:
     return str(obj)
 
 
+def _msg_role(msg: Any) -> str:
+    """消息角色：原始 BaseMessage 用 `type`，已序列化 dict 用 `role`/`type`。"""
+    if isinstance(msg, dict):
+        return str(msg.get("role") or msg.get("type") or "system")
+    return str(getattr(msg, "type", "system"))
+
+
+def _msg_content(msg: Any) -> Any:
+    if isinstance(msg, dict):
+        return msg.get("content", "")
+    return getattr(msg, "content", "")
+
+
+def _msg_files(msg: Any) -> list[dict[str, Any]]:
+    """读消息 `additional_kwargs["files"]`（聊天附件回显数据）。"""
+    ak = (
+        msg.get("additional_kwargs")
+        if isinstance(msg, dict)
+        else getattr(msg, "additional_kwargs", None)
+    )
+    files = ak.get("files") if isinstance(ak, dict) else None
+    if not isinstance(files, list):
+        return []
+    return [f for f in files if isinstance(f, dict)]
+
+
 def _vision_capable(model: str | None) -> bool:
     """模型是否声明「图像理解」能力（`模型管理` 的 capabilities.vision）。"""
     if not model:
@@ -67,6 +93,19 @@ def _vision_capable(model: str | None) -> bool:
         return bool(caps.get("vision"))
     except Exception:  # noqa: BLE001 - 目录不可用时按「无视觉」降级
         return False
+
+
+def _image_blocks(text: str, images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把纯文本 + 图片附件拼成多模态 content 分块。"""
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for f in images:
+        data = str(f.get("data") or "")
+        if not data:
+            continue
+        mime = str(f.get("mime_type") or "image/png")
+        url = data if data.startswith("data:") else f"data:{mime};base64,{data}"
+        blocks.append({"type": "image_url", "image_url": {"url": url}})
+    return blocks
 
 
 def _attachment_content(
@@ -91,13 +130,26 @@ def _attachment_content(
         "\n（图片已随本条消息内联提供，请直接依据图像内容作答；"
         "不要在工作区中搜索该文件——它不在磁盘上。）"
     )
-    blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
-    for f in images:
-        mime = str(f.get("mime_type") or "image/png")
-        data = str(f.get("data"))
-        url = data if data.startswith("data:") else f"data:{mime};base64,{data}"
-        blocks.append({"type": "image_url", "image_url": {"url": url}})
-    return blocks
+    return _image_blocks(text, images)
+
+
+_FILE_ECHO_KEYS = ("filename", "mime_type", "data", "_thumb", "_caption")
+
+
+def _files_payload(files: list[Any] | None) -> list[dict[str, str]]:
+    """挑出可回显的附件字段（仅字符串），存进消息 `additional_kwargs` 供历史回放。"""
+    out: list[dict[str, str]] = []
+    for f in files or []:
+        if not isinstance(f, dict):
+            continue
+        item = {
+            k: str(v)
+            for k, v in f.items()
+            if k in _FILE_ECHO_KEYS and isinstance(v, str) and v
+        }
+        if item:
+            out.append(item)
+    return out
 
 
 def initial_state(
@@ -116,11 +168,18 @@ def initial_state(
     `files`（前端聊天附件，`{filename, mime_type, data(base64)}`）与 `model`（本回合
     选中模型 id）一并传入 → 图片按模型 `vision` 能力组装成多模态 content 分块。
     此前该参数从未被转发，图片在 API 边界即被静默丢弃（「后端不解析图片」根因）。
+    附件本身另存进 `additional_kwargs["files"]`（含 `_thumb`/`_caption`），供历史回放
+    在聊天里回显图片——正文 content 只承担喂给模型的部分。
     """
     from langchain_core.messages import HumanMessage
 
+    msg = HumanMessage(content=_attachment_content(question, files, model))
+    payload = _files_payload(files)
+    if payload:
+        msg.additional_kwargs["files"] = payload
+
     return {
-        "messages": [HumanMessage(content=_attachment_content(question, files, model))],
+        "messages": [msg],
         "iteration_count": 0,
         "user_id": user_id,
         "task_plan": [],
@@ -410,6 +469,13 @@ class PlatformContext:
         snap = await self.graph.aget_state({"configurable": {"thread_id": session_id}})
         return jsonable(getattr(snap, "values", {}) or {})
 
+    async def _raw_messages(self, session_id: str) -> list[Any]:
+        """原始消息对象（不经 `jsonable`），用于读取 `additional_kwargs`（附件回显）。"""
+        snap = await self.graph.aget_state({"configurable": {"thread_id": session_id}})
+        values = getattr(snap, "values", {}) or {}
+        msgs = values.get("messages") if isinstance(values, dict) else None
+        return msgs if isinstance(msgs, list) else []
+
     def messages(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         msgs = state.get("messages") if isinstance(state, dict) else None
         return msgs if isinstance(msgs, list) else []
@@ -437,14 +503,18 @@ class PlatformContext:
         sess = self.sessions.get(session_id)
         hidden = sess.hidden_ids if sess else set()
         baseline = sess.compact_baseline_seq if sess else 0
-        state = await self.state(session_id)
+        raw = await self._raw_messages(session_id)
         out: list[dict[str, Any]] = []
-        for idx, msg in enumerate(self.messages(state), start=1):
+        for idx, msg in enumerate(raw, start=1):
             mid = self.message_id(session_id, idx)
             if mid in hidden or idx <= baseline:
                 continue
-            mtype = _role.get(str(msg.get("role", "system")), "system")
-            content = content_text(msg.get("content", ""))
+            mtype = _role.get(_msg_role(msg), "system")
+            content = content_text(_msg_content(msg))
+            data: dict[str, Any] = {"content": content}
+            files = _msg_files(msg)
+            if files:
+                data["files"] = files
             out.append(
                 {
                     "id": mid,
@@ -452,7 +522,7 @@ class PlatformContext:
                     "type": mtype,
                     "role": mtype,
                     "content": content,
-                    "data": {"content": content},
+                    "data": data,
                     "seq": idx,
                     "time_created": 0,
                     "parts": [],
@@ -543,6 +613,15 @@ class PlatformContext:
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
         msgs = await self.session_messages(src_id)
+        raw = await self._raw_messages(src_id)
+
+        def _src_content(m: dict[str, Any]) -> Any:
+            """取原始 content：分块消息保留 image_url（`session_messages` 会压成文本）。"""
+            seq = m.get("seq")
+            if isinstance(seq, int) and 1 <= seq <= len(raw):
+                return _msg_content(raw[seq - 1])
+            return m.get("content", "")
+
         if up_to_index is not None:
             kept: list[dict[str, Any]] = []
             for m in msgs:
@@ -553,8 +632,12 @@ class PlatformContext:
         lc_msgs: list[Any] = []
         for m in msgs:
             content = m.get("content", "")
+            files = (m.get("data") or {}).get("files") or []
             if m["type"] == "user":
-                lc_msgs.append(HumanMessage(content=content))
+                lc_msg: Any = HumanMessage(content=_src_content(m))
+                if files:
+                    lc_msg.additional_kwargs["files"] = _files_payload(files)
+                lc_msgs.append(lc_msg)
             elif m["type"] == "assistant":
                 lc_msgs.append(AIMessage(content=content))
             elif m["type"] == "system":

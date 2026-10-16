@@ -20,6 +20,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ..deps import PlatformContext, get_context
+from ..image_processor import enrich_image_files
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -200,9 +201,18 @@ async def enqueue_prompt(
 ) -> dict:
     sess = _must_get(ctx, session_id)
     pid = body.client_msg_id or f"pr_{int(time.time() * 1000)}"
-    msg = body.prompt.get("message") if isinstance(body.prompt, dict) else None
+    prompt = body.prompt if isinstance(body.prompt, dict) else {}
+    msg = prompt.get("message")
+    files = await enrich_image_files(prompt.get("files")) if prompt.get("files") else None
     if not any(p["id"] == pid for p in sess.prompts):
-        sess.prompts.append({"id": pid, "message": msg or "", "enqueued_at": int(time.time() * 1000)})
+        sess.prompts.append(
+            {
+                "id": pid,
+                "message": msg or "",
+                "files": files,
+                "enqueued_at": int(time.time() * 1000),
+            }
+        )
     return {"id": pid, "message": msg or "", "enqueued_at": int(time.time() * 1000)}
 
 

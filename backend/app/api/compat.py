@@ -29,6 +29,7 @@ from models.router import reset_request_model, set_request_model
 from execution.filesystem import reset_allowed_roots, set_allowed_roots
 
 from ..deps import PlatformContext, get_context, initial_state
+from ..image_processor import enrich_image_files
 
 router = APIRouter(prefix="/chat", tags=["compat"])
 
@@ -282,6 +283,7 @@ async def multi_agent_stream(
 
                 turn_question = body.message
                 turn_user_msg_id = user_msg_id
+                turn_files = await enrich_image_files(body.files)
                 while True:
                     # 队列快照仅提示前端「本轮之后还有活」；done/turn_done 由末尾原子 pop 决定
                     pending = len(sess.prompts)
@@ -303,7 +305,7 @@ async def multi_agent_stream(
                     state = initial_state(
                         turn_question,
                         user_id,
-                        files=body.files if turn_user_msg_id == user_msg_id else None,
+                        files=turn_files if turn_user_msg_id == user_msg_id else None,
                         model=sess.model,
                     )
                     async for ev in _graph_events(ctx, sess, state, seen, cancel):
@@ -351,6 +353,7 @@ async def multi_agent_stream(
                     if is_final or cancel.is_set():
                         break
                     turn_question = str(nxt.get("message") or "")
+                    turn_files = nxt.get("files") or None
                     turn_user_msg_id = f"um_{uuid4().hex[:12]}"
         except asyncio.CancelledError:
             raise
@@ -407,7 +410,10 @@ async def multi_agent(
         token = set_permission_hook(_hook)
         try:
             state = await ctx.run(
-                body.message, session_id=sess.id, user_id=user_id, files=body.files
+                body.message,
+                session_id=sess.id,
+                user_id=user_id,
+                files=await enrich_image_files(body.files),
             )
         finally:
             reset_permission_hook(token)
