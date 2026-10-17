@@ -194,7 +194,7 @@ watch(listening, (on) => {
 })
 const recognition = ref<{ start(): void; stop(): void } | null>(null)
 const hasSpeechRecognition = computed(() =>
-  typeof window !== 'undefined' && !!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition
+  typeof window !== 'undefined' && !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
 )
 // MediaRecorder 兜底路径（采集可用时不再使用；历史代码保留）
 let mediaRecorder: MediaRecorder | null = null
@@ -211,6 +211,7 @@ let livePending = 0              // 已（排队）交给转写的样本结束�
 let liveTimer: number | null = null
 let transcribeChain: Promise<void> = Promise.resolve()
 let transcribeBusy = false  // 上一块仍在转写时跳本次 tick，避免出字突发/滞后
+let liveErrorNotified = false  // 本次录音首次转写失败已提示（避免逐块弹窗轰炸）
 
 function appendSamples(data: Float32Array) {
   const n = liveSamples.length
@@ -248,7 +249,13 @@ function enqueueTranscribe(slice: Float32Array) {
     try {
       const t = await transcribeAudio(blob, 'live.wav')
       if (t) text.value = (text.value ? text.value + ' ' : '') + t
-    } catch { /* 单块失败静默，最终块兜底提示 */ }
+    } catch (e) {
+      // 首次失败即提示（此前逐块静默 → 后端转写不可用时用户只看到「没有任何反应」）
+      if (!liveErrorNotified) {
+        liveErrorNotified = true
+        showToast(e instanceof Error && e.message ? e.message : '语音转写失败，请重试')
+      }
+    }
     transcribeBusy = false
   })
   return transcribeChain
@@ -440,6 +447,7 @@ async function toggleMic() {
     transcribeChain = Promise.resolve()
     liveTimer = window.setInterval(tickLiveTranscribe, 1800)
     transcribeBusy = false
+    liveErrorNotified = false
     listening.value = true
     return
   }

@@ -772,6 +772,7 @@ describe.skipIf(!RUN)('Voice /api/voice/*', () => {
     expect(r.ok).toBe(true)
     const j = await r.json()
     expect('enabled' in j.data).toBe(true)
+    expect('asr_enabled' in j.data).toBe(true)
   })
   it('POST /api/voice/message（uploadVoiceMessage）', async () => {
     const blob = new Blob([new Uint8Array([26, 69, 223, 163, 1, 0, 0, 0])], { type: 'audio/webm' })
@@ -785,7 +786,7 @@ describe.skipIf(!RUN)('Voice /api/voice/*', () => {
     const r = await realFetch(LIVE + url, { headers: authHeaders() })
     expect(r.ok).toBe(true)
   }, T_WRITE)
-  it('POST /api/voice/transcribe（未启用 → 抛错）', async () => {
+  it('POST /api/voice/transcribe（无效音频 / ASR 未就绪 → 抛错）', async () => {
     const blob = new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' })
     await expect(voice.transcribeAudio(blob, 'apitest.webm')).rejects.toBeTruthy()
   }, T_WRITE)

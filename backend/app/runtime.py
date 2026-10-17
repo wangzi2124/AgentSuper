@@ -160,15 +160,21 @@ def _do_init(app):
     )
     set_perm_manager(perm_mgr)
 
-    # [语音] 本地 Qwen3-TTS 服务（子进程，无外部 HTTP）：启用时注入主线，
-    # 后台线程启动下载模型（同向量模型：ModelScope 优先，失败降级不阻断启动）
-    voice_service = VoiceService() if settings.voice_tts_enabled else None
-    if voice_service is not None:
+    # [语音] 本地 Qwen3-TTS 服务（子进程，无外部 HTTP）：转写（ASR）与合成（TTS）共用同一
+    # service，但**互相独立**——TTS 由 VOICE_TTS_ENABLED 控制（会下载 Qwen3-TTS 模型并常驻
+    # worker），ASR 只要引擎（faster-whisper/openai-whisper）+ 模型就绪即可用，不再被 TTS
+    # 总开关连坐（此前 voice_service=None → 只想语音输入也一律 503）。
+    voice_service = VoiceService()
+    if settings.voice_tts_enabled:
+        # 后台线程启动下载 TTS 模型（同向量模型：ModelScope 优先，失败降级不阻断启动）
         threading.Thread(target=voice_service.ensure_models, daemon=True, name="voice-model-dl").start()
-        # 预热常驻 Whisper worker：后台启动并要求模型加载完成，把「首字延迟」（~5.7s 模型加载）
-        # 从用户点麦克风时挪到服务启动阶段，录音刚开始即可出字。
-        threading.Thread(target=voice_service.warmup, daemon=True, name="voice-whisper-warmup").start()
-        logger.info("Voice service enabled (dir=%s)", voice_service.tts_dir)
+    # 预热常驻 Whisper worker：后台启动并要求模型加载完成，把「首字延迟」（模型加载 ~4s）
+    # 从用户点麦克风时挪到服务启动阶段，录音刚开始即可出字。whisper_ready 为假时内部直接返回。
+    threading.Thread(target=voice_service.warmup, daemon=True, name="voice-whisper-warmup").start()
+    logger.info(
+        "Voice service ready (dir=%s, tts_enabled=%s, asr_ready=%s)",
+        voice_service.tts_dir, settings.voice_tts_enabled, voice_service.whisper_ready,
+    )
 
     app.state.vector_store = vs
     app.state.embeddings = emb

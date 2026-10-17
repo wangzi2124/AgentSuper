@@ -50,13 +50,23 @@ def _get_service(request: Request):
 
 
 _DISABLED_MSG = (
-    "语音服务未启用或模型未下载（VOICE_TTS_ENABLED=false / ttsclone 缺失 / "
-    "模型缺失——请先运行 scripts/download_tts_model.py 预下载）"
+    "语音合成未启用或模型未下载（VOICE_TTS_ENABLED=false / ttsclone 缺失 / "
+    "Qwen3-TTS 模型缺失）"
+)
+# 转写（ASR）与合成（TTS）独立：只要 Whisper 引擎+模型就绪即可转写，
+# 不需要 VOICE_TTS_ENABLED（此前被 TTS 总开关连坐 → 只想语音输入也一律 503）。
+_ASR_DISABLED_MSG = (
+    "语音转写引擎未就绪（需要 faster-whisper + backend/ttsclone/models/faster-whisper-small，"
+    "或 openai-whisper + ~/.cache/whisper/small.pt；依赖见 backend/requirements-voice.txt）"
 )
 
 
 def _disabled() -> dict:
     return error_response(503, _DISABLED_MSG, 503)
+
+
+def _asr_disabled() -> dict:
+    return error_response(503, _ASR_DISABLED_MSG, 503)
 
 
 ALLOWED_AUDIO_EXTS = {".webm", ".ogg", ".wav", ".mp3", ".m4a"}
@@ -140,6 +150,7 @@ def voice_status(request: Request):
     svc = _get_service(request)
     return ok({
         "enabled": svc.enabled,
+        "asr_enabled": svc.whisper_ready,
         "speakers": SPEAKERS,
         "languages": LANGUAGES,
         "has_model": svc.has_model,
@@ -149,8 +160,8 @@ def voice_status(request: Request):
 @router.post("/transcribe")
 async def voice_transcribe(request: Request, audio: UploadFile = File(...)):
     svc = _get_service(request)
-    if not svc.enabled:
-        return _disabled()
+    if not svc.whisper_ready:
+        return _asr_disabled()
     try:
         data = await audio.read()
     except Exception as e:  # noqa: BLE001
