@@ -27,3 +27,28 @@ sqlalchemy
 alembic
 pymysql
 psycopg2-binary
+
+# HTTP 客户端（web 抓取 / 模型下载）
+httpx
+requests
+
+# 分词 / token 计数（不可用时自动回退启发式估算，不阻塞启动）
+tiktoken
+tokenizers
+
+# 语音输入 ASR（faster-whisper = CTranslate2 int8，CPU 上比 openai-whisper 快一个数量级）
+# av 必须锁 <19：PyAV 19 移除了 av.open(..., metadata_errors=...)，而 faster-whisper 1.2.1 仍传该参数（会 TypeError）
+faster-whisper>=1.2.1
+soundfile>=0.13.1
+av<19
+
+# 测试
+pytest
+pytest-asyncio
+
+# 以下默认不安装，按需启用：
+# langfuse                # 可观测性追踪；设置 LANGFUSE_PUBLIC_KEY 后生效，未安装时自动跳过
+# 语音合成 TTS / openai-whisper 回退：见 requirements-voice.txt（torch / qwen-tts / openai-whisper）
+# ttsclone 独立 UI（app.py 专用）：gradio / flash_attn（server.py / clone.py 不依赖）
+# 技能脚本按需：defusedxml pdfplumber pdf2image imageio playwright anthropic
+#   另需系统二进制：tesseract（OCR，pytesseract 已装但二进制缺失则 OCR 静默返回空）、poppler（pdf2image）

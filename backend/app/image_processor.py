@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
 import time as tmod
 from typing import Any, Optional
 
@@ -56,6 +57,38 @@ def is_image_file(f: dict) -> bool:
     return mime.startswith("image/") or ext in _IMAGE_EXTENSIONS
 
 
+_tesseract_configured = False
+
+
+def _configure_tesseract(pytesseract: Any) -> None:
+    """把 settings.tesseract_cmd / tessdata_dir 应用到 tesseract（仅首次）。
+
+    语言包目录走 TESSDATA_PREFIX 环境变量而非 --tessdata-dir：pytesseract 在
+    Windows 下用 shlex.split(posix=False) 切分 config，路径引号会被原样保留导致
+    「Error opening data file "..."」，环境变量无此问题。
+    """
+    global _tesseract_configured
+    if _tesseract_configured:
+        return
+    _tesseract_configured = True
+    cmd = (settings.tesseract_cmd or "").strip()
+    if cmd:
+        pytesseract.pytesseract.tesseract_cmd = cmd
+    d = (settings.tessdata_dir or "").strip()
+    if d:
+        os.environ["TESSDATA_PREFIX"] = d
+
+
+def _ocr_lang_attempts() -> list[str]:
+    langs = [x.strip() for x in (settings.ocr_languages or "eng").split("+") if x.strip()]
+    if not langs:
+        return ["eng"]
+    attempts = ["+".join(langs)]
+    if len(langs) > 1:
+        attempts.append(langs[-1])
+    return attempts
+
+
 def ocr_image(data_b64: str, filename: str = "") -> str:
     """图片 OCR 提取文本（截图/文档图）。引擎缺失或未启用返回空串。"""
     if not settings.image_use_ocr:
@@ -66,10 +99,19 @@ def ocr_image(data_b64: str, filename: str = "") -> str:
         import pytesseract
         from PIL import Image
 
+        _configure_tesseract(pytesseract)
         raw = base64.b64decode(data_b64 or "", validate=False)
         img = Image.open(_io.BytesIO(raw))
-        text = pytesseract.image_to_string(img, lang="chi_sim+eng")
-        text = (text or "").strip()
+        text = ""
+        last_err: Exception | None = None
+        for lang in _ocr_lang_attempts():
+            try:
+                text = (pytesseract.image_to_string(img, lang=lang) or "").strip()
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+        if last_err is not None and not text:
+            raise last_err
         logger.info("image ocr ok (%s): %d chars", filename, len(text))
         return text
     except Exception as e:  # noqa: BLE001

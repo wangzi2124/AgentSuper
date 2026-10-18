@@ -158,6 +158,12 @@ class Settings(BaseSettings):
     image_token_cap: int = 6000              # 单请求图片 token 预算上限（超限进一步降采样）
     image_thumbnail_px: int = 256            # 回显/缓存缩略图边长
     image_use_ocr: bool = False              # 图片 OCR 提取文本（截图/文档图，需 OCR 库）
+    # OCR 引擎：tesseract 可执行文件与语言包目录（留空则依赖系统 PATH / 默认 tessdata）。
+    # 典型场景：tesseract 装在受保护目录（C:\Program Files\Tesseract-OCR）且无权写入
+    # 其 tessdata 时，把 chi_sim.traineddata 放到自建目录并用 tessdata_dir 指向它。
+    tesseract_cmd: str = ""
+    tessdata_dir: str = ""
+    ocr_languages: str = "chi_sim+eng"       # OCR 语言；chi_sim 缺失时自动回退 eng
     image_vlm_caption: bool = True           # 图片描述桥：视觉 LLM 生成 caption 注入文本
     image_caption_model: str = "openai/gpt-4o-mini"  # caption VLM（litellm 前缀；内网改 ollama/llava）
     image_caption_api_base: str = ""
