@@ -32,7 +32,6 @@ class Settings(BaseSettings):
     db_name: str = "agentsuper"
 
     vector_store_path: str = "data/vector_store"
-    upload_dir: str = "data/uploads"
 
     chunk_size: int = 500
     chunk_overlap: int = 200
@@ -48,12 +47,9 @@ class Settings(BaseSettings):
     # 单个下载源（ModelScope / HuggingFace）内的重试次数（不含首次尝试）
     model_download_retries: int = 2
 
-    skills_dir: str = "skills"
     plugins_dir: str = "plugins"
 
     summarization_model: Optional[str] = None
-    summarization_api_key: Optional[str] = None
-    summarization_api_base: Optional[str] = None
     summarization_keep_messages: int = 20
 
     # ── 语音 / TTS（本地 Qwen3-TTS 子进程，无外部 HTTP 接口调用）──
@@ -65,13 +61,7 @@ class Settings(BaseSettings):
     voice_tts_model_size: str = "0.6B"
     voice_tts_timeout: int = 600
 
-    # 多 Agent 超时（秒）
-    # supervisor 转发到子 Agent 的等待上限（单次生成可能因 LLM 延迟/tool 循环超 60s）
-    sub_agent_timeout: float = 150.0
-    # 端点层等待 supervisor 返回的上限（需 > decompose + sub_agent + synthesize）
-    supervisor_timeout: float = 300.0
-
-# 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
+    # 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
     # 默认 16_384 ≈ 模型原生上限的常用值；长任务配合系统提示"长内容写文件"规则避免截断。
     # [token 优化 v9] 16_384 → 8_192：普通问答用不到那么大输出，压低超长输出兜底成本。
     # [输出上限 2026-10-03] 8_192 → 16_384：实测写俄罗斯方块时整份代码塞进单次
@@ -81,82 +71,37 @@ class Settings(BaseSettings):
     # [思考预算 2026-10-09] 16_384 → 32_000：deepseek-v4-flash 默认开思考，且思考 token
     # 计入 max_tokens（实测 ct==reasoning==16_384、finish=length、content=0），16K 上限被
     # 思考吃光 → 正文与工具调用皆空、任务失败。对齐 opencode `OUTPUT_TOKEN_MAX=32000`，
-    # 给「思考 + 正文」留总预算。⚠ 必须同步抬高 CONTEXT_RESERVE_TOKENS（预留 ≥ 输出上限），
+    # 给「思考 + 正文」留总预算。⚠ 输出预留必须 ≥ 输出上限，
     # 并同步 builtin_catalog deepseek 条目的 limits.max_output_tokens（resolve 取 min）。
     llm_max_tokens: int = 32_000
 
-    # Token 成本控制
-    # 每次 LLM 调用允许的最大上下文（system + history + 当前问题）
-    # 对齐 opencode overflow.ts：usable = max_context_tokens - context_reserve_tokens
-    # [token 优化 v5] 48K → 32K：配合 v4 压缩（信息不丢），单次调用天花板 -33%
-    # [token 优化 v9] 32K → 24K：usable ≈ 15.8K，进一步压平单次调用体积（配套 MAX_HISTORY_TOKENS 16K）
-    # [输出上限 2026-10-03] 24K → 32K：**不是**为了放大单次调用体积（那会让每轮 prompt 成本涨 33%），
-    # 而是为了给上调后的输出预留腾地方 —— 预留必须 ≥ 输出上限，否则 usable = 32K-16K = 16K
-    # 会比调前的 15.8K 还小，历史可用量反而缩水。32K-16K = 16K ≈ 原来的 15.8K，
-    # 即「输出天花板翻倍、单次调用体积基本不变」，成本中性。
-    max_context_tokens: int = 32_768
-    # 输出预留：留给模型回答的 token（≈ min(20_000, maxOutputTokens)）
-    # [输出上限 2026-10-03] 8_192 → 16_384，与 llm_max_tokens 对齐（预留 < 输出上限是自相矛盾的：
-    # 模型一次输出就能吃掉全部 usable，留给历史的窗口归零）。
-    # [思考预算 2026-10-09] 16_384 → 32_768：预留必须 ≥ llm_max_tokens（32_000），
-    # 否则一次输出就能吃光 usable、历史窗口归零（见 test_output_budget.py）。
-    context_reserve_tokens: int = 32_768
+    # ── 已删配置（2026-10-18 审计）──
+    # max_context_tokens / context_reserve_tokens：曾用于 opencode overflow.ts 的
+    # usable = max − reserve 预算封顶（原 app/context/budget.py），随目录重构删除后
+    # 全库已无读者（含 os.environ 读取），本轮从 Settings 移除。
+    # 当前上下文压缩阈值是 cognition/compressor.py 的模块常量（非配置项）：
+    # COMPRESS_THRESHOLD=80_000、KEEP_RECENT_TOKENS=20_000、TOOL_OUTPUT_MAX_CHARS=2000。
     # [token 优化 P8] cl100k_base 对 DeepSeek tokenizer 系统性低估（实测 +13.2%：
     # round8 估算 20,851 vs 实际 23,599）。用于 token_counter 估算校正，避免
     # 截断/压缩判断"以为没超、实际已超"（实测 round9 实际 25,779 超 usable 23,808）
     token_estimate_correction: float = 1.13
-    # [token 优化 P8] 压缩触发比例：usable × ratio。原 0.8 实测 round 8 才触发、
-    # 压缩后下一轮仍超限；降到 0.65 提前 2-3 轮介入，压平长工具循环 token 曲线
-    # [token 优化 v9] 0.65 → 0.6：usable 降为 15.8K 后保持"压缩早于截断"的窗口
-    compaction_threshold_ratio: float = 0.6
-    # 压缩触发阈值（token）；0 表示自动 = usable × compaction_threshold_ratio，长工具循环在截断兜底之前先压缩
-    compaction_threshold_tokens: int = 0
     # 压缩时尾部保留的最近轮次（对齐 opencode tail_turns，默认 2）
     context_tail_turns: int = 2
-    # 尾部保留的 token 预算（对齐 opencode preserve_recent_tokens，默认 8_000）
-    context_preserve_recent_tokens: int = 8_000
-    # 回溯式工具输出清理：最近 N 轮之内累计工具输出超过该值时，清理更旧输出。
-    # 注意：这里只是「原始配置值」，实际生效值由 budget.py 与压缩阈值联动钳制
-    # （protect = min(配置值, compaction_threshold_tokens()//2)，minimum = protect//2），
-    # 保证 prune 先于压缩回收旧输出（[token 优化 v12]）。
-    tool_output_protect_tokens: int = 24_000
-    # 清理收益低于该值时不做（避免微小收益的频繁改写）；生效值同样经联动钳制。
-    tool_output_prune_minimum_tokens: int = 12_000
-    # [C5 长任务上下文越界根治] 单次 LLM 调用预算的安全系数：截断/压缩目标
-    # 使用 usable × context_safety_ratio（默认 0.9），为估算误差预留 ≥10% 余量，
-    # 避免「截断按估算放行、Provider 按实际拒绝」。见 budget.llm_call_budget。
-    context_safety_ratio: float = 0.9
-    # [C5] 压缩目标系数：压缩后的上下文应尽量落到 usable × compaction_target_ratio
-    # 之下（默认 0.5），保证压缩后仍有充足余量继续多轮工具循环。
-    compaction_target_ratio: float = 0.5
+    # 自动压缩时保留的最近消息条数（0 = 按 context_tail_turns × 2 折算）。
+    # ⚠ 此前只在 .env.example 里文档化、未声明为字段：extra="allow" 下 .env 里没这行时
+    # settings.compaction_tail_messages 直接 AttributeError，service._auto_tail_limit()
+    # 在 compact 路径必炸。现补为正式字段（默认 0 = 用轮次折算）。
+    compaction_tail_messages: int = 0
     # [C5] 单条工具输出 token 上限（对齐 opencode 按 token 截断语义）：中文场景
     # 32KB 字符 ≈ 48K token 单条过大，bound_tool_output 在字符/行限之外再按 token
     # 封顶，超限写盘 + 续读提示。0 = 不启用 token 封顶。
+    # ⚠ 现状：仅被 cognition/tool_output.py:bound_tool_output 读取，而新工具循环
+    # graph/nodes/base.py:run_tool_loop **未调用** bound_tool_output（工具输出原样入 convo），
+    # 故本项当前为「库函数可配、生产未接线」。
     tool_output_max_tokens: int = 8_000
-    # [C5 · 方案 D 小步快走] 长任务周期性地把旧轮次压成摘要（HierarchicalSummarization
-    # Middleware），上下文只装 [摘要 checkpoint + 最近一轮 + 当前步]，不随轮次线性膨胀。
-    step_summary_enabled: bool = True
-    # 从第几步起进入小步快走（短任务保持 in-loop 快路径，不做多余摘要调用）
-    step_summary_min_rounds: int = 3
-    # 每隔几步做一次摘要替换（间隔 1 = 每轮都压，成本高；间隔 2 = 折中）
-    step_summary_interval: int = 2
-    # 摘要后原样保留的最近消息条数（覆盖最近一轮 assistant+tool 结果）
-    step_summary_keep_messages: int = 4
-    # ── [C5 · 方案 E/F] 长任务小步快走（多请求接力）──
-    # code 子 Agent 对多步骤实现类任务先拆解计划、每步一个独立 fresh-context 请求执行，
-    # 步间只传落盘 STEP_STATE（上下文永不膨胀）。默认开启（用 LONG_TASK_MIN_QUESTION_CHARS
-    # 门控，短问题不触发规划调用，零额外开销）。
-    long_task_step_mode: bool = True
-    # 接力规划门控：问题字符数低于该阈值时不拆计划（保持普通单请求路径）
-    long_task_min_question_chars: int = 30
-    # 接力时计划最多拆几步
-    long_task_max_steps: int = 6
     # ── [F8/F9] 图片上传解析给模型（多模态附件管线）──
-    # 上传图片先规格化（缩放+JPEG 压缩）再投递给模型，避免大图 base64 撑爆上下文。
-    image_max_dimension: int = 1024          # 长边缩放上限（px）
-    image_max_kb: int = 512                  # 压缩后单图字节上限（KB）
-    image_token_cap: int = 6000              # 单请求图片 token 预算上限（超限进一步降采样）
-    image_thumbnail_px: int = 256            # 回显/缓存缩略图边长
+    # 回显/缓存缩略图边长（px）
+    image_thumbnail_px: int = 256
     image_use_ocr: bool = False              # 图片 OCR 提取文本（截图/文档图，需 OCR 库）
     # OCR 引擎：tesseract 可执行文件与语言包目录（留空则依赖系统 PATH / 默认 tessdata）。
     # 典型场景：tesseract 装在受保护目录（C:\Program Files\Tesseract-OCR）且无权写入
@@ -170,8 +115,6 @@ class Settings(BaseSettings):
     image_caption_api_key: str = ""
     image_caption_prompt: str = ""           # 空用默认「用中文简洁描述图片内容与关键细节」
     image_caption_timeout: int = 15          # caption 调用超时（秒），失败快速降级
-    # 摘要中间件缓存大小（按历史分块缓存，避免每请求全量重算）
-    summarization_cache_size: int = 200
 
     # 可选：管理端鉴权 token。设置后插件 toggle/call、权限审批等敏感接口需携带
     # Authorization: Bearer <token>；不设置时这些接口仅允许本机来源（deps.require_admin）。
@@ -220,14 +163,6 @@ class Settings(BaseSettings):
     # 摘除且直接调用被拒，任意计算改走 CodeAct（CODEACT_ENABLED=true + tool_code_exec）。
     tool_execute_enabled: bool = False
 
-    # ── Agent 执行循环护栏（对齐 opencode prompt.ts / processor.ts / max-steps.ts）──
-    # 主步骤上限（对齐 opencode agent.steps，默认 40）：到达上限的最后一轮注入收尾提示，
-    # 并禁用工具，强制"已完成/未完成/下一步"式总结。生效上限 = min(MAX_STEPS, MAX_TOOL_ROUNDS)。
-    max_steps: int = 24
-    # 硬兜底：单次请求内最多 LLM 调用轮数（每轮都是一次完整 LLM 调用）。
-    # 当 MAX_STEPS >= MAX_TOOL_ROUNDS 时，MAX_STEPS 生效上限即等于该值。
-    # [token 优化 v9] 16 → 8：每轮工具调用都会重发整段上下文，减少轮数即减少 token 累积。
-    max_tool_rounds: int = 8
     # [思考模式 2026-10-09] DeepSeek V4 思考开关：enabled / disabled / adaptive。
     # 默认 disabled —— 实测 agentic 工具循环里思考会吃光 max_tokens 预算
     # （reasoning == ct == 上限，finish=length，零工具 / 零正文），且思考轮要求把
@@ -242,21 +177,6 @@ class Settings(BaseSettings):
     # reasoning，工具循环报废），与 DeepSeek 同理。关闭后 finish=stop、content 正常产出
     # （含标准 tool_calls）。adaptive = 不显式下发，交推理服务默认；enabled 时顶层传 think=True。
     ollama_thinking: str = "disabled"
-    # Doom-loop 检测：同一组工具调用指纹连续重复 N 轮后，注入策略变更提示（≥2）
-    doom_loop_threshold: int = 3
-    # Doom-loop 升级：首次提示之后，再次连续触发 N 次相同指纹即强制收尾（注入 MAX_STEPS_PROMPT + 禁用工具），
-    # 对齐 opencode processor.ts 的 permission.ask(doom_loop) → deny 后 stop 语义
-    doom_loop_max_strikes: int = 2
-    # 工具密集型子 Agent（如 code）的更长等待超时（秒），避免长任务被误判超时
-    sub_agent_timeout_extended: float = 300.0
-    # 使用 extended 超时的子 Agent 列表（逗号分隔）
-    extended_timeout_agents: str = "code"
-    # 子 Agent 委派嵌套深度上限（对齐 opencode subagent_depth）。
-    # [C10] 默认 1 = 与「实际可达深度」一致：build/plan 委派 explore 仅 1 跳，
-    # 且 explore 的只读 allowlist 不含 tool_task，无法再嵌套 → 原默认值 4 永不触发，
-    # 且与 graphmod/tools.py 的错误文案「(default 1)」自相矛盾。
-    # 放开到 >1 需要同时给子 Agent 挂上 tool_task，否则该守卫仍是不可达代码。
-    subagent_depth: int = 1
 
     # Ollama 上下文窗口（num_ctx，传给本地推理服务的 options）。Ollama 默认 2048，
     # 超出窗口的 prompt 会被服务器截断 -> 历史/长上下文静默丢失（模型答"记不清/无历史"）。
@@ -266,8 +186,6 @@ class Settings(BaseSettings):
     # ── 共享记忆持久化 ──
     # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失
     memory_persist_path: str = "data/agent_memory.json"
-    # tool_memory_set 记忆的有效期（秒），默认 300（5 分钟）
-    memory_ttl_seconds: int = 300
 
     # ── 用户身份签名（可选，默认关闭）──
     # 设置 AUTH_TOKEN_SECRET 后启用：X-User-Id 必须携带对应的签名 token
