@@ -19,6 +19,12 @@ GREETINGS = [
     "OK",
     "嗯。",
     "收到了",
+    "喂",
+    "喂你好你好",  # plan.md「及其重复、变体」
+    "test",
+    "Test!!",
+    "你好你好",
+    "好的好的",
 ]
 
 TASKS = [
@@ -28,8 +34,32 @@ TASKS = [
     "谢谢，另外帮我改下 a.py",
     "读取 你好.md",
     "在吗？帮我查下这个报错",  # 寒暄词但带任务 → 全串锚定不命中
+    "测试一下这个功能",
+    "帮我 test 这段代码",
     "",
 ]
+
+
+class _StubModel:
+    """记录调用并返回预设内容的假 LLM。"""
+
+    tier = None
+
+    def __init__(self, content: str) -> None:
+        self._content = content
+        self.calls: list[str] = []
+
+    async def ainvoke(self, messages):  # noqa: ANN001
+        self.calls.append(messages[0]["content"])
+
+        class _Res:
+            content = self._content
+
+            @staticmethod
+            def response_metadata():
+                return {}
+
+        return _Res()
 
 
 def test_classify_greetings():
@@ -80,3 +110,40 @@ async def test_greeting_flow_routes_to_synthesize():
     assert route_after_supervisor(state) == "synthesize"
     final = await make_synthesize_node(None)(state)
     assert final["final_output"] == SMALLTALK_REPLIES["greeting"]
+
+
+async def test_plan_llm_empty_plan_short_circuits():
+    """LLM 按 plan.md 对寒暄输出空计划 `[]` → 短路为草稿，不回退单任务。"""
+    # "hello there" 不被正则全串锚定命中 → 走 LLM 分解；LLM 判定寒暄输出 []
+    model = _StubModel("```json\n[]\n```")
+    node = make_plan_node(model)
+    out = await node({"messages": [HumanMessage(content="hello there")]})
+    assert out["task_plan"] == [{"id": "t1", "desc": "hello there", "status": "done"}]
+    assert out["draft_output"] == SMALLTALK_REPLIES["greeting"]
+    # 仍调了一次 LLM（正则未命中才走的分解路径）
+    assert len(model.calls) == 1
+
+
+async def test_plan_llm_parse_failure_falls_back_to_single():
+    """解析失败（非 JSON）≠ 显式空计划 → 回退单任务。"""
+    model = _StubModel("抱歉，我无法分解该请求。")
+    node = make_plan_node(model)
+    out = await node({"messages": [HumanMessage(content="帮我查下报错原因")]})
+    assert out["task_plan"] == [
+        {"id": "t1", "desc": "帮我查下报错原因", "status": "pending"}
+    ]
+    assert "draft_output" not in out
+
+
+async def test_plan_llm_model_error_falls_back_to_single():
+    class _Boom:
+        tier = None
+
+        async def ainvoke(self, messages):  # noqa: ANN001
+            raise RuntimeError("model down")
+
+    node = make_plan_node(_Boom())
+    out = await node({"messages": [HumanMessage(content="帮我查下报错原因")]})
+    assert out["task_plan"] == [
+        {"id": "t1", "desc": "帮我查下报错原因", "status": "pending"}
+    ]

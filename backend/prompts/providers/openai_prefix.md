@@ -1,8 +1,8 @@
 <provider_notes>
-- 使用 XML 标签组织约束段落。
-- 关键安全约束在开头和结尾各强调一次。
+- 使用 Markdown 标题（## / ###）组织内容，层级清晰；列表用 Markdown 列表。
+- 多步骤内容按编号列表逐步展开；结论先行，依据随后。
+- 工具调用参数严格按 schema 输出，JSON 格式化，不添加额外字段。
 - 不需要额外要求"逐步思考"，直接给出结论与依据即可。
-- 工具参数严格按 schema 输出，不要添加额外字段。
 </provider_notes>
 
 <global_rules priority="system">

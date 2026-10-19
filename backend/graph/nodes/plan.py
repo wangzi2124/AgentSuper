@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from prompts.loader import PromptLoader
 
-from ..tasks import KNOWN_AGENTS, parse_task_specs
+from ..tasks import KNOWN_AGENTS, is_explicit_empty_plan, parse_task_specs
 from ..usage import usage_from_result
 from .base import content_text
 
@@ -24,21 +24,31 @@ MAX_TASKS = 5
 # 纯寒暄/致谢/应答识别（全串锚定，正文带任何任务内容即不命中）——
 # 这类消息若进工具循环，弱本地模型会臆造文件名并把「文件不存在」错误
 # 当成最终答案（实测 qwen2.5:3b 对「你好」返回「错误：文件不存在 工作区.txt」）。
-_GREETING_RE = re.compile(
-    r"^(?:你好+|您好|嗨+|哈喽|哈啰?|hi+|hello|hey|"
+# 单元可重复（对齐 plan.md「及其重复、变体」）：「你好你好」「喂，喂」「ok ok」命中；
+# 「在吗？帮我查下这个报错」等带任务正文的仍不命中（正文不在单元/标点字符类内）。
+_GREETING_UNIT = (
+    r"(?:你好+|您好|嗨+|哈喽|哈啰?|hi+|hello|hey|喂+|"
     r"在吗|在么|在不在|有人吗|有人么|请问在吗|"
     r"早上好|早安|上午好|中午好|下午好|傍晚好|晚上好|晚安)"
-    r"[!！~～。.，,\s?？]*$",
+)
+_GREETING_RE = re.compile(
+    rf"^(?:{_GREETING_UNIT}[!！~～。.，,\s?？]*)+$",
     re.IGNORECASE,
 )
+_THANKS_UNIT = r"(?:谢谢+|谢谢你|感谢你?|多谢+|谢啦|thanks?|thx|thank u)"
 _THANKS_RE = re.compile(
-    r"^(?:谢谢+|谢谢你|感谢你?|多谢+|谢啦|thanks?|thx|thank u)"
-    r"[!！~～。.，,\s?？]*$",
+    rf"^(?:{_THANKS_UNIT}[!！~～。.，,\s?？]*)+$",
     re.IGNORECASE,
 )
+_ACK_UNIT = r"(?:好的+|okay|ok|嗯+|哦+|噢+|收到了?|明白|了解|知道了?)"
 _ACK_RE = re.compile(
-    r"^(?:好的+|okay|ok|嗯+|哦+|噢+|收到了?|明白|了解|知道了?)"
-    r"[!！~～。.，,\s?？]*$",
+    rf"^(?:{_ACK_UNIT}[!！~～。.，,\s?？]*)+$",
+    re.IGNORECASE,
+)
+# 测试性输入（plan.md 判定标准：非实质请求）——回复 greeting 自我介绍，
+# 让用户看到助手存活；「测试一下/测个功能」等带正文的不命中。
+_TEST_RE = re.compile(
+    r"^(?:test|testing|测试)[!！~～。.，,\s?？]*$",
     re.IGNORECASE,
 )
 
@@ -61,6 +71,8 @@ def classify_smalltalk(text: str) -> str | None:
         return "thanks"
     if _ACK_RE.match(s):
         return "ack"
+    if _TEST_RE.match(s):
+        return "greeting"
     return None
 
 
@@ -112,16 +124,27 @@ def make_plan_node(
             return {"task_plan": _single(request)}
 
         usage: dict[str, Any] = {}
+        raw_content = ""
         try:
             prompt = PromptLoader().load("nodes/plan.md", content=request)
             res = await model.ainvoke([{"role": "user", "content": prompt}])
             usage = usage_from_result(res, getattr(model, "tier", None))
-            specs = parse_task_specs(getattr(res, "content", "") or "")
+            raw_content = getattr(res, "content", "") or ""
+            specs = parse_task_specs(raw_content)
         except Exception as exc:  # noqa: BLE001
             logger.warning("plan decomposition failed, using single task: %s", exc)
             specs = []
 
         if not specs:
+            if raw_content and is_explicit_empty_plan(raw_content):
+                # plan.md：寒暄/非实质请求 → 空计划 `[]`（区别于解析失败）。
+                # 短路为草稿回复（同 classify_smalltalk 路径）——
+                # 不回退单任务、不进工具循环；否则寒暄会被当任务送进 execute。
+                return {
+                    "task_plan": [{"id": "t1", "desc": request, "status": "done"}],
+                    "draft_output": SMALLTALK_REPLIES["greeting"],
+                    "token_usage": usage,
+                }
             return {"task_plan": _single(request), "token_usage": usage}
 
         tasks = [

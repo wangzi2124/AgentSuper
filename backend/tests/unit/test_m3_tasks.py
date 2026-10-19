@@ -1,6 +1,11 @@
 """L1 单元测试：结构化任务对象（agent.md §3.4）。"""
 
-from graph.tasks import KNOWN_AGENTS, TaskSpec, parse_task_specs
+from graph.tasks import (
+    KNOWN_AGENTS,
+    TaskSpec,
+    is_explicit_empty_plan,
+    parse_task_specs,
+)
 
 
 def test_roundtrip_dict():
@@ -38,3 +43,15 @@ def test_invalid_json_returns_empty():
 
 def test_known_agents_set():
     assert set(KNOWN_AGENTS) == {"research", "code", "file"}
+
+
+def test_is_explicit_empty_plan():
+    # 寒暄：LLM 按 plan.md 输出空计划
+    assert is_explicit_empty_plan("[]")
+    assert is_explicit_empty_plan("```json\n[]\n```")
+    assert is_explicit_empty_plan("输出如下：[]")
+    # 解析失败 / 非空列表 → 不是显式空计划
+    assert not is_explicit_empty_plan("")
+    assert not is_explicit_empty_plan("这不是 JSON")
+    assert not is_explicit_empty_plan('[{"agent": "code", "objective": "x"}]')
+    assert not is_explicit_empty_plan("[1, 2, 3]")

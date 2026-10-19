@@ -78,3 +78,20 @@ def parse_task_specs(text: str, *, default_agent: str = "") -> list[TaskSpec]:
             spec.agent = default_agent
         specs.append(spec)
     return specs
+
+
+def is_explicit_empty_plan(text: str) -> bool:
+    """LLM 是否明确输出了空计划 `[]`（区别于解析失败/非 JSON）。
+
+    plan.md 提示词要求寒暄输入输出空计划 `[]`。`parse_task_specs` 对
+    显式 `[]` 与解析失败都返回空列表，调用方需用本函数区分二者：
+    显式 `[]` → 寒暄短路；解析失败 → 回退单任务。
+    """
+    raw = _extract_json_array(text or "")
+    if raw is None:
+        return False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data, list) and len(data) == 0
