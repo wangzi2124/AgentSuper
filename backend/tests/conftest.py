@@ -7,7 +7,15 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
+
+# 会话库/检查点库与真实 data/ 隔离 —— 必须在导入 app.* 之前设置：
+# - SESSION_DB_PATH：app.session.db.DB_PATH 模块级求值（SessionStore 落库写测试库）
+# - CHECKPOINT_DB_PATH：图持久化检查点（AsyncSqliteSaver）写测试库
+_TEST_DB_DIR = tempfile.mkdtemp(prefix="agentsuper-test-")
+os.environ["SESSION_DB_PATH"] = os.path.join(_TEST_DB_DIR, "session.db")
+os.environ["CHECKPOINT_DB_PATH"] = os.path.join(_TEST_DB_DIR, "checkpoints.db")
 
 import pytest
 from fastapi.testclient import TestClient

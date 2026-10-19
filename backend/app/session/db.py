@@ -16,6 +16,7 @@ context_epoch / session_inputs（旧的 conversations.db 已移除，数据全�
   （SQLAlchemy 引擎，参数/事务方言由门面翻译），本模块的 Pool 不参与。
 """
 
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -24,7 +25,13 @@ from typing import Optional
 from config import settings
 from storage import backends, schema as storage_schema
 
-DB_PATH = Path(__file__).resolve().parents[2] / "data" / "session.db"
+# 会话库路径：`SESSION_DB_PATH` 可覆盖（测试隔离 / 自定义部署），缺省 data/session.db
+_raw_db_path = (os.environ.get("SESSION_DB_PATH") or "").strip()
+DB_PATH = (
+    Path(_raw_db_path)
+    if _raw_db_path
+    else Path(__file__).resolve().parents[2] / "data" / "session.db"
+)
 
 # 由 metadata 表声明编译的 sqlite DDL（建表 + 建索引，全部 IF NOT EXISTS）
 _SESSION_TABLES = storage_schema.SESSION_TABLES
@@ -118,6 +125,8 @@ class _ConnectionPool:
             schema_ddl=_SCHEMA,
         )
         _ensure_column(conn, "sessions", "tokens_reasoning", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "sessions", "hidden_ids", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, "sessions", "compact_baseline_seq", "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
         return conn
 
@@ -140,8 +149,11 @@ def _get_db(path: Optional[Path] = None):
             schema_ddl=_SCHEMA,
         )
         _ensure_column(conn, "sessions", "tokens_reasoning", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "sessions", "hidden_ids", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, "sessions", "compact_baseline_seq", "INTEGER NOT NULL DEFAULT 0")
         conn.commit()
         return conn
+
     if not backends.is_sqlite():
         # 非 sqlite：返回统一后端门面（repository 方法会在 try/finally 中 close）
         return backends.connect()

@@ -7,6 +7,7 @@ import contextvars
 import inspect
 import json
 import logging
+import re
 import typing
 from typing import Any, Awaitable, Callable
 
@@ -14,12 +15,82 @@ from execution.tool_registry import ToolDefinition, ToolRegistry
 from models.router import TierModel
 from observability.metrics import record_llm_call
 from observability.tracing import trace_span
+from utils.json_repair import (
+    is_tool_call_markup,
+    parse_answer_envelope,
+    parse_tool_args,
+)
 
 from ..usage import empty_usage, merge_usage, usage_from_result
 
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 8
+
+# 纠正文：小模型常把「工具调用」当纯文本正文输出（无原生 tool_calls），
+# 循环误判为最终答案 → 前端看到裸 JSON（如 {"id":"call_x","type":"function",...}）。
+_NUDGE_NOT_A_TOOL_CALL = (
+    "上一条输出是工具调用 JSON，不是给用户的回答。"
+    "请直接用纯文本给出最终答案：不要输出 JSON，不要再调用工具。"
+)
+_FINAL_ROUND_NUDGE = "工具调用轮数已达上限。请立即停止调用工具，直接用纯文本给出最终答案。"
+
+
+def _json_object_candidate(text: str) -> dict[str, Any] | None:
+    """正文中的 JSON 对象候选（只做形态提取，不做宽容修复）。
+
+    归一化覆盖三种呈现：裸 JSON、markdown 代码围栏包裹、简短散文包裹
+    （取第一个 `{` 到最后一个 `}` 的跨度）。解析失败返回 None，不打日志
+    —— 对每个最终答案都会调用，避免日志噪音。
+    """
+    s = (text or "").strip()
+    if len(s) < 2 or len(s) > 8000 or "{" not in s:
+        return None
+    m = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL | re.IGNORECASE)
+    if m:
+        s = m.group(1).strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        a, b = s.find("{"), s.rfind("}")
+        if not (0 <= a < b):
+            return None
+        s = s[a : b + 1]
+    if not (s.startswith("{") and s.endswith("}") and len(s) <= 8000):
+        return None
+    try:
+        obj = json.loads(s)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _looks_like_tool_call_json(text: str) -> bool:
+    """正文是否实为「工具调用」而非答案文本（覆盖所有已观测模型形态）。"""
+    s = (text or "").strip()
+    if len(s) < 2 or len(s) > 8000:
+        return False
+    # Hermes / DeepSeek DSML 等工具标记（utils.json_repair.is_tool_call_markup）
+    if is_tool_call_markup(s):
+        return True
+    obj = _json_object_candidate(s)
+    if obj is None:
+        return False
+    fn = obj.get("function")
+    if isinstance(fn, dict):
+        # 非标准形状（小模型自造）：{"function": {"function_name": "...", ...}}
+        if isinstance(fn.get("function_name"), str):
+            return True
+        # 标准形状：{"id": ..., "type": "function", "function": {"name": ...}}
+        if isinstance(fn.get("name"), str) and (
+            obj.get("type") == "function" or "id" in obj
+        ):
+            return True
+    calls = obj.get("tool_calls")
+    if isinstance(calls, list) and calls:
+        return True
+    # 裸形状：{"name": "tool_x", "arguments": {...} | "{...}"}（无包装层）
+    if isinstance(obj.get("name"), str) and "arguments" in obj:
+        return True
+    return False
 
 # 高危工具审批钩子（§5.3 require_approval / §9 execution/approval.py）。
 # 由 API 层（app/api/compat.py）在本回合内注入：`async (tool, args) -> bool`。
@@ -186,8 +257,25 @@ async def run_tool_loop(
         )
 
         if not result.tool_calls:
+            text = result.content or ""
+            if _looks_like_tool_call_json(text):
+                if rounds < max_rounds:
+                    # 工具调用被模型写成了正文（无原生 tool_calls）→ 纠正一轮，不当答案返回。
+                    # 记录原始响应摘录做诊断（等价于 set_verbose 抓包，但不打印整包请求/密钥）。
+                    logger.warning(
+                        "模型把工具调用写成了正文（model=%s round=%d）: %.300s",
+                        label,
+                        rounds,
+                        text,
+                    )
+                    convo.append({"role": "assistant", "content": text})
+                    convo.append({"role": "user", "content": _NUDGE_NOT_A_TOOL_CALL})
+                    continue
+                break  # 轮数已尽：交由下方纯文本收尾，不把裸 JSON 当最终答案
+            # 弱模型把回答包进 JSON 外壳（{"response": "..."}）→ 解包归一化
+            envelope = parse_answer_envelope(text)
             return {
-                "text": result.content,
+                "text": envelope or text,
                 "rounds": rounds,
                 "tool_trace": tool_trace,
                 "usage": usage_total,
@@ -208,12 +296,15 @@ async def run_tool_loop(
             }
         )
         for tc in result.tool_calls:
-            try:
-                args = json.loads(tc.arguments) if tc.arguments else {}
-                if not isinstance(args, dict):
-                    args = {}
-            except json.JSONDecodeError:
-                args = {}
+            raw_args = tc.arguments
+            if isinstance(raw_args, dict):
+                args: dict[str, Any] = raw_args
+            else:
+                # 宽容解析：弱模型常见坏 JSON（单引号/尾逗号/未转义换行/围栏）
+                # —— utils.json_repair.parse_tool_args，修复失败才回退空参数
+                args = parse_tool_args(
+                    raw_args if isinstance(raw_args, str) else None
+                ) or {}
             td = registry.get(tc.name)
             if td is None:
                 output = f"错误：未知工具 {tc.name}"
@@ -232,6 +323,37 @@ async def run_tool_loop(
             convo.append(
                 {"role": "tool", "tool_call_id": tc.id, "content": output}
             )
+
+    # 工具轮数耗尽：做一次「纯文本收尾」调用（不带工具），避免把占位文案当最终答案
+    _prior_nudges = {_FINAL_ROUND_NUDGE, _NUDGE_NOT_A_TOOL_CALL}
+    if not (convo and convo[-1].get("role") == "user" and convo[-1].get("content") in _prior_nudges):
+        convo.append({"role": "user", "content": _FINAL_ROUND_NUDGE})
+    try:
+        with trace_span("llm.call", rounds=rounds, final=True):
+            final = await model.ainvoke(convo, tools=None)
+        rounds += 1
+        label = model.model_name() if hasattr(model, "model_name") else model.tier
+        usage_total = merge_usage(usage_total, usage_from_result(final, label))
+        record_llm_call(
+            final.model or model.tier,
+            final.usage.get("input", 0),
+            final.usage.get("output", 0),
+        )
+        final_text = final.content or ""
+        if _looks_like_tool_call_json(final_text):
+            final_text = ""
+        else:
+            envelope = parse_answer_envelope(final_text)
+            final_text = envelope or final_text
+        if final_text:
+            return {
+                "text": final_text,
+                "rounds": rounds,
+                "tool_trace": tool_trace,
+                "usage": usage_total,
+            }
+    except Exception:  # noqa: BLE001 - 收尾失败仍走占位文案兜底
+        logger.warning("工具轮数耗尽后的纯文本收尾调用失败", exc_info=True)
 
     return {
         "text": "(达到最大工具轮数，未产出最终答案)",

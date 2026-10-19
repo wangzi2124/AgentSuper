@@ -274,7 +274,7 @@ export interface ConversationMeta {
 }
 
 export interface ConversationDetail extends ConversationMeta {
-  messages: Array<{ id: string; role: string; content: string; sources?: any[]; steps?: any[]; parts?: any[]; agents?: any[]; files?: any[]; voice?: any; seq?: number; model?: string; tokens?: Record<string, number>; cost?: number }>
+  messages: Array<{ id: string; role: string; content: string; sources?: any[]; steps?: any[]; parts?: any[]; agents?: any[]; files?: any[]; files_changed?: any[]; plan_path?: string; partial_error?: any; diffSteps?: number; voice?: any; seq?: number; model?: string; tokens?: Record<string, number>; cost?: number }>
 }
 
 function _msgTypeToRole(msgType: string): string {
@@ -340,11 +340,10 @@ export async function getConversation(conversationId: string, convType?: string)
       if (m.data?.steps) msg.steps = m.data.steps as any[]
       if (m.data?.agents) msg.agents = m.data.agents as any[]
       if (m.data?.files) msg.files = m.data.files as any[]
-      if (m.data?.voice) msg.voice = m.data.voice as any
-      if (m.data?.model) msg.model = m.data.model as string
-      if (m.data?.tokens) msg.tokens = m.data.tokens as Record<string, number>
-      if (m.data?.cost != null) msg.cost = m.data.cost as number
-      if (m.parts?.length) msg.parts = m.parts as any[]
+      if (m.data?.files_changed) msg.files_changed = m.data.files_changed as any[]
+      if (m.data?.plan_path) msg.plan_path = m.data.plan_path as string
+      if (m.data?.partial_error) msg.partial_error = m.data.partial_error as any
+      if (m.data?.diff_steps != null) msg.diffSteps = m.data.diff_steps as number
       return msg
     }),
   }

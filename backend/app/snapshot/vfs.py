@@ -28,7 +28,11 @@ def snapshot_begin(vfs: VirtualFileSystem) -> int:
 
 
 def _read(vfs: VirtualFileSystem, path: str) -> str | None:
-    fp = vfs._resolve(path)  # noqa: SLF001 - 同平台内部使用
+    # 历史路径来自当次成功写入（已审批/在允许根内）→ 用 raw_path 直读：
+    # 快照跑在请求级上下文，看不到图任务内 add_allowed_root 的就地授权，
+    # 若照常走 _resolve 会把合法的外部写入（如人工审批后的 C:/tool/test.txt）
+    # 误判为越界，令整轮 SSE 以 error 收尾（文件其实已落盘）。
+    fp = vfs.raw_path(path)
     if not fp.exists() or fp.is_dir():
         return None
     return fp.read_text(encoding="utf-8", errors="replace")
@@ -87,7 +91,7 @@ def restore(vfs: VirtualFileSystem, descriptor: dict[str, Any]) -> dict[str, Any
         path = item.get("path")
         if not path:
             continue
-        fp = vfs._resolve(path)  # noqa: SLF001
+        fp = vfs.raw_path(path)  # 同 _read：已确权历史路径，不做二次边界校验
         old = item.get("old")
         if old is None:
             if fp.exists():

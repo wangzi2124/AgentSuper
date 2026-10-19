@@ -14,6 +14,7 @@ litellm 为底座实现 `invoke` / `ainvoke`，返回带 `content` / `tool_calls
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -63,6 +64,13 @@ TIER_MAP: dict[str, str] = {
 
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_TIMEOUT = 120
+# 本地 Ollama CPU 推理慢（实测 ~7.5 tok/s），子 Agent 全量工具提示词 120s 必超时
+# （2026-10-19 实锤：deepseek-r1:1.5b 超时 ×2 重试 → SSE error）；仅默认值时放宽，
+# 调用方显式传 timeout 仍按其值。
+LOCAL_OLLAMA_TIMEOUT = 300
+# 本地 Ollama 输出上限收窄：CPU 上模型跑飞生成能烧半小时；常规答案几百 token
+# 不受影响。仅按 model 前缀判定（本地代理 tier 别名不受影响），取 min 不放大。
+LOCAL_OLLAMA_MAX_TOKENS = 4096
 DEFAULT_MAX_RETRIES = 2
 
 # finish_reason 归一化（对齐 opencode FinishReason 六值）
@@ -147,11 +155,20 @@ def _parse_response(resp: Any, requested_model: str) -> ChatResult:
     calls: list[ToolCall] = []
     for tc in raw_tool_calls:
         fn = getattr(tc, "function", None)
+        raw_args = getattr(fn, "arguments", "") if fn else ""
+        # 归一化：部分 provider（Ollama 边缘路径）把 arguments 给成 dict/list，
+        # OpenAI 契约要求 str —— 下游 json.loads/回放进对话都会炸，这里统一成 str。
+        if isinstance(raw_args, (dict, list)):
+            arguments = json.dumps(raw_args, ensure_ascii=False)
+        elif raw_args is None:
+            arguments = ""
+        else:
+            arguments = str(raw_args)
         calls.append(
             ToolCall(
                 id=getattr(tc, "id", "") or "",
                 name=getattr(fn, "name", "") if fn else "",
-                arguments=getattr(fn, "arguments", "") if fn else "",
+                arguments=arguments,
             )
         )
     usage: dict[str, Any] = {}
@@ -218,6 +235,8 @@ class TierModel:
         `api_base`/`api_key`）> `.env` 的 `LLM_API_BASE`/`LLM_API_KEY`。此前这里直取
         `.env`，导致用户在「模型管理」里改的密钥/端点不参与聊天调用（只在连通性自检
         生效）——这就是「改了 key 聊天仍报旧 key 无效」的根因。
+        **Ollama 例外**：`ollama/*` 模型只认前端注册的 Provider，`.env` 不兜底
+        （否则 .env 的 DeepSeek 端点顶掉 localhost、占位 key "ollama" 被网关拒绝）。
 
         `options`（Ollama `num_ctx`/`think`、DeepSeek `thinking`）由
         `_kwargs`/`astream` 经 `litellm_extra_kwargs()` 展开，不直接透传给 litellm。
@@ -237,6 +256,17 @@ class TierModel:
         except Exception as exc:  # noqa: BLE001 - 目录/DB 异常不得中断 LLM 调用
             logger.warning("provider_api(%s) 解析失败，回退 .env 凭证：%s", mid, exc)
             creds = {}
+        if mid.startswith("ollama/") or creds.get("is_ollama"):
+            # Ollama 只认前端「模型管理」注册的 Provider，后端 .env 不兜底：
+            # 此前 `api_base=None or settings.llm_api_base` 被 .env 的 DeepSeek 端点
+            # 顶掉、key 落成占位 "ollama" → 请求打 DeepSeek 报 ****lama is invalid。
+            # None → litellm 原生发现（OLLAMA_HOST 环境变量 → localhost:11434）。
+            return {
+                "model": mid,
+                "api_base": creds.get("api_base"),
+                "api_key": creds.get("api_key") or "ollama",
+                "options": creds.get("options"),
+            }
         return {
             "model": mid,
             "api_base": creds.get("api_base") or settings.llm_api_base,
@@ -254,6 +284,30 @@ class TierModel:
             logger.warning("litellm_extra_kwargs 展开失败：%s", exc)
             return {}
 
+    def _is_local_ollama(self, endpoint: dict[str, Any]) -> bool:
+        """endpoint 是否指向本地 Ollama（model 前缀 或 api_base 指向本机）。"""
+        mid = str(endpoint.get("model") or "")
+        base = str(endpoint.get("api_base") or "").lower()
+        return mid.startswith("ollama/") or "127.0.0.1" in base or "localhost" in base
+
+    def _timeout_for(self, endpoint: dict[str, Any]) -> int:
+        """本地 Ollama 用更宽的超时；显式注入的自定义 timeout 优先。"""
+        if self.timeout != DEFAULT_TIMEOUT:
+            return self.timeout
+        if self._is_local_ollama(endpoint):
+            return LOCAL_OLLAMA_TIMEOUT
+        return self.timeout
+
+    def _max_tokens_for(self, endpoint: dict[str, Any]) -> int | None:
+        """本地 Ollama 收窄输出上限（CPU 跑飞生成保险）；只认 `ollama/` 前缀。"""
+        mt = self.max_tokens
+        if mt is None:
+            return None
+        mid = str(endpoint.get("model") or "")
+        if mid.startswith("ollama/"):
+            return min(mt, LOCAL_OLLAMA_MAX_TOKENS)
+        return mt
+
     def _kwargs(
         self, messages: list[Any], tools: list[dict] | None
     ) -> dict[str, Any]:
@@ -264,8 +318,8 @@ class TierModel:
             "api_key": endpoint.get("api_key"),
             "messages": [_render_message(m) for m in messages],
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "timeout": self.timeout,
+            "max_tokens": self._max_tokens_for(endpoint),
+            "timeout": self._timeout_for(endpoint),
             "num_retries": self.max_retries,
         }
         if tools:
@@ -315,9 +369,9 @@ class TierModel:
             api_key=endpoint.get("api_key"),
             api_base=endpoint.get("api_base"),
             extra=extra_kwargs,
-            max_tokens=self.max_tokens,
+            max_tokens=self._max_tokens_for(endpoint),
             temperature=self.temperature,
-            timeout=self.timeout,
+            timeout=self._timeout_for(endpoint),
             num_retries=self.max_retries,
             disable_thinking=disable_thinking,
             on_text=on_text,

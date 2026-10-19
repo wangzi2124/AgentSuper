@@ -88,6 +88,16 @@ class VirtualFileSystem:
             raise PermissionError(f"路径越界: {path}")
         return p
 
+    def raw_path(self, path: str) -> Path:
+        """不做越界校验的解析（仅供「已确权路径」回读：`_history` 记录 / 轮次快照还原）。
+
+        `_history` 里的路径只可能来自当次**已通过写入校验**的调用（审批通过或在允许根内）；
+        而回合末的快照 (`app/snapshot/vfs.py`) / `rollback` 跑在请求级上下文，看不到图任务内
+        `add_allowed_root` 对 contextvar 的就地更新 —— 再查一次边界会把合法的外部写入误判为
+        「路径越界」并让整轮 SSE 以 error 收尾（文件其实已落盘）。故对亲身写过的路径直读。
+        """
+        return (self.root / path).resolve()
+
     @staticmethod
     def _under(p: Path, root: Path) -> bool:
         return p == root or root in p.parents
@@ -171,7 +181,7 @@ class VirtualFileSystem:
         """回滚文件变更，返回实际回滚条数。"""
         count = 0
         for entry in reversed(self._history[-steps:]):
-            fp = self._resolve(entry.path)
+            fp = self.raw_path(entry.path)  # 已确权历史路径，不再重复边界校验
             if entry.old is not None:
                 fp.parent.mkdir(parents=True, exist_ok=True)
                 fp.write_text(entry.old, encoding="utf-8")

@@ -42,6 +42,9 @@ class SessionInfo(BaseModel):
     time_updated: int = 0
     time_compacted: Optional[int] = None
     time_archived: Optional[int] = None
+    # 逻辑删除集 / 压缩基线（平台层 SessionStore 落库用；重启水合回内存 Session）
+    hidden_ids: list[str] = Field(default_factory=list)
+    compact_baseline_seq: int = 0
 
 
 class Message(BaseModel):

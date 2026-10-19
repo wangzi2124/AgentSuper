@@ -106,7 +106,12 @@ export async function sendMultiAgentStream(
     while (true) {
       const { done, value } = await reader.read()
       if (done) {
-        if (!receivedTerminalEvent) throw { type: 'network', message: 'Connection interrupted', retryable: true } as ChatError
+        if (!receivedTerminalEvent) {
+          // stall 触发的 cancel 以 done 收尾 —— 不先判 stallTriggered 会把
+          // 「连接超时」误报成 'network'（网络连接中断）
+          if (stallTriggered) throw { type: 'timeout', message: '连接超时，正在重试', retryable: true } as ChatError
+          throw { type: 'network', message: 'Connection interrupted', retryable: true } as ChatError
+        }
         break
       }
       lastEventTime = Date.now()

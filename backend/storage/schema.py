@@ -90,6 +90,9 @@ sessions = Table(
     Column("time_updated", BigInteger, nullable=False),
     Column("time_compacted", BigInteger, nullable=True),
     Column("time_archived", BigInteger, nullable=True),
+    # 平台层逻辑删除集（JSON 数组文本）与压缩基线（deps.SessionStore 落库/水合）
+    Column("hidden_ids", Text(), nullable=False, server_default=text("'[]'")),
+    Column("compact_baseline_seq", Integer, nullable=False, server_default=text("0")),
     Index("idx_sessions_user", "user_id"),
     Index("idx_sessions_project", "project_id"),
     Index("idx_sessions_parent", "parent_id"),

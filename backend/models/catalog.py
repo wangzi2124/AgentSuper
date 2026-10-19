@@ -690,7 +690,15 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
             _ot = _normalize_deepseek_thinking(raw_mode)
             if _ot in ("enabled", "disabled"):
                 opts["think"] = (_ot == "enabled")
-        return {"api_base": None, "api_key": "ollama", "is_ollama": True, "options": opts}
+        # 连接凭证**只认前端注册表**（「模型管理」页 providers 表，upsert_provider 写入）；
+        # 后端 .env 不参与 ollama 解析（不回落 LLM_API_BASE/LLM_API_KEY ——
+        # 否则 api_base=None 被 .env 的 DeepSeek 端点顶掉、key 落成占位 "ollama"，
+        # 请求打到 DeepSeek 网关报 "Your api key: ****lama is invalid"）。
+        # 注册表未配 api_base → None 交 litellm 原生发现（OLLAMA_HOST 环境变量 → localhost:11434）。
+        reg_o = read_providers().get("ollama") or {}
+        _ob = (reg_o.get("api_base") or "").strip()
+        _ok = (reg_o.get("api_key") or "").strip()
+        return {"api_base": _ob or None, "api_key": _ok or "ollama", "is_ollama": True, "options": opts}
     # DeepSeek 思考模型（V4.1-Flash / V4-Pro 默认开思考）：按「推理模型」能力 + 全局
     # DEEPSEEK_THINKING 开关下发 thinking。**默认 disabled** —— 实测 agentic 工具循环里
     # 思考会吃光 max_tokens（reasoning==ct==上限、finish=length、零工具/零正文），

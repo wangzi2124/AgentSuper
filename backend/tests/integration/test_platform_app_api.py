@@ -66,7 +66,7 @@ def test_chat_non_stream(client):
 
 
 def test_chat_stream_emits_events(client):
-    with client.stream("POST", "/api/chat/stream", json={"message": "hi"}) as r:
+    with client.stream("POST", "/api/chat/stream", json={"message": "go"}) as r:
         assert r.status_code == 200
         text = "".join(r.iter_text())
     assert "event: start" in text
@@ -85,7 +85,7 @@ def test_session_lifecycle(client):
     assert "time_created" in created
     assert client.get(f"/api/sessions/{sid}").json()["id"] == sid
     # 跑一轮后消息可见
-    client.post("/api/chat", json={"message": "hi", "session_id": sid})
+    client.post("/api/chat", json={"message": "go", "session_id": sid})
     msgs = client.get(f"/api/sessions/{sid}/messages").json()
     assert isinstance(msgs, list) and msgs
     assert msgs[0]["role"] == "user"
@@ -121,14 +121,14 @@ def test_missing_session_404(client):
 
 
 def test_multi_agent_non_stream_envelope(client):
-    body = client.post("/api/chat/multi-agent", json={"message": "hi"}).json()
+    body = client.post("/api/chat/multi-agent", json={"message": "go"}).json()
     assert body["code"] == 0
     assert body["data"]["answer"] == "最终答案"
     assert body["data"]["conversation_id"]
 
 
 def test_multi_agent_stream_frontend_protocol(client):
-    with client.stream("POST", "/api/chat/multi-agent/stream", json={"message": "hi"}) as r:
+    with client.stream("POST", "/api/chat/multi-agent/stream", json={"message": "go"}) as r:
         assert r.status_code == 200
         assert r.headers.get("X-Session-Id")
         text = "".join(r.iter_text())
@@ -299,7 +299,7 @@ def _done_event(text: str) -> dict:
 
 def test_stream_done_reports_real_tokens_and_cost(usage_client):
     with usage_client.stream(
-        "POST", "/api/chat/multi-agent/stream", json={"message": "hi"}
+        "POST", "/api/chat/multi-agent/stream", json={"message": "go"}
     ) as r:
         text = "".join(r.iter_text())
     done = _done_event(text)
@@ -318,7 +318,7 @@ def test_stream_done_reports_real_tokens_and_cost(usage_client):
 def test_second_turn_reports_only_turn_delta(usage_client):
     # 第一轮
     with usage_client.stream(
-        "POST", "/api/chat/multi-agent/stream", json={"message": "hi"}
+        "POST", "/api/chat/multi-agent/stream", json={"message": "go"}
     ) as r:
         first = _done_event("".join(r.iter_text()))
     sid = first["conversation_id"]
@@ -332,7 +332,7 @@ def test_second_turn_reports_only_turn_delta(usage_client):
 
 
 def test_non_stream_reports_tokens_and_cost(usage_client):
-    body = usage_client.post("/api/chat/multi-agent", json={"message": "hi"}).json()
+    body = usage_client.post("/api/chat/multi-agent", json={"message": "go"}).json()
     assert body["data"]["tokens"]["input"] == 12
     assert body["data"]["tokens"]["output"] == 7
     assert body["data"]["cost"] == pytest.approx(12e-6 + 14e-6)
@@ -373,7 +373,7 @@ def test_auth_middleware_enforced_on_api(tmp_path, monkeypatch):
     with TestClient(app) as c:
         assert c.get("/health").status_code == 200  # 非 /api → 放行
         # 缺 token → 401 信封
-        denied = c.post("/api/chat/multi-agent", json={"message": "hi"})
+        denied = c.post("/api/chat/multi-agent", json={"message": "go"})
         assert denied.status_code == 401
         assert denied.json()["code"] == 401
         # /api/auth/* 豁免（轻量 app 未挂 auth 路由 → 404 而非 401）
@@ -384,13 +384,13 @@ def test_auth_middleware_enforced_on_api(tmp_path, monkeypatch):
         token, _ = issue_token("u-test")
         hdr = {"X-User-Id": "u-test", "X-Auth-Token": token}
         assert (
-            c.post("/api/chat/multi-agent", json={"message": "hi"}, headers=hdr).status_code
+            c.post("/api/chat/multi-agent", json={"message": "go"}, headers=hdr).status_code
             == 200
         )
         # uid 与 token 不匹配 → 401
         bad = {"X-User-Id": "u-other", "X-Auth-Token": token}
         assert (
-            c.post("/api/chat/multi-agent", json={"message": "hi"}, headers=bad).status_code
+            c.post("/api/chat/multi-agent", json={"message": "go"}, headers=bad).status_code
             == 401
         )
 
@@ -406,13 +406,13 @@ def test_auth_disabled_when_no_secret(tmp_path, monkeypatch):
     )
     with TestClient(app) as c:
         # 未配置 secret → 全放行
-        assert c.post("/api/chat/multi-agent", json={"message": "hi"}).status_code == 200
+        assert c.post("/api/chat/multi-agent", json={"message": "go"}).status_code == 200
 
 
 # ── 会话端点真行为：历史回放 / revert / delete / compact / fork / children ─────
 
 
-def _sid_after_turn(client, message="hi", **extra):
+def _sid_after_turn(client, message="go", **extra):
     body = client.post(
         "/api/chat/multi-agent", json={"message": message, **extra}
     ).json()
@@ -430,7 +430,7 @@ def test_history_replays_user_and_assistant(client):
     sid = _sid_after_turn(client)
     msgs = client.get(f"/api/sessions/{sid}/messages").json()
     assert [m["role"] for m in msgs] == ["user", "assistant"]
-    assert msgs[0]["content"] == "hi"
+    assert msgs[0]["content"] == "go"
     assert msgs[1]["content"] == "最终答案"
     assert [m["seq"] for m in msgs] == [1, 2]
 
@@ -518,7 +518,7 @@ def test_interrupt_cancels_in_flight_turn(client):
 
 def test_stream_emits_model_switched_first(client):
     events = _stream_events(
-        client, {"message": "hi", "model": "deepseek/deepseek-v4-flash"}
+        client, {"message": "go", "model": "deepseek/deepseek-v4-flash"}
     )
     assert events[0]["type"] == "model_switched"
     assert events[0]["model_ref"]["id"] == "deepseek/deepseek-v4-flash"
@@ -531,7 +531,7 @@ def test_stream_turn_done_drains_queued_prompt(client):
         f"/api/sessions/{sid}/prompts",
         json={"prompt": {"message": "排队任务"}, "client_msg_id": "q1"},
     )
-    events = _stream_events(client, {"message": "hi", "conversation_id": sid})
+    events = _stream_events(client, {"message": "go", "conversation_id": sid})
     types = [e["type"] for e in events]
     assert "queue_drain" in types
     assert "turn_done" in types
@@ -568,7 +568,7 @@ class _LockedOnceSem:
 def test_stream_queued_when_all_slots_busy(client):
     ctx = client.app.state.platform
     ctx.semaphore = _LockedOnceSem()
-    events = _stream_events(client, {"message": "hi"})
+    events = _stream_events(client, {"message": "go"})
     assert events[0]["type"] == "queued"
     assert events[0]["queue_position"] == 1
     assert events[-1]["type"] == "done"
@@ -749,3 +749,69 @@ def test_request_permission_auto_allows_in_sandbox(client, tmp_path_factory):
     assert ctx.vfs.is_allowed(str(ext / "y.txt")) is False
 
 
+def test_approved_external_write_survives_turn_end_and_next_turn(client, tmp_path_factory):
+    """回归 ses_e0013e2e18c14793：审批写外部文件后，回合末快照与后续回合读写都不得报越界。
+
+    复现要点：授权发生在**图任务**上下文（`add_allowed_root` 不向上传播），而回合末
+    `snapshot_end` 跑在请求级上下文 —— 曾因此抛 `PermissionError: 路径越界` 让整轮 SSE
+    以 error 收尾（`done` 从不发出），而文件其实已落盘。
+    """
+    import asyncio
+    from pathlib import Path
+
+    from app.snapshot import snapshot_begin, snapshot_end
+    from execution.filesystem import (
+        add_allowed_root,
+        reset_allowed_roots,
+        set_allowed_roots,
+    )
+
+    ctx = client.app.state.platform
+    ext = Path(tmp_path_factory.mktemp("approved_ext"))
+    target = str(ext / "test.txt")
+    sid = "s_ext"
+
+    async def _turn_with_approval():
+        token = set_allowed_roots(ctx.allowed_roots_for(sid))  # 请求级：仅会话目录/工作目录
+        begin = snapshot_begin(ctx.vfs)
+        try:
+            async def _graph_task():  # 独立上下文 ≈ 图任务：审批通过后就地授权
+                add_allowed_root(target)
+                ctx.vfs.write_file(target, "hello")
+                ctx.remember_approved_root(sid, target)
+
+            await asyncio.create_task(_graph_task())
+            # 授权不向上传播：请求级仍视为越界
+            assert ctx.vfs.is_allowed(target) is False
+            files_changed, _ = snapshot_end(ctx.vfs, begin)  # 曾在此抛 PermissionError
+            assert [f["file"] for f in files_changed] == [target]
+            assert files_changed[0]["status"] == "added"
+        finally:
+            reset_allowed_roots(token)
+
+    asyncio.run(_turn_with_approval())
+    assert (ext / "test.txt").read_text(encoding="utf-8") == "hello"
+
+    # 下一回合：已审批路径经 allowed_roots_for 并入允许根 → 读/写不再越界；会话间隔离
+    assert target not in ctx.allowed_roots_for("other_session")
+    token = set_allowed_roots(ctx.allowed_roots_for(sid))
+    try:
+        assert ctx.vfs.is_allowed(target) is True
+        assert ctx.vfs.read_file(target) == "hello"
+    finally:
+        reset_allowed_roots(token)
+
+
+
+
+def test_session_messages_replay_includes_ui_fields(client):
+    r = client.post("/api/chat/multi-agent/stream", json={"message": "go"})
+    assert r.status_code == 200
+    sid = r.headers.get("X-Session-Id")
+    for _ in r.iter_text():
+        pass
+    msgs = client.get(f"/api/sessions/{sid}/messages").json()
+    assert msgs
+    for m in msgs:
+        assert "content" in m
+        assert "id" in m

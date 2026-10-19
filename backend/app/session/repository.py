@@ -39,6 +39,11 @@ def _serialize_model(value: Any) -> Optional[str]:
 
 def _row_to_session(row: sqlite3.Row) -> SessionInfo:
     data = dict(row)
+    model = json.loads(data["model"]) if data["model"] else None
+    if isinstance(model, str):
+        # 兼容历史 str 序列化（json.dumps("id") → "id"）：SessionInfo.model 是 ModelRef，
+        # 直接传 str 会 pydantic ValidationError —— 统一归一成 {id: ...} 形状。
+        model = {"id": model}
     return SessionInfo(
         id=data["id"],
         slug=data["slug"],
@@ -50,7 +55,7 @@ def _row_to_session(row: sqlite3.Row) -> SessionInfo:
         path=data["path"],
         title=data["title"],
         agent=data["agent"],
-        model=json.loads(data["model"]) if data["model"] else None,
+        model=model,
         kind=data["kind"],
         status=data["status"],
         cost=data["cost"],
@@ -63,6 +68,8 @@ def _row_to_session(row: sqlite3.Row) -> SessionInfo:
         time_updated=data["time_updated"],
         time_compacted=data["time_compacted"],
         time_archived=data["time_archived"],
+        hidden_ids=json.loads(data.get("hidden_ids") or "[]"),
+        compact_baseline_seq=int(data.get("compact_baseline_seq") or 0),
     )
 
 
@@ -206,13 +213,15 @@ def list_sessions(
 def update_session(session_id: str, **fields: Any) -> SessionInfo:
     allowed = {"title", "archived", "agent", "model", "status", "cost", "directory",
                "tokens_input", "tokens_output", "tokens_cache_read", "tokens_cache_write",
-               "time_compacted", "time_archived"}
+               "time_compacted", "time_archived", "hidden_ids", "compact_baseline_seq"}
     sets, params = [], []
     for key, value in fields.items():
         if key not in allowed:
             continue
         if key == "model":
             value = _serialize_model(value)
+        if key == "hidden_ids" and not isinstance(value, str):
+            value = json.dumps(sorted(str(x) for x in value))
         if key == "archived":
             # sessions 表只有 time_archived（无 archived 列）：把布尔归档标识
             # 映射为归档时间戳（true→当前时间，false→清除归档）

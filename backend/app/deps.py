@@ -11,6 +11,8 @@ graph 平台，可独立启动：`uvicorn app.main:app`。
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import threading
 import time
@@ -33,6 +35,8 @@ from graph.nodes.base import content_text
 from graph.subagent import SUBAGENTS
 from models.router import reset_request_model, set_request_model
 from observability.metrics import MetricsRecorder, get_recorder
+
+logger = logging.getLogger(__name__)
 
 
 def jsonable(obj: Any) -> Any:
@@ -74,6 +78,20 @@ def _msg_files(msg: Any) -> list[dict[str, Any]]:
     if not isinstance(files, list):
         return []
     return [f for f in files if isinstance(f, dict)]
+
+
+def _msg_ui(msg: Any) -> dict[str, Any]:
+    """尝试从 checkpoint 消息提取 `additional_kwargs["ui"]`（前端细节：agents/files_changed）。"""
+    ak = (
+        msg.get("additional_kwargs")
+        if isinstance(msg, dict)
+        else getattr(msg, "additional_kwargs", None)
+    )
+    if isinstance(ak, dict):
+        ui = ak.get("ui")
+        if isinstance(ui, dict):
+            return ui
+    return {}
 
 
 def _vision_capable(model: str | None) -> bool:
@@ -255,11 +273,127 @@ class Session:
 
 
 class SessionStore:
-    """进程内会话存储（生产可替换为 Postgres，见 deploy/migrations）。"""
+    """会话存储：进程内热缓存 + session.db 落库（跨重启水合）。
+
+    - 内存 dict 是运行期热路径（列表/取用/在途轮次状态）。
+    - create/update/touch/delete 同步写 `session.db`（repository.write-through）——
+      后端重启后 `get()` 懒水合、`list()` 按用户水合，会话列表与元数据不再丢失。
+    - 消息实体的唯一真相源是**图 checkpointer**（AsyncSqliteSaver，
+      `graph/checkpoint.py`），不写 session_messages 表。
+    - 落库失败仅记日志不阻塞聊天（库不可用时行为退回纯内存）。
+    """
 
     def __init__(self) -> None:
         self._items: dict[str, Session] = {}
         self._lock = threading.Lock()
+
+    # ── 落库（write-through） ──────────────────────────────────────────────
+
+    @staticmethod
+    def _session_from_info(info: Any) -> Session:
+        """repository.SessionInfo → 内存 Session（重启水合用）。"""
+        model = getattr(info, "model", None)
+        if hasattr(model, "id"):
+            model = model.id
+        elif isinstance(model, dict):
+            model = model.get("id")
+        created = float(getattr(info, "time_created", 0) or 0) / 1000
+        updated = float(getattr(info, "time_updated", 0) or 0) / 1000
+        now = time.time()
+        return Session(
+            id=info.id,
+            thread_id=info.id,
+            title=info.title or "新会话",
+            directory=info.directory or None,
+            user_id=info.user_id or "anonymous",
+            kind=info.kind or "multi-agent",
+            status=info.status or "idle",
+            model=model if isinstance(model, str) and model else None,
+            cost=float(info.cost or 0.0),
+            tokens={
+                "input": int(info.tokens_input or 0),
+                "output": int(info.tokens_output or 0),
+                "cache_read": int(info.tokens_cache_read or 0),
+                "cache_write": int(info.tokens_cache_write or 0),
+                "reasoning": int(getattr(info, "tokens_reasoning", 0) or 0),
+            },
+            created_at=created if created > 0 else now,
+            updated_at=updated if updated > 0 else now,
+            parent_id=getattr(info, "parent_id", None),
+            hidden_ids=set(getattr(info, "hidden_ids", None) or []),
+            compact_baseline_seq=int(getattr(info, "compact_baseline_seq", 0) or 0),
+        )
+
+    def _persist_create(self, sess: Session) -> None:
+        try:
+            from .session import repository as repo
+
+            project = repo.resolve_project(sess.directory or ".")
+            repo.create_session(
+                sess.user_id,
+                project.id,
+                sess.directory or "",
+                path=sess.directory or "",
+                parent_id=sess.parent_id,
+                model=sess.model,
+                kind=sess.kind,
+                title=sess.title,
+                session_id=sess.id,
+            )
+        except Exception:  # noqa: BLE001 - 同 id 行已存在等 → 退化为整份更新
+            logger.debug("session 落库 create 失败，改走 update: %s", sess.id, exc_info=True)
+            self.persist(sess.id)
+
+    def persist(self, session_id: str) -> None:
+        """把内存会话的可持久化字段整份写回 session.db（幂等；顺带刷新 time_updated）。"""
+        sess = self.get(session_id)
+        if sess is None:
+            return
+        try:
+            from .session import repository as repo
+
+            repo.update_session(
+                session_id,
+                title=sess.title,
+                status=sess.status,
+                model=sess.model,
+                directory=sess.directory or "",
+                cost=round(float(sess.cost or 0.0), 8),
+                tokens_input=int((sess.tokens or {}).get("input", 0)),
+                tokens_output=int((sess.tokens or {}).get("output", 0)),
+                tokens_cache_read=int((sess.tokens or {}).get("cache_read", 0)),
+                tokens_cache_write=int((sess.tokens or {}).get("cache_write", 0)),
+                hidden_ids=sess.hidden_ids,
+                compact_baseline_seq=int(sess.compact_baseline_seq or 0),
+            )
+        except Exception:  # noqa: BLE001 - 落库失败不阻塞聊天
+            logger.warning("session 落库 update 失败: %s", session_id, exc_info=True)
+
+    # ── 水合（重启后从 session.db 恢复） ────────────────────────────────────
+
+    def hydrate_rows(self, infos: list[Any]) -> None:
+        """把库里已有、内存缺失的会话行补进内存（幂等）。"""
+        missing = []
+        for info in infos:
+            with self._lock:
+                if info.id not in self._items:
+                    missing.append(info)
+        if not missing:
+            return
+        with self._lock:
+            for info in missing:
+                self._items.setdefault(info.id, self._session_from_info(info))
+
+    def _hydrate_one(self, session_id: str) -> Session | None:
+        try:
+            from .session import repository as repo
+
+            info = repo.get_session(session_id)
+        except Exception:  # noqa: BLE001
+            return None
+        return self._session_from_info(info) if info else None
+
+    # ── CRUD ──────────────────────────────────────────────────────────────
 
     def create(
         self,
@@ -285,11 +419,20 @@ class SessionStore:
         )
         with self._lock:
             self._items[sid] = sess
+        self._persist_create(sess)
         return sess
 
     def get(self, session_id: str) -> Session | None:
         with self._lock:
-            return self._items.get(session_id)
+            sess = self._items.get(session_id)
+        if sess is not None:
+            return sess
+        # 重启水合：内存未命中 → 从 session.db 懒加载（并发下 setdefault 保唯一）
+        sess = self._hydrate_one(session_id)
+        if sess is None:
+            return None
+        with self._lock:
+            return self._items.setdefault(session_id, sess)
 
     def ensure(
         self,
@@ -301,16 +444,31 @@ class SessionStore:
     ) -> Session:
         if session_id and (sess := self.get(session_id)) is not None:
             # 会话中途改目录 / 模型：采纳本次携带的非空值
+            changed = False
             if directory and directory != sess.directory:
                 sess.directory = directory
+                changed = True
             if model and model != sess.model:
                 sess.model = model
+                changed = True
+            if changed:
+                sess.updated_at = time.time()
+                self.persist(session_id)
             return sess
         return self.create(session_id=session_id, directory=directory, user_id=user_id, model=model)
 
     def list(
         self, *, user_id: str | None = None, kind: str | None = None
     ) -> list[Session]:
+        if user_id is not None:
+            # 重启水合：先从库补齐该用户的缺失会话，再走内存视图
+            try:
+                from .session import repository as repo
+
+                infos = repo.list_sessions(user_id, kind=kind, archived=None, limit=1000)
+                self.hydrate_rows(infos)
+            except Exception:  # noqa: BLE001
+                logger.debug("session 列表水合失败（库不可用时忽略）", exc_info=True)
         with self._lock:
             items = list(self._items.values())
         if user_id is not None:
@@ -328,16 +486,25 @@ class SessionStore:
                 if hasattr(sess, key) and value is not None:
                     setattr(sess, key, value)
             sess.updated_at = time.time()
-            return sess
+        self.persist(session_id)
+        return sess
 
     def touch(self, session_id: str) -> None:
         with self._lock:
-            if (sess := self._items.get(session_id)) is not None:
-                sess.updated_at = time.time()
+            sess = self._items.get(session_id)
+        if sess is not None:
+            self.persist(session_id)
 
     def delete(self, session_id: str) -> bool:
         with self._lock:
-            return self._items.pop(session_id, None) is not None
+            existed = self._items.pop(session_id, None) is not None
+        try:
+            from .session import repository as repo
+
+            repo.remove_session(session_id)  # 递归删子会话（行不存在时静默）
+        except Exception:  # noqa: BLE001
+            logger.warning("session 落库 delete 失败: %s", session_id, exc_info=True)
+        return existed
 
 
 @dataclass
@@ -353,6 +520,8 @@ class PlatformContext:
     subagents: dict[str, Any] = field(default_factory=lambda: dict(SUBAGENTS))
     # 轮次快照：assistant 消息 id → restore descriptor（供 restore-snapshot / diff）
     snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 会话级已审批外部路径：回合开始时并入允许根（跨回合/轮次快照均生效）
+    approved_roots: dict[str, list[str]] = field(default_factory=dict)
     # 在途回合取消标志（interrupt 置位；compat 流循环每步检查）
     cancels: dict[str, asyncio.Event] = field(default_factory=dict)
     # 并发闸门（对齐 MAX_CONCURRENT_AGENTS）：超出并发时 SSE 发 `queued`
@@ -463,7 +632,27 @@ class PlatformContext:
             roots.extend(get_manager().list_workspaces())
         except Exception:  # noqa: BLE001
             pass
+        roots.extend(self.approved_roots.get(session_id, ()))
         return roots
+
+    def remember_approved_root(self, session_id: str, path: str) -> None:
+        """记住本会话已审批通过的外部路径（跨回合允许根，去重）。
+
+        审批发生在图任务上下文里，`add_allowed_root` 只就地更新该上下文的 contextvar，
+        不会传播回请求级（轮次快照 / 后续回合的读写）—— 故在 `PlatformContext` 上按会话
+        留档，由 `allowed_roots_for`（回合开始时经 `set_allowed_roots` 注入）统一并入。
+        """
+        if not path:
+            return
+        try:
+            from pathlib import Path
+
+            norm = str(Path(path).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            norm = path
+        roots = self.approved_roots.setdefault(session_id, [])
+        if norm not in roots:
+            roots.append(norm)
 
     async def state(self, session_id: str) -> dict[str, Any]:
         snap = await self.graph.aget_state({"configurable": {"thread_id": session_id}})
@@ -511,10 +700,23 @@ class PlatformContext:
                 continue
             mtype = _role.get(_msg_role(msg), "system")
             content = content_text(_msg_content(msg))
+            ui = _msg_ui(msg)
             data: dict[str, Any] = {"content": content}
             files = _msg_files(msg)
             if files:
                 data["files"] = files
+            if ui.get("agents"):
+                data["agents"] = ui["agents"]
+            if ui.get("files_changed"):
+                data["files_changed"] = ui["files_changed"]
+            if ui.get("steps"):
+                data["steps"] = ui["steps"]
+            if ui.get("plan_path"):
+                data["plan_path"] = ui["plan_path"]
+            if ui.get("snapshot_restored"):
+                data["snapshot_restored"] = ui["snapshot_restored"]
+            if ui.get("partial_error"):
+                data["partial_error"] = ui["partial_error"]
             out.append(
                 {
                     "id": mid,
@@ -566,6 +768,7 @@ class PlatformContext:
             return False
         sess.hidden_ids.add(message_id)
         sess.updated_at = time.time()
+        self.sessions.persist(session_id)  # 逻辑删除跨重启存活
         return True
 
     async def revert_session(self, session_id: str, message_id: str) -> dict[str, Any]:
@@ -590,6 +793,7 @@ class PlatformContext:
         if target - 1 < sess.compact_baseline_seq:
             sess.compact_baseline_seq = max(0, target - 1)
         sess.updated_at = time.time()
+        self.sessions.persist(session_id)  # 撤回集跨重启存活
         return {"deleted": deleted, "messages": await self.session_messages(session_id)}
 
     async def compact_session(self, session_id: str, keep_last: int = 10) -> dict[str, Any]:
@@ -604,6 +808,7 @@ class PlatformContext:
         baseline = visible[len(visible) - keep_last - 1]["seq"]
         sess.compact_baseline_seq = max(sess.compact_baseline_seq, baseline)
         sess.updated_at = time.time()
+        self.sessions.persist(session_id)  # 压缩基线跨重启存活
         return {"compacted": True, "baseline": sess.compact_baseline_seq}
 
     async def copy_messages_to_thread(
@@ -667,6 +872,12 @@ class PlatformContext:
 
     def session_children(self, session_id: str) -> list[Session]:
         """按 parent_id 返回直接子会话（fork 分支）。"""
+        try:  # 重启后子会话行先水合进内存（list() 无 user 维度，单独按 parent 补齐）
+            from .session import repository as repo
+
+            self.sessions.hydrate_rows(repo.list_children(session_id))
+        except Exception:  # noqa: BLE001
+            logger.debug("children 水合失败（库不可用时忽略）", exc_info=True)
         return [s for s in self.sessions.list() if s.parent_id == session_id]
 
     async def request_permission(
@@ -729,6 +940,7 @@ class PlatformContext:
             await self.approvals.decide(rid, allowed, reason=decision)
             if allowed and raw_path:
                 add_allowed_root(str(raw_path))
+                self.remember_approved_root(session_id, str(raw_path))
             return allowed
 
         from execution.approval import APPROVAL_TIMEOUT_SEC
@@ -748,6 +960,7 @@ class PlatformContext:
         allowed = await self.approvals.await_decision(rid) == "approved"
         if allowed and raw_path:
             add_allowed_root(str(raw_path))
+            self.remember_approved_root(session_id, str(raw_path))
         return allowed
 
 
@@ -760,17 +973,26 @@ def build_context(
     reranker: Any | None = None,
     sessions: SessionStore | None = None,
     metrics: MetricsRecorder | None = None,
+    checkpointer: Any = None,
 ) -> PlatformContext:
-    """构建运行时上下文（默认装配 default_registry + 主图）。"""
+    """构建运行时上下文（默认装配 default_registry + 主图）。
+
+    `checkpointer`：图检查点（生产为 `graph.checkpoint.get_checkpointer()` 的持久化
+    AsyncSqliteSaver；None → build_main_graph 默认 MemorySaver，进程内不落盘）。
+    """
     if registry is None:
         registry, vfs = default_registry(vfs)
     elif vfs is None:
         vfs = VirtualFileSystem()
-    graph = build_main_graph(model=model, registry=registry, vfs=vfs, retrieve=retrieve, reranker=reranker)
-    try:
-        max_concurrent = int(os.environ.get("MAX_CONCURRENT_AGENTS", "4"))
-    except ValueError:
-        max_concurrent = 4
+    graph = build_main_graph(
+        model=model, registry=registry, vfs=vfs, retrieve=retrieve, reranker=reranker,
+        checkpointer=checkpointer,
+    )
+    # 并发上限统一读 Settings（与 session.db 连接池 sizing 同源）；
+    # 此前直接 os.environ.get("MAX_CONCURRENT_AGENTS") 会造成双真相源漂移。
+    from config import settings
+
+    max_concurrent = max(1, int(settings.max_concurrent_agents))
     try:
         max_queue_size = int(os.environ.get("MAX_QUEUE_SIZE", "20"))
     except ValueError:

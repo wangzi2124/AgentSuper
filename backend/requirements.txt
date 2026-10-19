@@ -6,6 +6,7 @@ langchain-core
 langchain-community
 pypdf
 langgraph
+langgraph-checkpoint-sqlite
 litellm
 pyyaml
 python-multipart

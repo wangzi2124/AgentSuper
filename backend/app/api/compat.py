@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -32,6 +34,14 @@ from ..deps import PlatformContext, get_context, initial_state
 from ..image_processor import enrich_image_files
 
 router = APIRouter(prefix="/chat", tags=["compat"])
+
+logger = logging.getLogger(__name__)
+
+# SSE 心跳间隔（秒）：`stream_mode="updates"` 只在节点完成时产出 chunk，长节点
+# （如 execute_subagent 的 ≤8 轮工具循环，实测可 60-90s）期间零事件 → 前端 60s
+# stall 看门狗掐流并误报「网络连接中断」。任何 `data:` 行都会刷新前端
+# lastEventTime，故以远小于 60s 的间隔发心跳保持连接（前端对未知 type 静默忽略）。
+_HEARTBEAT_SEC = 12
 
 # 平台图节点 → 前端 agent 标识/展示名
 _NODE_AGENT = {
@@ -89,6 +99,62 @@ def _agents_snapshot(seen: list[str]) -> list[dict]:
     return [{"agent_id": a, "agent_name": a, "status": "done"} for a in seen]
 
 
+_AGENT_EVENT_TYPES = {"agent_start", "agent_step", "agent_done", "agent_error"}
+
+
+def _track_agent_event(agents: dict[str, dict[str, Any]], ev: dict[str, Any]) -> None:
+    """把流式 `agent_*` 事件累积成可持久化的 agents 快照（刷新后回放仍见工具步骤）。
+
+    形状对齐前端 `AgentStreamData`（`stores/multiAgent.ts` 的 `agentsMap`）：按 `step_id`
+    就地更新步骤，`done`/`error` 更新状态 —— 结果随 assistant 消息写进检查点的
+    `additional_kwargs`（见 `_append_assistant` / `deps.session_messages`）。
+    """
+    etype = ev.get("type")
+    agent_id = ev.get("agent_id")
+    if etype not in _AGENT_EVENT_TYPES or not agent_id:
+        return
+    agent = agents.get(agent_id)
+    if agent is None:
+        agent = {
+            "agent_id": agent_id,
+            "agent_name": ev.get("agent_name") or agent_id,
+            "agent_avatar": ev.get("agent_avatar") or "",
+            "status": "running",
+            "content": "",
+            "steps": [],
+        }
+        agents[agent_id] = agent
+    if ev.get("agent_name"):
+        agent["agent_name"] = ev["agent_name"]
+    if ev.get("agent_avatar"):
+        agent["agent_avatar"] = ev["agent_avatar"]
+    if ev.get("type") == "agent_step":
+        step = ev.get("step") or {}
+        sid = step.get("step_id")
+        if not sid:
+            return
+        for i, old in enumerate(agent["steps"]):
+            if old.get("step_id") == sid:
+                agent["steps"][i] = {**old, **step}
+                return
+        agent["steps"].append(step)
+    elif ev.get("type") == "agent_done":
+        agent["status"] = "completed"
+        if ev.get("content"):
+            agent["content"] = ev["content"]
+    elif ev.get("type") == "agent_error":
+        agent["status"] = "failed"
+        if ev.get("error"):
+            agent["error"] = ev["error"]
+
+
+def _turn_meta(
+    agents_map: dict[str, dict[str, Any]], files_changed: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """本轮 UI 细节（随 assistant 消息持久化，刷新/重开后历史回放可见）。"""
+    return {"agents": list(agents_map.values()), "files_changed": files_changed}
+
+
 async def _discard(event: dict) -> None:  # 非流式路径：审批事件无需下发
     return None
 
@@ -101,19 +167,35 @@ def _enter_roots(ctx: PlatformContext, session_id: str | None):
     return set_allowed_roots(ctx.allowed_roots_for(session_id or ""))
 
 
-async def _append_assistant(ctx: PlatformContext, session_id: str, text: str) -> None:
-    """把本轮正文追加进 thread checkpoint（供历史回放：`/sessions/{id}/messages`）。"""
+async def _append_assistant(ctx: PlatformContext, session_id: str, text: str, ui: dict | None = None) -> None:
+    """把本轮正文追加进 thread checkpoint（供历史回放：`/sessions/{id}/messages`）。
+
+    将 `ui`（agents/steps/files_changed 等前端细节）写入 `AIMessage.additional_kwargs["ui"]`
+    以便 `deps.session_messages` 在历史回放时原样透传给前端。
+    """
     if not text:
         return
     from langchain_core.messages import AIMessage
 
+    msg = AIMessage(content=text)
+    if ui:
+        try:
+            msg.additional_kwargs = dict(getattr(msg, "additional_kwargs", {}) or {})
+            msg.additional_kwargs["ui"] = ui
+        except Exception:  # noqa: BLE001
+            pass
     await ctx.graph.aupdate_state(
-        {"configurable": {"thread_id": session_id}}, {"messages": [AIMessage(content=text)]}
+        {"configurable": {"thread_id": session_id}}, {"messages": [msg]}
     )
 
 
 async def _graph_events(
-    ctx: PlatformContext, sess: Any, state: dict, seen: list[str], cancel: asyncio.Event
+    ctx: PlatformContext,
+    sess: Any,
+    state: dict,
+    seen: list[str],
+    cancel: asyncio.Event,
+    agents_map: dict[str, dict[str, Any]],
 ):
     """迭代主图 `astream`，并把高危工具审批（`permission_request`）与图事件交错下发。
 
@@ -145,8 +227,16 @@ async def _graph_events(
                 break
             get_task = asyncio.ensure_future(perm_q.get())
             done, _ = await asyncio.wait(
-                {next_task, get_task}, return_when=asyncio.FIRST_COMPLETED
+                {next_task, get_task},
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=_HEARTBEAT_SEC,
             )
+            if not done:
+                # 心跳：图仍在执行但没有节点完成（长工具循环），继续等下一块。
+                # next_task 保持挂起，get_task 重建（与既有每轮重建语义一致）。
+                yield {"type": "heartbeat", "ts": round(time.time(), 3)}
+                get_task.cancel()
+                continue
             if get_task in done:
                 yield get_task.result()
             elif not get_task.done():
@@ -166,9 +256,8 @@ async def _graph_events(
                             "agent_name": agent_name,
                             "agent_avatar": "",
                         }
-                    # 前端仅在 `agent_step.step.step_id` 存在时才渲染步骤（stores/multiAgent.ts:720）
                     summary = json.dumps(_summarize(update), ensure_ascii=False, default=str)[:500]
-                    yield {
+                    step_ev = {
                         "type": "agent_step",
                         "agent_id": agent_id,
                         "agent_name": agent_name,
@@ -180,12 +269,16 @@ async def _graph_events(
                             "detail": summary,
                         },
                     }
+                    _track_agent_event(agents_map, step_ev)
+                    yield step_ev
                     if agent_id != "supervisor":
-                        yield {
+                        done_ev = {
                             "type": "agent_done",
                             "agent_id": agent_id,
                             "agent_name": agent_name,
                         }
+                        _track_agent_event(agents_map, done_ev)
+                        yield done_ev
                 next_task = asyncio.ensure_future(agen.__anext__())
     finally:
         if not next_task.done():
@@ -300,6 +393,7 @@ async def multi_agent_stream(
                     )
                     ctx.sessions.update(sess.id, status="running")
                     seen: list[str] = []
+                    agents_map: dict[str, dict[str, Any]] = {}
                     snap_begin = snapshot_begin(ctx.vfs)
                     before_usage = await _current_usage(ctx, sess.id)
                     state = initial_state(
@@ -308,12 +402,11 @@ async def multi_agent_stream(
                         files=turn_files if turn_user_msg_id == user_msg_id else None,
                         model=sess.model,
                     )
-                    async for ev in _graph_events(ctx, sess, state, seen, cancel):
+                    async for ev in _graph_events(ctx, sess, state, seen, cancel, agents_map):
                         yield _sse(ev)
 
                     snapshot = await ctx.state(sess.id)
                     final = snapshot.get("final_output", "") or ""
-                    await _append_assistant(ctx, sess.id, final)
                     after_usage = snapshot.get("token_usage") or {}
                     usage = usage_delta(before_usage, after_usage)
                     files_changed, descriptor = snapshot_end(ctx.vfs, snap_begin)
@@ -328,6 +421,14 @@ async def multi_agent_stream(
                     is_final = nxt is None
                     ctx.sessions.update(sess.id, status="idle", title=sess.title)
 
+                    agents_map_snapshot = dict(agents_map)
+                    await _append_assistant(
+                        ctx,
+                        sess.id,
+                        final,
+                        ui=_turn_meta(agents_map_snapshot, files_changed),
+                    )
+
                     # 权威完整正文流式下发（前端 text_delta 逐段渲染，done 再兜底覆盖）
                     if final:
                         yield _sse({"type": "text_delta", "agent_id": "", "delta": final})
@@ -339,7 +440,7 @@ async def multi_agent_stream(
                             "conversation_id": sess.id,
                             "title": sess.title,
                             "model": sess.model,
-                            "agents": _agents_snapshot(seen),
+                            "agents": list(agents_map_snapshot.values()) or _agents_snapshot(seen),
                             "tokens": tokens,
                             "cost": round(cost, 8),
                             "files_changed": files_changed,
@@ -420,7 +521,7 @@ async def multi_agent(
         files_changed, descriptor = snapshot_end(ctx.vfs, snap_begin)
         assistant_msg_id = f"am_{uuid4().hex[:12]}"
         ctx.snapshots[assistant_msg_id] = descriptor
-        await _append_assistant(ctx, sess.id, state.get("final_output", "") or "")
+        await _append_assistant(ctx, sess.id, state.get("final_output", "") or "", ui={"files_changed": files_changed})
     except Exception as exc:  # noqa: BLE001
         return {
             "code": 500,

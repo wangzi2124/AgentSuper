@@ -243,7 +243,11 @@ def create_app(
             await _init_app_runtime(app)
             tasks = _start_background(app)
         logger.info("building platform context...")
-        app.state.platform = build_context(**options)
+        # 持久化检查点（AsyncSqliteSaver → data/checkpoints.db）：会话消息/上下文跨重启存活
+        from graph.checkpoint import aclose_checkpointer, get_checkpointer
+
+        checkpointer = await get_checkpointer()
+        app.state.platform = build_context(**options, checkpointer=checkpointer)
         try:
             yield
         finally:
@@ -251,6 +255,7 @@ def create_app(
                 task.cancel()
             if include_app:
                 await _shutdown_app_runtime(app)
+            await aclose_checkpointer()
 
     app = FastAPI(
         title="Agent Platform",

@@ -13,8 +13,15 @@ class Settings(BaseSettings):
         extra="allow",
     )
 
+    # ── LLM 基础连接（.env 兜底凭证）──
+    # 请求未指定模型时的默认对话模型（models/router.py:TierModel._direct_model 的
+    # 最低优先级兜底，优先级：请求选中 > TIER_{tier}_MODEL > 本字段）；无 "/" 前缀时
+    # 按 api_base 自动补 deepseek/ 或 openai/ 前缀。后台任务/无请求上下文的调用也落这里。
     llm_model: str = "deepseek-chat"
+    # 直连（无 LITELLM_PROXY_URL）时的 API key 兜底：模型目录 Provider 注册的凭证
+    # （「模型管理」页保存）优先，目录未配时回落本字段。
     llm_api_key: Optional[str] = None
+    # 同上的直连端点兜底（litellm base_url）；同样目录 Provider 优先。
     llm_api_base: Optional[str] = "https://api.deepseek.com"
 
     # ── 持久化后端（session.db / model_catalog.db / chapter_store.db / tasks.db 的统一后端）──
@@ -31,13 +38,22 @@ class Settings(BaseSettings):
     db_password: str = ""
     db_name: str = "agentsuper"
 
+    # ChromaDB 持久化目录（相对 backend/，runtime.py:VectorStore.load 加载）；
+    # 结构化清理（清空/过期/单文档删除）见 app/services/kb_cleanup.py。
     vector_store_path: str = "data/vector_store"
 
+    # 文档入库分块参数（runtime.py:DocumentProcessor）：块字符数与重叠字符数。
+    # 章节感知切分：按「第X章/Chapter X」边界优先断开，chapter_title/number 入元数据
+    # （cognition/document_processor.py）。
     chunk_size: int = 500
     chunk_overlap: int = 200
 
+    # 本地 embedding 模型（cognition/embeddings.py:LocalEmbeddings）。
+    # ModelScope 优先下载（HF 兜底）；英文回退 all-MiniLM-L6-v2。
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
 
+    # 重排序开关与模型（cognition/reranker.py）。构造/rerank 失败时管道自动降级
+    # （不重排、保持向量+BM25 RRF 融合顺序），不会崩启动或查询。
     enable_reranker: bool = True
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
@@ -47,9 +63,18 @@ class Settings(BaseSettings):
     # 单个下载源（ModelScope / HuggingFace）内的重试次数（不含首次尝试）
     model_download_retries: int = 2
 
+    # 插件发现目录（相对 backend/，extensions/plugins.py:PluginLoader 扫描 *.py，
+    # tool_* 函数自动注册；启用状态看同名 .enabled 文件）。
     plugins_dir: str = "plugins"
 
+    # ── 历史摘要配置（app/api/config.py 的 GET/POST /api/config/summarization，require_admin）──
+    # ⚠ 接线现状：仅被该管理 API 读写（前端集成测试 api-live.spec.ts 覆盖），实际压缩
+    # 路径（graph/nodes/compress.py + cognition/compressor.py）**不读取本字段** ——
+    # 压缩节点的模型经 models/router.get_model("simple") 取 tier 模型，阈值/保留量是
+    # compressor.py 模块常量。改这里只改 API 回显，不改压缩行为；要生效需改 compress 节点。
+    # 非空语义（API 层）：model 非空视为 enabled=true。
     summarization_model: Optional[str] = None
+    # 历史摘要保留消息条数（POST 时强制 ≥1；当前仅 API 回显，见上方接线现状说明）。
     summarization_keep_messages: int = 20
 
     # ── 语音 / TTS（本地 Qwen3-TTS 子进程，无外部 HTTP 接口调用）──
@@ -81,6 +106,9 @@ class Settings(BaseSettings):
     # 全库已无读者（含 os.environ 读取），本轮从 Settings 移除。
     # 当前上下文压缩阈值是 cognition/compressor.py 的模块常量（非配置项）：
     # COMPRESS_THRESHOLD=80_000、KEEP_RECENT_TOKENS=20_000、TOOL_OUTPUT_MAX_CHARS=2000。
+    # tool_execute_enabled（2026-10-19 删）：曾与 ALLOW_SOURCE_WRITES 共同作为
+    # tool_execute 的双开关（helper tool_execute_available()），但新图里读取该
+    # helper 的 tools/fstools 包已随目录重构删除，helper 与字段双双成为死代码，移除。
     # [token 优化 P8] cl100k_base 对 DeepSeek tokenizer 系统性低估（实测 +13.2%：
     # round8 估算 20,851 vs 实际 23,599）。用于 token_counter 估算校正，避免
     # 截断/压缩判断"以为没超、实际已超"（实测 round9 实际 25,779 超 usable 23,808）
@@ -155,13 +183,6 @@ class Settings(BaseSettings):
     # 设为 true 后（如开发本系统自身时）允许 Agent 修改 backend 源码。
     # .git、.env、*.db、permissions.json 始终保护，不受此开关影响。
     allow_source_writes: bool = False
-    # [P1 #8] tool_execute 开关（默认 false —— 开箱即用下 shell 执行不可用）。
-    # tool_execute 的白名单/黑名单/SSRF/重定向校验只是「补丁」——解释器内联
-    # （python -c / node -e）、管道与重定向仍可绕过。开启方式（任一即可，见
-    # `tool_execute_available()`）：显式置 `TOOL_EXECUTE_ENABLED=true`，或开启受信任
-    # 的源码写入模式 `ALLOW_SOURCE_WRITES=true`。关闭时 tool_execute 从工具 schema
-    # 摘除且直接调用被拒，任意计算改走 CodeAct（CODEACT_ENABLED=true + tool_code_exec）。
-    tool_execute_enabled: bool = False
 
     # [思考模式 2026-10-09] DeepSeek V4 思考开关：enabled / disabled / adaptive。
     # 默认 disabled —— 实测 agentic 工具循环里思考会吃光 max_tokens 预算
@@ -218,15 +239,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
-
-def tool_execute_available() -> bool:
-    """[P1 #8] tool_execute 是否可用（挂载 + 可执行）。
-
-    开箱即用为 False（两个开关默认均关闭）。任一为真即开启：
-    - `tool_execute_enabled`（`TOOL_EXECUTE_ENABLED`，显式开关）
-    - `allow_source_writes`（`ALLOW_SOURCE_WRITES`，受信任源码写入模式）
-    """
-    return bool(getattr(settings, "tool_execute_enabled", False)) or bool(
-        getattr(settings, "allow_source_writes", False)
-    )
