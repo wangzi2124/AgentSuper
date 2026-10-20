@@ -208,6 +208,12 @@ async def stream_chat(
     """发起一次模型调用（流式优先，建连失败/中断回退非流式），返回 StreamResult。
 
     失败时抛出底层异常，由调用方决定友好化与记账。
+
+    **Ollama 工具轮次非流式（对齐 ollama.txt 规格）**：LiteLLM 对 Ollama 的流式
+    工具调用存在已知缺陷（finish_reason 错误、缺少 tool call id、arguments 类型不匹配），
+    导致工具调用在流式路径下丢失。规避策略：当请求带 tools 且模型为 Ollama 时，
+    强制走非流式路径（invoke），非流式 transform_response 能正确设置 finish_reason
+    并保留 tool_calls。最终自然语言回答（无 tools）仍可流式输出给用户。
     """
     extra = dict(extra or {})
     if disable_thinking and (model or "").lower().startswith("deepseek/"):
@@ -229,6 +235,12 @@ async def stream_chat(
         cache_prompt=True,
         **extra,
     )
+
+    # [Ollama 工具轮次非流式] 规格：工具调用轮次用 invoke，避免流式 finish_reason/tool_call id 缺陷
+    is_ollama = (model or "").lower().startswith(("ollama/", "ollama_chat/"))
+    if tools and is_ollama:
+        resp = await litellm.acompletion(**base)
+        return nonstream_result(resp, on_text)
 
     try:
         stream = await litellm.acompletion(

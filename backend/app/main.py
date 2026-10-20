@@ -209,6 +209,65 @@ async def _shutdown_app_runtime(app: FastAPI) -> None:
         logger.warning("Chain log shutdown failed: %s", exc)
 
 
+def _make_retrieve_adapter(retriever: Any):
+    """把运行时的 `HybridSearchRetriever.invoke(query, k)` 适配成 `make_rag_node` 的
+    `retrieve(query, top_k) -> list[dict]` 契约。
+
+    归一化输出：兼容 `(doc, score)` 元组（含 `doc` 为 dict 或对象）与直接返回的
+    `list[dict]`，统一为 `{"content", "meta", "score"}`。
+    """
+    if retriever is None:
+        return None
+
+    # §13.6 父块展开：子块命中后补父小节正文（父子文档召回）。
+    # 降级安全：向量库缺失/查询失败时保持原结果，不影响检索主链路。
+    store = getattr(retriever, "vector_store", None)
+
+    def _expand_parents(out: list[dict[str, Any]]) -> None:
+        if store is None or not hasattr(store, "get_parents"):
+            return
+        pids = [
+            (h.get("meta") or {}).get("parent_id")
+            for h in out
+            if (h.get("meta") or {}).get("parent_id")
+            and not (h.get("meta") or {}).get("is_parent")
+        ]
+        if not pids:
+            return
+        try:
+            parents = store.get_parents([str(p) for p in pids])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("parent expansion skipped: %s", exc)
+            return
+        for h in out:
+            meta = h.get("meta") or {}
+            pid = meta.get("parent_id")
+            if pid and not meta.get("is_parent") and parents.get(str(pid)):
+                meta["parent_content"] = parents[str(pid)]
+
+    def _retrieve(query: str, top_k: int = 5) -> list[dict[str, Any]]:
+        raw = retriever.invoke(query, top_k)
+        out: list[dict[str, Any]] = []
+        for item in raw or []:
+            score: Any = None
+            doc: Any = item
+            if isinstance(item, tuple) and len(item) == 2:
+                doc, score = item
+            if isinstance(doc, dict):
+                content = doc.get("content") or doc.get("text") or doc.get("page_content") or ""
+                meta = doc.get("meta") or doc.get("metadata") or {}
+                if score is None:
+                    score = doc.get("score")
+            else:
+                content = getattr(doc, "page_content", "") or ""
+                meta = getattr(doc, "metadata", {}) or {}
+            out.append({"content": str(content), "meta": meta, "score": score})
+        _expand_parents(out)
+        return out
+
+    return _retrieve
+
+
 def create_app(
     *,
     include_app: bool = False,
@@ -247,6 +306,20 @@ def create_app(
         from graph.checkpoint import aclose_checkpointer, get_checkpointer
 
         checkpointer = await get_checkpointer()
+        # RAG 接线：未显式注入 retrieve 时，用运行时构建的混合检索器
+        # （`app.state.retriever` = cognition.retriever.HybridSearchRetriever）。它暴露的是
+        # `invoke(query, k) -> List[Tuple[doc, score]]`，而 `make_rag_node` 期望
+        # `retrieve(query, top_k) -> list[dict]` → 这里适配一层（此前 options["retrieve"]
+        # 恒为 None，`rag_node` 恒返回「未配置检索器」，RAG 在真实链路里是死路）。
+        options["retrieve"] = options.get("retrieve") or _make_retrieve_adapter(
+            getattr(app.state, "retriever", None)
+        )
+        options["reranker"] = options.get("reranker") or getattr(app.state, "reranker", None)
+        # 技能接线（1+2）：注册 load_skill_* 工具 + 注入技能清单，
+        # 并把 loader 交给 PlatformContext 处理 `/技能名` 强制加载。
+        options["skill_loader"] = options.get("skill_loader") or getattr(
+            app.state, "skill_loader", None
+        )
         app.state.platform = build_context(**options, checkpointer=checkpointer)
         try:
             yield

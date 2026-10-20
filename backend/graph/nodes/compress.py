@@ -44,14 +44,15 @@ def make_compress_node(
                 result = await compressor(messages, existing, model)
             except Exception as e:  # noqa: BLE001
                 logger.warning("compressor failed, skip: %s", e)
-                return {"token_usage": {"compressed": False}}
+                return {"token_usage": {"compressed": False}, "context_compressed": True}
             if not result.get("triggered"):
-                return {"token_usage": {"compressed": False}}
+                return {"token_usage": {"compressed": False}, "context_compressed": True}
             summary = result.get("summary") or existing
             recent = result.get("recent") or messages
             payload: dict[str, Any] = {
                 "context_summary": summary,
                 "token_usage": {"compressed": True},
+                "context_compressed": True,
             }
             if RemoveMessage is not None and REMOVE_ALL_MESSAGES is not None:
                 payload["messages"] = [
@@ -62,13 +63,18 @@ def make_compress_node(
             return payload
 
         if len(messages) <= keep_recent:
-            return {"token_usage": {"compressed": True}}
+            return {"token_usage": {"compressed": True}, "context_compressed": True}
 
         older = messages[:-keep_recent]
         recent = messages[-keep_recent:]
 
         summary = existing
-        if model is not None:
+        # 门禁（agent-1.md §1.4）：只有 C1(≥5000 token) + C2(含精确值) + C3(本会话
+        # LLM 摘要 < 上限) 全为真才调模型；否则退回规则截断，分文不花。
+        from cognition.compressor import enforce_precision, should_use_llm_summary
+
+        count = int(state.get("compress_count", 0) or 0)
+        if model is not None and should_use_llm_summary(older, compress_count=count):
             try:
                 rendered = "\n".join(_render(m) for m in older)
                 prompt = (
@@ -79,10 +85,15 @@ def make_compress_node(
                 summary = res.content or existing
             except Exception:  # noqa: BLE001
                 summary = existing or "(压缩调用失败，保留最近消息)"
+            # 精确值回填（§1.5）：纯规则确定性补齐，模型忘了也能补回来。
+            summary = enforce_precision(summary, older)
+            count += 1
 
         payload: dict[str, Any] = {
             "context_summary": summary,
+            "compress_count": count,
             "token_usage": {"compressed": True},
+            "context_compressed": True,
         }
         if RemoveMessage is not None and REMOVE_ALL_MESSAGES is not None:
             payload["messages"] = [

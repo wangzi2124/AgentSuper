@@ -85,6 +85,9 @@ export async function sendMultiAgentStream(
   const decoder = new TextDecoder()
   let buffer = ''
   let receivedTerminalEvent = false
+  // [终态兜底] 队列 drain 路径可能以 turn_done 收尾后断流（无后续 done）。
+  // turn_done = 本回合已完成，收到过它即视为「干净收尾」，不把断流误判为网络错误。
+  let receivedTurnEnd = false
   // S1: stall 检测 — 记录最近事件时间戳，>60s 无事件 → abort + 按可重试错误处理
   const STALL_TIMEOUT_MS = 60_000
   let lastEventTime = Date.now()
@@ -106,7 +109,7 @@ export async function sendMultiAgentStream(
     while (true) {
       const { done, value } = await reader.read()
       if (done) {
-        if (!receivedTerminalEvent) {
+        if (!receivedTerminalEvent && !receivedTurnEnd) {
           // stall 触发的 cancel 以 done 收尾 —— 不先判 stallTriggered 会把
           // 「连接超时」误报成 'network'（网络连接中断）
           if (stallTriggered) throw { type: 'timeout', message: '连接超时，正在重试', retryable: true } as ChatError
@@ -123,6 +126,7 @@ export async function sendMultiAgentStream(
           try {
             const event: MultiAgentSSEEvent = JSON.parse(line.slice(6))
             if (event.type === 'done' || event.type === 'error') receivedTerminalEvent = true
+            if (event.type === 'turn_done') receivedTurnEnd = true
             onEvent(event)
           } catch (e) {
             if (e && typeof e === 'object' && 'retryable' in (e as any)) throw e

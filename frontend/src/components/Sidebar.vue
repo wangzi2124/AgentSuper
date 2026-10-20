@@ -213,14 +213,16 @@ function handleLogout() {
         </button>
       </div>
 
-      <!-- 资料编辑弹层（含监控信息：不再在侧栏单独显示） -->
-      <div v-if="showUserCard && profileOpen" class="profile-panel">
-        <div class="pp-head">
-          <span class="pp-head-title">用户设置</span>
-          <button class="pp-close" title="关闭" @click="profileOpen = false">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-        </div>
+      <!-- 资料编辑弹层（屏幕居中自适应模态，浮于多智能体历史记录之上，不影响历史记录） -->
+      <Teleport to="body">
+        <div v-if="showUserCard && profileOpen" class="profile-overlay" @click.self="profileOpen = false">
+          <div class="profile-panel">
+            <div class="pp-head">
+              <span class="pp-head-title">用户设置</span>
+              <button class="pp-close" title="关闭" @click="profileOpen = false">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
         <div class="pp-stats">
           <button class="pp-stat" type="button" title="我的累计输入 Token（跨会话）· 点击查看系统监控" @click="goMonitor">
             <span class="pp-stat-ico">↑</span>
@@ -292,11 +294,9 @@ function handleLogout() {
           <button class="pp-btn" @click="resetAvatar">重置</button>
           <button class="pp-btn pp-btn-primary" @click="saveNick">保存</button>
         </div>
-      </div>
-
-      <div class="sidebar-footer">
-        v0.1.0
-      </div>
+          </div>
+        </div>
+      </Teleport>
     </div>
   </aside>
 </template>
@@ -326,17 +326,28 @@ function handleLogout() {
 .us-v { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .us-sub { font-style: normal; color: var(--text-secondary); margin-left: 4px; }
 
-.profile-panel {
-  position: absolute;
-  left: 10px; right: 10px; bottom: 10px;
-  z-index: 40;
-  margin: 0;
-  max-height: min(72vh, 560px);
-  overflow-y: auto;
-  padding: 10px; border: 1px solid var(--border-subtle);
-  border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-lg, 0 10px 40px rgba(0, 0, 0, 0.25));
-  display: flex; flex-direction: column; gap: 10px;
+/* 半透明遮罩：浮于多智能体历史记录之上（不影响其内容），点击空白关闭 */
+.profile-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, #0b0b14 55%, transparent);
+  backdrop-filter: blur(3px);
+  animation: profileFade 0.16s var(--ease, ease);
 }
+@keyframes profileFade { from { opacity: 0; } to { opacity: 1; } }
+
+.profile-panel {
+  position: relative;
+  width: min(760px, 100%);
+  max-height: min(86vh, 680px);
+  overflow-y: auto;
+  padding: 16px; border: 1px solid var(--border-subtle);
+  border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-lg, 0 10px 40px rgba(0, 0, 0, 0.25));
+  display: flex; flex-direction: column; gap: 10px;
+  animation: profilePop 0.18s var(--ease, ease);
+}
+@keyframes profilePop { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
 .pp-head { display: flex; align-items: center; justify-content: space-between; margin: -2px 0 2px; }
 .pp-head-title { font-size: 14px; font-weight: 800; letter-spacing: -0.01em; color: var(--text); }
 .pp-close {
@@ -362,13 +373,30 @@ function handleLogout() {
 .pp-preset.on { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
 .pp-upload { font-size: 11px; color: var(--text-secondary); width: auto; padding: 0 8px; }
 .pp-upload:hover { color: var(--primary); }
-.pp-actions { display: flex; justify-content: flex-end; gap: 8px; }
-.pp-btn {
-  font-size: 12px; padding: 5px 12px; border: 1px solid var(--border-subtle); border-radius: 6px;
-  background: var(--bg-subtle); color: var(--text); cursor: pointer;
+.pp-actions {
+  position: sticky; bottom: -16px;
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin: 0 -16px -16px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--border-subtle);
+  z-index: 2;
 }
-.pp-btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
-.pp-btn-primary:hover { filter: brightness(1.08); }
+.pp-btn {
+  box-sizing: border-box; min-width: 88px; text-align: center;
+  font-size: 13px; font-weight: 600; padding: 7px 18px;
+  border: 1px solid color-mix(in srgb, var(--text-secondary) 38%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-secondary) 8%, var(--surface));
+  color: var(--text); cursor: pointer;
+  transition: filter 0.18s var(--ease, ease), background 0.18s var(--ease, ease), border-color 0.18s var(--ease, ease);
+}
+.pp-btn:hover {
+  background: color-mix(in srgb, var(--text-secondary) 16%, var(--surface));
+  border-color: color-mix(in srgb, var(--text-secondary) 60%, transparent);
+}
+.pp-btn-primary { background: var(--primary); border: 1px solid var(--primary); color: #fff; }
+.pp-btn-primary:hover { filter: brightness(1.08); background: var(--primary); border-color: var(--primary); }
 
 /* ── 个人设置内的监控信息方块（酷炫方块） ── */
 .pp-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }

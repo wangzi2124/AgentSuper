@@ -123,6 +123,29 @@ class VectorStore:
         """从持久化目录加载已有的向量存储实例。"""
         return cls(persist_dir)
 
+    def get_parents(self, parent_ids: list[str]) -> dict[str, str]:
+        """§13.6 父块展开：按 parent_id 批量取父块正文，返回 {parent_id: text}。
+
+        子块命中后用它补全上下文；Chroma 不支持空 `$in`，故空列表直接返回。
+        """
+        ids = [p for p in dict.fromkeys(parent_ids or []) if p]
+        if not ids:
+            return {}
+        res = self.collection.get(
+            where={"parent_id": {"$in": ids}},
+            include=["documents", "metadatas"],
+        )
+        docs = res.get("documents") or []
+        metas = res.get("metadatas") or []
+        out: dict[str, str] = {}
+        for text, meta in zip(docs, metas):
+            if not (meta or {}).get("is_parent"):
+                continue
+            pid = (meta or {}).get("parent_id")
+            if pid and pid not in out:
+                out[pid] = text or ""
+        return out
+
     @property
     def count(self) -> int:
         """返回向量库中文档总数。"""

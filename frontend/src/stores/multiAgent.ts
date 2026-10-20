@@ -1,5 +1,5 @@
 ﻿import { defineStore } from 'pinia'
-import { ref, computed, reactive, onScopeDispose } from 'vue'
+import { ref, computed, reactive, watch, onScopeDispose } from 'vue'
 import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep, FileContent, AgentOutputPart, VoiceMessageData, QueuedPrompt } from '../types'
 import {
   sendMultiAgentStream,
@@ -165,7 +165,17 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       // 后端不可达：保留上面的本地快照（若有），尽量保持选择器可用
     }
   }
-  const useVectorDb = ref(false)
+  // 「用户设置 → 知识库检索」开关：持久化到 localStorage，刷新后保持上次选择
+  // （此前 ref(false) 每次刷新都重置为关闭，用户会误以为开关不生效）。
+  const USE_VECTOR_DB_KEY = 'agent-super:use-vector-db'
+  function _readUseVectorDb(): boolean {
+    try { return localStorage.getItem(USE_VECTOR_DB_KEY) === '1' }
+    catch { return false }
+  }
+  const useVectorDb = ref(_readUseVectorDb())
+  watch(useVectorDb, (v) => {
+    try { localStorage.setItem(USE_VECTOR_DB_KEY, v ? '1' : '0') } catch { /* 隐私模式等忽略 */ }
+  })
   // 当前/新建会话绑定的工作目录（opencode ctx.directory）。首条消息发送时
   // 随请求 directory 创建会话；已有会话在 loadConversation 时同步为服务器值。
   const sessionDirectory = ref('')
@@ -651,6 +661,10 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     session.streamPhase = 'queued'
     session.queuePosition = null
 
+    // 首条消息立即用内容作标题（与后端 `body.message[:20]` 口径一致），
+    // 顶部标题 / 左侧历史即时可见，无需等 done 事件回传 title。
+    if (!session.conversationTitle) session.conversationTitle = text.slice(0, 20)
+
     const assistantMsgId = genId()
     let agentsMap: Record<string, AgentStreamData> = {}
     let assistantMsg: MultiAgentMessage = reactive({
@@ -848,6 +862,20 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       session.streamPhase = 'idle'
       session.queuePosition = null
       if (session.abortController === controller) session.abortController = null
+      // [终态兜底] 队列 drain 在 turn_done 后断流（无后续 done）时，会残留一个空的
+      // 助手占位（turn_done 分支新建来接下个回合）。未收到终态 done 且该占位仍为空
+      // → 移除它，避免聊天框里挂一条永远「思考中」的空气泡。
+      if (!completed) {
+        const tail = session.messages[session.messages.length - 1]
+        if (
+          tail && tail.role === 'assistant' && !tail.isError &&
+          !tail.content && !(tail.agents && tail.agents.length) &&
+          !tail.files_changed?.length
+        ) {
+          session.messages = session.messages.slice(0, -1)
+          persistSession(sessionId)
+        }
+      }
     }
     return completed
   }

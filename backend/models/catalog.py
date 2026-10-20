@@ -142,6 +142,26 @@ def _ollama_base_url() -> str:
     return host.rstrip("/")
 
 
+def is_ollama_model(model_id: Optional[str]) -> bool:
+    """判断模型 ID 是否为 Ollama 模型（支持 ollama/ 和 ollama_chat/ 前缀）。
+
+    ollama_chat/ 是 LiteLLM 推荐的前缀，可正确处理工具调用；
+    ollama/ 是旧前缀，流式工具调用有已知问题。
+    """
+    if not model_id:
+        return False
+    return model_id.startswith("ollama/") or model_id.startswith("ollama_chat/")
+
+
+def get_ollama_model_name(model_id: str) -> str:
+    """从 Ollama 模型 ID 提取模型名（去掉 ollama/ 或 ollama_chat/ 前缀）。"""
+    if model_id.startswith("ollama_chat/"):
+        return model_id[len("ollama_chat/"):]
+    if model_id.startswith("ollama/"):
+        return model_id[len("ollama/"):]
+    return model_id
+
+
 # 本地端点（ollama / vLLM / LM Studio）快速预检。
 # 为什么需要：在装了 TUN/透明代理（mihomo/clash 等）的机器上，指向**没有监听**的
 # localhost 端口的连接不会立刻 refused，而是被静默丢包 → TCP connect 一直挂到超时。
@@ -219,7 +239,8 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
                 name = (m.get("name") or "").strip()
                 if not name:
                     continue
-                mid = f"ollama/{name}"
+                # 使用 ollama_chat/ 前缀（LiteLLM 推荐，工具调用兼容性更好）
+                mid = f"ollama_chat/{name}"
                 family = name.split(":", 1)[0]
                 # [能力透传] /api/tags 的 capabilities 列出入参能力（vision/completion/tools/thinking），
                 # 映射为本系统能力键：tools→tool_use、thinking→reasoning。老版 ollama 无该字段
@@ -288,7 +309,7 @@ def _ollama_installed_names() -> Optional[set[str]]:
 
 
 def ollama_model_installed(model_id: Optional[str]) -> bool:
-    """ollama/<name> 是否已在本机安装（按 /api/tags 探测）。
+    """ollama/<name> 或 ollama_chat/<name> 是否已在本机安装（按 /api/tags 探测）。
 
     - 非 ollama 前缀 / 空模型 → True（不拦截）；
     - 探测失败（ollama 未启动/不可达）→ True（放行，交给 litellm 报原始错误，
@@ -297,8 +318,10 @@ def ollama_model_installed(model_id: Optional[str]) -> bool:
     """
     if not model_id:
         return True
-    provider, _, name = model_id.partition("/")
-    if provider != "ollama" or not name:
+    if not is_ollama_model(model_id):
+        return True
+    name = get_ollama_model_name(model_id)
+    if not name:
         return True
     installed = _ollama_installed_names()
     if installed is None:
@@ -673,8 +696,8 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     mid = normalize_model(model_id)
     if not mid:
         return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False, "options": None}
-    provider = mid.split("/", 1)[0] if "/" in mid else ""
-    if provider == "ollama":
+    # 支持 ollama/ 和 ollama_chat/ 两种前缀（ollama_chat/ 是 LiteLLM 推荐的前缀）
+    if is_ollama_model(mid):
         opts: dict[str, Any] = {"num_ctx": resolve_context_length(mid, settings.ollama_num_ctx)}
         caps = read_capabilities(mid)
         entry = lookup(mid)
@@ -698,6 +721,11 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         reg_o = read_providers().get("ollama") or {}
         _ob = (reg_o.get("api_base") or "").strip()
         _ok = (reg_o.get("api_key") or "").strip()
+        # [OLLAMA_API_BASE 双保险] 规格：同时设置 api_base 参数和 OLLAMA_API_BASE 环境变量
+        # 最稳妥（ChatLiteLLM 某些版本内部探测会忽略构造参数转而读环境变量）。
+        # 注册表未配 api_base 时读 OLLAMA_API_BASE（其次 OLLAMA_HOST）兜底。
+        if not _ob:
+            _ob = (os.environ.get("OLLAMA_API_BASE") or os.environ.get("OLLAMA_HOST") or "").strip()
         return {"api_base": _ob or None, "api_key": _ok or "ollama", "is_ollama": True, "options": opts}
     # DeepSeek 思考模型（V4.1-Flash / V4-Pro 默认开思考）：按「推理模型」能力 + 全局
     # DEEPSEEK_THINKING 开关下发 thinking。**默认 disabled** —— 实测 agentic 工具循环里
@@ -706,6 +734,7 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     # litellm_vision_patch.install_litellm_reasoning_patch（修「思考模式多轮流式报错」）。
     # adaptive → 不显式下发（options=None），交服务端默认。
     options = None
+    provider = mid.split("/", 1)[0] if "/" in mid else ""
     if provider == "deepseek" and read_capabilities(mid).get("reasoning"):
         _tt = _normalize_deepseek_thinking(getattr(settings, "deepseek_thinking", "disabled"))
         if _tt in ("enabled", "disabled"):
@@ -763,15 +792,17 @@ def provider_config_hint(model_id: Optional[str], *, creds: Optional[dict] = Non
     mid = normalize_model(model_id)
     if not mid:
         return ""
-    provider = mid.split("/", 1)[0] if "/" in mid else ""
-    if not provider or provider == "ollama":
+    # 支持 ollama/ 和 ollama_chat/ 两种前缀
+    if is_ollama_model(mid):
         # ollama 前缀：provider 本身无需配置；但模型必须已安装
-        if provider == "ollama":
-            mname = mid.split("/", 1)[1] if "/" in mid else ""
-            if mname and not ollama_model_installed(mid):
-                return ("本地 Ollama 未安装模型「%s」。请在终端执行 `ollama pull %s` "
-                        "安装后重试，或在「模型管理」页切换为其它已安装模型。"
-                        % (mname, mname))
+        mname = get_ollama_model_name(mid)
+        if mname and not ollama_model_installed(mid):
+            return ("本地 Ollama 未安装模型「%s」。请在终端执行 `ollama pull %s` "
+                    "安装后重试，或在「模型管理」页切换为其它已安装模型。"
+                    % (mname, mname))
+        return ""
+    provider = mid.split("/", 1)[0] if "/" in mid else ""
+    if not provider:
         return ""
     reg = read_providers().get(provider)
     if reg and reg.get("api_base"):

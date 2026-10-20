@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable, Sequence
 
 from prompts.loader import PromptLoader
@@ -217,3 +218,82 @@ async def compress_context(
         summary = existing_summary
 
     return {"summary": summary, "recent": recent, "triggered": True, "tokens": total}
+
+
+# ── LLM 摘要门禁 + 精确值回填（agent-1.md §1.4 / §1.5）──
+# 原则：压缩是「低成本高收益」，可积极启用，但**每次调模型都要过门禁**；
+# 越不过门禁就退回规则截断（不花一分钱）。摘要生成后用纯规则确定性地回填精确值，
+# 不依赖模型「记得住」。
+
+# 精确值模式（§1.5 PRECISION_PATTERNS）：文件路径 / 长数字（ID、端口）/ 反引号命令。
+PRECISION_PATTERNS = [
+    r"[/\\][\w./\\-]+\.\w{2,4}",   # 文件路径（含 Windows 反斜杠）
+    r"\b\d{4,}\b",                 # 长数字（ID、端口、token 计数）
+    r"`[^`]+`",                    # 反引号命令
+]
+# 门禁 C2 的精确值关键词：命中其一才认为「值得调模型压缩」。
+_PRECISION_KEYWORDS = re.compile(
+    r"(path|command|cmd|id:|port|version|token|端口|版本|命令|路径|标识)",
+    re.IGNORECASE,
+)
+# 精确值回填上限（避免补充段本身过大，§1.5 missing[:20]）。
+_PRECISION_BACKFILL_MAX = 20
+
+
+def extract_precision_values(text: str) -> list[str]:
+    """按 PRECISION_PATTERNS 从原文提取精确值（去重、保序）。"""
+    found: list[str] = []
+    seen: set[str] = set()
+    for pat in PRECISION_PATTERNS:
+        for m in re.findall(pat, text or ""):
+            if m not in seen:
+                seen.add(m)
+                found.append(m)
+    return found
+
+
+def contains_precision_keyword(text: str) -> bool:
+    """门禁 C2：被压缩内容是否含精确值关键词（或直接含精确值模式命中）。"""
+    if _PRECISION_KEYWORDS.search(text or ""):
+        return True
+    return bool(extract_precision_values(text or ""))
+
+
+def should_use_llm_summary(
+    older_messages: Sequence[Any],
+    *,
+    compress_count: int = 0,
+    min_tokens: int = 5_000,
+    max_llm_calls: int = 3,
+) -> bool:
+    """LLM 摘要门禁（§1.4）：三条件全为真才调模型，否则走规则截断。
+
+    C1. 被压缩消息总 token >= `min_tokens`（太少不划算）
+    C2. 被压缩内容含精确值关键词 / 精确值模式
+    C3. 本会话 `compress_count < max_llm_calls`（防反复烧钱）
+    """
+    serialized = serialize_messages(older_messages)
+    # C1：被压缩内容的体量。
+    if estimate_tokens(serialized) < min_tokens:
+        return False
+    # C2：是否存在值得保全的精确值。
+    if not contains_precision_keyword(serialized):
+        return False
+    # C3：本会话 LLM 摘要次数上限。
+    if compress_count >= max_llm_calls:
+        return False
+    return True
+
+
+def enforce_precision(summary: str, older_messages: Sequence[Any]) -> str:
+    """压缩后精确值回填（§1.5，零 LLM 成本、确定性保证）。
+
+    从被压缩原文提取精确值，凡摘要里缺失的追加到 `[精确值补充]` 段。
+    """
+    original = serialize_messages(older_messages)
+    critical = extract_precision_values(original)
+    missing = [t for t in critical if t and t not in (summary or "")]
+    if not missing:
+        return summary
+    backfill = "\n".join(f"- {t}" for t in missing[:_PRECISION_BACKFILL_MAX])
+    return f"{summary}\n\n[精确值补充]\n{backfill}"

@@ -186,6 +186,7 @@ def _do_init(app):
     app.state.doc_processor = DocumentProcessor(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
+        department=settings.kb_department,
     )
     app.state.plugin_loader = plugin_loader
     app.state.skill_loader = skill_loader

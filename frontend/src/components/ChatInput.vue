@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, watch } from 'vue'
-import type { FileContent, VoiceMessageData } from '../types'
+import type { FileContent, VoiceMessageData, Skill, Plugin } from '../types'
 import { useMultiAgentStore } from '../stores/multiAgent'
+import { listSkills, getSkill } from '../api/skills'
+import { listPlugins } from '../api/plugins'
 
 // 定义组件事件：发送消息（含可选附件）、取消请求
 const emit = defineEmits<{ send: [text: string, files: FileContent[], voice?: VoiceMessageData]; cancel: [] }>()
@@ -518,6 +520,123 @@ function autoResize() {
   el.style.height = clamped + 'px'
 }
 
+// ── [/ 命令面板] 输入框以 `/` 开头（且未输入空格）→ 弹出技能 / 插件列表 ──
+// 交互：按名字实时过滤；↑/↓ 选择；Enter 填入；点条目看完整详情（正文可能被截断）。
+type SlashItem = {
+  key: string
+  kind: 'skill' | 'plugin'
+  name: string
+  description: string
+  enabled: boolean
+}
+const slashItems = ref<SlashItem[]>([])
+const slashLoaded = ref(false)
+const slashLoading = ref(false)
+const slashError = ref('')
+const slashActive = ref(0)
+const slashDismissed = ref(false)
+const slashDetail = ref<SlashItem | null>(null)
+const slashDetailBody = ref('')
+const slashDetailLoading = ref(false)
+
+// 仅在「正在输入命令名」时打开：`/` 或 `/novel`；一旦出现空白（说明命令已选定）就收起。
+const slashOpen = computed(() => {
+  if (props.loading || slashDismissed.value) return false
+  const v = text.value
+  return v.startsWith('/') && v.length > 0 && !/\s/.test(v)
+})
+const slashQuery = computed(() => (slashOpen.value ? text.value.slice(1).trim().toLowerCase() : ''))
+const slashFiltered = computed(() => {
+  const q = slashQuery.value
+  if (!q) return slashItems.value
+  return slashItems.value.filter(
+    (i) => i.name.toLowerCase().includes(q) || i.description.toLowerCase().includes(q),
+  )
+})
+
+watch(slashOpen, (open) => {
+  if (open) {
+    slashActive.value = 0
+    void loadSlashItems()
+  } else {
+    slashDetail.value = null
+  }
+})
+watch(slashFiltered, () => { slashActive.value = 0 })
+
+async function loadSlashItems() {
+  if (slashLoaded.value || slashLoading.value) return
+  slashLoading.value = true
+  slashError.value = ''
+  try {
+    const [skills, plugins] = await Promise.allSettled([listSkills(), listPlugins()])
+    const items: SlashItem[] = []
+    if (skills.status === 'fulfilled') {
+      for (const s of skills.value as Skill[]) {
+        items.push({
+          key: `skill:${s.name}`, kind: 'skill', name: s.name,
+          description: s.description || '', enabled: s.enabled,
+        })
+      }
+    }
+    if (plugins.status === 'fulfilled') {
+      for (const p of plugins.value as Plugin[]) {
+        items.push({
+          key: `plugin:${p.name}`, kind: 'plugin', name: p.name,
+          description: p.description || '', enabled: p.enabled,
+        })
+      }
+    }
+    items.sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === 'skill' ? -1 : 1
+      return a.name.localeCompare(b.name)
+    })
+    slashItems.value = items
+    slashLoaded.value = true
+    if (!items.length) slashError.value = '没有可用的技能或插件'
+  } catch (e) {
+    slashError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    slashLoading.value = false
+  }
+}
+
+function slashMove(step: number) {
+  const n = slashFiltered.value.length
+  if (!n) return
+  slashActive.value = (slashActive.value + step + n) % n
+}
+
+function slashUseDetail() {
+  if (slashDetail.value) slashUse(slashDetail.value)
+}
+
+// 填入输入框（保留斜杠前缀，后接空格表示命令已选定 → 面板自然收起）
+function slashUse(item: SlashItem) {
+  text.value = `/${item.name} `
+  slashDetail.value = null
+  nextTick(() => {
+    autoResize()
+    textareaRef.value?.focus()
+  })
+}
+
+// 点条目看完整详情：技能额外拉取 SKILL.md 正文（列表里只显示截断后的描述）
+async function slashShowDetail(item: SlashItem) {
+  slashDetail.value = item
+  slashDetailBody.value = ''
+  if (item.kind !== 'skill') return
+  slashDetailLoading.value = true
+  try {
+    const detail = await getSkill(item.name)
+    slashDetailBody.value = detail.content || ''
+  } catch (e) {
+    slashDetailBody.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    slashDetailLoading.value = false
+  }
+}
+
 // [F8] 读取 File → base64（对齐后端 FileContent.data），图片额外生成 data URL 预览
 function readFile(file: File): Promise<PendingFile> {
   return new Promise((resolve, reject) => {
@@ -714,6 +833,8 @@ const displayValue = computed(() =>
 )
 // 输入框改动：剥离首行历史提示后写入 text（编辑提示本身则退出历史模式）
 function onInput(e: Event) {
+  // 用户继续输入 → 恢复 `/` 面板（此前可能被 Esc/点击遮罩收起）
+  slashDismissed.value = false
   const v = (e.target as HTMLTextAreaElement).value
   const pre = historyHintText.value ? historyHintText.value + '\n' : ''
   if (v.startsWith(pre)) {
@@ -748,6 +869,16 @@ function navigateHistory(step: number) {
 // 避免中文输入法选词/组句时误触发发送。
 function onKeydown(e: KeyboardEvent) {
   if (e.isComposing || e.keyCode === 229) return
+  // [/ 命令面板] 打开时接管 ↑/↓/Enter/Esc（Enter 填入选中项，而不是发送）
+  if (slashOpen.value) {
+    if (e.key === 'ArrowDown') { e.preventDefault(); slashMove(1); return }
+    if (e.key === 'ArrowUp') { e.preventDefault(); slashMove(-1); return }
+    if (e.key === 'Escape') { e.preventDefault(); slashDismissed.value = true; return }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      const item = slashFiltered.value[slashActive.value]
+      if (item) { e.preventDefault(); slashUse(item); return }
+    }
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     handleSend()
@@ -829,6 +960,60 @@ const textareaRef = ref<HTMLTextAreaElement>()
         </div>
       </div>
     </div>
+    <!-- [/ 命令面板] 输入 `/` 弹出：技能 + 插件列表，可按名字过滤，点条目看完整详情 -->
+    <div v-if="slashOpen" class="slash-mask" @click="slashDismissed = true"></div>
+    <div v-if="slashOpen" class="slash-panel">
+      <div class="slash-head">
+        <span class="slash-title">技能与插件</span>
+        <span class="slash-tip">输入名字筛选 · ↑↓ 选择 · Enter 填入 · Esc 关闭</span>
+        <button class="slash-close" title="关闭" @click="slashDismissed = true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <div v-if="slashLoading" class="slash-empty">加载中…</div>
+      <div v-else-if="slashError" class="slash-empty">{{ slashError }}</div>
+      <div v-else-if="!slashFiltered.length" class="slash-empty">没有匹配的技能或插件</div>
+      <div v-else class="slash-list">
+        <button
+          v-for="(it, i) in slashFiltered"
+          :key="it.key"
+          type="button"
+          class="slash-item"
+          :class="{ active: i === slashActive, disabled: !it.enabled }"
+          @mouseenter="slashActive = i"
+          @click="slashShowDetail(it)"
+        >
+          <span class="slash-badge" :class="it.kind">{{ it.kind === 'skill' ? '技能' : '插件' }}</span>
+          <span class="slash-main">
+            <span class="slash-name">
+              {{ it.name }}
+              <span v-if="!it.enabled" class="slash-off">已禁用</span>
+            </span>
+            <span class="slash-desc">{{ it.description || '（无描述）' }}</span>
+          </span>
+          <span class="slash-insert" title="填入输入框" @click.stop="slashUse(it)">↵</span>
+        </button>
+      </div>
+
+      <!-- 详情：覆盖在列表上，展示完整描述 / 技能正文 -->
+      <div v-if="slashDetail" class="slash-detail" @click.stop>
+        <div class="slash-detail-head">
+          <span class="slash-badge" :class="slashDetail.kind">{{ slashDetail.kind === 'skill' ? '技能' : '插件' }}</span>
+          <span class="slash-detail-name">{{ slashDetail.name }}</span>
+          <button class="slash-close" title="返回列表" @click="slashDetail = null">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="slash-detail-desc">{{ slashDetail.description || '（无描述）' }}</div>
+        <div v-if="slashDetailLoading" class="slash-empty">加载内容…</div>
+        <pre v-else-if="slashDetailBody" class="slash-detail-body">{{ slashDetailBody }}</pre>
+        <div class="slash-detail-foot">
+          <button class="slash-use-btn" @click="slashUseDetail">填入输入框</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Gemini 风格大圆角输入卡 -->
     <div class="input-card">
       <textarea

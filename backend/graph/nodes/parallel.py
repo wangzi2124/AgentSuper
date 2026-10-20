@@ -70,3 +70,37 @@ def make_parallel_node(
         }
 
     return parallel_node
+
+
+def make_parallel_worker_node(runner: Callable[..., Any]) -> Callable[[dict[str, Any]], Any]:
+    """`Send` 动态扇出 worker（agent-1.md §2.3）。
+
+    `route_after_plan` 为每个子任务 `Send("parallel_worker", {task_id, agent,
+    desc, context})`，LangGraph 并发运行本节点多次；每次只跑一个子任务并返回
+    增量 `{"sub_results": {tid: text}}`（由 `merge_dicts` reducer 合并）。
+    `fanout_count` 用数值 reducer 累加扇出次数（§2.4 C2）。
+    """
+
+    async def parallel_worker(payload: dict[str, Any]) -> dict[str, Any]:
+        tid = payload.get("task_id", "t?")
+        agent = payload.get("agent") or "file"
+        desc = payload.get("desc") or ""
+        context = payload.get("context") or ""
+        usage: dict[str, Any] = {}
+        try:
+            res = await runner(agent, desc, context)
+            if isinstance(res, dict):
+                text = res.get("text", "")
+                usage = res.get("usage") or {}
+            else:
+                text = str(res)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("subagent %s failed: %s", agent, exc)
+            text = f"(子任务 {tid} 失败：{exc})"
+        return {
+            "sub_results": {tid: text},
+            "token_usage": usage,
+            "fanout_count": 1,
+        }
+
+    return parallel_worker

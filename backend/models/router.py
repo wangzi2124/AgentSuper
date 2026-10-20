@@ -123,6 +123,15 @@ def _ensure_provider(model: str, api_base: str | None) -> str:
     return model
 
 
+def _is_ollama_model(model: str) -> bool:
+    """判断模型 ID 是否为 Ollama 模型（支持 ollama/ 和 ollama_chat/ 前缀）。
+
+    ollama_chat/ 是 LiteLLM 推荐的前缀，可正确处理工具调用；
+    ollama/ 是旧前缀，流式工具调用有已知问题。
+    """
+    return model.startswith("ollama/") or model.startswith("ollama_chat/")
+
+
 # 公共别名：既有调用方（app/agent/graphmod/generate.py、models/__init__.py）使用无下划线名。
 ensure_provider = _ensure_provider
 
@@ -256,7 +265,7 @@ class TierModel:
         except Exception as exc:  # noqa: BLE001 - 目录/DB 异常不得中断 LLM 调用
             logger.warning("provider_api(%s) 解析失败，回退 .env 凭证：%s", mid, exc)
             creds = {}
-        if mid.startswith("ollama/") or creds.get("is_ollama"):
+        if _is_ollama_model(mid) or creds.get("is_ollama"):
             # Ollama 只认前端「模型管理」注册的 Provider，后端 .env 不兜底：
             # 此前 `api_base=None or settings.llm_api_base` 被 .env 的 DeepSeek 端点
             # 顶掉、key 落成占位 "ollama" → 请求打 DeepSeek 报 ****lama is invalid。
@@ -288,7 +297,7 @@ class TierModel:
         """endpoint 是否指向本地 Ollama（model 前缀 或 api_base 指向本机）。"""
         mid = str(endpoint.get("model") or "")
         base = str(endpoint.get("api_base") or "").lower()
-        return mid.startswith("ollama/") or "127.0.0.1" in base or "localhost" in base
+        return _is_ollama_model(mid) or "127.0.0.1" in base or "localhost" in base
 
     def _timeout_for(self, endpoint: dict[str, Any]) -> int:
         """本地 Ollama 用更宽的超时；显式注入的自定义 timeout 优先。"""
@@ -299,12 +308,12 @@ class TierModel:
         return self.timeout
 
     def _max_tokens_for(self, endpoint: dict[str, Any]) -> int | None:
-        """本地 Ollama 收窄输出上限（CPU 跑飞生成保险）；只认 `ollama/` 前缀。"""
+        """本地 Ollama 收窄输出上限（CPU 跑飞生成保险）；支持 ollama/ 和 ollama_chat/ 前缀。"""
         mt = self.max_tokens
         if mt is None:
             return None
         mid = str(endpoint.get("model") or "")
-        if mid.startswith("ollama/"):
+        if _is_ollama_model(mid):
             return min(mt, LOCAL_OLLAMA_MAX_TOKENS)
         return mt
 

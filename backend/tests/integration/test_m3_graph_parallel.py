@@ -58,7 +58,13 @@ def _tool_call(name, args):
 
 
 @pytest.mark.asyncio
-async def test_parallel_plan_decomposes_and_merges(tmp_path):
+async def test_parallel_plan_decomposes_and_merges(tmp_path, monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "plan_parallel_enabled", True)
+    monkeypatch.setattr(settings, "plan_max_fanout_calls", 2)
+    monkeypatch.setattr(settings, "plan_fanout_min_budget", 0.0)
+
     def subagent_models(spec):
         return SubagentResultModel(f"{spec.name} 输出")
 
@@ -68,11 +74,16 @@ async def test_parallel_plan_decomposes_and_merges(tmp_path):
         subagent_models=subagent_models,
         enable_task_tool=True,
     )
-    out = await run_agent("处理一个复杂请求", graph=graph, thread_id="m3p1")
+    out = await run_agent(
+        "分别处理并汇总这几个独立子任务",
+        graph=graph,
+        thread_id="m3p1",
+        budget_total=10.0,
+    )
     assert "sub_results" in out and "t1" in out["sub_results"] and "t2" in out["sub_results"]
     assert "file 输出" in out["final_output"]
     assert "research 输出" in out["final_output"]
-    assert out["iteration_count"] == 1  # plan → parallel → synthesize → memory_store(END)
+    assert out["iteration_count"] == 1  # plan → parallel_worker(×N) → synthesize → memory_store(END)
 
 
 @pytest.mark.asyncio

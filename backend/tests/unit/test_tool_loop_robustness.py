@@ -252,3 +252,79 @@ async def test_plain_answer_returns_first_round():
     )
     assert out["text"] == "直接答案"
     assert out["rounds"] == 1
+
+
+class _EmptyThenAnswerModel:
+    """第 1 轮空回复（无 tool_calls、无正文）；被要求补答后给出正常答案。"""
+
+    def __init__(self) -> None:
+        self.tier = "fake"
+        self.seen: list[dict] = []
+
+    async def ainvoke(self, messages, *, tools=None, **kwargs):
+        self.seen.append({"tools": tools, "last": dict(messages[-1])})
+        if len(self.seen) == 1:
+            return ChatResult(content="", finish_reason="stop")
+        return ChatResult(content="补答后的答案", finish_reason="stop")
+
+
+async def test_empty_answer_nudged_and_recovered():
+    """空回复不能被当答案返回 → 要求补答后拿到非空文本。"""
+    model = _EmptyThenAnswerModel()
+    out = await run_tool_loop(
+        model, [{"role": "user", "content": "写个文件"}], _registry()
+    )
+    assert out["text"] == "补答后的答案"
+    assert out["rounds"] == 2
+    nudge = model.seen[1]["last"]
+    assert nudge["role"] == "user" and "空的" in nudge["content"]
+
+
+class _ToolThenAlwaysEmptyModel:
+    """第 1 轮调工具（返回错误），之后每轮都空回复（连收尾调用也空）。"""
+
+    def __init__(self, tool_name: str = "failing") -> None:
+        self.tier = "fake"
+        self.round = 0
+        self.tool_name = tool_name
+
+    async def ainvoke(self, messages, *, tools=None, **kwargs):
+        self.round += 1
+        if self.round == 1:
+            return ChatResult(
+                content="",
+                tool_calls=[ToolCall(id="c1", name=self.tool_name, arguments="{}")],
+                finish_reason="tool-calls",
+            )
+        return ChatResult(content="", finish_reason="stop")
+
+
+def _failing_registry() -> ToolRegistry:
+    reg = ToolRegistry()
+
+    def failing(**kw):
+        return "错误：路径越界: C:\\tool\\hello.txt"
+
+    reg.register(ToolDefinition(name="failing", description="报错工具", fn=failing))
+    return reg
+
+
+async def test_empty_answer_never_returns_empty_string():
+    """最坏情况：模型始终空回复 → 绝不能返回空串，用工具轨迹摘要兜底。"""
+    out = await run_tool_loop(
+        _ToolThenAlwaysEmptyModel(), [{"role": "user", "content": "go"}], _failing_registry()
+    )
+    assert out["text"].strip() != ""
+    assert "failing" in out["text"]  # 摘要里带有出错工具轨迹
+
+
+async def test_empty_answer_all_success_falls_back_to_placeholder():
+    """轨迹全部成功但模型始终空回复 → 沿用占位文案（不返回空串）。"""
+    out = await run_tool_loop(
+        _ToolThenAlwaysEmptyModel(tool_name="noop"),
+        [{"role": "user", "content": "go"}],
+        _registry(),
+    )
+    assert out["text"] == "(达到最大工具轮数，未产出最终答案)"
+
+

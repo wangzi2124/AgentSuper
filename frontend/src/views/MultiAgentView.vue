@@ -311,7 +311,7 @@ async function handleCopy(messageId: string, text: string) {
   <div class="multi-agent-view">
     <div class="chat-header">
       <div class="chat-heading">
-        <h2>AI 智能助手</h2>
+        <h2 :title="agent.conversationTitle || '新对话'">{{ agent.conversationTitle || '新对话' }}</h2>
         <p>统一 Agent：知识库 + 代码/文件 + 联网搜索（输入框可选 规划/探索 模式）</p>
       </div>
       <div class="header-actions">
@@ -334,9 +334,9 @@ async function handleCopy(messageId: string, text: string) {
       class="chat-tab"
       :class="{ current: c.id === agent.conversationId }"
       @click="switchConversation(c.id)"
-      :title="c.title || '未命名会话'"
+      :title="c.title || '新对话'"
     >
-      <span class="chat-tab-title">{{ c.title || '未命名会话' }}</span>
+      <span class="chat-tab-title">{{ c.title || '新对话' }}</span>
     </div>
     <div class="chat-tab chat-tab-new" title="新建会话" @click="newConversation">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -392,7 +392,7 @@ async function handleCopy(messageId: string, text: string) {
               </template>
 
               <template v-else>
-                <MultiAgentResponse :message="msg" :routingStatus="agent.routingStatus" :isLast="idx === messages.length - 1" :loadDiff="agent.fetchMessageDiff" @restore="handleRestore(msg)" />
+                <MultiAgentResponse :message="msg" :routingStatus="agent.routingStatus" :isLast="idx === messages.length - 1" :running="agent.loading && idx === messages.length - 1" :loadDiff="agent.fetchMessageDiff" @restore="handleRestore(msg)" />
               </template>
 
               <div class="message-footer">

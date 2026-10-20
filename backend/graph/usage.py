@@ -43,6 +43,24 @@ def merge_usage(
     return merged
 
 
+def merge_dicts(
+    old: dict[str, Any] | None, new: dict[str, Any] | None
+) -> dict[str, Any]:
+    """LangGraph reducer：浅合并两个字典（供 Send 并行扇出的 sub_results）。
+
+    并行 worker 各自返回 `{task_id: text}` 片段，需按 reducer 合并而非互相覆盖
+    （§2.3 `Annotated[list, operator.add]` 之于列表；字典同理用并集）。
+    """
+    merged = dict(old or {})
+    merged.update(new or {})
+    return merged
+
+
+def add_ints(old: int | None, new: int | None) -> int:
+    """LangGraph reducer：整数累加（供 Send 并行 worker 并发累加 fanout_count）。"""
+    return int(old or 0) + int(new or 0)
+
+
 def usage_from_result(result: Any, model: str | None = None) -> dict[str, Any]:
     """把一次 ChatResult 的 usage 归一化为统一用量字典（含 cost）。"""
     raw = getattr(result, "usage", None) or {}

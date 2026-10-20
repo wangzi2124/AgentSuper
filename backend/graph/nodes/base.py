@@ -34,6 +34,12 @@ _NUDGE_NOT_A_TOOL_CALL = (
     "请直接用纯文本给出最终答案：不要输出 JSON，不要再调用工具。"
 )
 _FINAL_ROUND_NUDGE = "工具调用轮数已达上限。请立即停止调用工具，直接用纯文本给出最终答案。"
+# 纠正文：模型既没有 tool_calls 也没有正文（弱模型给了空 content）——若直接当答案
+# 返回空串，上层 `_append_assistant` 见空即跳过持久化、SSE 也不下发 text_delta，
+# 用户看到「Agent 跑完但没有任何回答」（实锤：ollama qwen2.5:3b 在工具被拒后给出空回复）。
+_NUDGE_EMPTY_ANSWER = (
+    "你上一条回复是空的。请直接用纯文本给出对用户问题的最终答案（不要输出 JSON，不要再调用工具）。"
+)
 
 
 def _json_object_candidate(text: str) -> dict[str, Any] | None:
@@ -206,6 +212,28 @@ def build_tool_defs(
     return defs
 
 
+def _fallback_text(tool_trace: list[dict[str, Any]]) -> str:
+    """工具轨迹摘要（兜底答案）：模型始终没给出正文时，把已发生的工具调用/结果
+    呈现给用户，避免空答案被上层静默丢弃。
+
+    仅当轨迹里出现「被拒 / 报错 / 越界」等异常结果时才追加摘要（让用户看到真实
+    原因，如写入被拒）；全部成功的普通调用沿用占位文案（保持既有语义）。
+    """
+    if not tool_trace:
+        return ""
+    signals = ("拒绝", "错误", "越界", "未授权", "error", "Error")
+    abnormal = [t for t in tool_trace if any(s in str(t.get("output", "")) for s in signals)]
+    if not abnormal:
+        return ""
+    lines = ["（模型未给出文字总结，以下是本次工具执行情况：）"]
+    for t in abnormal[-4:]:
+        out = str(t.get("output", ""))
+        if len(out) > 200:
+            out = out[:200] + "…"
+        lines.append(f"- {t.get('name', '?')}: {out}")
+    return "\n".join(lines)
+
+
 def _describe(result: Any) -> str:
     if isinstance(result, str):
         return result
@@ -274,12 +302,27 @@ async def run_tool_loop(
                 break  # 轮数已尽：交由下方纯文本收尾，不把裸 JSON 当最终答案
             # 弱模型把回答包进 JSON 外壳（{"response": "..."}）→ 解包归一化
             envelope = parse_answer_envelope(text)
-            return {
-                "text": envelope or text,
-                "rounds": rounds,
-                "tool_trace": tool_trace,
-                "usage": usage_total,
-            }
+            answer = envelope or text
+            if answer.strip():
+                return {
+                    "text": answer,
+                    "rounds": rounds,
+                    "tool_trace": tool_trace,
+                    "usage": usage_total,
+                }
+            # 空回复（既无 tool_calls 也无正文）：不能把空串当答案返回，否则上层会
+            # 静默丢弃（无持久化 / 无 text_delta），表现为「Agent 跑完却没有任何回答」。
+            if rounds < max_rounds:
+                logger.warning(
+                    "模型给出空回复（model=%s round=%d，已有 %d 次工具调用）→ 要求补答",
+                    label,
+                    rounds,
+                    len(tool_trace),
+                )
+                convo.append({"role": "assistant", "content": ""})
+                convo.append({"role": "user", "content": _NUDGE_EMPTY_ANSWER})
+                continue
+            break  # 轮数已尽：交由下方纯文本收尾
 
         convo.append(
             {
@@ -325,7 +368,7 @@ async def run_tool_loop(
             )
 
     # 工具轮数耗尽：做一次「纯文本收尾」调用（不带工具），避免把占位文案当最终答案
-    _prior_nudges = {_FINAL_ROUND_NUDGE, _NUDGE_NOT_A_TOOL_CALL}
+    _prior_nudges = {_FINAL_ROUND_NUDGE, _NUDGE_NOT_A_TOOL_CALL, _NUDGE_EMPTY_ANSWER}
     if not (convo and convo[-1].get("role") == "user" and convo[-1].get("content") in _prior_nudges):
         convo.append({"role": "user", "content": _FINAL_ROUND_NUDGE})
     try:
@@ -339,13 +382,13 @@ async def run_tool_loop(
             final.usage.get("input", 0),
             final.usage.get("output", 0),
         )
-        final_text = final.content or ""
+        final_text = (final.content or "").strip()
         if _looks_like_tool_call_json(final_text):
             final_text = ""
         else:
             envelope = parse_answer_envelope(final_text)
             final_text = envelope or final_text
-        if final_text:
+        if (final_text or "").strip():
             return {
                 "text": final_text,
                 "rounds": rounds,
@@ -355,8 +398,11 @@ async def run_tool_loop(
     except Exception:  # noqa: BLE001 - 收尾失败仍走占位文案兜底
         logger.warning("工具轮数耗尽后的纯文本收尾调用失败", exc_info=True)
 
+    # 最后防线：连收尾调用都没给出非空文本 —— 绝不能返回空串（上层见空即静默丢弃）。
+    # 若已有工具调用，用工具轨迹摘要兜底（让用户看到「写被拒/报错」等真实原因）；
+    # 否则退回既有的占位文案。
     return {
-        "text": "(达到最大工具轮数，未产出最终答案)",
+        "text": _fallback_text(tool_trace) or "(达到最大工具轮数，未产出最终答案)",
         "rounds": rounds,
         "tool_trace": tool_trace,
         "usage": usage_total,

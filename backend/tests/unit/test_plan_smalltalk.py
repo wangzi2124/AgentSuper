@@ -114,13 +114,15 @@ async def test_greeting_flow_routes_to_synthesize():
 
 async def test_plan_llm_empty_plan_short_circuits():
     """LLM 按 plan.md 对寒暄输出空计划 `[]` → 短路为草稿，不回退单任务。"""
-    # "hello there" 不被正则全串锚定命中 → 走 LLM 分解；LLM 判定寒暄输出 []
+    # 长于单任务阈值（≥50 字）且带串行信号 → 走 LLM 分解路径；
+    # LLM 判定寒暄输出 []（此时三层门禁已放行到模型）。
+    msg = "非常感谢你一直以来耐心细致的帮助与支持，辛苦了，然后我们慢慢聊一聊最近的情况吧"
     model = _StubModel("```json\n[]\n```")
     node = make_plan_node(model)
-    out = await node({"messages": [HumanMessage(content="hello there")]})
-    assert out["task_plan"] == [{"id": "t1", "desc": "hello there", "status": "done"}]
+    out = await node({"messages": [HumanMessage(content=msg)]})
+    assert out["task_plan"] == [{"id": "t1", "desc": msg, "status": "done"}]
     assert out["draft_output"] == SMALLTALK_REPLIES["greeting"]
-    # 仍调了一次 LLM（正则未命中才走的分解路径）
+    # 仍调了一次 LLM（未命中快速路径才走的分解路径）
     assert len(model.calls) == 1
 
 

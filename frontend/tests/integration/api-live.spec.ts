@@ -352,7 +352,7 @@ describe.skipIf(!RUN)('Skills /api/skills/*', () => {
     try { await skills.deleteSkill(NAME) } catch { /* ignore stale */ }
     const s = await skills.createSkill({ name: NAME, description: 'apitest temp', content: '# apitest\n临时技能', enabled: true })
     expect(s.name).toBe(NAME)
-  })
+  }, T_WRITE)
   it('GET /api/skills/{name}（getSkill）', async () => {
     const s = await skills.getSkill(NAME)
     expect(s.name).toBe(NAME)
@@ -361,22 +361,24 @@ describe.skipIf(!RUN)('Skills /api/skills/*', () => {
   it('PUT /api/skills/{name}（updateSkill）', async () => {
     const s = await skills.updateSkill(NAME, { description: 'apitest updated', content: '# updated' })
     expect(s.name).toBe(NAME)
-  })
+  }, T_WRITE)
+  // toggle/addSkillsDirectory/removeSkillsDirectory 会触发后端 agent.refresh_tools()
+  // 重建 LangGraph，耗时可能 >5s（默认超时）→ 显式放大到 T_WRITE。
   it('POST /api/skills/{name}/toggle（toggleSkill）', async () => {
     await skills.toggleSkill(NAME, false)
     await skills.toggleSkill(NAME, true)
-  })
+  }, T_WRITE)
   it('POST /api/skills/directory + /remove（外部源，自建自删）', async () => {
     const dir = os.tmpdir()
     const added = await skills.addSkillsDirectory(dir)
     expect(Array.isArray(added.extra_dirs)).toBe(true)
     const removed = await skills.removeSkillsDirectory(dir)
     expect(Array.isArray(removed.extra_dirs)).toBe(true)
-  })
+  }, T_WRITE)
   it('DELETE /api/skills/{name}（deleteSkill，清理）', async () => {
     await skills.deleteSkill(NAME)
     await expect(skills.getSkill(NAME)).rejects.toBeTruthy()
-  })
+  }, T_WRITE)
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -400,7 +402,7 @@ describe.skipIf(!RUN)('Plugins /api/plugins/*', () => {
     const orig = target.enabled
     await plugins.togglePlugin(target.name, !orig)
     await plugins.togglePlugin(target.name, orig)
-  })
+  }, T_WRITE)
   it('POST /api/plugins/{name}/call/{fn} 非白名单 → 403', async () => {
     const r = await raw('POST', '/api/plugins/filesystem/call/tool_ls', { args: {} })
     expect(r.status).toBe(403)
@@ -418,7 +420,8 @@ describe.skipIf(!RUN)('Plugins /api/plugins/*', () => {
     } finally {
       if (!wasEnabled) await plugins.togglePlugin('example-plugin', false)
     }
-  })
+  }, T_WRITE)
+  // toggle 触发 refresh_tools 重建图 + 工具走外网（NMC 台风数据）→ 耗时可达数秒，放大超时。
   it('POST /api/plugins/weather-alert/call/tool_get_typhoon_info（WeatherAlert.vue 直连，非 api/ 包装）', async () => {
     // 前端 WeatherAlert.vue 直接 fetch 该端点（bug 回归面：直连调用最易漏测）。
     // 该工具走外网（NMC 台风数据），受限网络下插件内会抛错 → 500；两者都接受。
@@ -436,7 +439,7 @@ describe.skipIf(!RUN)('Plugins /api/plugins/*', () => {
     } finally {
       if (!wasEnabled) await plugins.togglePlugin('weather-alert', false)
     }
-  })
+  }, T_WRITE)
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -549,8 +552,11 @@ describe.skipIf(!RUN)('Multi-Agent /api/chat/multi-agent*', () => {
     // 回归护栏：此前 body.model 只写进会话元数据、不参与调用（改密钥/换模型都不生效），
     // 上游永远拿到 .env 默认模型 → 传一个不存在的模型 id 也会「成功」。
     // 现在必须真实透传 → 上游报错信息里应出现该模型 id。
+    // ⚠ 消息不能用纯寒暄（如 'hi'）：plan 节点的寒暄/测试短路会直接回固定文案、
+    //    不进工具循环、不调 LLM（graph/nodes/plan.py classify_smalltalk），上游永远成功。
+    //    必须用带任务内容的正文，请求才会真正打到上游模型。
     const bogus = 'deepseek/nonexistent-xyz-zzz'
-    const r = await raw('POST', '/api/chat/multi-agent', { message: 'hi', model: bogus, use_vector_db: false })
+    const r = await raw('POST', '/api/chat/multi-agent', { message: '读取 README.md 并总结要点', model: bogus, use_vector_db: false })
     const j = await r.json()
     expect(j.code).not.toBe(0)
     expect(String(j.message)).toContain('nonexistent-xyz-zzz')

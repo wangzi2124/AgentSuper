@@ -21,6 +21,46 @@ logger = logging.getLogger(__name__)
 
 MAX_TASKS = 5
 
+# ── 计划档位（agent-1.md §2.2 / §2.4）──
+# 三档：single（单任务快速路径，不调模型）/ serial（串行分解，调 medium 模型）
+# / parallel（并行扇出，调模型 + Send，Step 3 门禁后才开）。
+# 由用户措辞的任务特征决定，不做二元开关 —— 大多数请求是 single/serial。
+_SERIAL_SIGNALS = ("然后", "接着", "之后", "再", "基于", "根据以上", "根据上面", "依次", "按顺序")
+_PARALLEL_SIGNALS = ("分别", "同时", "各自", "并行", "三个", "多个", "逐一", "各自独立")
+# 单一明确动词快速路径：短描述（<50 字）或无分解诉求时，恒单任务。
+_SINGLE_MAX_LEN = 50
+# 长描述（>100 字且无问号）视为复杂 → 可走串行/并行分解。
+_LONG_DESC_LEN = 100
+
+
+def classify_plan_tier(text: str) -> str:
+    """按用户措辞判定计划档位（§2.2 / §2.4）。
+
+    - "single"  ：短描述 / 无分解信号 → 单任务快速路径（不调模型）
+    - "serial"  ：含串行信号（然后/接着/基于以上…）→ 串行分解
+    - "parallel"：含并行信号（分别/同时/各自…）或长描述性任务 → 可并行扇出
+
+    无信号时按长度：<50 字 → single；≥100 字且无问号 → parallel-capable；否则 serial。
+    """
+    s = (text or "").strip()
+    if not s:
+        return "single"
+    has_parallel = any(sig in s for sig in _PARALLEL_SIGNALS)
+    has_serial = any(sig in s for sig in _SERIAL_SIGNALS)
+    # 并行信号优先（用户明确要"分别/同时"）；但串行信号与之并存时以串行为准
+    # （"先 A 然后分别 B/C" = 有依赖，不能并行）。
+    if has_parallel and not has_serial:
+        return "parallel"
+    if has_serial:
+        return "serial"
+    # 无显式分解信号：短请求走单任务；长描述性任务（无问号）视为复杂。
+    if len(s) < _SINGLE_MAX_LEN:
+        return "single"
+    if len(s) > _LONG_DESC_LEN and "?" not in s and "？" not in s:
+        return "parallel"
+    return "serial"
+
+
 # 纯寒暄/致谢/应答识别（全串锚定，正文带任何任务内容即不命中）——
 # 这类消息若进工具循环，弱本地模型会臆造文件名并把「文件不存在」错误
 # 当成最终答案（实测 qwen2.5:3b 对「你好」返回「错误：文件不存在 工作区.txt」）。
@@ -121,7 +161,13 @@ def make_plan_node(
                 }
 
         if model is None:
-            return {"task_plan": _single(request)}
+            return {"task_plan": _single(request), "plan_tier": "single"}
+
+        # 三档策略（agent-1.md §2.2）：单任务快速路径**不调模型**。
+        # 只有串行分解/并行扇出才需要 medium 模型生成本结构化计划。
+        tier = classify_plan_tier(request)
+        if tier == "single":
+            return {"task_plan": _single(request), "plan_tier": "single"}
 
         usage: dict[str, Any] = {}
         raw_content = ""
@@ -143,9 +189,10 @@ def make_plan_node(
                 return {
                     "task_plan": [{"id": "t1", "desc": request, "status": "done"}],
                     "draft_output": SMALLTALK_REPLIES["greeting"],
+                    "plan_tier": "single",
                     "token_usage": usage,
                 }
-            return {"task_plan": _single(request), "token_usage": usage}
+            return {"task_plan": _single(request), "plan_tier": "single", "token_usage": usage}
 
         tasks = [
             {
@@ -160,7 +207,8 @@ def make_plan_node(
             if s.agent in KNOWN_AGENTS
         ]
         if not tasks:
-            return {"task_plan": _single(request), "token_usage": usage}
-        return {"task_plan": tasks, "token_usage": usage}
+            return {"task_plan": _single(request), "plan_tier": "single", "token_usage": usage}
+        # 计划生成成功：携带档位（parallel 需 Step 3 门禁后才会真正扇出）。
+        return {"task_plan": tasks, "plan_tier": tier, "token_usage": usage}
 
     return plan_node

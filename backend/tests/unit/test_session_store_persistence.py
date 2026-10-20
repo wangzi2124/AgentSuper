@@ -17,7 +17,7 @@ def test_create_update_delete_write_through():
         title="落库测试",
         directory="C:/tmp-ws-it",
         user_id="u_it_store",
-        model="ollama/qwen2.5:3b",
+        model="ollama_chat/qwen2.5:3b",
     )
     try:
         info = repo.get_session(sess.id)
@@ -26,7 +26,7 @@ def test_create_update_delete_write_through():
         assert info.user_id == "u_it_store"
         assert info.project_id  # FK：resolve_project 已补项目行
         # str 模型引用读回后归一为 ModelRef（曾是 pydantic ValidationError）
-        assert info.model is not None and info.model.id == "ollama/qwen2.5:3b"
+        assert info.model is not None and info.model.id == "ollama_chat/qwen2.5:3b"
 
         store.update(sess.id, title="改名", status="running")
         info2 = repo.get_session(sess.id)

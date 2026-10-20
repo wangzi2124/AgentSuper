@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     chunk_size: int = 500
     chunk_overlap: int = 200
 
+    # §13.2.1 强制 metadata 字段 department（部门/租户，权限过滤用）。
+    # 单租户部署保持默认；多租户可在入库时按请求覆盖。
+    kb_department: str = "default"
+
     # 本地 embedding 模型（cognition/embeddings.py:LocalEmbeddings）。
     # ModelScope 优先下载（HF 兜底）；英文回退 all-MiniLM-L6-v2。
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
@@ -76,6 +80,33 @@ class Settings(BaseSettings):
     summarization_model: Optional[str] = None
     # 历史摘要保留消息条数（POST 时强制 ≥1；当前仅 API 回显，见上方接线现状说明）。
     summarization_keep_messages: int = 20
+
+    # ── 压缩模型（agent-1.md §1，对齐 agent.md §4.3 九段式摘要）──
+    # 压缩是「信息压缩」而非推理任务 → 固定用 simple tier（禁用 complex）。
+    # 生产可用 LITELLM_PROXY_URL + COMPRESS_MODEL 独立别名隔离成本（§1.3）；
+    # 直连环境不设 proxy 时，别名会落到 provider_api；故默认留空 → 走 tier-simple。
+    compress_model: Optional[str] = None
+    # 是否启用 LLM 摘要压缩（默认 true：压缩=低成本高收益，可积极启用，§核心结论）。
+    # 关闭时压缩节点仅按规则截断（缩消息数，不调模型），与旧行为一致。
+    compress_model_enabled: bool = True
+    # 单次摘要输出硬上限，防摘要啰嗦（§1.3 max_tokens=800）。
+    compress_max_tokens: int = 800
+    # 触发 LLM 摘要的最小被压缩内容 token（太少不划算，§1.4 C1）。
+    compress_min_tokens: int = 5_000
+    # 单会话内允许的 LLM 摘要次数上限；超出后改用规则截断（§1.4 C3）。
+    compress_max_llm_calls: int = 3
+
+    # ── 计划模型 / 多 Agent 扇出（agent-1.md §2，对齐 agent.md §6.2）──
+    # 计划分解用 medium tier（§2.2 / §2.6）；单任务快速路径不调模型。
+    # 默认 true：串行分解是默认路径之一（§四「默认路径必须是串行或单任务」）。
+    plan_model_enabled: bool = True
+    # 并行扇出（高成本高收益）：**默认关闭**（§四【不要做】），需显式开启且过
+    # should_plan_parallel 预算守卫（剩余预算 / fanout_count / 任务特征）。
+    plan_parallel_enabled: bool = False
+    # 单会话允许的并行扇出次数上限（§2.4 C2：防连续扇出烧钱）。
+    plan_max_fanout_calls: int = 2
+    # 扇出前要求的本会话剩余预算（¥，§2.4 C1）。
+    plan_fanout_min_budget: float = 0.20
 
     # ── 语音 / TTS（本地 Qwen3-TTS 子进程，无外部 HTTP 接口调用）──
     # 目录固定为 backend/ttsclone（不配置路径）；模型不自动下载，
@@ -138,7 +169,7 @@ class Settings(BaseSettings):
     tessdata_dir: str = ""
     ocr_languages: str = "chi_sim+eng"       # OCR 语言；chi_sim 缺失时自动回退 eng
     image_vlm_caption: bool = True           # 图片描述桥：视觉 LLM 生成 caption 注入文本
-    image_caption_model: str = "openai/gpt-4o-mini"  # caption VLM（litellm 前缀；内网改 ollama/llava）
+    image_caption_model: str = "openai/gpt-4o-mini"  # caption VLM（litellm 前缀；内网改 ollama_chat/llava）
     image_caption_api_base: str = ""
     image_caption_api_key: str = ""
     image_caption_prompt: str = ""           # 空用默认「用中文简洁描述图片内容与关键细节」

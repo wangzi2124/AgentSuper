@@ -72,7 +72,7 @@ BUILTIN_CATALOG: list[dict[str, Any]] = [
                  "cache_read_per_1m": 0.075, "cache_write_per_1m": 0.0},
     },
     {
-        "id": "ollama/qwen2.5-coder:latest",
+        "id": "ollama_chat/qwen2.5-coder:latest",
         "provider": "ollama",
         "family": "qwen2.5-coder",
         "name": "Ollama Qwen2.5-Coder",
@@ -84,7 +84,7 @@ BUILTIN_CATALOG: list[dict[str, Any]] = [
                  "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
     },
     {
-        "id": "ollama/qwen2.5:7b",
+        "id": "ollama_chat/qwen2.5:7b",
         "provider": "ollama",
         "family": "qwen2.5",
         "name": "Ollama Qwen2.5 7B",
@@ -96,7 +96,7 @@ BUILTIN_CATALOG: list[dict[str, Any]] = [
                  "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
     },
     {
-        "id": "ollama/qwen2.5:14b",
+        "id": "ollama_chat/qwen2.5:14b",
         "provider": "ollama",
         "family": "qwen2.5",
         "name": "Ollama Qwen2.5 14B",
@@ -108,7 +108,7 @@ BUILTIN_CATALOG: list[dict[str, Any]] = [
                  "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
     },
     {
-        "id": "ollama/qwen2.5:32b",
+        "id": "ollama_chat/qwen2.5:32b",
         "provider": "ollama",
         "family": "qwen2.5",
         "name": "Ollama Qwen2.5 32B",
@@ -120,7 +120,7 @@ BUILTIN_CATALOG: list[dict[str, Any]] = [
                  "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
     },
     {
-        "id": "ollama/codellama:latest",
+        "id": "ollama_chat/codellama:latest",
         "provider": "ollama",
         "family": "codellama",
         "name": "Ollama CodeLlama",
@@ -132,7 +132,7 @@ BUILTIN_CATALOG: list[dict[str, Any]] = [
                  "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
     },
     {
-        "id": "ollama/llama3.1:latest",
+        "id": "ollama_chat/llama3.1:latest",
         "provider": "ollama",
         "family": "llama3.1",
         "name": "Ollama Llama 3.1",
@@ -144,7 +144,7 @@ BUILTIN_CATALOG: list[dict[str, Any]] = [
                  "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
     },
     {
-        "id": "ollama/mistral:latest",
+        "id": "ollama_chat/mistral:latest",
         "provider": "ollama",
         "family": "mistral",
         "name": "Ollama Mistral",
@@ -156,7 +156,7 @@ BUILTIN_CATALOG: list[dict[str, Any]] = [
                  "cache_read_per_1m": 0.0, "cache_write_per_1m": 0.0},
     },
     {
-        "id": "ollama/olmo-3:7b",
+        "id": "ollama_chat/olmo-3:7b",
         "provider": "ollama",
         "family": "olmo-3",
         "name": "Ollama OLMo 3 7B",

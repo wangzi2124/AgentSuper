@@ -31,6 +31,7 @@ from models.router import reset_request_model, set_request_model
 from execution.filesystem import reset_allowed_roots, set_allowed_roots
 
 from ..deps import PlatformContext, get_context, initial_state
+from ..skills.slash import apply_slash_skill
 from ..image_processor import enrich_image_files
 
 router = APIRouter(prefix="/chat", tags=["compat"])
@@ -45,6 +46,7 @@ _HEARTBEAT_SEC = 12
 
 # 平台图节点 → 前端 agent 标识/展示名
 _NODE_AGENT = {
+    "filter": ("build", "build"),
     "plan": ("plan", "plan"),
     "rag": ("build", "build"),
     "memory_recall": ("build", "build"),
@@ -247,6 +249,11 @@ async def _graph_events(
                 except StopAsyncIteration:
                     break
                 for node, update in (chunk or {}).items():
+                    # [面板整合] supervisor 是编排节点，其步骤与 plan/build 重复，
+                    # 且从不发 agent_done（旧逻辑跳过）→ 面板永久「运行中」。直接不作为
+                    # 独立 Agent 面板下发，只保留真正干活的 plan/build（各自会收到 agent_done）。
+                    if node == "supervisor":
+                        continue
                     agent_id, agent_name = _NODE_AGENT.get(node, (node, node))
                     if agent_id not in seen:
                         seen.append(agent_id)
@@ -271,14 +278,13 @@ async def _graph_events(
                     }
                     _track_agent_event(agents_map, step_ev)
                     yield step_ev
-                    if agent_id != "supervisor":
-                        done_ev = {
-                            "type": "agent_done",
-                            "agent_id": agent_id,
-                            "agent_name": agent_name,
-                        }
-                        _track_agent_event(agents_map, done_ev)
-                        yield done_ev
+                    done_ev = {
+                        "type": "agent_done",
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                    }
+                    _track_agent_event(agents_map, done_ev)
+                    yield done_ev
                 next_task = asyncio.ensure_future(agen.__anext__())
     finally:
         if not next_task.done():
@@ -397,10 +403,12 @@ async def multi_agent_stream(
                     snap_begin = snapshot_begin(ctx.vfs)
                     before_usage = await _current_usage(ctx, sess.id)
                     state = initial_state(
-                        turn_question,
+                        # `/技能名`：本轮强制加载技能正文（找不到/未启用则原样发送）
+                        apply_slash_skill(turn_question, getattr(ctx, "skill_loader", None))[0],
                         user_id,
                         files=turn_files if turn_user_msg_id == user_msg_id else None,
                         model=sess.model,
+                        use_vector_db=bool(body.use_vector_db),
                     )
                     async for ev in _graph_events(ctx, sess, state, seen, cancel, agents_map):
                         yield _sse(ev)
@@ -416,8 +424,14 @@ async def multi_agent_stream(
                     cost = float(usage.get("cost", 0.0) or 0.0)
                     _accumulate_session_usage(ctx, sess.id, usage)
 
-                    # 原子认领下一个排队任务（后来居上）→ 决定 done 还是 turn_done
-                    nxt = sess.prompts.pop() if sess.prompts else None
+                    # 原子认领下一个排队任务（后来居上）→ 决定 done 还是 turn_done。
+                    # [停止即终态] 用户在回合中按了停止：不再认领排队任务，直接收尾为
+                    # done —— 否则会发 turn_done 后 break、缺一个终态 done，前端读到干净
+                    # 断流却因未收到终态事件而误判为 network 错误（横幅卡「运行中」/误触发重试）。
+                    if cancel.is_set():
+                        nxt = None
+                    else:
+                        nxt = sess.prompts.pop() if sess.prompts else None
                     is_final = nxt is None
                     ctx.sessions.update(sess.id, status="idle", title=sess.title)
 
@@ -515,6 +529,7 @@ async def multi_agent(
                 session_id=sess.id,
                 user_id=user_id,
                 files=await enrich_image_files(body.files),
+                use_vector_db=bool(body.use_vector_db),
             )
         finally:
             reset_permission_hook(token)

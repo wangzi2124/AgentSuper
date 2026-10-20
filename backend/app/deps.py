@@ -176,6 +176,7 @@ def initial_state(
     *,
     files: list[Any] | None = None,
     model: str | None = None,
+    use_vector_db: bool = False,
 ) -> dict[str, Any]:
     """构造一轮的输入状态。
 
@@ -205,6 +206,14 @@ def initial_state(
         "sub_results": {},
         "draft_output": "",
         "final_output": "",
+        "context_compressed": False,
+        "rag_context": "",
+        "rag_done": False,
+        "use_vector_db": bool(use_vector_db),
+        # §13.4.3 单轮字段：每轮重置，避免上一轮的「相关/已改写」污染本轮。
+        "rag_relevant": False,
+        "rewrite_count": 0,
+        "rewritten_query": "",
     }
 
 
@@ -531,6 +540,8 @@ class PlatformContext:
     queue_counter: int = 0
     # 审批桥接：非 None 时替代 PermissionManager 决策（测试/自定义）
     permission_hook: Callable[..., Any] | None = None
+    # 技能加载器（斜杠命令 / `load_skill_*` 工具）；None = 未接线
+    skill_loader: Any | None = None
 
     def __post_init__(self) -> None:
         if self.semaphore is None:
@@ -566,14 +577,22 @@ class PlatformContext:
         session_id: str,
         user_id: str = "anonymous",
         files: list[Any] | None = None,
+        use_vector_db: bool = False,
     ) -> dict[str, Any]:
         """执行一轮问答，返回最终状态（不含 BaseMessage 原始对象）。"""
+        # `/技能名`：本轮强制加载技能正文（找不到/未启用则原样发送）
+        from .skills.slash import apply_slash_skill
+
+        question, _skill = apply_slash_skill(question, self.skill_loader)
         token = set_allowed_roots(self.allowed_roots_for(session_id))
         model = self.session_model(session_id)
         model_token = set_request_model(model)
         try:
             result = await self.graph.ainvoke(
-                initial_state(question, user_id, files=files, model=model),
+                initial_state(
+                    question, user_id, files=files, model=model,
+                    use_vector_db=use_vector_db,
+                ),
                 config={"configurable": {"thread_id": session_id}},
             )
         finally:
@@ -589,10 +608,17 @@ class PlatformContext:
         session_id: str,
         user_id: str = "anonymous",
         files: list[Any] | None = None,
+        use_vector_db: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         """逐节点流式执行，产出 `{event, node, data}` 事件。"""
+        # `/技能名`：本轮强制加载技能正文（找不到/未启用则原样发送）
+        from .skills.slash import apply_slash_skill
+
+        question, _skill = apply_slash_skill(question, self.skill_loader)
         model = self.session_model(session_id)
-        state = initial_state(question, user_id, files=files, model=model)
+        state = initial_state(
+            question, user_id, files=files, model=model, use_vector_db=use_vector_db
+        )
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))
         model_token = set_request_model(model)
@@ -974,6 +1000,7 @@ def build_context(
     sessions: SessionStore | None = None,
     metrics: MetricsRecorder | None = None,
     checkpointer: Any = None,
+    skill_loader: Any | None = None,
 ) -> PlatformContext:
     """构建运行时上下文（默认装配 default_registry + 主图）。
 
@@ -984,9 +1011,23 @@ def build_context(
         registry, vfs = default_registry(vfs)
     elif vfs is None:
         vfs = VirtualFileSystem()
+
+    # 技能接线（1+2）：已启用技能 → `load_skill_*` 工具（模型自发现）；
+    # 技能清单并入 system prompt；`/技能名` 由 ctx.run/stream 在轮次入口强制加载。
+    skills_catalog_text = ""
+    if skill_loader is not None:
+        from .skills.tools import make_skill_tools, skills_catalog
+
+        for fn, name, desc in make_skill_tools(skill_loader):
+            try:
+                registry.register_function(fn, name=name, description=desc, scope="global")
+            except ValueError:  # 与内置工具重名：保留内置
+                logger.warning("skill tool name conflict, skipped: %s", name)
+        skills_catalog_text = skills_catalog(skill_loader)
+
     graph = build_main_graph(
         model=model, registry=registry, vfs=vfs, retrieve=retrieve, reranker=reranker,
-        checkpointer=checkpointer,
+        checkpointer=checkpointer, skills_catalog=skills_catalog_text,
     )
     # 并发上限统一读 Settings（与 session.db 连接池 sizing 同源）；
     # 此前直接 os.environ.get("MAX_CONCURRENT_AGENTS") 会造成双真相源漂移。
@@ -1006,6 +1047,7 @@ def build_context(
         approvals=ApprovalQueue(),
         max_concurrent=max_concurrent,
         max_queue_size=max_queue_size,
+        skill_loader=skill_loader,
     )
 
 

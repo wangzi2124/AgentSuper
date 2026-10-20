@@ -85,3 +85,24 @@ async def test_needs_rag_routes_through_rag_node(tmp_path):
     )
     out = await run_agent("[NEED_RAG] 退款政策", graph=graph, thread_id="t4")
     assert out["final_output"]
+
+
+@pytest.mark.asyncio
+async def test_use_vector_db_triggers_retrieval(tmp_path):
+    """勾选「知识库检索」→ 无需 [NEED_RAG] 哨兵也走 rag 节点并注入上下文。"""
+    calls = []
+
+    def retrieve(query, top_k):
+        calls.append(query)
+        return [{"content": "退款 7 天内", "score": 0.9}]
+
+    model = ScriptedModel([ChatResult(content="退款 7 天", finish_reason="stop")])
+    graph = build_main_graph(
+        model=model, vfs=VirtualFileSystem(root=str(tmp_path)), retrieve=retrieve
+    )
+    out = await run_agent(
+        "退款政策是什么", graph=graph, thread_id="t5", use_vector_db=True
+    )
+    assert calls and "退款政策" in calls[0]
+    assert out["rag_context"] and "退款 7 天" in out["rag_context"]
+    assert out["final_output"]

@@ -7,10 +7,51 @@ const props = defineProps<{
   message: MultiAgentMessage
   routingStatus: string
   isLast: boolean
+  /** 本轮是否仍在执行中（父组件传 agent.loading && isLast）。
+   *  true = 展开显示 plan/build 等 Agent 面板与工具卡片（便于观看进度）；
+   *  false = 任务完成，折叠为「已思考（用时 X 秒）」一行，可点开查看。 */
+  running?: boolean
   /** [查看改动] 按需拉取该轮次 diff（由父组件注入 store.fetchMessageDiff，保持组件无 store 依赖）
    *  step 省略 = 整轮净 diff；传 step=N = 只看第 N 步（每 step 快照） */
   loadDiff?: (messageId: string, step?: number) => Promise<unknown>
 }>()
+
+// [思考折叠] 是否手动展开了「已思考」明细（仅完成态有意义；执行中恒展开）。
+const thoughtOpen = ref(false)
+// 完成态：折叠成一行可展开；出错态：始终展开（便于排查）。
+const collapsible = computed(() => !props.running && !props.message.isError)
+const hasAgents = computed(() => props.message.agents.length > 0)
+
+// 后端 agent_id → 中文展示名（agent_name 目前就是 build/plan 这类内部标识）。
+const AGENT_LABELS: Record<string, string> = {
+  build: '执行助手',
+  plan: '任务规划',
+  supervisor: '调度',
+  research: '研究助手',
+  code: '编码助手',
+  file: '文件助手',
+}
+function agentLabel(a: { agent_id: string; agent_name?: string }): string {
+  return AGENT_LABELS[a.agent_id] || a.agent_name || a.agent_id
+}
+
+// [思考中动态加载] 整轮执行期间常驻在顶部（与下方执行过程同时可见），
+// 直到最终答案开始产出（message.content 非空）才隐藏。
+const showThinking = computed(
+  () => !!props.running && !props.message.isError && !(props.message.content || '').trim(),
+)
+// 是否渲染 Agent 明细：执行中 / 出错 / 手动展开。
+// 与「思考中」并存：上方一行状态，下方实时执行过程。
+const showAgents = computed(
+  () => hasAgents.value && (!collapsible.value || thoughtOpen.value),
+)
+// 「已思考（用时 X 秒）」：累加各 Agent 步骤耗时（ms → 秒，向上取整，至少 1s）。
+const thoughtSeconds = computed(() => {
+  let ms = 0
+  for (const a of props.message.agents) for (const s of a.steps || []) ms += s.duration_ms || 0
+  return Math.max(1, Math.round(ms / 1000))
+})
+function toggleThought(): void { thoughtOpen.value = !thoughtOpen.value }
 
 const emit = defineEmits<{ undo: []; restore: [] }>()
 
@@ -87,9 +128,11 @@ async function copyPlanPath(): Promise<void> {
 
 // 单 Agent 路由时，最终答案与 Agent 面板内容完全一致，
 // 再渲染一遍会造成"两条最终答案"的重复。仅在内容有新增信息时才展示。
+// 但任务完成后 Agent 面板已隐藏 → 必须始终展示最终答案（作为唯一总结）。
 const showFinalAnswer = computed(() => {
   const content = props.message.content
   if (!content) return false
+  if (!showAgents.value) return true
   const agents = props.message.agents
   if (agents.length === 1 && agents[0].content && agents[0].content.trim() === content.trim()) {
     return false
@@ -112,9 +155,10 @@ function formatDuration(ms?: number): string {
 
 // 工具/步骤卡片标题（对齐 opencode BasicTool trigger 的子标题文案）
 function stepTitle(step: AgentStep): string {
+  // 图节点进度（无 tool_name）不展示 detail —— 那是原始 JSON，对用户无意义。
+  if (!step.tool_name) return ''
   if (step.detail) return step.detail
-  if (step.tool_name) return step.tool_name
-  return step.name
+  return step.tool_name
 }
 
 // 极简工具名展示（去掉 tool_ 前缀，对齐 opencode 工具名可读性）
@@ -123,10 +167,26 @@ function shortToolName(name?: string): string {
   return name.replace(/^plugin_[^_]+_/, '').replace(/^tool_/, '')
 }
 
-// 卡片标签：真实工具调用（带 tool_name）显示工具名；其余是模型的阶段步骤
-// （检索/重排/生成/探索…），显示「思考」，避免把生成/思考阶段误标成「工具」。
+// 图节点 → 中文阶段名（后台执行过程展示；替代原先直出的 plan/rag/execute 英文节点名）。
+const NODE_LABELS: Record<string, string> = {
+  filter: '识别意图',
+  plan: '任务规划',
+  rag: '知识库检索',
+  memory_recall: '记忆召回',
+  context_compress: '整理上下文',
+  execute_subagent: '执行任务',
+  parallel: '并行执行',
+  parallel_worker: '并行执行',
+  grade_docs: '评估检索结果',
+  rewrite: '改写查询',
+  synthesize: '汇总结果',
+  memory_store: '保存记忆',
+}
+
+// 卡片标签：真实工具调用显示工具名；图节点进度显示中文阶段名。
 function cardLabel(step: AgentStep): string {
-  return step.tool_name ? shortToolName(step.tool_name) : '思考'
+  if (step.tool_name) return shortToolName(step.tool_name)
+  return NODE_LABELS[step.name] || '处理中'
 }
 
 // 按输出顺序排列的展示部件：优先 parts（真实交错），否则组装 steps（含最终正文）
@@ -137,7 +197,7 @@ function orderedParts(agent: {
 }): AgentOutputPart[] {
   if (agent.parts && agent.parts.length > 0) return agent.parts
   // 回退：历史回放（服务端只存 steps+content）——
-  // 组装 [工具卡片…, 最终正文]，最大程度贴近 opencode 的"工具在前、答案收尾"。
+  // 组装 [执行步骤…, 最终正文]，保证「先出执行过程、再出答案」。
   const parts: AgentOutputPart[] = (agent.steps || []).map((s, i) => ({
     seq: i,
     kind: 'tool' as const,
@@ -159,24 +219,31 @@ function statusLabel(status: string): string {
 
 <template>
   <div class="response" :class="{ loading: isLast && !!routingStatus, error: message.isError }">
-    <!-- waiting for response -->
-    <div v-if="isLast && !routingStatus && !message.agents.length && !message.content && !message.isError" class="routing">
-      <span class="spinner"></span>
-      正在思考...
+    <!-- waiting for response：动态「思考中」三点加载（排队/路由/等首 token 均可见） -->
+    <div v-if="showThinking" class="thinking">
+      <span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="thinking-label">思考中<template v-if="routingStatus"> · {{ routingStatus }}</template></span>
     </div>
 
-    <!-- routing -->
-    <div v-if="isLast && routingStatus" class="routing">
-      <span class="spinner"></span>
-      {{ routingStatus }}
-    </div>
+    <!-- [思考折叠] 完成态：折叠为一行「已思考（用时 X 秒）」，点击展开/收起明细 -->
+    <button
+      v-if="collapsible && hasAgents"
+      type="button"
+      class="thought-toggle"
+      :class="{ open: thoughtOpen }"
+      @click="toggleThought"
+    >
+      <span class="tt-label">{{ message.isError ? '执行出错' : '已思考' }}</span>
+      <span class="tt-time" v-if="!message.isError">（用时 {{ thoughtSeconds }} 秒）</span>
+      <svg class="tt-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
 
-    <!-- per-agent panels -->
-    <div v-if="message.agents.length" class="agents">
+    <!-- per-agent panels：执行中 / 出错 / 手动展开时展示；完成态默认折叠 -->
+    <div v-if="showAgents" class="agents">
       <div v-for="a in message.agents" :key="a.agent_id" class="agent" :class="a.status">
         <div class="agent-h">
           <span class="avatar">{{ a.agent_avatar || '🤖' }}</span>
-          <span class="name">{{ a.agent_name }}</span>
+          <span class="name">{{ agentLabel(a) }}</span>
           <span class="badge" :class="a.status">{{ a.status === 'running' ? '● 运行中' : a.status === 'completed' ? '✓ 完成' : '✗ 失败' }}</span>
         </div>
 

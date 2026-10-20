@@ -1,48 +1,71 @@
-.response { font-size: 15px; line-height: 1.8; }
-.routing { display: flex; align-items: center; gap: 8px; padding: 10px 0; font-size: 13px; color: var(--text-secondary); }
+.response { font-size: 16px; line-height: 1.75; }
+.routing { display: flex; align-items: center; gap: 8px; padding: 10px 0; font-size: 14px; color: var(--text-secondary); }
 .spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* [思考中动态加载] 三点跳动 + 文案：发送后立即出现，直到首个可见输出（正文/步骤）产生 */
+.thinking { display: flex; align-items: center; gap: 8px; padding: 8px 0; font-size: 14px; color: var(--text-secondary); }
+.thinking-dots { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.thinking-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); opacity: .35; animation: thinking-bounce 1.2s infinite ease-in-out; }
+.thinking-dots i:nth-child(2) { animation-delay: .15s; }
+.thinking-dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes thinking-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: .35; }
+  40% { transform: translateY(-4px); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thinking-dots i { animation: none; opacity: .7; }
+}
 .text { white-space: normal; word-break: break-word; }
 
-/* Deep Space Agent 面板：玻璃卡片 + 左侧品牌光带 */
-.agents { display: flex; flex-direction: column; gap: 14px; }
+/* [思考折叠] 完成态：DeepSeek 式「已思考（用时 X 秒）」折叠行 */
+.thought-toggle {
+display: inline-flex;
+align-items: center;
+gap: 4px;
+margin: 2px 0 8px;
+padding: 4px 10px 4px 8px;
+border: 1px solid var(--border);
+border-radius: var(--radius-pill);
+background: var(--bg-subtle, color-mix(in srgb, var(--bg) 70%, transparent));
+color: var(--text-secondary);
+font-size: 13px;
+font-family: inherit;
+cursor: pointer;
+transition: border-color var(--duration) var(--ease), color var(--duration) var(--ease), background var(--duration) var(--ease);
+}
+.thought-toggle:hover { color: var(--text); border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); }
+.tt-label { font-weight: 600; }
+.tt-time { color: var(--text-muted); }
+.tt-chevron { flex-shrink: 0; transition: transform 0.2s var(--ease); color: var(--text-muted); }
+.thought-toggle.open .tt-chevron { transform: rotate(180deg); }
+
+/* Agent 面板：统一克制的卡片（弱化装饰光带，统一圆角/边框） */
+.agents { display: flex; flex-direction: column; gap: 10px; }
 .agent {
 position: relative;
-border: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
-border-radius: 16px;
-padding: 16px 18px 16px 22px;
-background: linear-gradient(135deg, color-mix(in srgb, var(--surface-elevated) 96%, var(--primary)), var(--surface-elevated));
-box-shadow: var(--shadow-sm), inset 0 1px 0 color-mix(in srgb, #fff 3%, transparent);
+border: 1px solid var(--border);
+border-radius: 12px;
+padding: 14px 16px;
+background: var(--surface-elevated);
 transition: border-color var(--duration) var(--ease), box-shadow var(--duration) var(--ease);
 }
-.agent::before {
-content: '';
-position: absolute;
-left: 0; top: 14px; bottom: 14px;
-width: 3px;
-border-radius: 0 3px 3px 0;
-background: linear-gradient(180deg, var(--primary), var(--accent));
-opacity: 0.6;
-transition: opacity var(--duration) var(--ease);
-}
+.agent::before { display: none; }
 .agent.running {
-border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
-box-shadow: var(--shadow), 0 0 26px color-mix(in srgb, var(--primary) 12%, transparent);
+border-color: color-mix(in srgb, var(--primary) 36%, var(--border));
 }
-.agent.running::before { opacity: 1; }
-.agent-h { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 15px; }
+.agent-h { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 14px; }
 .avatar {
-width: 30px; height: 30px;
-font-size: 15px;
-border-radius: 10px;
-background: color-mix(in srgb, var(--surface) 70%, var(--primary));
+width: 26px; height: 26px;
+font-size: 14px;
+border-radius: 8px;
+background: var(--surface);
 display: inline-flex; align-items: center; justify-content: center;
 flex-shrink: 0;
-border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent);
-box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 5%, transparent);
+border: 1px solid var(--border);
 }
 .name { font-weight: 600; color: var(--text); }
-.badge { font-size: 11.5px; padding: 3px 10px; border-radius: var(--radius-pill); margin-left: auto; font-weight: 600; letter-spacing: 0.02em; flex-shrink: 0; }
+.badge { font-size: 11px; padding: 2px 9px; border-radius: var(--radius-pill); margin-left: auto; font-weight: 600; letter-spacing: 0.02em; flex-shrink: 0; }
 .badge.running { background: var(--primary-glow); color: var(--primary); }
 .badge.completed { background: var(--success-soft); color: var(--success); }
 .badge.failed { background: var(--danger-soft); color: var(--danger); }
@@ -61,24 +84,23 @@ color: var(--text-secondary);
 .step-time { margin-left: auto; color: var(--text-secondary); font-size: 13px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .step-time.spinning { color: var(--primary); animation: spin 0.8s linear infinite; }
 /* 输出部件流：正文块按真实输出顺序交错渲染 */
-.o-parts { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 4px; }
+.o-parts { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 2px; }
 .o-text > *:first-child { margin-top: 0; }
 
-/* 极简工具卡片：对齐 opencode BasicTool trigger —— 无边框独立行，
-   工具名 + 子标题 + 耗时，点击不展开任何参数/结果细节 */
+/* 极简工具卡片：统一为克制的行内提示条（无边框重绘，仅浅底） */
 .o-tool {
 display: flex;
 align-items: center;
 gap: 8px;
-padding: 6px 10px;
+padding: 5px 10px;
 border-radius: 8px;
 font-size: 13px;
-background: color-mix(in srgb, var(--bg-subtle) 55%, transparent);
-border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+background: color-mix(in srgb, var(--bg-subtle) 60%, transparent);
+border: 1px solid transparent;
 transition: border-color var(--duration) var(--ease), background var(--duration) var(--ease);
 }
-.o-tool.running { background: color-mix(in srgb, var(--primary) 8%, transparent); border-color: color-mix(in srgb, var(--primary) 26%, transparent); }
-.o-tool.failed { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 24%, transparent); }
+.o-tool.running { background: color-mix(in srgb, var(--primary) 8%, transparent); border-color: color-mix(in srgb, var(--primary) 22%, transparent); }
+.o-tool.failed { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 22%, transparent); }
 .o-tool-icon { font-size: 12px; flex-shrink: 0; width: 12px; text-align: center; color: var(--text-secondary); }
 .o-tool-icon.completed { color: var(--success); }
 .o-tool-icon.failed { color: var(--danger); }
