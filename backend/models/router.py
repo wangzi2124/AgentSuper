@@ -73,6 +73,24 @@ LOCAL_OLLAMA_TIMEOUT = 300
 LOCAL_OLLAMA_MAX_TOKENS = 4096
 DEFAULT_MAX_RETRIES = 2
 
+COMPRESS_MODEL = "compress-model"
+
+
+def get_compress_model(max_tokens: int | None = 800):
+    """压缩专用模型（agent-1 §1.3）——独立 model_name 隔离成本，不走 smart-router。
+
+    代理模式（LITELLM_PROXY_URL）用别名 `compress-model` 由代理路由并计费；
+    直连模式回落 tier-simple（与既有行为一致），并可用 COMPRESS_MODEL 环境变量覆盖。
+    """
+    proxy = os.environ.get("LITELLM_PROXY_URL")
+    if proxy:
+        return TierModel(tier="auto", max_tokens=max_tokens)
+    env = os.environ.get("COMPRESS_MODEL")
+    if env:
+        return TierModel(tier="auto", max_tokens=max_tokens)
+    return get_model("simple", max_tokens=max_tokens)
+
+
 # finish_reason 归一化（对齐 opencode FinishReason 六值）
 FINISH_REASON_MAP: dict[str, str] = {
     "stop": "stop",

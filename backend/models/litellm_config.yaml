@@ -21,6 +21,11 @@ model_list:
       model: anthropic/claude-opus-5
       api_key: os.environ/ANTHROPIC_API_KEY
 
+  - model_name: compress-model
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
   - model_name: embedding
     litellm_params:
       model: openai/text-embedding-3-small

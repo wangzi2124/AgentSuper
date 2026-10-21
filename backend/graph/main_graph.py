@@ -125,8 +125,9 @@ def build_main_graph(
 
         if getattr(settings, "compress_model_enabled", True):
             try:
-                compress_model = get_model(
-                    "simple",
+                from models.router import get_compress_model
+
+                compress_model = get_compress_model(
                     max_tokens=getattr(settings, "compress_max_tokens", 800),
                 )
             except Exception as exc:  # noqa: BLE001 - 构造失败降级为规则截断
