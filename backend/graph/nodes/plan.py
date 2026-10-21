@@ -11,6 +11,7 @@ import logging
 import re
 from typing import Any, Callable
 
+from models.router import TierModel, resolve_model
 from prompts.loader import PromptLoader
 
 from ..tasks import KNOWN_AGENTS, is_explicit_empty_plan, parse_task_specs

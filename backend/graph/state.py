@@ -42,6 +42,10 @@ class AgentState(TypedDict, total=False):
     draft_output: str
     tool_rounds: int
     trace: list[dict[str, Any]]
+    # 模型切换相关（会话内换模型不丢上下文）
+    model_binding: dict[str, Any]
+    model_switch_log: list[dict[str, Any]]
+    pending_model_switch: str | None
 
 
 class SubAgentState(TypedDict, total=False):

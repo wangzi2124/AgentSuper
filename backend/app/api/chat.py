@@ -24,12 +24,11 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, description="用户输入")
-    session_id: str | None = Field(default=None, description="会话 id（兼容别名）")
-    thread_id: str | None = Field(
-        default=None, description="续跑线程 id；已存在则在该线程上继续（§10.8）"
-    )
+    session_id: str | None = Field(default=None, description="会话 id")
+    thread_id: str | None = Field(default=None, description="续跑线程 id")
     user_id: str = Field(default="anonymous")
     directory: str | None = Field(default=None, description="会话工作目录")
+    target_model: str | None = Field(default=None, description="会话内切换模型")
 
 
 @router.post("")

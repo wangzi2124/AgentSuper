@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from execution.tool_registry import ToolRegistry
-from models.router import TierModel
+from models.router import TierModel, resolve_model
 
 from .base import content_text, run_tool_loop
 
@@ -100,12 +100,21 @@ def _multimodal_user_content(state: dict[str, Any]) -> list[dict[str, Any]] | No
 
 
 def make_execute_node(
-    model: TierModel,
-    registry: ToolRegistry,
+    model: TierModel | None = None,
+    registry: ToolRegistry | None = None,
     system_prompt: str = "",
     scope: str | None = TOOL_SCOPE,
 ) -> Callable[[dict[str, Any]], Any]:
+    from models.router import resolve_model
+
+    _model = model
+    _registry = registry
+    _system_prompt = system_prompt
+
     async def execute_node(state: dict[str, Any]) -> dict[str, Any]:
+        model = _model if _model is not None else resolve_model(state, default_tier="medium")
+        registry = _registry
+        system_prompt = _system_prompt
         plan = [dict(t) for t in (state.get("task_plan") or [])]
         pending = [t for t in plan if t.get("status") != "done"]
         if not pending:

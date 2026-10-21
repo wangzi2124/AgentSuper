@@ -33,6 +33,7 @@ from .nodes import (
     make_supervisor_node,
     make_synthesize_node,
 )
+from .nodes.model_switch import make_model_switch_node
 from .routers import route_after_grade, route_after_plan, route_after_supervisor
 from .state import AgentState
 from .subagent import SUBAGENTS, make_runner, make_task_tool
@@ -192,6 +193,7 @@ def build_main_graph(
     # `"parallel"`，该节点是死接线；并行一律走 `Send → parallel_worker`。）
     builder.add_node("parallel_worker", make_parallel_worker_node(subagent_runner))
     builder.add_node("synthesize", make_synthesize_node(synthesize_model))
+    builder.add_node("model_switch", make_model_switch_node())
     builder.add_node("memory_store", make_memory_store_node(store))
 
     builder.set_entry_point("filter")
@@ -204,11 +206,12 @@ def build_main_graph(
             "rag": "rag",
             "recall": "memory_recall",
             "execute": "execute_subagent",
-            "compress": "context_compress",
-            "synthesize": "synthesize",
-            "end": END,
-        },
-    )
+        "compress": "context_compress",
+        "synthesize": "synthesize",
+        "end": END,
+        "switch_model": "model_switch",
+    },
+)
     builder.add_conditional_edges(
         "plan",
         route_after_plan,
@@ -225,6 +228,7 @@ def build_main_graph(
     builder.add_edge("execute_subagent", "supervisor")
     builder.add_edge("parallel_worker", "synthesize")
     builder.add_edge("context_compress", "supervisor")
+    builder.add_edge("model_switch", "supervisor")
     builder.add_edge("synthesize", "memory_store")
     builder.add_edge("memory_store", END)
 

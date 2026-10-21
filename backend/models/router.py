@@ -412,6 +412,20 @@ def get_model(tier: str = "auto", **kwargs: Any) -> TierModel:
     return TierModel(tier=tier, **kwargs)
 
 
+def resolve_model(state: dict[str, Any] | None = None, default_tier: str = "medium") -> TierModel:
+    """节点统一入口：优先用 State.model_binding，否则回落到默认 tier"""
+    if state and isinstance(state.get("model_binding"), dict):
+        binding = state["model_binding"]
+        tier = binding.get("tier") or default_tier
+        proxy = os.environ.get("LITELLM_PROXY_URL")
+        if proxy:
+            return TierModel(tier="auto")
+        if tier in TIER_MAP or tier in ("auto",):
+            return TierModel(tier=tier)
+        return TierModel(tier=default_tier)
+    return get_model(default_tier)
+
+
 def embed(texts: list[str], model: str | None = None) -> list[list[float]]:
     """向量化（对齐 agent.md RAG 管线使用的 `embedding` tier）。"""
     target = model or TIER_MAP["embedding"]

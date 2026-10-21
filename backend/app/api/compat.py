@@ -422,13 +422,15 @@ async def multi_agent_stream(
                     snap_begin = snapshot_begin(ctx.vfs)
                     before_usage = await _current_usage(ctx, sess.id)
                     state = initial_state(
-                        # `/技能名`：本轮强制加载技能正文（找不到/未启用则原样发送）
+                        # `/技能名`：本轮强制加载技能正文（找不到或未启用则原样发送）
                         apply_slash_skill(turn_question, getattr(ctx, "skill_loader", None))[0],
                         user_id,
                         files=turn_files if turn_user_msg_id == user_msg_id else None,
                         model=sess.model,
                         use_vector_db=bool(body.use_vector_db),
                     )
+                    if getattr(body, "target_model", None):
+                        state["pending_model_switch"] = body.target_model
                     async for ev in _graph_events(ctx, sess, state, seen, cancel, agents_map):
                         yield _sse(ev)
 

@@ -48,6 +48,9 @@ def _context_tokens(state: dict[str, Any]) -> int:
 def route_after_supervisor(state: dict[str, Any]) -> str:
     """Supervisor 根据当前状态决定下一步。"""
 
+    if state.get("pending_model_switch"):
+        return "switch_model"
+
     if state.get("iteration_count", 0) >= MAX_ITERATIONS:
         return "synthesize"
 
