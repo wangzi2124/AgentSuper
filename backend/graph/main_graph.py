@@ -26,7 +26,6 @@ from .nodes import (
     make_grade_node,
     make_memory_recall_node,
     make_memory_store_node,
-    make_parallel_node,
     make_parallel_worker_node,
     make_plan_node,
     make_rag_node,
@@ -48,6 +47,20 @@ def _default_execute_prompt() -> str:
         return PromptLoader().load("system/file_agent.md")
     except Exception:  # noqa: BLE001
         return "你是执行专家，使用提供的工具完成任务。"
+
+
+def _build_simple_grade_model() -> Any | None:
+    """为 grade/rewrite 构造 simple 档位模型（不依赖压缩开关）。
+
+    agent-2 §13.4.2 要求 grade/rewrite 用 tier-simple（二分类/改写是轻任务）。
+    独立于 `compress_model_enabled`，保证「关压缩」不影响「检索门禁」。
+    构造失败返回 None → grade 节点保守放行（`rag_relevant=True`），不阻塞主流程。
+    """
+    try:
+        return get_model("simple", max_tokens=256)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("grade/rewrite model build failed, pass-through: %s", exc)
+        return None
 
 
 def default_registry(
@@ -154,14 +167,17 @@ def build_main_graph(
     builder.add_node("supervisor", make_supervisor_node())
     builder.add_node("plan", make_plan_node(plan_model))
     builder.add_node("rag", make_rag_node(retrieve, reranker=reranker))
-    # §13.4：检索质量门禁 + 查询改写，均复用 tier-simple 的 compress-model
-    # （§13.4.2 明确「复用 §1.3 的 compress-model」，不额外新增模型成本）。
-    # ⚠ 与 plan_model 同样：仅在**未注入测试模型**时自动挂载 —— 否则脚本化
-    # FakeModel 的图会为每次检索偷偷调真实网络模型（集成测试不得联网）。
+    # §13.4：检索质量门禁 + 查询改写，复用 tier-simple 档位（§13.4.2「复用 §1.3 的
+    # compress-model」指的是**模型档位**，不是压缩开关）。此前二者直接取 `compress_model`，
+    # 而 `compress_model_enabled=False` 时 `compress_model` 为 None → grade/rewrite 被静默
+    # 关掉（RAG 质量门禁失效）。此处独立构造：优先复用 compress_model，其次自建 simple
+    # 档位，保证「关压缩」不影响「检索门禁」。
+    # ⚠ 与 plan_model 同样：仅在**未注入测试模型**时自动挂载 —— 否则脚本化 FakeModel
+    # 的图会为每次检索偷偷调真实网络模型（集成测试不得联网）。
     if grade_model is None and not _injected_model:
-        grade_model = compress_model
+        grade_model = compress_model or _build_simple_grade_model()
     if rewrite_model is None and not _injected_model:
-        rewrite_model = compress_model
+        rewrite_model = compress_model or _build_simple_grade_model()
     builder.add_node("grade_docs", make_grade_node(grade_model))
     builder.add_node("rewrite", make_rewrite_node(rewrite_model))
     builder.add_node("memory_recall", make_memory_recall_node(store))
@@ -170,8 +186,9 @@ def build_main_graph(
         "execute_subagent",
         make_execute_node(model, registry, system_prompt, scope=DEFAULT_TOOL_SCOPE),
     )
-    builder.add_node("parallel", make_parallel_node(subagent_runner, max_concurrency=max_concurrency))
     # Send 动态扇出 worker（§2.3）：route_after_plan 逐个 Send 到本节点并发执行。
+    # （旧静态三路 `parallel` 节点/边已删除 —— `route_after_plan` 从不返回字符串
+    # `"parallel"`，该节点是死接线；并行一律走 `Send → parallel_worker`。）
     builder.add_node("parallel_worker", make_parallel_worker_node(subagent_runner))
     builder.add_node("synthesize", make_synthesize_node(synthesize_model))
     builder.add_node("memory_store", make_memory_store_node(store))
@@ -194,7 +211,7 @@ def build_main_graph(
     builder.add_conditional_edges(
         "plan",
         route_after_plan,
-        {"parallel": "parallel", "execute_subagent": "execute_subagent"},
+        {"execute_subagent": "execute_subagent"},
     )
     builder.add_edge("rag", "grade_docs")
     builder.add_conditional_edges(
@@ -205,7 +222,6 @@ def build_main_graph(
     builder.add_edge("rewrite", "rag")
     builder.add_edge("memory_recall", "execute_subagent")
     builder.add_edge("execute_subagent", "supervisor")
-    builder.add_edge("parallel", "synthesize")
     builder.add_edge("parallel_worker", "synthesize")
     builder.add_edge("context_compress", "supervisor")
     builder.add_edge("synthesize", "memory_store")

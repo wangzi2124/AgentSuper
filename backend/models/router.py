@@ -124,12 +124,14 @@ def _ensure_provider(model: str, api_base: str | None) -> str:
 
 
 def _is_ollama_model(model: str) -> bool:
-    """判断模型 ID 是否为 Ollama 模型（支持 ollama/ 和 ollama_chat/ 前缀）。
+    """判断模型 ID 是否为 Ollama 模型。
 
-    ollama_chat/ 是 LiteLLM 推荐的前缀，可正确处理工具调用；
-    ollama/ 是旧前缀，流式工具调用有已知问题。
+    规范实现收敛在 `models/catalog.py:is_ollama_model`（避免两处前缀判断漂移）；
+    此处惰性委派，规避 `router → catalog` 的模块级循环导入。
     """
-    return model.startswith("ollama/") or model.startswith("ollama_chat/")
+    from .catalog import is_ollama_model
+
+    return is_ollama_model(model)
 
 
 # 公共别名：既有调用方（app/agent/graphmod/generate.py、models/__init__.py）使用无下划线名。

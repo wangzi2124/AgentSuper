@@ -22,18 +22,12 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 
-from .usage import merge_usage
+from .usage import merge_dicts as _merge_dict, merge_usage
 
 logger = logging.getLogger(__name__)
 
 WORKER_AGENTS: tuple[str, ...] = ("research", "code", "file")
 DEFAULT_MAX_CONCURRENCY = 3
-
-
-def _merge_dict(old: dict[str, Any] | None, new: dict[str, Any] | None) -> dict[str, Any]:
-    merged = dict(old or {})
-    merged.update(new or {})
-    return merged
 
 
 def _concat_text(old: str | None, new: str | None) -> str:

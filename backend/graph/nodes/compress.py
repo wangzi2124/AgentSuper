@@ -85,9 +85,11 @@ def make_compress_node(
                 summary = res.content or existing
             except Exception:  # noqa: BLE001
                 summary = existing or "(压缩调用失败，保留最近消息)"
-            # 精确值回填（§1.5）：纯规则确定性补齐，模型忘了也能补回来。
-            summary = enforce_precision(summary, older)
             count += 1
+
+        # 精确值回填（§1.5）：纯规则、零 LLM 成本、**每次压缩后**都执行（不只是 LLM
+        # 分支）——走规则截断时 older 同样被丢弃，若不回填则路径/命令/数字一并丢失。
+        summary = enforce_precision(summary, older)
 
         payload: dict[str, Any] = {
             "context_summary": summary,

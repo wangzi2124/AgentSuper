@@ -129,3 +129,18 @@ async def test_node_skips_model_when_disabled():
     out = await node({"messages": older + recent, "compress_count": 0})
     assert out["context_compressed"] is True
     assert out.get("compress_count", 0) == 0
+
+
+async def test_node_backfills_precision_on_rule_path():
+    """§1.5：精确值回填是「每次压缩后」的确定性保证 —— 门禁失败走规则截断时
+    精确值（路径/命令/数字）同样会随 older 被丢弃，必须回填，不能只补 LLM 分支。"""
+    model = _CaptureModel()  # C1 失败 → 不调模型，走规则截断
+    node = make_compress_node(model, keep_recent=2)
+    older = [HumanMessage(content="端口 8080 路径 /a/b.txt version 3")]
+    recent = [HumanMessage(content="最近1"), HumanMessage(content="最近2")]
+    out = await node({"messages": older + recent, "compress_count": 0})
+    assert model.calls == 0  # 未调模型（规则路径）
+    summary = out["context_summary"]
+    assert "精确值补充" in summary
+    assert "8080" in summary and "/a/b.txt" in summary
+

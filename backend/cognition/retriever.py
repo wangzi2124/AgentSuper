@@ -25,12 +25,18 @@ def _tokenize(text: str) -> list[str]:
 
 
 class HybridRetriever:
-    """把既有检索器适配为认知层统一契约。"""
+    """把既有检索器适配为认知层统一契约。
+
+    `score_threshold` 默认 `0.35`（agent-2 §13.3.1 签名，与 `cognition/rag.py`
+    的 `DEFAULT_THRESHOLD` 一致）。⚠ 该阈值作用在**归一化相似度**上（本适配器的 base
+    返回 cos/rerank 分数，∈[0,1]）；RRF 融合分（`~1/60`）走的是另一条
+    `HybridSearchRetriever` 路径，不受此默认值影响。
+    """
 
     def __init__(
         self,
         base: Any | None = None,
-        score_threshold: float = 0.0,
+        score_threshold: float = 0.35,
         fallback: "BM25Retriever | None" = None,
     ) -> None:
         self.base = base
