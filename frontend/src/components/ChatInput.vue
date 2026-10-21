@@ -520,7 +520,8 @@ function autoResize() {
   el.style.height = clamped + 'px'
 }
 
-// ── [/ 命令面板] 输入框以 `/` 开头（且未输入空格）→ 弹出技能 / 插件列表 ──
+// ── [/ 命令面板] 输入 `/`（行首/空白后，命令名尚未选定）→ 弹出技能 / 插件列表 ──
+// 三种顺序均弹出：先描述再补 `/`、先 `/` 再描述、只输入 `/`；描述含空格不关闭面板。
 // 交互：按名字实时过滤；↑/↓ 选择；Enter 填入；点条目看完整详情（正文可能被截断）。
 type SlashItem = {
   key: string
@@ -539,13 +540,47 @@ const slashDetail = ref<SlashItem | null>(null)
 const slashDetailBody = ref('')
 const slashDetailLoading = ref(false)
 
-// 仅在「正在输入命令名」时打开：`/` 或 `/novel`；一旦出现空白（说明命令已选定）就收起。
+// 触发位置：最后一个「位于行首或空白之后」的 `/`，其后允许继续输入含空格的业务描述。
+// 三种输入顺序均触发：先描述后在前面补 `/`、先 `/` 后描述、只输入 `/`。
+// 仅行首/空白后触发 → 排除 URL（https://x/y）、词内路径（a/b）等误触发。
+const slashTrigger = computed(() => {
+  const v = text.value
+  if (!v) return -1
+  for (let i = v.length - 1; i >= 0; i--) {
+    if (v[i] !== '/') continue
+    const prev = i > 0 ? v[i - 1] : ''
+    if (prev && !/\s/.test(prev)) continue
+    if (v[i + 1] === '/') continue // `//` 不触发
+    return i
+  }
+  return -1
+})
+// `/` 之后的剩余文本；首个空白前的一段是「命令名候选」，其后是业务描述（可含空格）
+const slashRest = computed(() => {
+  const i = slashTrigger.value
+  return i >= 0 ? text.value.slice(i + 1) : ''
+})
+// 命令已选定 → 收起面板：已输入空白分隔，且首段是已加载的技能/插件名（`/` 后直接跟空白也视为选定）
+const slashChosen = computed(() => {
+  const rest = slashRest.value
+  const sp = rest.search(/\s/)
+  if (sp < 0) return false
+  const token = rest.slice(0, sp)
+  if (!token) return true
+  return slashLoaded.value && slashItems.value.some((it) => it.name === token)
+})
+// 打开：存在触发 `/` 且命令尚未选定（描述里的空格不再关闭面板）
 const slashOpen = computed(() => {
   if (props.loading || slashDismissed.value) return false
-  const v = text.value
-  return v.startsWith('/') && v.length > 0 && !/\s/.test(v)
+  if (slashTrigger.value < 0) return false
+  return !slashChosen.value
 })
-const slashQuery = computed(() => (slashOpen.value ? text.value.slice(1).trim().toLowerCase() : ''))
+// 筛选用词：只取 `/` 后首段（业务描述的空格部分不参与过滤，避免整句匹配不到而空列表）
+const slashQuery = computed(() => {
+  const rest = slashRest.value
+  const sp = rest.search(/\s/)
+  return (sp < 0 ? rest : rest.slice(0, sp)).trim().toLowerCase()
+})
 const slashFiltered = computed(() => {
   const q = slashQuery.value
   if (!q) return slashItems.value
@@ -611,9 +646,11 @@ function slashUseDetail() {
   if (slashDetail.value) slashUse(slashDetail.value)
 }
 
-// 填入输入框（保留斜杠前缀，后接空格表示命令已选定 → 面板自然收起）
+// 填入输入框（在触发的 `/` 处替换，保留前缀文字；后接空格表示命令已选定 → 面板自然收起）
 function slashUse(item: SlashItem) {
-  text.value = `/${item.name} `
+  const i = slashTrigger.value
+  const prefix = i >= 0 ? text.value.slice(0, i) : ''
+  text.value = `${prefix}/${item.name} `
   slashDetail.value = null
   nextTick(() => {
     autoResize()

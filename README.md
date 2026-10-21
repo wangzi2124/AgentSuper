@@ -134,7 +134,7 @@ metadata: {is_dialogue: true, speaker: "张三", dialogue: "你好吗？"}
 | **向量检索** | 语义理解，找"意思相近" | 开放式问题、概括性查询 |
 | **BM25 关键词** | 精确匹配，找"字面相同" | 章节名、人名、术语等事实查询 |
 
-两者通过 **RRF（Reciprocal Rank Fusion）** 算法融合，权重向量 0.7 + BM25 0.3。
+两者通过 **RRF（Reciprocal Rank Fusion）** 算法融合：`score = Σ 1/(k + rank)`（k=60），**纯 RRF、不加两路权重** —— 排名靠前的结果自然获得更高融合分，无需调权重。
 
 **多路台词召回** — 检索时额外执行一路台词锚点搜索（`where={"is_dialogue": true}`），与主路径结果经 RRF 融合（台词权重 0.4），确保角色台词不被正文淹没。
 

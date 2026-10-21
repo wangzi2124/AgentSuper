@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     plan_max_fanout_calls: int = 2
     # 扇出前要求的本会话剩余预算（¥，§2.4 C1）。
     plan_fanout_min_budget: float = 0.20
+    # 本会话总预算（¥，§2.4 C1）——剩余预算 = 本值 − 累计 `token_usage.cost`。
+    # 之前 production 路径从不设置 `budget_total`，`_remaining_budget` 恒返回 0，
+    # 扇出门禁 C1 永久为假 → 并行扇出在生产不可达（仅测试能触发）。
+    # 0（默认）表示不设会话预算：此时门禁按「未知预算」保守拒绝扇出。
+    session_budget: float = 0.0
 
     # ── 语音 / TTS（本地 Qwen3-TTS 子进程，无外部 HTTP 接口调用）──
     # 目录固定为 backend/ttsclone（不配置路径）；模型不自动下载，

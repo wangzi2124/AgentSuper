@@ -127,8 +127,6 @@ class BM25Retriever:
 # 由 `app.rag.retriever` 迁入（算法逐字保留，仅将基础设施改为鸭子类型注入）。
 # 旧导入路径 `app.rag.retriever.Retriever` 现再导出本类，故 RAGAgent 的
 # retrieve seam 已由认知层接管，不改变其对外契约。
-VECTOR_WEIGHT = 0.7
-BM25_WEIGHT = 0.3
 DIALOGUE_WEIGHT = 0.4
 
 
@@ -151,7 +149,11 @@ def _reciprocal_rank_fusion(
     bm25_results: List[Tuple[dict, float]],
     k: int = 60,
 ) -> List[Tuple[dict, float]]:
-    """使用倒数排名融合（RRF）合并向量搜索和 BM25 搜索结果。"""
+    """使用倒数排名融合（RRF）合并向量搜索和 BM25 搜索结果。
+
+    agent-2 §13.3.1：`score(d) = Σ 1/(k + rank_i(d))`，k=60。**纯 RRF、不加两路权重**
+    —— 排名靠前的结果自然获得更高融合分，无需调权重（D12 明确选择纯 RRF 而非"加权融合"）。
+    """
     scores: dict[str, float] = {}
     docs: dict[str, dict] = {}
 
@@ -159,14 +161,14 @@ def _reciprocal_rank_fusion(
         key = _doc_key(doc)
         if key not in docs:
             docs[key] = doc
-        scores[key] = VECTOR_WEIGHT * (1.0 / (rank + k))
+        scores[key] = 1.0 / (rank + k)
 
     for rank, (doc, _) in enumerate(bm25_results):
         key = _doc_key(doc)
         if key not in docs:
             docs[key] = doc
             scores[key] = 0
-        scores[key] += BM25_WEIGHT * (1.0 / (rank + k))
+        scores[key] += 1.0 / (rank + k)
 
     ranked = sorted(
         [(docs[k2], v) for k2, v in scores.items() if v > 0],

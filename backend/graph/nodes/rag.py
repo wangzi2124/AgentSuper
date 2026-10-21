@@ -17,6 +17,8 @@ from typing import Any, Callable
 
 from langchain_core.messages import SystemMessage
 
+from .base import content_text
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOP_K = 5
@@ -29,8 +31,9 @@ GRADE_CONTEXT_CHARS = 2000
 def _last_user_text(state: dict[str, Any]) -> str:
     for msg in reversed(state.get("messages") or []):
         if getattr(msg, "type", None) in ("human", "user"):
-            content = getattr(msg, "content", "")
-            return content if isinstance(content, str) else str(content)
+            # 多模态 content 是分块数组（image_url 块含 base64）——必须走 content_text，
+            # `str(content)` 会把整个 base64 灌进检索查询（base.py:123-128）。
+            return content_text(getattr(msg, "content", ""))
     return ""
 
 

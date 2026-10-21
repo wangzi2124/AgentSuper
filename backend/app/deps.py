@@ -197,7 +197,13 @@ def initial_state(
     if payload:
         msg.additional_kwargs["files"] = payload
 
-    return {
+    # §2.4 C1：会话预算须真实下发，否则扇出门禁 `_remaining_budget` 恒为 0 →
+    # 并行扇出在生产永久不可达。未配置（<=0）时不下发该字段，门禁按「未知预算」拒绝。
+    from config import settings
+
+    budget_total = float(getattr(settings, "session_budget", 0.0) or 0.0)
+
+    state: dict[str, Any] = {
         "messages": [msg],
         "iteration_count": 0,
         "user_id": user_id,
@@ -215,6 +221,9 @@ def initial_state(
         "rewrite_count": 0,
         "rewritten_query": "",
     }
+    if budget_total > 0:
+        state["budget_total"] = budget_total
+    return state
 
 
 @dataclass
