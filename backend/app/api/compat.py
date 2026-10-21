@@ -220,7 +220,7 @@ async def _graph_events(
     # 只写进会话元数据、不参与调用（改 key/换模型都不生效的根因）。
     model_token = set_request_model(getattr(sess, "model", None))
     agen = ctx.graph.astream(
-        state, config={"configurable": {"thread_id": sess.id}}, stream_mode="updates"
+        state, config={"configurable": {"thread_id": sess.id}}, stream_mode=["updates", "messages"]
     ).__aiter__()
     next_task = asyncio.ensure_future(agen.__anext__())
     try:
@@ -248,6 +248,25 @@ async def _graph_events(
                     chunk = next_task.result()
                 except StopAsyncIteration:
                     break
+                if isinstance(chunk, tuple) and len(chunk) == 2:
+                    mode, payload = chunk
+                    if mode == "messages":
+                        msg_chunk, meta = payload
+                        content = getattr(msg_chunk, "content", None)
+                        if content:
+                            if isinstance(content, str) and content:
+                                yield {"type": "text_delta", "agent_id": "", "delta": content}
+                            elif isinstance(content, list):
+                                for part in content:
+                                    if isinstance(part, str) and part:
+                                        yield {"type": "text_delta", "agent_id": "", "delta": part}
+                                    elif isinstance(part, dict):
+                                        text = part.get("text") or part.get("content")
+                                        if isinstance(text, str) and text:
+                                            yield {"type": "text_delta", "agent_id": "", "delta": text}
+                        next_task = asyncio.ensure_future(agen.__anext__())
+                        continue
+                    chunk = payload if isinstance(payload, dict) else {}
                 for node, update in (chunk or {}).items():
                     # [面板整合] supervisor 是编排节点，其步骤与 plan/build 重复，
                     # 且从不发 agent_done（旧逻辑跳过）→ 面板永久「运行中」。直接不作为
