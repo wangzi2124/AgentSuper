@@ -26,17 +26,28 @@ from langchain_core.messages import AIMessage
 
 import app.deps as deps
 from app.deps import ModelSwitchError, PlatformContext
+from config import settings
 from execution.filesystem import VirtualFileSystem
 from graph.main_graph import build_main_graph
 from models.router import get_model
 
-_L4_ENABLED = os.environ.get("L4_MODEL_SWITCH", "").lower() in {"1", "true", "yes"}
-MODEL_A = os.environ.get("L4_MODEL_A", "").strip()
-MODEL_B = os.environ.get("L4_MODEL_B", "").strip()
+
+def _setting(name: str, default: str = "") -> str:
+    """优先 shell 环境变量，其次 backend/.env（Settings extra="allow"）。"""
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        extra = getattr(settings, name.lower(), None)
+        value = "" if extra is None else str(extra)
+    return value.strip() or default
+
+
+_L4_ENABLED = _setting("L4_MODEL_SWITCH").lower() in {"1", "true", "yes"}
+MODEL_A = _setting("L4_MODEL_A")
+MODEL_B = _setting("L4_MODEL_B")
 
 
 def _model_pairs() -> list[tuple[str, str]]:
-    raw = os.environ.get("L4_MODEL_PAIRS", "").strip()
+    raw = _setting("L4_MODEL_PAIRS")
     pairs: list[tuple[str, str]] = []
     if raw:
         for item in raw.replace(",", ";").split(";"):

@@ -18,12 +18,22 @@ from harness.delimiters import NAME_OPEN
 from harness.tool_adapter import ToolAdapter
 from models.router import TierModel
 
+_REAL_ENABLED = str(
+    os.environ.get("HARNESS_REAL_TEST")
+    or getattr(settings, "harness_real_test", "")
+    or ""
+).strip().lower() in {"1", "true", "yes"}
+
 pytestmark = pytest.mark.skipif(
-    os.environ.get("HARNESS_REAL_TEST") != "1",
+    not _REAL_ENABLED,
     reason="真实模型测试默认跳过（设置 HARNESS_REAL_TEST=1 开启）",
 )
 
-MODEL = os.environ.get("HARNESS_REAL_MODEL") or "deepseek/deepseek-v4-flash"
+MODEL = (
+    os.environ.get("HARNESS_REAL_MODEL")
+    or str(getattr(settings, "harness_real_model", "") or "")
+    or "deepseek/deepseek-v4-flash"
+)
 TOKEN = "REAL-HARNESS-7788"
 
 
