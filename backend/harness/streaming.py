@@ -128,12 +128,17 @@ class StreamToolCallParser:
 
 
 class PreludeSuppressor:
-    """原生路径前置文本抑制器（保留尾部窗口，防止标记被切断）。"""
+    """原生路径前置文本抑制器。
+
+    在检测到内嵌 JSON 调用标记前先缓冲，避免把解释性文本推给用户；
+    超过 ``max_buffer`` 字符仍无标记则整段放行（长回答不被无限延迟）。
+    """
 
     _MARKERS = ('{"name":', '[{"name":')
 
-    def __init__(self) -> None:
+    def __init__(self, max_buffer: int = 512) -> None:
         self._buf = ""
+        self._max = max(1, int(max_buffer))
         self._decided = False
 
     def feed(self, chunk: str) -> str:
@@ -144,20 +149,11 @@ class PreludeSuppressor:
             self._decided = True
             self._buf = ""
             return ""
-        keep = self._partial_marker_len()
-        if len(self._buf) <= keep:
+        if len(self._buf) < self._max:
             return ""
-        cut = len(self._buf) - keep
-        out, self._buf = self._buf[:cut], self._buf[cut:]
+        self._decided = True
+        out, self._buf = self._buf, ""
         return out
-
-    def _partial_marker_len(self) -> int:
-        best = 0
-        for marker in self._MARKERS:
-            for k in range(1, len(marker)):
-                if self._buf.endswith(marker[:k]):
-                    best = max(best, k)
-        return best
 
     def finalize(self) -> str:
         if self._decided:

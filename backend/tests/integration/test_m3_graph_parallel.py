@@ -105,5 +105,8 @@ async def test_task_tool_delegates_end_to_end(tmp_path):
     )
     out = await run_agent("让代码专家处理", graph=graph, thread_id="m3d1")
     assert out["final_output"] == "委派完成"
-    # first model call is execute with tools (including task)
-    assert main.calls[0]["tools"]
+    # 回退模式下首轮把工具定义注入提示词（task 必须可用）
+    prompt = "\n".join(
+        str(m.get("content", "")) for m in main.calls[0]["messages"]
+    )
+    assert "task" in prompt

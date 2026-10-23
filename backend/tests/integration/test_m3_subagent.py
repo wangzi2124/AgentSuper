@@ -55,9 +55,11 @@ async def test_run_subagent_restricts_tools(tmp_path):
     model = FakeModel("研究结论")
     out = await run_subagent(SUBAGENTS["research"], "查一下", registry=reg, model=model)
     assert out["text"] == "研究结论"
-    tool_names = {t["function"]["name"] for t in model.calls[0]["tools"]}
-    assert "dangerous_tool" not in tool_names
-    assert "read_file" in tool_names
+    prompt = "\n".join(
+        str(m.get("content", "")) for m in model.calls[0]["messages"]
+    )
+    assert "dangerous_tool" not in prompt
+    assert "read_file" in prompt
 
 
 @pytest.mark.asyncio

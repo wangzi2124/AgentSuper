@@ -162,7 +162,7 @@ def _dict_to_call(item: Any) -> HarnessToolCall | None:
 
 
 def _to_tool_call(call: HarnessToolCall) -> Any:
-    from models.router import ToolCall
+    from models.types import ToolCall
 
     return ToolCall(
         id=f"harness-{uuid.uuid4().hex[:12]}",

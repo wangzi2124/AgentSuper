@@ -196,14 +196,16 @@ async def test_malformed_tool_args_repaired():
 
 
 class _AlwaysJsonModel:
-    """每轮（带工具时）都输出工具调用 JSON；仅无工具的收尾调用给纯文本。"""
+    """每轮都输出工具调用 JSON；仅无工具的收尾调用给纯文本。"""
 
     def __init__(self) -> None:
         self.tier = "fake"
         self.final_calls: list = []
+        self.calls = 0
 
     async def ainvoke(self, messages, *, tools=None, **kwargs):
-        if tools:
+        self.calls += 1
+        if self.calls <= MAX_TOOL_ROUNDS:
             return ChatResult(content=_TOOL_JSON, finish_reason="stop")
         self.final_calls.append(tools)
         return ChatResult(content="兜底后的最终答案", finish_reason="stop")

@@ -15,6 +15,7 @@ from config import settings
 from execution.tool_registry import ToolRegistry
 from graph.nodes.base import run_tool_loop
 from harness.delimiters import NAME_OPEN
+from harness.tool_adapter import ToolAdapter
 from models.router import TierModel
 
 pytestmark = pytest.mark.skipif(
@@ -57,7 +58,7 @@ async def test_real_native_tool_call(monkeypatch):
     monkeypatch.delenv("HARNESS_TOOL_MODE", raising=False)
     model = TierModel(tier="auto", timeout=120)
     monkeypatch.setattr(model, "_direct_model", lambda: MODEL)
-    result = await model.ainvoke(
+    result = await ToolAdapter(model).complete(
         [
             {
                 "role": "system",

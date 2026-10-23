@@ -44,8 +44,9 @@ async def test_simple_task_no_subagent_calls(tmp_path):
     out = await run_agent("1+1=?", graph=graph, thread_id="t1")
     assert out["final_output"] == "2"
     assert out["iteration_count"] <= 3
-    # 简单任务不应产生工具调用（无 tools 传入即纯 QA）
-    assert model.calls[0]["tools"]
+    # 未声明原生能力的模型走文本回退：工具定义以提示词注入，而非 tools 参数
+    prompt = "\n".join(str(m.get("content", "")) for m in model.calls[0]["messages"])
+    assert "You have access to the following tools:" in prompt
 
 
 @pytest.mark.asyncio

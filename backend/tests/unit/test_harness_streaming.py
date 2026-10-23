@@ -62,7 +62,7 @@ def test_plain_stream_text_is_flushed():
 
 def test_native_prelude_suppressed_when_marker_appears():
     s = PreludeSuppressor()
-    assert s.feed("我先解释一下" * 20) != ""
+    assert s.feed("我先解释一下") == ""
     assert s.feed('前置文本 {"name": "tool_x", "arguments": {}}') == ""
     assert s.finalize() == ""
 
@@ -75,5 +75,12 @@ def test_native_prelude_flushed_without_marker():
 
 def test_native_prelude_holds_partial_marker():
     s = PreludeSuppressor()
-    assert s.feed("abcdefgh" + '{"name"') == "abcdefgh"
-    assert s.finalize() == '{"name"'
+    assert s.feed("abcdefgh" + '{"name"') == ""
+    assert s.finalize() == 'abcdefgh{"name"'
+
+
+def test_native_long_text_flushes_without_marker():
+    s = PreludeSuppressor(max_buffer=10)
+    assert s.feed("12345") == ""
+    assert s.feed("67890abc") == "1234567890abc"
+    assert s.finalize() == ""

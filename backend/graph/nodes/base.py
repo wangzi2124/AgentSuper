@@ -294,12 +294,16 @@ async def run_tool_loop(
     scope: str | None = None,
     max_rounds: int = MAX_TOOL_ROUNDS,
     agent_id: str = "build",
+    adapter: Any | None = None,
 ) -> dict[str, Any]:
     """LLM 工具调用循环，返回 {text, rounds, tool_trace, usage}。
 
-    `agent_id` 用于 part 事件归属（主 Agent = build，子 Agent = 各自名字），
-    前端按 `step_id` 把 tool_start/tool_end 原位更新成一条工具 part。
+    模型差异全部收敛在 Harness 的 `ToolAdapter`：本循环只消费标准
+    ``tool_calls``。`agent_id` 用于 part 事件归属（主 Agent = build）。
     """
+    from harness.tool_adapter import get_tool_adapter
+
+    tool_adapter = adapter or get_tool_adapter(model)
     tool_defs = build_tool_defs(registry, scope)
     convo = [dict(m) for m in messages]
     roots_note = _authorized_roots_note()
@@ -313,7 +317,7 @@ async def run_tool_loop(
 
     while rounds < max_rounds:
         with trace_span("llm.call", rounds=rounds):
-            result = await model.ainvoke(convo, tools=tool_defs or None)
+            result = await tool_adapter.complete(convo, tool_defs or None)
         rounds += 1
         label = model.model_name() if hasattr(model, "model_name") else model.tier
         usage_total = merge_usage(usage_total, usage_from_result(result, label))
@@ -438,7 +442,7 @@ async def run_tool_loop(
         convo.append({"role": "user", "content": _FINAL_ROUND_NUDGE})
     try:
         with trace_span("llm.call", rounds=rounds, final=True):
-            final = await model.ainvoke(convo, tools=None)
+            final = await tool_adapter.complete(convo, None)
         rounds += 1
         label = model.model_name() if hasattr(model, "model_name") else model.tier
         usage_total = merge_usage(usage_total, usage_from_result(final, label))

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from harness.delimiters import NAME_OPEN, parse_tool_calls
+from harness.tool_adapter import ToolAdapter
 from models.router import TierModel, reset_request_model, set_request_model
 
 TOOLS = [
@@ -67,7 +68,7 @@ async def test_native_history_works_after_switch_to_fallback_model(monkeypatch):
 
     token = set_request_model("native-model")
     try:
-        first = await model.ainvoke(
+        first = await ToolAdapter(model).complete(
             [
                 {"role": "system", "content": "sys"},
                 {"role": "user", "content": "读 a.txt"},
@@ -106,7 +107,7 @@ async def test_native_history_works_after_switch_to_fallback_model(monkeypatch):
 
     token = set_request_model("fallback-model")
     try:
-        second = await model.ainvoke(history, tools=TOOLS)
+        second = await ToolAdapter(model).complete(history, tools=TOOLS)
     finally:
         reset_request_model(token)
 

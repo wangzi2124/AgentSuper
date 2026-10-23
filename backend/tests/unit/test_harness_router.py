@@ -36,102 +36,46 @@ def _model(monkeypatch, mode, endpoint_model="fake-model"):
 
 
 @pytest.mark.asyncio
-async def test_fallback_call_injects_prompt_and_parses(monkeypatch):
+async def test_raw_ainvoke_is_transport_only(monkeypatch):
     captured = {}
 
     async def fake(**kwargs):
         captured.update(kwargs)
-        return _response(
-            f"我来回显。\n{NAME_OPEN}tool_echo{NAME_CLOSE}\n"
-            f'{ARGS_OPEN}{{"text": "hi"}}{ARGS_CLOSE}'
-        )
+        return _response("raw")
 
     monkeypatch.setattr("litellm.acompletion", fake)
     model = _model(monkeypatch, "fallback")
 
-    result = await model.ainvoke([{"role": "user", "content": "go"}], tools=TOOLS)
-
-    assert "tools" not in captured
-    system_text = captured["messages"][0]["content"]
-    assert "tool_echo" in system_text and "ꊰ▸function_name◂ꊰ" in system_text
-    assert result.tool_calls[0].name == "tool_echo"
-    assert json.loads(result.tool_calls[0].arguments) == {"text": "hi"}
-    assert result.content == "我来回显。"
-
-
-@pytest.mark.asyncio
-async def test_native_keeps_tools_and_normalizes_history(monkeypatch):
-    captured = {}
-
-    async def fake(**kwargs):
-        captured.update(kwargs)
-        return _response("ok")
-
-    monkeypatch.setattr("litellm.acompletion", fake)
-    model = _model(monkeypatch, "native")
-
-    result = await model.ainvoke(
-        [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{"name": "tool_echo", "arguments": {"text": "x"}}],
-            },
-            {"role": "tool", "tool_call_id": "", "content": "done"},
-            {"role": "user", "content": "继续"},
-        ],
+    result = await model.raw_ainvoke(
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"}],
         tools=TOOLS,
     )
 
+    # 传输层不做提示词注入、不丢弃 tools（适配由 ToolAdapter 负责）
     assert captured["tools"] == TOOLS
-    assert captured["messages"][0]["tool_calls"][0]["function"]["arguments"] == '{"text": "x"}'
-    # 孤儿 tool 消息被文本化，不会让厂商 400
-    assert captured["messages"][1]["role"] == "user"
-    assert result.content == "ok"
+    assert captured["messages"][0]["content"] == "sys"
+    assert result.content == "raw"
 
 
 @pytest.mark.asyncio
-async def test_fallback_bad_json_kept_for_repair(monkeypatch):
-    async def fake(**kwargs):
-        return _response(
-            f"{NAME_OPEN}tool_echo{NAME_CLOSE}\n{ARGS_OPEN}not-json{ARGS_CLOSE}"
-        )
+async def test_raw_stream_is_transport_only(monkeypatch):
+    captured = {}
 
-    monkeypatch.setattr("litellm.acompletion", fake)
-    model = _model(monkeypatch, "fallback")
-    result = await model.ainvoke([{"role": "user", "content": "go"}], tools=TOOLS)
-    assert result.tool_calls[0].arguments == "not-json"
-
-
-@pytest.mark.asyncio
-async def test_stream_fallback_filters_delimiters_and_emits_calls(monkeypatch):
-    text = (
-        "稍等。"
-        f"{NAME_OPEN}tool_echo{NAME_CLOSE}\n"
-        f'{ARGS_OPEN}{{"text": "hi"}}{ARGS_CLOSE}'
-    )
-
-    async def fake_stream_chat(messages, *, on_text=None, **kwargs):
-        assert kwargs.get("tools") is None
-        for piece in (text[:3], text[3:11], text[11:]):
-            if on_text is not None:
-                on_text(piece)
-        return StreamResult(content=text, tool_calls=None, finish_reason="stop")
+    async def fake_stream_chat(messages, **kwargs):
+        captured["messages"] = messages
+        captured.update(kwargs)
+        return StreamResult(content="ok", tool_calls=None, finish_reason="stop")
 
     monkeypatch.setattr("models.stream.stream_chat", fake_stream_chat)
     model = _model(monkeypatch, "fallback")
-    seen: list[str] = []
 
-    result = await model.astream(
-        [{"role": "user", "content": "go"}],
-        tools=TOOLS,
-        on_text=seen.append,
+    result = await model.raw_stream(
+        [{"role": "system", "content": "sys"}], tools=TOOLS
     )
 
-    assert "".join(seen) == "稍等。"
-    assert result.content == "稍等。"
-    assert result.tool_calls[0].name == "tool_echo"
-    assert json.loads(result.tool_calls[0].arguments) == {"text": "hi"}
+    assert captured["tools"] == TOOLS
+    assert captured["messages"][0]["content"] == "sys"
+    assert result.content == "ok"
 
 
 @pytest.mark.asyncio
