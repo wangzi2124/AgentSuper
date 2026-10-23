@@ -588,6 +588,43 @@ class SessionStore:
         return existed
 
 
+_PERMISSION_PATH_KEYS = ("path", "file", "workdir", "directory", "target")
+_PERMISSION_PATH_LIST_KEYS = ("paths", "files")
+
+
+def _permission_path_args(args: dict[str, Any]) -> list[str]:
+    """收集工具参数里所有可能是文件路径的值（单值 + 列表）。"""
+    found: list[str] = []
+    for key in _PERMISSION_PATH_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            found.append(value.strip())
+    for key in _PERMISSION_PATH_LIST_KEYS:
+        value = args.get(key)
+        if isinstance(value, (list, tuple)):
+            found.extend(
+                str(item).strip()
+                for item in value
+                if isinstance(item, str) and item.strip()
+            )
+    unique: list[str] = []
+    for item in found:
+        if item not in unique:
+            unique.append(item)
+    return unique
+
+
+def _permission_operation(tool: str) -> str:
+    """按工具名推断审批操作类型（read / write / execute / tool）。"""
+    if tool in {"read_file", "ls", "grep", "glob"}:
+        return "read"
+    if tool in {"write_file", "edit_file", "append_file", "delete_file", "apply_patch"}:
+        return "write"
+    if tool in {"shell_exec", "execute"}:
+        return "execute"
+    return "tool"
+
+
 @dataclass
 class PlatformContext:
     """平台运行时上下文。"""
@@ -601,8 +638,6 @@ class PlatformContext:
     subagents: dict[str, Any] = field(default_factory=lambda: dict(SUBAGENTS))
     # 轮次快照：assistant 消息 id → restore descriptor（供 restore-snapshot / diff）
     snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
-    # 会话级已审批外部路径：回合开始时并入允许根（跨回合/轮次快照均生效）
-    approved_roots: dict[str, list[str]] = field(default_factory=dict)
     # 在途回合取消标志（interrupt 置位；compat 流循环每步检查）
     cancels: dict[str, asyncio.Event] = field(default_factory=dict)
     # 并发闸门（对齐 MAX_CONCURRENT_AGENTS）：超出并发时 SSE 发 `queued`
@@ -1147,12 +1182,15 @@ class PlatformContext:
         }
 
     def allowed_roots_for(self, session_id: str) -> list[str]:
-        """本会话允许写入/读取的额外根：会话目录 + 用户「工作目录」面板（PermissionManager）。
+        """本会话免审的路径根：会话工作目录 + 用户额外工作区 + 持久白名单。
 
-        沙箱默认根（`VirtualFileSystem.root`）不在此列（始终允许）。前端「工作目录」
-        面板经 `/api/permission/workspaces` 落到 `PermissionManager.extra_workspaces`，
-        此处把它接入平台 VFS —— 使面板配置对平台聊天真正生效（此前仅旧引擎读取）。
-        无 `app` 子系统时（独立平台/tests）退化为仅会话目录。
+        严格对齐「只有工作目录 workspace 和白名单免审」：
+        - 会话目录（opencode `ctx.directory`，前端「会话工作目录」）
+        - 用户经「工作目录」面板添加的额外工作区
+        - 「允许并记住」写入的持久白名单
+        程序主工作区（backend/ 源码目录）**不再**默认并入 —— 它不是当前会话的
+        工作目录；用户若确实以它为工作目录，会话目录会单独带入。临时审批通过的
+        外部路径也只在本回合上下文生效，不跨回合沉淀（跨回合免审必须走白名单）。
         """
         roots: list[str] = []
         sess = self.sessions.get(session_id)
@@ -1162,31 +1200,11 @@ class PlatformContext:
             from execution.permission import get_manager
 
             mgr = get_manager()
-            roots.extend(mgr.list_workspaces())
+            roots.extend(mgr.list_extra_workspaces())
             roots.extend(mgr.list_whitelist())
         except Exception:  # noqa: BLE001
             pass
-        roots.extend(self.approved_roots.get(session_id, ()))
         return roots
-
-    def remember_approved_root(self, session_id: str, path: str) -> None:
-        """记住本会话已审批通过的外部路径（跨回合允许根，去重）。
-
-        审批发生在图任务上下文里，`add_allowed_root` 只就地更新该上下文的 contextvar，
-        不会传播回请求级（轮次快照 / 后续回合的读写）—— 故在 `PlatformContext` 上按会话
-        留档，由 `allowed_roots_for`（回合开始时经 `set_allowed_roots` 注入）统一并入。
-        """
-        if not path:
-            return
-        try:
-            from pathlib import Path
-
-            norm = str(Path(path).expanduser().resolve())
-        except (OSError, RuntimeError, ValueError):
-            norm = path
-        roots = self.approved_roots.setdefault(session_id, [])
-        if norm not in roots:
-            roots.append(norm)
 
     async def state(self, session_id: str) -> dict[str, Any]:
         snap = await self.graph.aget_state({"configurable": {"thread_id": session_id}})
@@ -1486,11 +1504,15 @@ class PlatformContext:
     ) -> bool:
         """发起一次工具审批（§9 `execution/approval.py` 高危审批流）。
 
-        免审规则（与 `PermissionManager` 语义对齐）：
-        - 路径类工具：沙箱根 / 会话目录 / 「工作目录」面板 / 持久白名单内的路径直接
-          放行；越界按 `EXTERNAL_PATH_DEFAULT`（ask/allow/deny）处理 —— ask 时弹审批。
-        - `shell_exec`：命令白名单 / 临时命令授权命中直接放行；否则按
-          `EXTERNAL_PATH_DEFAULT` 处理（ask 时弹审批）。路径免审**不能**绕过命令审批。
+        严格免审规则（需求：**只有工作目录 workspace 和持久白名单免审**）：
+        - 路径类工具：仅「会话工作目录 / 用户额外工作区 / 持久白名单 / VFS 沙箱根」
+          内的路径直接放行；其余路径**一律人工审批**，不受 `EXTERNAL_PATH_DEFAULT`
+          的 allow/deny 影响。
+        - 敏感路径（`.git` / `.env*` / `*.db` / `permissions.json`）即使位于工作目录
+          内也不静默放行：读取需审批，写入/执行直接拒绝。
+        - `shell_exec`：base 命令白名单只决定命令本身；命令里引用的绝对路径 / `~` /
+          显式相对路径、以及 `workdir` 越界时仍须人工审批（防止 `cat D:\\secret`）。
+        - 无路径参数的高危工具（MCP 等）：一律人工审批。
 
         - 规范机制：`ctx.approvals`（`ApprovalQueue`）登记审批请求，是本平台权威记录。
         - 前端传输：复用既有 `/api/permission/*`（`app.permission.PermissionManager`）
@@ -1505,62 +1527,62 @@ class PlatformContext:
                 await self.permission_hook(session_id=session_id, tool=tool, args=args, emit=emit)
             )
 
-        raw_path = args.get("path") or args.get("file") or args.get("workdir")
         command = str(args.get("command") or "").strip()
+        raw_paths = _permission_path_args(args)
 
         legacy = None
+        command_keys = None
         try:  # pragma: no cover - 依赖既有 app 子系统
-            from execution.permission import command_keys, get_manager
+            from execution.permission import command_keys as _command_keys, get_manager
 
+            command_keys = _command_keys
             legacy = get_manager()
         except Exception:  # noqa: BLE001
-            command_keys = None  # type: ignore[assignment]
             legacy = None
 
         default_decision = getattr(legacy, "external_default", "ask") if legacy else "ask"
 
+        operation = "tool"
+        approval_path = tool
         keys: list[str] = []
+
         if command:
             keys = command_keys(command) if command_keys is not None else []
-            if legacy is not None:
-                if keys:
-                    decisions = [legacy.check_command(key) for key in keys]
-                    if all(decision == "allow" for decision in decisions):
-                        return True
-                    if any(decision == "deny" for decision in decisions):
-                        return False
-                elif default_decision == "allow":
-                    return True
-                elif default_decision == "deny":
+            outside = self._command_external_paths(
+                command, str(args.get("workdir") or ""), legacy
+            )
+            if legacy is not None and keys:
+                decisions = [legacy.check_command(key) for key in keys]
+                if any(decision == "deny" for decision in decisions):
                     return False
-            else:
-                if default_decision == "allow":
+                # 命令本身在白名单内，但命令**访问的路径**越界 → 仍须人工审批
+                if all(decision == "allow" for decision in decisions) and not outside:
                     return True
-                if default_decision == "deny":
-                    return False
-            operation = "command"
-            path = keys[0] if keys else command[:80]
-        else:
-            # 沙箱/允许根内路径免审批（对齐 opencode external_directory ask：仅越界才询问）
-            if raw_path and self.vfs.is_allowed(str(raw_path)):
-                return True
-            if default_decision == "allow":
-                return True
-            if default_decision == "deny":
+            if default_decision == "deny" and not outside:
                 return False
-            path = str(raw_path) if raw_path else tool
-            if tool in {"read_file", "ls", "grep", "glob"}:
-                operation = "read"
-            elif tool in {"write_file", "edit_file", "append_file", "delete_file"}:
-                operation = "write"
-            else:
+            operation = "command"
+            approval_path = outside[0] if outside else (keys[0] if keys else command[:80])
+        else:
+            if not raw_paths:
+                # 无路径参数的高危工具（MCP 等）：没有可判定的免审路径 → 人工审批
+                approval_path = tool
                 operation = "tool"
+            else:
+                operation = _permission_operation(tool)
+                decisions = [
+                    (p, self._path_decision(p, operation, legacy)) for p in raw_paths
+                ]
+                if any(decision == "deny" for _, decision in decisions):
+                    return False
+                if all(decision == "allow" for _, decision in decisions):
+                    return True
+                approval_path = next(p for p, decision in decisions if decision == "ask")
 
         rid = await self.approvals.request(tool, args, requester=session_id)
 
         if legacy is not None:
             req = legacy.create_request(
-                path=path,
+                path=approval_path,
                 operation=operation,
                 tool_name=tool,
                 tool_args=args,
@@ -1587,9 +1609,11 @@ class PlatformContext:
                     # 由 `PermissionManager.respond(remember=True)` 写持久白名单。
                     for key in keys:
                         legacy.add_temp_command_approval(key)
-                elif raw_path:
-                    add_allowed_root(str(raw_path))
-                    self.remember_approved_root(session_id, str(raw_path))
+                elif not command:
+                    # 仅在本回合图任务上下文内就地放行（不跨回合沉淀）。
+                    # 跨回合免审必须由用户点「允许并记住」写入持久白名单。
+                    for p in raw_paths:
+                        add_allowed_root(str(p))
             return allowed
 
         from execution.approval import APPROVAL_TIMEOUT_SEC
@@ -1598,7 +1622,7 @@ class PlatformContext:
             {
                 "type": "permission_request",
                 "request_id": rid,
-                "path": path,
+                "path": approval_path,
                 "operation": operation,
                 "tool_name": tool,
                 "tool_args": args,
@@ -1607,10 +1631,80 @@ class PlatformContext:
             }
         )
         allowed = await self.approvals.await_decision(rid) == "approved"
-        if allowed and raw_path:
-            add_allowed_root(str(raw_path))
-            self.remember_approved_root(session_id, str(raw_path))
+        if allowed and not command:
+            for p in raw_paths:
+                add_allowed_root(str(p))
         return allowed
+
+    def _abs_for_permission(self, path_str: str) -> Any:
+        """把工具参数路径解析为绝对路径（相对路径按 VFS 根解析，与文件工具一致）。"""
+        from pathlib import Path
+
+        p = Path(str(path_str)).expanduser()
+        if not p.is_absolute():
+            p = Path(self.vfs.root) / p
+        try:
+            return p.resolve()
+        except (OSError, RuntimeError):
+            return p
+
+    def _path_decision(self, path_str: str, operation: str, legacy: Any) -> str:
+        """单个路径的严格决策：allow（工作目录/白名单）/ ask（其他）/ deny（受保护）。"""
+        from execution.permission import is_git_path, is_sensitive_path
+
+        resolved = self._abs_for_permission(path_str)
+        if is_git_path(str(resolved)):
+            return "deny"
+        if legacy is not None:
+            try:
+                if legacy.classify_path(str(resolved)) == "system":
+                    return "deny"
+            except Exception:  # noqa: BLE001
+                pass
+        if is_sensitive_path(str(resolved)):
+            if operation == "read":
+                return "ask"
+            return "deny" if operation in ("write", "execute") else "ask"
+        if self.vfs.is_allowed(str(resolved)):
+            return "allow"
+        return "ask"
+
+    def _command_external_paths(
+        self, command: str, workdir: str, legacy: Any
+    ) -> list[str]:
+        """命令里引用的、不在工作目录/白名单内的路径（用于强制人工审批）。"""
+        from pathlib import Path
+
+        from execution.permission import command_path_tokens
+
+        base = Path(self.vfs.root)
+        wd = Path(workdir).expanduser() if workdir else base
+        if not wd.is_absolute():
+            wd = base / wd
+        try:
+            wd = wd.resolve()
+        except (OSError, RuntimeError):
+            pass
+
+        candidates: list[str] = []
+        if workdir:
+            candidates.append(str(wd))
+        for token in command_path_tokens(command):
+            p = Path(token).expanduser()
+            if not p.is_absolute():
+                p = wd / p
+            try:
+                p = p.resolve()
+            except (OSError, RuntimeError):
+                continue
+            candidates.append(str(p))
+
+        outside: list[str] = []
+        for candidate in candidates:
+            if self._path_decision(candidate, "execute", legacy) != "allow":
+                outside.append(candidate)
+        return outside
+
 
 
 def build_context(

@@ -112,6 +112,94 @@ def base_command(command: str) -> str:
     return _first_token(text) if text else ""
 
 
+_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+_WIN_ABS_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_DEVICE_FILES = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/zero"}
+_REDIRECT_PREFIXES = ("2>>", "1>>", "2>", "1>", ">>", ">")
+
+
+def _strip_command_token(token: str) -> str:
+    """去掉重定向前缀 / 包裹引号 / 尾部标点，取出候选路径本体。"""
+    t = token.strip()
+    for prefix in _REDIRECT_PREFIXES:
+        if t.startswith(prefix):
+            t = t[len(prefix) :]
+            break
+    t = t.strip().strip("'\"").rstrip(",;")
+    # `--opt=/abs/path` / `NAME=C:\path`：取等号右侧
+    if "=" in t and not _WIN_ABS_RE.match(t):
+        left, _, right = t.partition("=")
+        if right and left and not left.startswith("="):
+            t = right.strip().strip("'\"")
+    return t
+
+
+def _looks_like_path(token: str) -> bool:
+    """粗判一个 token 是否指向文件系统（避免把普通参数/URL 当路径）。"""
+    if not token or _URL_RE.match(token):
+        return False
+    if token in _DEVICE_FILES:
+        return False
+    if _WIN_ABS_RE.match(token) or token.startswith("\\\\"):
+        return True
+    if token.startswith("~"):
+        return True
+    if token.startswith(("/", "./", "../", ".\\", "..\\")):
+        # Windows 单字母开关（如 `dir /S`）不是路径
+        if token.startswith("/") and len(token) <= 3 and token[1:].isalpha():
+            return False
+        return True
+    # 含分隔符的相对路径（`src/main.py`、`dir\file.txt`）
+    return "/" in token or "\\" in token
+
+
+def command_path_tokens(command: str) -> list[str]:
+    """从命令行里提取**可能访问文件系统**的路径 token。
+
+    命令白名单只约束 base 命令（如 `cat`），无法阻止 `cat D:\\secret.txt`
+    读取工作区外文件。这里把绝对路径、`~`、显式相对路径（`./`、`../`、含分隔符）
+    抽出来，供审批层判断是否越界；普通参数/URL/Windows 开关会被忽略。
+    """
+    text = str(command or "")
+    out: list[str] = []
+    for match in _TOKEN.finditer(text):
+        raw = next((g for g in match.groups() if g is not None), "")
+        token = _strip_command_token(raw)
+        if _looks_like_path(token) and token not in out:
+            out.append(token)
+    return out
+
+
+def is_git_path(path_str: str) -> bool:
+    """路径任意层级含 `.git` → git 内部路径（读写一律拒绝）。"""
+    try:
+        p = Path(path_str).resolve()
+    except (OSError, RuntimeError):
+        p = Path(str(path_str))
+    return any(part.lower() == ".git" for part in p.parts)
+
+
+def is_sensitive_path(path_str: str) -> bool:
+    """密钥 / 数据库 / 权限配置：即使位于工作目录内也不得静默访问。
+
+    与 `PermissionManager._is_critical_read` 不同，这里按**绝对路径全名**判定，
+    因此会话工作目录、额外工作区内的 `.env` / `*.db` / `permissions.json` 同样
+    受保护（读取需审批、写入/执行直接拒绝）。
+    """
+    try:
+        p = Path(path_str).resolve()
+    except (OSError, RuntimeError):
+        p = Path(str(path_str))
+    if is_git_path(str(p)):
+        return True
+    name = p.name.lower()
+    if name.startswith(".env") or name.endswith(".env"):
+        return True
+    if name.endswith((".db", ".sqlite", ".sqlite3")):
+        return True
+    return name in ("permissions.json", "command_permissions.json")
+
+
 class NeedsPermission(Exception):
     """当文件操作需要用户授权时抛出的异常。"""
 
@@ -352,7 +440,7 @@ class PermissionManager:
 
     def _is_git_path(self, p: Path) -> bool:
         """路径任意层级含 .git（目录或 .git 文件）即为 git 内部路径，读写均拒绝。"""
-        return any(part.lower() == ".git" for part in p.parts)
+        return is_git_path(str(p))
 
     def _is_critical_read(self, p: Path) -> bool:
         """判断是否为禁止读取的敏感路径（密钥/数据库/凭据文件）。"""
@@ -515,6 +603,14 @@ class PermissionManager:
         """返回所有可写工作区（主工作区 + 额外工作区）的绝对路径。"""
         return [str(self.workspace), *(str(w) for w in self.extra_workspaces)]
 
+    def list_extra_workspaces(self) -> list[str]:
+        """仅返回用户经「工作目录」面板配置的额外工作区（不含程序主工作区）。
+
+        平台审批的免审范围只用这些目录 + 会话工作目录 + 持久白名单：程序主工作区
+        （backend/ 源码目录）本身不应因为「是主工作区」而自动放行。
+        """
+        return [str(w) for w in self.extra_workspaces]
+
     def list_whitelist(self) -> list[str]:
         """返回持久化路径白名单（「允许并记住」写入的绝对路径）。"""
         return list(self._whitelist)
@@ -607,8 +703,17 @@ class PermissionManager:
                 if key and key not in self._command_whitelist:
                     self._command_whitelist.add(key)
                     self._save_command_whitelist()
-            else:
-                self.add_whitelist(req.path)
+            elif req.operation in ("read", "write", "execute"):
+                # 只持久化真实的**绝对路径**：无路径参数的工具（path=tool 名）或
+                # 相对路径绝不能写进白名单，否则会得到 `.../write_file` 这类伪条目
+                # 并把一个不存在的相对路径当成授权根。
+                target = Path(str(req.path)).expanduser()
+                if target.is_absolute():
+                    self.add_whitelist(str(target))
+                else:
+                    logger.warning(
+                        "Skip remembering non-absolute permission path: %r", req.path
+                    )
         self._prune_pending_index(req)
         self.cleanup_expired()
         return True

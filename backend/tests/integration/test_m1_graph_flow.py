@@ -11,7 +11,27 @@ from langgraph.checkpoint.memory import MemorySaver
 from app.deps import initial_state
 from execution.filesystem import VirtualFileSystem
 from graph.main_graph import build_main_graph, run_agent
+from graph.nodes.base import reset_permission_hook, set_permission_hook
 from models.router import ChatResult, ToolCall
+
+
+@pytest.fixture
+def allow_tools():
+    """图测试直接跑工具循环：显式注入「全部批准」钩子。
+
+    生产路径由 API 层注入审批钩子；无钩子时高危工具按拒绝处理（安全默认），
+    因此需要执行文件工具的图测试必须显式声明放行。
+    """
+
+    async def _allow(tool, args):
+        return True
+
+    token = set_permission_hook(_allow)
+    try:
+        yield
+    finally:
+        reset_permission_hook(token)
+
 
 
 class ScriptedModel:
@@ -83,7 +103,7 @@ async def test_followup_turn_does_not_reuse_stale_sub_results(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_read_write_edit_end_to_end(tmp_path):
+async def test_read_write_edit_end_to_end(tmp_path, allow_tools):
     model = ScriptedModel(
         [
             _tool_call("write_file", {"path": "a.txt", "content": "hello"}),
@@ -100,7 +120,7 @@ async def test_read_write_edit_end_to_end(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tool_loop_bounded_on_endless_tool_calls(tmp_path):
+async def test_tool_loop_bounded_on_endless_tool_calls(tmp_path, allow_tools):
     # 全程返回工具调用，验证工具循环有硬上限、不挂起
     infinite = [_tool_call("ls", {"path": "."}) for _ in range(20)]
     model = ScriptedModel(infinite)
@@ -108,6 +128,22 @@ async def test_tool_loop_bounded_on_endless_tool_calls(tmp_path):
     out = await run_agent("永远列目录", graph=graph, thread_id="t3")
     assert out["iteration_count"] <= 25
     assert "最大工具轮数" in out["final_output"]
+
+
+@pytest.mark.asyncio
+async def test_high_risk_tool_denied_without_permission_hook(tmp_path):
+    """无审批钩子时高危工具必须拒绝，不能静默放行（安全默认）。"""
+    model = ScriptedModel(
+        [
+            _tool_call("write_file", {"path": "a.txt", "content": "leak"}),
+            ChatResult(content="未获授权，未写入", finish_reason="stop"),
+        ]
+    )
+    graph = build_main_graph(model=model, vfs=VirtualFileSystem(root=str(tmp_path)))
+    out = await run_agent("写入 a.txt", graph=graph, thread_id="t_no_hook")
+    assert not (tmp_path / "a.txt").exists()
+    followup = "\n".join(str(m.get("content", "")) for m in model.calls[-1]["messages"])
+    assert "已拒绝执行工具 write_file" in followup
 
 
 @pytest.mark.asyncio

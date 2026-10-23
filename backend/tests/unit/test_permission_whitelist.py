@@ -91,3 +91,58 @@ def test_read_and_shell_tools_require_approval(tmp_path):
         td = registry.get(name)
         assert td is not None, name
         assert td.require_approval is True, name
+
+
+def test_command_path_tokens_extracts_external_paths():
+    from execution.permission import command_path_tokens
+
+    assert command_path_tokens("cat D:\\secret.txt") == ["D:\\secret.txt"]
+    assert command_path_tokens("type ..\\outside.txt") == ["..\\outside.txt"]
+    assert command_path_tokens("dir /S") == []
+    assert command_path_tokens("curl https://example.com/a") == []
+    assert command_path_tokens("python -m pytest") == []
+    assert command_path_tokens("tool --out=./dist/out.txt") == ["./dist/out.txt"]
+    assert command_path_tokens("echo hi > D:\\x.txt") == ["D:\\x.txt"]
+    assert command_path_tokens('cat "C:\\Program Files\\a.txt"') == [
+        "C:\\Program Files\\a.txt"
+    ]
+
+
+def test_sensitive_path_detection():
+    from execution.permission import is_sensitive_path
+
+    assert is_sensitive_path("E:/AgentSuper/backend/.env") is True
+    assert is_sensitive_path("E:/AgentSuper/backend/.env.local") is True
+    assert is_sensitive_path("E:/AgentSuper/backend/data/session.db") is True
+    assert is_sensitive_path("E:/AgentSuper/backend/data/permissions.json") is True
+    assert is_sensitive_path("E:/AgentSuper/.git/config") is True
+    assert is_sensitive_path("E:/AgentSuper/backend/app/main.py") is False
+    assert is_sensitive_path("E:/AgentSuper/README.md") is False
+
+
+def test_remember_skips_non_absolute_and_tool_name_paths(tmp_path):
+    mgr = _manager(tmp_path)
+
+    bogus = mgr.create_request("write_file", "write", tool_name="write_file")
+    assert mgr.respond(bogus.id, "allowed", remember=True) is True
+    assert mgr.list_whitelist() == []
+
+    rel = mgr.create_request("relative/x.txt", "write", tool_name="write_file")
+    assert mgr.respond(rel.id, "allowed", remember=True) is True
+    assert mgr.list_whitelist() == []
+
+    absolute = tmp_path / "external" / "ok.txt"
+    req = mgr.create_request(str(absolute), "write", tool_name="write_file")
+    assert mgr.respond(req.id, "allowed", remember=True) is True
+    assert str(absolute.resolve()) in mgr.list_whitelist()
+
+
+def test_extra_workspaces_exclude_program_workspace(tmp_path):
+    mgr = _manager(tmp_path)
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    mgr.add_workspace(str(extra))
+
+    assert str(extra.resolve()) in mgr.list_extra_workspaces()
+    assert str(mgr.workspace.resolve()) not in mgr.list_extra_workspaces()
+    assert str(mgr.workspace.resolve()) in mgr.list_workspaces()

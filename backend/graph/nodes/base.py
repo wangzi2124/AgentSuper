@@ -103,7 +103,8 @@ def _looks_like_tool_call_json(text: str) -> bool:
 
 # 高危工具审批钩子（§5.3 require_approval / §9 execution/approval.py）。
 # 由 API 层（app/api/compat.py）在本回合内注入：`async (tool, args) -> bool`。
-# 未注入时按「无审批」处理（默认工具 require_approval=False，行为不变）。
+# 未注入时按「拒绝」处理：没有审批通道就不能执行 require_approval 工具，
+# 否则外部路径/命令会绕过人工审批（对齐「越界必须人工审批」的安全语义）。
 PermissionHook = Callable[[str, dict[str, Any]], Awaitable[bool]]
 _permission_hook_var: contextvars.ContextVar[PermissionHook | None] = contextvars.ContextVar(
     "tool_permission_hook", default=None
@@ -407,7 +408,8 @@ async def run_tool_loop(
                 args = run_pre_tool(tc.name, args)
                 if td.require_approval:
                     hook = _permission_hook_var.get()
-                    approved = await hook(tc.name, args) if hook is not None else True
+                    # 无审批通道 → 拒绝（绝不静默放行高危工具）
+                    approved = await hook(tc.name, args) if hook is not None else False
                     if not approved:
                         output = f"已拒绝执行工具 {tc.name}（用户未授权）。"
                     else:

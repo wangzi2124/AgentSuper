@@ -893,7 +893,8 @@ def test_request_permission_read_outside_follows_external_default(client, tmp_pa
         set_manager(previous)
 
 
-def test_request_permission_read_approved_adds_session_root(client, tmp_path_factory):
+def test_request_permission_read_approved_allows_turn_only(client, tmp_path_factory):
+    """审批通过只在本回合上下文生效，不沉淀为跨回合允许根（严格白名单语义）。"""
     import asyncio
 
     from execution.permission import PermissionManager, get_manager, set_manager
@@ -925,21 +926,112 @@ def test_request_permission_read_approved_adds_session_root(client, tmp_path_fac
                 if pending:
                     mgr.respond(pending[0].id, "allowed")
                     break
-            return await task
+            allowed = await task
+            return allowed
 
-        assert asyncio.run(scenario()) is True
-        assert target in ctx.allowed_roots_for("s_read_ok")
+        allowed = asyncio.run(scenario())
+        assert allowed is True
+        # 跨回合不保留：必须由用户「允许并记住」写入持久白名单
+        assert target not in ctx.allowed_roots_for("s_read_ok")
     finally:
         set_manager(previous)
 
 
-def test_approved_external_write_survives_turn_end_and_next_turn(client, tmp_path_factory):
-    """回归 ses_e0013e2e18c14793：审批写外部文件后，回合末快照与后续回合读写都不得报越界。
+def test_request_permission_sensitive_inside_workspace_asks(client, tmp_path_factory):
+    """工作目录内的 .env 读取仍需审批；写入直接拒绝（不得静默放行）。"""
+    import asyncio
 
-    复现要点：授权发生在**图任务**上下文（`add_allowed_root` 不向上传播），而回合末
-    `snapshot_end` 跑在请求级上下文 —— 曾因此抛 `PermissionError: 路径越界` 让整轮 SSE
-    以 error 收尾（`done` 从不发出），而文件其实已落盘。
-    """
+    from execution.permission import PermissionManager, get_manager, set_manager
+
+    ctx = client.app.state.platform
+    previous = get_manager()
+    work = tmp_path_factory.mktemp("strict_ws")
+    secret = str(work / ".env")
+    (work / ".env").write_text("API_KEY=secret", encoding="utf-8")
+    mgr = PermissionManager(
+        workspace=str(work),
+        whitelist_path=str(work / "data-approve"),
+        external_default="ask",
+        approval_timeout=5,
+    )
+    set_manager(mgr)
+    try:
+        async def call(tool):
+            emitted = []
+
+            async def emit(event):
+                emitted.append(event)
+
+            task = asyncio.create_task(
+                ctx.request_permission(
+                    session_id="s_sensitive", tool=tool, args={"path": secret}, emit=emit
+                )
+            )
+            for _ in range(300):
+                await asyncio.sleep(0.01)
+                pending = mgr.get_pending_requests()
+                if pending:
+                    mgr.respond(pending[0].id, "allowed")
+                    break
+            return await task, emitted
+
+        allowed, emitted = asyncio.run(call("read_file"))
+        assert allowed is True  # 读取：弹审批，用户允许后放行
+        assert emitted and emitted[0]["operation"] == "read"
+
+        denied, emitted = asyncio.run(call("write_file"))
+        assert denied is False  # 写入：直接拒绝，不弹审批
+        assert emitted == []
+    finally:
+        set_manager(previous)
+
+
+def test_request_permission_ignores_external_default_allow(client, tmp_path_factory):
+    """EXTERNAL_PATH_DEFAULT=allow 不再绕过路径审批：工作目录外一律 ask。"""
+    import asyncio
+
+    from execution.permission import PermissionManager, get_manager, set_manager
+
+    ctx = client.app.state.platform
+    previous = get_manager()
+    outside = tmp_path_factory.mktemp("strict_outside")
+    target = str(outside / "x.txt")
+    mgr = PermissionManager(
+        workspace=str(ctx.vfs.root),
+        whitelist_path=str(outside / "data-approve"),
+        external_default="allow",
+        approval_timeout=5,
+    )
+    set_manager(mgr)
+    try:
+        async def scenario():
+            emitted = []
+
+            async def emit(event):
+                emitted.append(event)
+
+            task = asyncio.create_task(
+                ctx.request_permission(
+                    session_id="s_allow", tool="read_file", args={"path": target}, emit=emit
+                )
+            )
+            for _ in range(300):
+                await asyncio.sleep(0.01)
+                pending = mgr.get_pending_requests()
+                if pending:
+                    mgr.respond(pending[0].id, "denied")
+                    break
+            return await task, emitted
+
+        allowed, emitted = asyncio.run(scenario())
+        assert allowed is False
+        assert emitted and emitted[0]["type"] == "permission_request"
+    finally:
+        set_manager(previous)
+
+
+def test_approved_external_write_is_turn_scoped(client, tmp_path_factory):
+    """审批写外部文件：回合内快照正常；回合结束后不再自动放行（需白名单）。"""
     import asyncio
     from pathlib import Path
 
@@ -962,7 +1054,6 @@ def test_approved_external_write_survives_turn_end_and_next_turn(client, tmp_pat
             async def _graph_task():  # 独立上下文 ≈ 图任务：审批通过后就地授权
                 add_allowed_root(target)
                 ctx.vfs.write_file(target, "hello")
-                ctx.remember_approved_root(sid, target)
 
             await asyncio.create_task(_graph_task())
             # 授权不向上传播：请求级仍视为越界
@@ -976,12 +1067,11 @@ def test_approved_external_write_survives_turn_end_and_next_turn(client, tmp_pat
     asyncio.run(_turn_with_approval())
     assert (ext / "test.txt").read_text(encoding="utf-8") == "hello"
 
-    # 下一回合：已审批路径经 allowed_roots_for 并入允许根 → 读/写不再越界；会话间隔离
+    # 下一回合：临时授权不跨回合 → 仍越界；跨回合免审只能靠持久白名单
     assert target not in ctx.allowed_roots_for("other_session")
     token = set_allowed_roots(ctx.allowed_roots_for(sid))
     try:
-        assert ctx.vfs.is_allowed(target) is True
-        assert ctx.vfs.read_file(target) == "hello"
+        assert ctx.vfs.is_allowed(target) is False
     finally:
         reset_allowed_roots(token)
 
