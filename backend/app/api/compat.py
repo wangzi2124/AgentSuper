@@ -62,6 +62,7 @@ class MultiAgentRequest(BaseModel):
     message: str = Field(..., min_length=1)
     conversation_id: str | None = None
     model: str | None = None
+    target_model: str | None = None
     use_vector_db: bool = False
     directory: str | None = None
     client_msg_id: str | None = None
@@ -169,7 +170,13 @@ def _enter_roots(ctx: PlatformContext, session_id: str | None):
     return set_allowed_roots(ctx.allowed_roots_for(session_id or ""))
 
 
-async def _append_assistant(ctx: PlatformContext, session_id: str, text: str, ui: dict | None = None) -> None:
+async def _append_assistant(
+    ctx: PlatformContext,
+    session_id: str,
+    text: str,
+    ui: dict | None = None,
+    message_id: str | None = None,
+) -> None:
     """把本轮正文追加进 thread checkpoint（供历史回放：`/sessions/{id}/messages`）。
 
     将 `ui`（agents/steps/files_changed 等前端细节）写入 `AIMessage.additional_kwargs["ui"]`
@@ -179,7 +186,8 @@ async def _append_assistant(ctx: PlatformContext, session_id: str, text: str, ui
         return
     from langchain_core.messages import AIMessage
 
-    msg = AIMessage(content=text)
+    # 稳定 assistant 消息 ID：与 SSE `assistant_msg_id` 一致，刷新/切换模型后不变。
+    msg = AIMessage(content=text, id=message_id or f"am_{uuid4().hex[:12]}")
     if ui:
         try:
             msg.additional_kwargs = dict(getattr(msg, "additional_kwargs", {}) or {})
@@ -352,18 +360,45 @@ async def multi_agent_stream(
     x_user_id: str | None = Header(default=None),
 ) -> StreamingResponse:
     user_id = x_user_id or "anonymous"
+    # 已存在会话不再由 `ensure` 静默改模型（必须走 switch_model 门禁）。
+    existing = (
+        ctx.sessions.get(body.conversation_id) if body.conversation_id else None
+    )
     sess = ctx.sessions.ensure(
-        body.conversation_id, directory=body.directory, user_id=user_id, model=body.model
+        body.conversation_id,
+        directory=body.directory,
+        user_id=user_id,
+        model=None if existing else body.model,
     )
     if not sess.title or sess.title == "新会话":
         ctx.sessions.update(sess.id, title=body.message[:20])
 
-    user_msg_id = f"um_{uuid4().hex[:12]}"
+    # 稳定消息 ID：优先使用前端 client_msg_id，历史回放/乐观消息可精确对齐。
+    user_msg_id = body.client_msg_id or f"um_{uuid4().hex[:12]}"
 
     async def event_source():
         from ..snapshot import snapshot_begin, snapshot_end
+        from ..deps import ModelSwitchError
 
-        # [D3] 字段名与前端 store 对齐：`model_ref`（{id, name, provider}）。
+        # 会话内切换模型：门禁 + 迁移摘要 + 原子绑定；失败直接下发 error，
+        # 不启动本轮（旧模型继续可用）。
+        if body.target_model and body.target_model != sess.model:
+            try:
+                await ctx.switch_model(sess.id, body.target_model)
+            except ModelSwitchError as exc:
+                yield _sse(
+                    {
+                        "type": "error",
+                        "error": str(exc),
+                        "detail": str(exc),
+                        "retryable": False,
+                        "status_code": exc.status_code,
+                        "error_type": "ModelSwitchError",
+                    }
+                )
+                return
+
+        # [D3] 字段名与前端 store 对齐：`model_ref`（{id, name, provider}）
         if sess.model:
             yield _sse(
                 {
@@ -421,6 +456,7 @@ async def multi_agent_stream(
                     agents_map: dict[str, dict[str, Any]] = {}
                     snap_begin = snapshot_begin(ctx.vfs)
                     before_usage = await _current_usage(ctx, sess.id)
+                    binding = await ctx.resolve_context_binding(sess.id)
                     state = initial_state(
                         # `/技能名`：本轮强制加载技能正文（找不到或未启用则原样发送）
                         apply_slash_skill(turn_question, getattr(ctx, "skill_loader", None))[0],
@@ -428,9 +464,14 @@ async def multi_agent_stream(
                         files=turn_files if turn_user_msg_id == user_msg_id else None,
                         model=sess.model,
                         use_vector_db=bool(body.use_vector_db),
+                        message_id=turn_user_msg_id,
+                        context_summary=binding.get("summary", ""),
+                        context_tail_start_id=binding.get("tail_start_id"),
+                        context_bound=binding.get("active", False),
+                        context_window_override=binding.get("context_window", 0),
+                        compress_threshold_override=binding.get("compress_threshold", 0),
+                        keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
                     )
-                    if getattr(body, "target_model", None):
-                        state["pending_model_switch"] = body.target_model
                     async for ev in _graph_events(ctx, sess, state, seen, cancel, agents_map):
                         yield _sse(ev)
 
@@ -462,6 +503,7 @@ async def multi_agent_stream(
                         sess.id,
                         final,
                         ui=_turn_meta(agents_map_snapshot, files_changed),
+                        message_id=assistant_msg_id,
                     )
 
                     # 权威完整正文流式下发（前端 text_delta 逐段渲染，done 再兜底覆盖）
@@ -526,11 +568,30 @@ async def multi_agent(
     x_user_id: str | None = Header(default=None),
 ) -> dict:
     user_id = x_user_id or "anonymous"
-    sess = ctx.sessions.ensure(
-        body.conversation_id, directory=body.directory, user_id=user_id, model=body.model
+    existing = (
+        ctx.sessions.get(body.conversation_id) if body.conversation_id else None
     )
-    if not sess.title or sess.title == "新会话":
+    sess = ctx.sessions.ensure(
+        body.conversation_id,
+        directory=body.directory,
+        user_id=user_id,
+        model=None if existing else body.model,
+    )
+    if body.target_model and body.target_model != sess.model:
+        from ..deps import ModelSwitchError
+
+        try:
+            await ctx.switch_model(sess.id, body.target_model)
+        except ModelSwitchError as exc:
+            return {
+                "code": exc.status_code,
+                "message": str(exc),
+                "data": None,
+                "detail": str(exc),
+            }
+    if not sess.title or sess.title.startswith("新会"):
         ctx.sessions.update(sess.id, title=body.message[:20])
+    user_msg_id = body.client_msg_id or f"um_{uuid4().hex[:12]}"
     before_usage = await _current_usage(ctx, sess.id)
     roots_token = _enter_roots(ctx, sess.id)
     try:
@@ -551,13 +612,20 @@ async def multi_agent(
                 user_id=user_id,
                 files=await enrich_image_files(body.files),
                 use_vector_db=bool(body.use_vector_db),
+                message_id=user_msg_id,
             )
         finally:
             reset_permission_hook(token)
         files_changed, descriptor = snapshot_end(ctx.vfs, snap_begin)
         assistant_msg_id = f"am_{uuid4().hex[:12]}"
         ctx.snapshots[assistant_msg_id] = descriptor
-        await _append_assistant(ctx, sess.id, state.get("final_output", "") or "", ui={"files_changed": files_changed})
+        await _append_assistant(
+            ctx,
+            sess.id,
+            state.get("final_output", "") or "",
+            ui={"files_changed": files_changed},
+            message_id=assistant_msg_id,
+        )
     except Exception as exc:  # noqa: BLE001
         return {
             "code": 500,

@@ -192,6 +192,8 @@ async def compress_context(
     model: Any | None = None,
     threshold: int = COMPRESS_THRESHOLD,
     keep_tokens: int = KEEP_RECENT_TOKENS,
+    raise_on_error: bool = False,
+    segment_tokens: int = 0,
 ) -> dict[str, Any]:
     """按阈值触发增量压缩，返回 {summary, recent, triggered, tokens}。"""
     msgs = list(messages)
@@ -209,11 +211,34 @@ async def compress_context(
 
         model = get_model("simple")
 
-    prompt = build_compress_prompt(existing_summary, serialize_messages(older))
+    summary = existing_summary
+    # 分段摘要：older 过大时按 token 预算切段顺序汇总，避免单次 prompt 超窗。
+    chunks: list[Sequence[Any]] = [older]
+    if segment_tokens > 0 and estimate_tokens(serialize_messages(older)) > segment_tokens:
+        chunks = []
+        cur: list[Any] = []
+        used = 0
+        for m in older:
+            cost = estimate_tokens(serialize_messages([m]))
+            if cur and used + cost > segment_tokens:
+                chunks.append(cur)
+                cur = []
+                used = 0
+            cur.append(m)
+            used += cost
+        if cur:
+            chunks.append(cur)
+
     try:
-        result = await model.ainvoke([{"role": "user", "content": prompt}])
-        summary = str(getattr(result, "content", "") or "").strip() or existing_summary
+        for chunk in chunks:
+            prompt = build_compress_prompt(summary, serialize_messages(chunk))
+            result = await model.ainvoke([{"role": "user", "content": prompt}])
+            summary = (
+                str(getattr(result, "content", "") or "").strip() or summary
+            )
     except Exception as exc:  # noqa: BLE001
+        if raise_on_error:
+            raise
         logger.warning("compress LLM call failed, keeping existing summary: %s", exc)
         summary = existing_summary
 

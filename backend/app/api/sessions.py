@@ -96,13 +96,20 @@ async def get_session(session_id: str, ctx: PlatformContext = Depends(get_contex
 async def update_session(
     session_id: str, body: SessionUpdate, ctx: PlatformContext = Depends(get_context)
 ) -> dict:
-    _must_get(ctx, session_id)
+    sess = _must_get(ctx, session_id)
     fields: dict[str, Any] = {}
     if body.title is not None:
         fields["title"] = body.title
     if body.model is not None:
-        fields["model"] = body.model.get("id") if isinstance(body.model, dict) else body.model
-    sess = ctx.sessions.update(session_id, **fields)
+        target = body.model.get("id") if isinstance(body.model, dict) else body.model
+        if target and target != sess.model:
+            from ..deps import ModelSwitchError
+
+            try:
+                await ctx.switch_model(session_id, str(target))
+            except ModelSwitchError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    sess = ctx.sessions.update(session_id, **fields) if fields else ctx.sessions.get(session_id)
     assert sess is not None
     return sess.to_session_info()
 

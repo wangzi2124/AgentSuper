@@ -54,6 +54,7 @@ export interface SessionMessage {
   seq: number
   time_created: number
   parts?: SessionPart[]
+  is_compacted?: boolean
 }
 
 export interface SessionStatus {

@@ -27,10 +27,9 @@ function toggleModelMenu() {
   if (agentMenuOpen.value) agentMenuOpen.value = false
   modelMenuOpen.value = !modelMenuOpen.value
 }
-function pickModel(value: string) {
-  agent.selectedModel = value
-  agent.persistSelectedModel()
+async function pickModel(value: string) {
   modelMenuOpen.value = false
+  await agent.persistSelectedModel(value)
 }
 
 // [Agent 选择] 对齐 opencode agent modes：顶层只有 build（默认）/ 规划两个命令，

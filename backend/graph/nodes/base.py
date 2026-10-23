@@ -257,6 +257,32 @@ async def _dispatch(
         return f"错误：{e or repr(e)}"
 
 
+def _authorized_roots_note() -> str:
+    """把本回合已授权的额外根目录告知模型。
+
+    `file_agent.md`/`code_agent.md` 原先写死「禁止访问工作目录之外」，导致用户
+    明确给出白名单路径时模型先拒绝、根本不触发工具审批（权限层已放行但模型不调
+    工具）。这里把 `set_allowed_roots` 注入的会话目录 / 额外工作区 / 持久白名单
+    显式列出，让模型知道哪些外部路径可直接访问。
+    """
+    try:
+        from execution.filesystem import current_allowed_roots
+
+        roots = [str(p) for p in current_allowed_roots()]
+    except Exception:  # noqa: BLE001
+        return ""
+    if not roots:
+        return ""
+    lines = "\n".join(f"- {r}" for r in roots)
+    return (
+        "<authorized_roots>\n"
+        f"{lines}\n"
+        "</authorized_roots>\n"
+        "以上路径已由工作目录或持久白名单授权，可直接读写。"
+        "其他外部路径会触发审批，请按工具返回结果继续，不要预先拒绝。"
+    )
+
+
 async def run_tool_loop(
     model: TierModel,
     messages: list[dict[str, Any]],
@@ -267,7 +293,12 @@ async def run_tool_loop(
 ) -> dict[str, Any]:
     """LLM 工具调用循环，返回 {text, rounds, tool_trace, usage}。"""
     tool_defs = build_tool_defs(registry, scope)
-    convo = list(messages)
+    convo = [dict(m) for m in messages]
+    roots_note = _authorized_roots_note()
+    if roots_note and convo and convo[0].get("role") == "system":
+        content = convo[0].get("content")
+        if isinstance(content, str):
+            convo[0]["content"] = f"{content}\n\n{roots_note}"
     rounds = 0
     usage_total = empty_usage()
     tool_trace: list[dict[str, Any]] = []

@@ -11,6 +11,12 @@ def test_short_request_is_single():
     assert classify_plan_tier("") == "single"
 
 
+def test_short_question_with_parallel_word_is_single():
+    # 「分别」在短问句里只是并列疑问，不是并行任务信号。
+    assert classify_plan_tier("项目代号和端口分别是什么？只回答这两个值。") == "single"
+    assert classify_plan_tier("A 和 B 分别是什么？") == "single"
+
+
 def test_serial_signals():
     assert classify_plan_tier("先读取配置，然后修改端口再重启服务") == "serial"
     assert classify_plan_tier("根据以上分析，接着生成报告并保存到文件里") == "serial"

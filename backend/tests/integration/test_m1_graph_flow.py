@@ -6,7 +6,9 @@
 import json
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 
+from app.deps import initial_state
 from execution.filesystem import VirtualFileSystem
 from graph.main_graph import build_main_graph, run_agent
 from models.router import ChatResult, ToolCall
@@ -44,6 +46,39 @@ async def test_simple_task_no_subagent_calls(tmp_path):
     assert out["iteration_count"] <= 3
     # 简单任务不应产生工具调用（无 tools 传入即纯 QA）
     assert model.calls[0]["tools"]
+
+
+@pytest.mark.asyncio
+async def test_followup_turn_does_not_reuse_stale_sub_results(tmp_path):
+    """同一 thread 的第二轮：plan 返回空计划时必须重新执行，不能综合上一轮结果。
+
+    回归：会话内切换模型后追问「代号和端口分别是什么？」曾直接返回上一轮
+    的「收到」——plan 判空计划 → 无新 sub_results → synthesize 取到旧值。
+    """
+    model = ScriptedModel(
+        [
+            ChatResult(content="ALPHA", finish_reason="stop"),
+            ChatResult(content="BETA", finish_reason="stop"),
+        ]
+    )
+    plan = ScriptedModel([ChatResult(content="[]", finish_reason="stop")])
+    graph = build_main_graph(
+        model=model,
+        plan_model=plan,
+        vfs=VirtualFileSystem(root=str(tmp_path)),
+        checkpointer=MemorySaver(),
+    )
+    cfg = {"configurable": {"thread_id": "t_stale_sub_results"}}
+
+    first = await graph.ainvoke(initial_state("记住：项目代号 Falcon", "u1"), cfg)
+    assert first["final_output"] == "ALPHA"
+
+    # 「然后」触发串行档位 → 调 plan 模型 → 返回显式空计划 → 回退单任务执行。
+    second = await graph.ainvoke(
+        initial_state("请基于刚才的对话继续说明，然后把结论告诉我", "u1"), cfg
+    )
+    assert second["final_output"] == "BETA"
+    assert second["sub_results"] == {"t1": "BETA"}
 
 
 @pytest.mark.asyncio

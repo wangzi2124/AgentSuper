@@ -11,6 +11,7 @@ graph 平台，可独立启动：`uvicorn app.main:app`。
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable
 
 from fastapi import Request
+from langgraph.types import Overwrite
 
 from execution.approval import ApprovalQueue
 from execution.filesystem import (
@@ -177,6 +179,13 @@ def initial_state(
     files: list[Any] | None = None,
     model: str | None = None,
     use_vector_db: bool = False,
+    message_id: str | None = None,
+    context_summary: str = "",
+    context_tail_start_id: str | None = None,
+    context_bound: bool = False,
+    context_window_override: int = 0,
+    compress_threshold_override: int = 0,
+    keep_recent_tokens_override: int = 0,
 ) -> dict[str, Any]:
     """构造一轮的输入状态。
 
@@ -186,13 +195,16 @@ def initial_state(
 
     `files`（前端聊天附件，`{filename, mime_type, data(base64)}`）与 `model`（本回合
     选中模型 id）一并传入 → 图片按模型 `vision` 能力组装成多模态 content 分块。
-    此前该参数从未被转发，图片在 API 边界即被静默丢弃（「后端不解析图片」根因）。
     附件本身另存进 `additional_kwargs["files"]`（含 `_thumb`/`_caption`），供历史回放
     在聊天里回显图片——正文 content 只承担喂给模型的部分。
     """
     from langchain_core.messages import HumanMessage
 
-    msg = HumanMessage(content=_attachment_content(question, files, model))
+    # 稳定消息 ID：跨模型/协议切换后保持不变（禁止 index 重算）。
+    msg = HumanMessage(
+        content=_attachment_content(question, files, model),
+        id=message_id or f"um_{uuid.uuid4().hex[:12]}",
+    )
     payload = _files_payload(files)
     if payload:
         msg.additional_kwargs["files"] = payload
@@ -203,16 +215,51 @@ def initial_state(
 
     budget_total = float(getattr(settings, "session_budget", 0.0) or 0.0)
 
+    # 压缩配置与「本轮模型」成对绑定：目标窗口更小 → 阈值同步调低，
+    # 禁止复用旧模型/全局默认阈值（agent-3 §2.2）。窗口未知时保留默认值。
+    context_window = 0
+    compress_threshold = 0
+    keep_recent_tokens = 0
+    if model:
+        try:
+            from models.catalog import read_limits
+
+            context_window = int(read_limits(model).get("context_length") or 0)
+        except Exception:  # noqa: BLE001 - 目录不可用时按未知处理
+            context_window = 0
+    if context_window > 0:
+        compress_threshold = max(2_000, int(context_window * 0.6))
+        keep_recent_tokens = max(1_000, min(20_000, int(context_window * 0.25)))
+    # 切换绑定的压缩配置优先：即使目录临时不可用，也不能退回旧模型/全局阈值。
+    if context_window_override > 0:
+        context_window = context_window_override
+        if compress_threshold_override <= 0:
+            compress_threshold = max(2_000, int(context_window * 0.6))
+        if keep_recent_tokens_override <= 0:
+            keep_recent_tokens = max(1_000, min(20_000, int(context_window * 0.25)))
+    if compress_threshold_override > 0:
+        compress_threshold = compress_threshold_override
+    if keep_recent_tokens_override > 0:
+        keep_recent_tokens = keep_recent_tokens_override
+
     state: dict[str, Any] = {
         "messages": [msg],
         "iteration_count": 0,
         "user_id": user_id,
         "task_plan": [],
+        "plan_tier": "",
         "current_task_id": "",
-        "sub_results": {},
+        # sub_results 是 `merge_dicts` reducer 通道：直接传 `{}` 只会与上一轮
+        # checkpoint 里的结果合并（空字典是 no-op），导致新一轮 synthesize 取到
+        # 旧答案。用 Overwrite 绕过 reducer 强制清空。
+        "sub_results": Overwrite({}),
         "draft_output": "",
         "final_output": "",
         "context_compressed": False,
+        "context_bound": bool(context_bound),
+        "context_window": context_window,
+        "compress_threshold": compress_threshold,
+        "keep_recent_tokens": keep_recent_tokens,
         "rag_context": "",
         "rag_done": False,
         "use_vector_db": bool(use_vector_db),
@@ -221,9 +268,27 @@ def initial_state(
         "rewrite_count": 0,
         "rewritten_query": "",
     }
+    # 模型切换绑定生效时，显式写入（含空值/None）以清掉上一次绑定的残留；
+    # 否则不覆盖 checkpoint 里已有的 context_summary（自动压缩摘要必须跨轮保留）。
+    if context_bound:
+        state["context_summary"] = context_summary
+        state["context_tail_start_id"] = context_tail_start_id
+    else:
+        if context_summary:
+            state["context_summary"] = context_summary
+        if context_tail_start_id:
+            state["context_tail_start_id"] = context_tail_start_id
     if budget_total > 0:
         state["budget_total"] = budget_total
     return state
+
+
+class ModelSwitchError(Exception):
+    """模型切换被门禁拒绝（携带 HTTP 状态码，供 API 层直接映射）。"""
+
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass
@@ -461,13 +526,11 @@ class SessionStore:
         model: str | None = None,
     ) -> Session:
         if session_id and (sess := self.get(session_id)) is not None:
-            # 会话中途改目录 / 模型：采纳本次携带的非空值
+            # 会话中途改目录：采纳本次携带的非空值。
+            # 模型不再由 ensure 静默更新 —— 切换必须走 `switch_model` 门禁/迁移。
             changed = False
             if directory and directory != sess.directory:
                 sess.directory = directory
-                changed = True
-            if model and model != sess.model:
-                sess.model = model
                 changed = True
             if changed:
                 sess.updated_at = time.time()
@@ -579,6 +642,313 @@ class PlatformContext:
         sess = self.sessions.get(session_id)
         return getattr(sess, "model", None) if sess is not None else None
 
+    def context_binding(self, session_id: str) -> dict[str, Any]:
+        """读取本会话的模型切换上下文绑定（摘要 + 近期原文起点）。
+
+        绑定存放在 `session_context_epoch.snapshot`，不删改图 checkpoint 原文；
+        模型视角 = `[摘要] + [tail_start_id 起的近期原文] + [切换后新消息]`。
+        自动压缩写入的 snapshot 同样在此返回，二者兼容。
+        """
+        try:
+            from .session import repository as repo
+
+            epoch = repo.get_epoch(session_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("读取上下文绑定失败", exc_info=True)
+            return {}
+        snap = dict(epoch.snapshot or {}) if epoch else {}
+        summary = snap.get("summary")
+        if not isinstance(summary, str):
+            summary = ""
+        tail = snap.get("tail_start_id")
+        return {
+            "active": bool(snap.get("model_switch")),
+            "summary": summary,
+            "tail_start_id": tail if isinstance(tail, str) else None,
+            "context_window": int(snap.get("context_window") or 0),
+            "compress_threshold": int(snap.get("compress_threshold") or 0),
+            "keep_recent_tokens": int(snap.get("keep_recent_tokens") or 0),
+        }
+
+    async def resolve_context_binding(self, session_id: str) -> dict[str, Any]:
+        """解析本轮生效的上下文绑定。
+
+        模型切换后若图内自动压缩又生成了更新的摘要，以图内摘要为准（并沿用其
+        tail 起点），否则旧的绑定摘要会在下一轮把新摘要覆盖回去。
+        """
+        binding = self.context_binding(session_id)
+        if not binding.get("active"):
+            return binding
+        try:
+            snap = await self.state(session_id)
+        except Exception:  # noqa: BLE001 - 无 checkpoint / 读取失败按绑定原值
+            return binding
+        graph_summary = str(snap.get("context_summary") or "")
+        if graph_summary and graph_summary != (binding.get("summary") or ""):
+            return {
+                "active": True,
+                "summary": graph_summary,
+                "tail_start_id": snap.get("context_tail_start_id"),
+                "context_window": binding.get("context_window", 0),
+                "compress_threshold": binding.get("compress_threshold", 0),
+                "keep_recent_tokens": binding.get("keep_recent_tokens", 0),
+            }
+        return binding
+
+    def _write_switch_backup(
+        self,
+        session_id: str,
+        old_model: str | None,
+        target: str,
+        messages: list[Any],
+        tokens: int,
+        threshold: int,
+        keep_tokens: int,
+    ) -> str:
+        """迁移前原文快照（必须先于任何摘要/绑定写入）。"""
+        from langchain_core.messages import messages_to_dict
+
+        backup_dir = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "data", "model_switches"
+        )
+        os.makedirs(backup_dir, exist_ok=True)
+        stamp = int(time.time() * 1000)
+        path = os.path.join(backup_dir, f"{session_id}_{stamp}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "session_id": session_id,
+                    "from": old_model,
+                    "to": target,
+                    "tokens": tokens,
+                    "threshold": threshold,
+                    "keep_recent_tokens": keep_tokens,
+                    "status": "prepared",
+                    "messages": messages_to_dict(messages),
+                },
+                fh,
+                ensure_ascii=False,
+            )
+        return path
+
+    @staticmethod
+    def _mark_switch_backup(path: str, status: str) -> None:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            data["status"] = status
+            data["updated_at"] = time.time()
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False)
+        except Exception:  # noqa: BLE001 - 标记失败不掩盖主流程结果
+            logger.warning("更新模型切换备份标记失败: %s", path, exc_info=True)
+
+    async def switch_model(self, session_id: str, target: str) -> dict[str, Any]:
+        """切换会话模型：门禁 → 生成摘要 → 原子写入绑定 → 持久化模型 id。
+
+        失败抛 `ModelSwitchError(status_code)`，旧模型与会话绑定保持不变。
+        """
+        target = (target or "").strip()
+        if not target:
+            raise ModelSwitchError("目标模型为空", 400)
+        sess = self.sessions.get(session_id)
+        if sess is None:
+            raise ModelSwitchError("会话不存在", 404)
+        if target == sess.model:
+            return {
+                "switched": False,
+                "model": sess.model,
+                "summarized": False,
+            }
+        from models.catalog import read_limits
+
+        limits = read_limits(target) or {}
+        window = int(limits.get("context_length") or 0)
+        if window <= 0:
+            raise ModelSwitchError(f"目标模型上下文窗口未知，已拒绝切换：{target}", 400)
+        if sess.status == "running" or session_id in self.cancels:
+            raise ModelSwitchError("会话正在运行，请等待本轮完成后再切换模型", 409)
+
+        messages = await self._raw_messages(session_id)
+        from cognition.compressor import (
+            compress_context,
+            enforce_precision,
+            estimate_tokens,
+            extract_precision_values,
+            serialize_messages,
+        )
+
+        tokens = (
+            sum(estimate_tokens(serialize_messages([m])) for m in messages)
+            if messages
+            else 0
+        )
+        threshold = max(2_000, int(window * 0.6))
+        keep_tokens = max(1_000, min(20_000, int(window * 0.25)))
+        summary = ""
+        tail_start_id: str | None = None
+        old_model = sess.model
+        before_ids = [
+            PlatformContext.stable_message_id(session_id, m) for m in messages
+        ]
+
+        # §2.3：原文快照必须先于摘要/绑定写入；备份失败即拒绝切换。
+        try:
+            backup_path = PlatformContext._write_switch_backup(
+                self,
+                session_id, old_model, target, messages, tokens, threshold, keep_tokens
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("切换模型备份失败: %s", exc)
+            raise ModelSwitchError(f"迁移备份失败，已保留原模型：{exc}", 500) from exc
+
+        recent: list[Any] = []
+        try:
+            if tokens > threshold and messages:
+                existing_summary = self.context_binding(session_id).get("summary", "")
+                try:
+                    graph_summary = str(
+                        (await self.state(session_id)).get("context_summary") or ""
+                    )
+                except Exception:  # noqa: BLE001 - 空会话 / 无 checkpoint
+                    graph_summary = ""
+                if graph_summary and graph_summary != existing_summary:
+                    existing_summary = graph_summary
+                model_token = set_request_model(target)
+                try:
+                    result = await compress_context(
+                        messages,
+                        existing_summary=existing_summary,
+                        model=None,
+                        threshold=threshold,
+                        keep_tokens=keep_tokens,
+                        raise_on_error=True,
+                        segment_tokens=max(4_000, min(12_000, threshold // 4)),
+                    )
+                finally:
+                    reset_request_model(model_token)
+                summary = str(result.get("summary") or "").strip()
+                if not summary:
+                    raise ModelSwitchError("历史无法压缩到目标模型窗口，已保留原模型", 400)
+                recent = list(result.get("recent") or [])
+                recent_ids = {id(m) for m in recent}
+                older = [m for m in messages if id(m) not in recent_ids]
+                summary = enforce_precision(summary, older)
+                # §3.2 确定性事实探针：原文中的路径/命令/数字必须在摘要+近期原文中。
+                preserved = f"{summary}\n{serialize_messages(recent)}"
+                facts = extract_precision_values(serialize_messages(messages))
+                missing = [t for t in facts if t not in preserved]
+                if missing:
+                    raise ModelSwitchError(
+                        f"事实探针失败，缺少 {len(missing)} 个精确值，已保留原模型："
+                        + ", ".join(missing[:5]),
+                        500,
+                    )
+                if recent:
+                    tail = recent[0]
+                    tail_start_id = (
+                        getattr(tail, "id", None)
+                        or PlatformContext.stable_message_id(session_id, tail)
+                    )
+        except ModelSwitchError:
+            PlatformContext._mark_switch_backup(backup_path, "rolled_back")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("切换模型时历史摘要失败：%s", exc)
+            PlatformContext._mark_switch_backup(backup_path, "rolled_back")
+            raise ModelSwitchError(f"历史摘要生成失败，已保留原模型：{exc}", 500) from exc
+
+        from .session import repository as repo
+
+        epoch = repo.get_epoch(session_id)
+        baseline = epoch.baseline if epoch else ""
+        # 无既有纪元时用 0（不是 latest_seq）：切换只新增摘要绑定，
+        # 不能让 history.load 把切换前的全部消息当成「基线之前」跳过。
+        baseline_seq = epoch.baseline_seq if epoch else 0
+        old_snapshot = dict(epoch.snapshot or {}) if epoch else {}
+        snapshot = dict(old_snapshot)
+        snapshot["context_window"] = window
+        snapshot["compress_threshold"] = threshold
+        snapshot["keep_recent_tokens"] = keep_tokens
+        if summary:
+            snapshot["summary"] = summary
+            snapshot["tail_start_id"] = tail_start_id
+            snapshot["summary_model"] = target
+            snapshot["summary_at"] = time.time()
+        # 只有确实存在摘要/近期原文绑定时才标记生效；否则不干扰图内自动压缩摘要。
+        if snapshot.get("summary") or snapshot.get("tail_start_id"):
+            snapshot["model_switch"] = True
+        try:
+            repo.upsert_epoch(session_id, baseline, baseline_seq, snapshot)
+        except Exception as exc:  # noqa: BLE001 - 绑定写失败必须保留旧模型
+            logger.warning("模型切换绑定写入失败：%s", exc)
+            PlatformContext._mark_switch_backup(backup_path, "rolled_back")
+            raise ModelSwitchError(f"模型绑定写入失败，已保留原模型：{exc}", 500) from exc
+
+        # §3.1 消息完整性：切换不得丢失任何未压缩消息。
+        after_ids = [
+            PlatformContext.stable_message_id(session_id, m)
+            for m in await self._raw_messages(session_id)
+        ]
+        lost = [mid for mid in before_ids if mid not in after_ids]
+        if lost:
+            try:
+                repo.upsert_epoch(session_id, baseline, baseline_seq, old_snapshot)
+            except Exception:  # noqa: BLE001
+                logger.warning("回滚上下文绑定失败", exc_info=True)
+            PlatformContext._mark_switch_backup(backup_path, "rolled_back")
+            raise ModelSwitchError(
+                f"消息完整性校验失败，丢失 {len(lost)} 条消息，已回滚模型切换", 500
+            )
+
+        try:
+            sess.model = target
+            sess.updated_at = time.time()
+            self.sessions.persist(session_id)
+        except Exception as exc:  # noqa: BLE001 - 持久化失败必须回滚绑定
+            sess.model = old_model
+            try:
+                repo.upsert_epoch(session_id, baseline, baseline_seq, old_snapshot)
+            except Exception:  # noqa: BLE001
+                logger.warning("回滚上下文绑定失败", exc_info=True)
+            PlatformContext._mark_switch_backup(backup_path, "rolled_back")
+            raise ModelSwitchError(f"模型持久化失败，已保留原模型：{exc}", 500) from exc
+
+        PlatformContext._mark_switch_backup(backup_path, "committed")
+        try:
+            backup_dir = os.path.dirname(backup_path)
+            with open(
+                os.path.join(backup_dir, "switches.jsonl"), "a", encoding="utf-8"
+            ) as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "session_id": session_id,
+                            "from": old_model,
+                            "to": target,
+                            "tokens": tokens,
+                            "threshold": threshold,
+                            "summarized": bool(summary),
+                            "at": time.time(),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        except Exception:  # noqa: BLE001 - 审计失败不影响已提交切换
+            logger.warning("写入模型切换审计失败", exc_info=True)
+
+        return {
+            "switched": True,
+            "from": old_model,
+            "to": target,
+            "summarized": bool(summary),
+            "tail_start_id": tail_start_id,
+            "context_window": window,
+            "compress_threshold": threshold,
+            "keep_recent_tokens": keep_tokens,
+        }
+
     async def run(
         self,
         question: str,
@@ -587,6 +957,7 @@ class PlatformContext:
         user_id: str = "anonymous",
         files: list[Any] | None = None,
         use_vector_db: bool = False,
+        message_id: str | None = None,
     ) -> dict[str, Any]:
         """执行一轮问答，返回最终状态（不含 BaseMessage 原始对象）。"""
         # `/技能名`：本轮强制加载技能正文（找不到/未启用则原样发送）
@@ -595,16 +966,31 @@ class PlatformContext:
         question, _skill = apply_slash_skill(question, self.skill_loader)
         token = set_allowed_roots(self.allowed_roots_for(session_id))
         model = self.session_model(session_id)
+        binding = await self.resolve_context_binding(session_id)
         model_token = set_request_model(model)
+        sess = self.sessions.get(session_id)
+        if sess is not None:
+            sess.status = "running"
+        self.begin_turn(session_id)
         try:
             result = await self.graph.ainvoke(
                 initial_state(
                     question, user_id, files=files, model=model,
                     use_vector_db=use_vector_db,
+                    message_id=message_id,
+                    context_summary=binding.get("summary", ""),
+                    context_tail_start_id=binding.get("tail_start_id"),
+                    context_bound=binding.get("active", False),
+                    context_window_override=binding.get("context_window", 0),
+                    compress_threshold_override=binding.get("compress_threshold", 0),
+                    keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
                 ),
                 config={"configurable": {"thread_id": session_id}},
             )
         finally:
+            if sess is not None:
+                sess.status = "idle"
+            self.end_turn(session_id)
             reset_allowed_roots(token)
             reset_request_model(model_token)
         self.sessions.touch(session_id)
@@ -625,12 +1011,23 @@ class PlatformContext:
 
         question, _skill = apply_slash_skill(question, self.skill_loader)
         model = self.session_model(session_id)
+        binding = await self.resolve_context_binding(session_id)
         state = initial_state(
-            question, user_id, files=files, model=model, use_vector_db=use_vector_db
+            question, user_id, files=files, model=model, use_vector_db=use_vector_db,
+            context_summary=binding.get("summary", ""),
+            context_tail_start_id=binding.get("tail_start_id"),
+            context_bound=binding.get("active", False),
+            context_window_override=binding.get("context_window", 0),
+            compress_threshold_override=binding.get("compress_threshold", 0),
+            keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
         )
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))
         model_token = set_request_model(model)
+        sess = self.sessions.get(session_id)
+        if sess is not None:
+            sess.status = "running"
+        self.begin_turn(session_id)
         try:
             async for chunk in self.graph.astream(
                 state,
@@ -640,6 +1037,9 @@ class PlatformContext:
                 for node, update in (chunk or {}).items():
                     yield {"event": "node", "node": node, "data": jsonable(update)}
         finally:
+            if sess is not None:
+                sess.status = "idle"
+            self.end_turn(session_id)
             reset_allowed_roots(token)
             reset_request_model(model_token)
         self.sessions.touch(session_id)
@@ -664,7 +1064,9 @@ class PlatformContext:
         try:  # pragma: no cover - 依赖既有 app 子系统
             from execution.permission import get_manager
 
-            roots.extend(get_manager().list_workspaces())
+            mgr = get_manager()
+            roots.extend(mgr.list_workspaces())
+            roots.extend(mgr.list_whitelist())
         except Exception:  # noqa: BLE001
             pass
         roots.extend(self.approved_roots.get(session_id, ()))
@@ -717,6 +1119,27 @@ class PlatformContext:
         except (IndexError, ValueError):
             return None
 
+    @staticmethod
+    def stable_message_id(session_id: str, msg: Any) -> str:
+        """稳定消息 id：优先 checkpoint 消息 id（跨模型/协议切换不变）。
+
+        无 id 时按「角色 + 内容」生成确定性摘要 id；同一消息重复计算结果一致。
+        禁止用 index 兜底（位置会随压缩/撤回/分叉漂移）。
+        """
+        mid = getattr(msg, "id", None)
+        if mid:
+            return str(mid)
+        content = _msg_content(msg)
+        raw = (
+            content
+            if isinstance(content, str)
+            else json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
+        )
+        digest = hashlib.sha256(
+            f"{_msg_role(msg)}|{raw}".encode("utf-8")
+        ).hexdigest()[:16]
+        return f"msg_{digest}"
+
     async def session_messages(self, session_id: str) -> list[dict[str, Any]]:
         """把图状态消息映射成前端 `frontend/src/api/sessions.ts:SessionMessage` 形状。
 
@@ -730,8 +1153,10 @@ class PlatformContext:
         raw = await self._raw_messages(session_id)
         out: list[dict[str, Any]] = []
         for idx, msg in enumerate(raw, start=1):
-            mid = self.message_id(session_id, idx)
-            if mid in hidden or idx <= baseline:
+            mid = PlatformContext.stable_message_id(session_id, msg)
+            # 兼容旧版 hidden_ids（`<sid>_m<idx>`）与基线水位（seq）。
+            legacy_mid = self.message_id(session_id, idx)
+            if (mid in hidden or legacy_mid in hidden) or idx <= baseline:
                 continue
             mtype = _role.get(_msg_role(msg), "system")
             content = content_text(_msg_content(msg))
@@ -763,6 +1188,7 @@ class PlatformContext:
                     "seq": idx,
                     "time_created": 0,
                     "parts": [],
+                    "is_compacted": False,
                 }
             )
         if baseline > 0:
@@ -779,27 +1205,47 @@ class PlatformContext:
                     "seq": 0,
                     "time_created": 0,
                     "parts": [],
+                    "is_compacted": True,
                 },
             )
         return out
 
     async def _full_history(self, session_id: str) -> list[dict[str, Any]]:
-        """未过滤的完整历史（含 hidden/基线之内），供 revert 计数与 fork 复制定位。"""
+        """未过滤的完整历史（含 hidden/基线之内），供 revert 计数与 fork 复制定位。
+
+        直接读 checkpoint 原始消息（`jsonable` 会丢 message.id），
+        id 用稳定 id，另附 `legacy_id` 以兼容旧位置 id。
+        """
         _role = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
-        state = await self.state(session_id)
+        raw = await self._raw_messages(session_id)
         out: list[dict[str, Any]] = []
-        for idx, msg in enumerate(self.messages(state), start=1):
-            mtype = _role.get(str(msg.get("role", "system")), "system")
-            content = content_text(msg.get("content", ""))
-            out.append({"id": self.message_id(session_id, idx), "seq": idx, "type": mtype, "content": content})
+        for idx, msg in enumerate(raw, start=1):
+            mtype = _role.get(_msg_role(msg), "system")
+            content = content_text(_msg_content(msg))
+            out.append(
+                {
+                    "id": PlatformContext.stable_message_id(session_id, msg),
+                    "legacy_id": self.message_id(session_id, idx),
+                    "seq": idx,
+                    "type": mtype,
+                    "content": content,
+                }
+            )
         return out
 
     async def hide_message(self, session_id: str, message_id: str) -> bool:
-        """逻辑删除单条消息；返回是否命中。"""
+        """逻辑删除单条消息；返回是否命中（稳定 id 或旧位置 id 均可）。"""
         sess = self.sessions.get(session_id)
-        if sess is None:
+        if sess is None or not message_id:
             return False
-        if self.message_index(message_id) is None and not message_id.endswith("_compact"):
+        if message_id.endswith("_compact"):
+            sess.hidden_ids.add(message_id)
+            sess.updated_at = time.time()
+            self.sessions.persist(session_id)
+            return True
+        history = await self._full_history(session_id)
+        known = {e["id"] for e in history} | {e.get("legacy_id") for e in history}
+        if message_id not in known:
             return False
         sess.hidden_ids.add(message_id)
         sess.updated_at = time.time()
@@ -809,21 +1255,29 @@ class PlatformContext:
     async def revert_session(self, session_id: str, message_id: str) -> dict[str, Any]:
         """撤回 `message_id` 及其之后的所有消息（逻辑隐藏，保留 checkpoint）。
 
-        返回 `{deleted, messages}`（messages = 撤回后剩余可见消息）。
+        以稳定消息 id 定位（旧位置 id 兼容）；返回 `{deleted, messages}`。
         """
         sess = self.sessions.get(session_id)
         if sess is None:
             return {"deleted": 0, "messages": []}
-        target = self.message_index(message_id)
         history = await self._full_history(session_id)
+        target: int | None = None
+        for entry in history:
+            if message_id in (entry["id"], entry.get("legacy_id")):
+                target = int(entry["seq"])
+                break
         if target is None:
-            # 兼容非位置 id：按内容匹配找不到则视为无操作
-            target = len(history) + 1
+            return {"deleted": 0, "messages": await self.session_messages(session_id)}
         deleted = 0
         for entry in history:
-            if entry["seq"] >= target and entry["id"] not in sess.hidden_ids:
+            if entry["seq"] < target:
+                continue
+            if entry["id"] not in sess.hidden_ids:
                 sess.hidden_ids.add(entry["id"])
                 deleted += 1
+            legacy = entry.get("legacy_id")
+            if legacy:
+                sess.hidden_ids.add(legacy)
         # 压缩基线之后被撤回 → 基线回退到撤回点之前
         if target - 1 < sess.compact_baseline_seq:
             sess.compact_baseline_seq = max(0, target - 1)
@@ -847,9 +1301,13 @@ class PlatformContext:
         return {"compacted": True, "baseline": sess.compact_baseline_seq}
 
     async def copy_messages_to_thread(
-        self, src_id: str, dst_id: str, up_to_index: int | None = None
+        self, src_id: str, dst_id: str, up_to_id: str | None = None
     ) -> int:
-        """把 src 的可见消息复制到 dst 的 checkpoint（fork 用）。返回复制条数。"""
+        """把 src 的可见消息复制到 dst 的 checkpoint（fork 用）。返回复制条数。
+
+        `up_to_id` 为稳定消息 id（含）；找不到时复制全部可见消息。
+        复制时保留原 message id，保证分叉后的消息与源会话对齐。
+        """
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
         msgs = await self.session_messages(src_id)
@@ -862,26 +1320,33 @@ class PlatformContext:
                 return _msg_content(raw[seq - 1])
             return m.get("content", "")
 
-        if up_to_index is not None:
+        if up_to_id is not None:
             kept: list[dict[str, Any]] = []
             for m in msgs:
                 kept.append(m)
-                if m["id"] == self.message_id(src_id, up_to_index):
+                seq = m.get("seq")
+                legacy = (
+                    self.message_id(src_id, int(seq))
+                    if isinstance(seq, int) and seq > 0
+                    else None
+                )
+                if m["id"] == up_to_id or legacy == up_to_id:
                     break
             msgs = kept
         lc_msgs: list[Any] = []
         for m in msgs:
             content = m.get("content", "")
             files = (m.get("data") or {}).get("files") or []
+            mid = m.get("id")
             if m["type"] == "user":
-                lc_msg: Any = HumanMessage(content=_src_content(m))
+                lc_msg: Any = HumanMessage(content=_src_content(m), id=mid)
                 if files:
                     lc_msg.additional_kwargs["files"] = _files_payload(files)
                 lc_msgs.append(lc_msg)
             elif m["type"] == "assistant":
-                lc_msgs.append(AIMessage(content=content))
+                lc_msgs.append(AIMessage(content=content, id=mid))
             elif m["type"] == "system":
-                lc_msgs.append(SystemMessage(content=content))
+                lc_msgs.append(SystemMessage(content=content, id=mid))
             # tool 消息依赖 tool_call_id，fork 时跳过以免产生非法状态
         if lc_msgs:
             await self.graph.aupdate_state(
@@ -901,8 +1366,7 @@ class PlatformContext:
             model=src.model,
             parent_id=session_id,
         )
-        index = self.message_index(message_id) if message_id else None
-        await self.copy_messages_to_thread(session_id, forked.id, up_to_index=index)
+        await self.copy_messages_to_thread(session_id, forked.id, up_to_id=message_id)
         return forked
 
     def session_children(self, session_id: str) -> list[Session]:

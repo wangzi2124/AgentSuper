@@ -1,4 +1,4 @@
-import type { MultiAgentChatRequest, MultiAgentSSEEvent, ChatError } from '../types'
+import type { MultiAgentChatRequest, MultiAgentSSEEvent, ChatError, TurnDiff } from '../types'
 import { apiRequest, classifyNetworkError } from './errors'
 import { fetchWithTimeout, addAuthHeaders } from './fetch'
 
@@ -33,7 +33,7 @@ export async function fetchTurnDiff(
   messageId: string,
   file?: string,
   step?: number,
-): Promise<{ files: { file: string; diff: string }[]; truncated: boolean; reason: string; steps: number }> {
+): Promise<TurnDiff> {
   return apiRequest(BASE + '/multi-agent/diff', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -43,7 +43,7 @@ export async function fetchTurnDiff(
       file: file || '',
       step: step == null ? null : step,
     }),
-  }, true) as Promise<{ files: { file: string; diff: string }[]; truncated: boolean; reason: string; steps: number }>
+  }, true) as Promise<TurnDiff>
 }
 
 export async function sendMultiAgentStream(

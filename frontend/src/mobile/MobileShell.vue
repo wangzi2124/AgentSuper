@@ -130,11 +130,11 @@ const mobileViews: Record<string, unknown> = {
     showSettingsForm.value = true
   }
 
-  function onModelConfirm(params: any) {
+  async function onModelConfirm(params: any) {
     const opt = params?.selectedOptions?.[0]
     if (opt && opt.value) formModel.value = opt.value
-    agent.selectedModel = formModel.value
-    agent.persistSelectedModel()
+    const ok = await agent.persistSelectedModel(formModel.value)
+    if (!ok) formModel.value = agent.selectedModel
     showModelPicker.value = false
   }
 

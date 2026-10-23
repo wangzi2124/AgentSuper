@@ -348,7 +348,7 @@ class PermissionManager:
         return False
 
     def _under_any(self, p: Path, roots: list[str]) -> bool:
-        """p 是否等于或位于 roots 任一路径之下（含多级子目录）。
+        r"""p 是否等于或位于 roots 任一路径之下（含多级子目录）。
 
         [外部目录授权] 以前临时授权只匹配「自身 + 直属父目录」一层，导致用户批准了
         `E:\some\project` 后，其**子目录**里的文件仍被判为未授权 —— 在
@@ -386,8 +386,6 @@ class PermissionManager:
         cls = self.classify_path(path_str)
         if cls == "system":
             return "deny"
-        if cls == "temp":
-            return "allow"
         if cls == "workspace":
             if self._is_critical_read(p):
                 # .env/.db/permissions.json：读弹窗审批，写/执行直接拒绝
@@ -395,6 +393,12 @@ class PermissionManager:
             if operation in ("write", "execute") and self._is_critical_write(p):
                 return "ask"
             return "allow"
+        for allowed in self._whitelist:
+            try:
+                Path(p).relative_to(Path(allowed).resolve())
+                return "allow"
+            except ValueError:
+                pass
         now = time.time()
         # Clean up expired temp approvals
         expired = [k for k, t in self._temp_approvals.items() if now - t > _TEMP_APPROVAL_TTL]
@@ -407,12 +411,6 @@ class PermissionManager:
                     self._temp_approvals.move_to_end(k)
                     break
             return "allow"
-        for allowed in self._whitelist:
-            try:
-                Path(p).relative_to(Path(allowed).resolve())
-                return "allow"
-            except ValueError:
-                pass
         return self.external_default
 
     def _is_program_source(self, p: Path) -> bool:
@@ -465,6 +463,28 @@ class PermissionManager:
     def list_workspaces(self) -> list[str]:
         """返回所有可写工作区（主工作区 + 额外工作区）的绝对路径。"""
         return [str(self.workspace), *(str(w) for w in self.extra_workspaces)]
+
+    def list_whitelist(self) -> list[str]:
+        """返回持久化路径白名单（「允许并记住」写入的绝对路径）。"""
+        return list(self._whitelist)
+
+    def add_whitelist(self, path_str: str) -> Path:
+        """把路径加入持久化白名单；目录放行整棵子树，文件仅放行自身。"""
+        p = Path(path_str).expanduser().resolve()
+        key = str(p)
+        if key not in self._whitelist:
+            self._whitelist.append(key)
+            self._save_whitelist()
+        return p
+
+    def remove_whitelist(self, path_str: str) -> bool:
+        """从持久化白名单移除路径，返回是否存在并被移除。"""
+        key = str(Path(path_str).expanduser().resolve())
+        if key not in self._whitelist:
+            return False
+        self._whitelist.remove(key)
+        self._save_whitelist()
+        return True
 
     def add_temp_approval(self, path_str: str):
         """临时授权指定路径，TTL 过期后自动失效。
@@ -537,10 +557,7 @@ class PermissionManager:
                     self._command_whitelist.add(key)
                     self._save_command_whitelist()
             else:
-                p = str(Path(req.path).resolve())
-                if p not in self._whitelist:
-                    self._whitelist.append(p)
-                    self._save_whitelist()
+                self.add_whitelist(req.path)
         self._prune_pending_index(req)
         self.cleanup_expired()
         return True

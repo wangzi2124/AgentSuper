@@ -25,7 +25,7 @@ VISION_SYSTEM_PREFIX = (
 # 历史注入预算（字符）：把同一 thread 的既有对话（checkpointer 中的 state.messages）
 # 作为上下文喂给 LLM，使模型具备会话内短期记忆（对齐 agent.md §4.2：工作记忆=State.messages）。
 # 只保留最近的内容，超出预算从最旧处丢弃，避免提示词无限增长。
-_HISTORY_BUDGET_CHARS = 6000
+_HISTORY_BUDGET_CHARS = 12_000
 
 # 历史里不需要回灌的 role（工具中间结果属噪音；压缩摘要另以 system 保留）。
 _SKIP_HISTORY_ROLES = ("tool",)
@@ -50,40 +50,73 @@ def _history_role(msg: Any) -> str | None:
 
 
 def _conversation_history(
-    state: dict[str, Any], budget_chars: int = _HISTORY_BUDGET_CHARS
+    state: dict[str, Any], budget_chars: int | None = None
 ) -> list[dict[str, Any]]:
     """把 checkpoint 中的既有对话转为 LLM 对话消息（不含本回合用户消息）。
 
-    只取**本回合用户消息之前**的历史（末尾的 human 即当前请求，由 execute 另行
-    以 task.desc 形式追加，避免重复）。工具角色消息丢弃（中间噪音）；压缩产生的
-    `[历史摘要]` 以 system 形式保留。按预算从最旧处截断，只留最近部分。
+    三层分离后的模型视角：`[迁移摘要] + [近期原文]`。
+    - `context_summary` 来自会话摘要层（模型切换时写入），原文仍在 checkpoint；
+    - `context_tail_start_id` 标记保留原文起点（稳定消息 id），找不到时退化为最近 12 条；
+    - 系统摘要**永不参与预算裁剪**（否则精确值会最先被丢掉）。
+    - 预算按目标窗口动态放大（窗口未知时用 12K 字符兜底）。
     """
     raw = list(state.get("messages") or [])
     if not raw:
         return []
-    # 末尾 human（含附件分块）/最后一条 human 视为本回合请求，排除。
+    # 末尾 human（含附件分块）的最后一个 human 视为本回合请求，排除。
     cut = len(raw)
     for i in range(len(raw) - 1, -1, -1):
         r = getattr(raw[i], "type", None) or getattr(raw[i], "role", None)
         if r in ("human", "user"):
             cut = i
             break
+
+    tail_id = state.get("context_tail_start_id")
+    start = 0
+    if tail_id:
+        for i, msg in enumerate(raw[:cut]):
+            mid = msg.get("id") if isinstance(msg, dict) else getattr(msg, "id", None)
+            if mid == tail_id:
+                start = i
+                break
+        else:
+            start = max(0, cut - 12)
+    elif state.get("context_bound"):
+        # 绑定生效但没有 tail（摘要覆盖全部历史）→ 不再重复注入旧原文。
+        start = cut
+
+    summary = str(state.get("context_summary") or "").strip()
     history: list[dict[str, Any]] = []
-    for msg in raw[:cut]:
+    # 摘要始终以 state.context_summary 为准（模型切换/自动压缩都会更新它）。
+    # 旧 checkpoint 里可能还留着上一版 [历史摘要] system 消息；窗口包含它时跳过，
+    # 避免同时注入两份摘要，也避免 tail 起点在其之后导致摘要丢失。
+    if summary:
+        history.append({"role": "system", "content": f"[历史摘要]\n{summary}"})
+
+    for msg in raw[start:cut]:
         role = _history_role(msg)
         if role is None:
             continue
         text = content_text(getattr(msg, "content", ""))
+        if summary and role == "system" and text.startswith("[历史摘要]"):
+            continue
         if not text.strip():
             continue
         history.append({"role": role, "content": text})
-    # 预算裁剪：从最旧处丢弃，直到总字符数落回预算内（至少保留最后一条）。
-    total = sum(len(h["content"]) for h in history)
-    start = 0
-    while start < len(history) - 1 and total > budget_chars:
-        total -= len(history[start]["content"])
-        start += 1
-    return history[start:]
+
+    if budget_chars is None:
+        window = int(state.get("context_window") or 0)
+        budget_chars = (
+            max(8_000, min(60_000, int(window * 2))) if window > 0 else _HISTORY_BUDGET_CHARS
+        )
+    # 预算裁剪：只裁非 system 消息，摘要始终保留。
+    systems = [h for h in history if h["role"] == "system"]
+    convo = [h for h in history if h["role"] != "system"]
+    total = sum(len(h["content"]) for h in convo)
+    while convo and total > budget_chars:
+        total -= len(convo[0]["content"])
+        convo.pop(0)
+    return systems + convo
 
 
 def _multimodal_user_content(state: dict[str, Any]) -> list[dict[str, Any]] | None:

@@ -48,6 +48,11 @@ def classify_plan_tier(text: str) -> str:
         return "single"
     has_parallel = any(sig in s for sig in _PARALLEL_SIGNALS)
     has_serial = any(sig in s for sig in _SERIAL_SIGNALS)
+    # 短问句是单次问答，不是并行任务：「项目代号和端口分别是什么？」里的
+    # 「分别」只是并列疑问，不该触发 plan LLM 分解（plan.md 会把「简单问答」
+    # 判成空计划 → 本轮没有子任务 → synthesize 只能拿草稿/旧结果）。
+    if len(s) < _SINGLE_MAX_LEN and ("?" in s or "？" in s):
+        return "serial" if has_serial else "single"
     # 并行信号优先（用户明确要"分别/同时"）；但串行信号与之并存时以串行为准
     # （"先 A 然后分别 B/C" = 有依赖，不能并行）。
     if has_parallel and not has_serial:
@@ -93,11 +98,21 @@ _TEST_RE = re.compile(
     re.IGNORECASE,
 )
 
+SELF_INTRO_MAIN = (
+    "你好！我是基于 RAG + Agent（检索增强生成）的知识库智能系统，"
+    "支持文档上传、向量检索、多模型对话、Skills 和 Plugins 动态扩展。\n\n"
+    "我可以帮你：\n"
+    "- 文档上传：上传并解析 PDF、Word、Excel、Markdown 等文档\n"
+    "- 向量检索：基于知识库做语义检索与引用作答\n"
+    "- 多模型对话：按任务切换不同模型进行对话与推理\n"
+    "- Skills：加载专项技能与工作流\n"
+    "- Plugins：动态接入工具与外部能力\n"
+    "- 工作区文件：读取、写入、编辑与检索\n\n"
+    "直接告诉我目标即可，例如「上传这份文档并总结」「在知识库中检索 xxx」「用某个模型分析这份资料」。"
+)
+
 SMALLTALK_REPLIES = {
-    "greeting": (
-        "你好！我是工作区助手，可以帮你读取、新建、编辑、搜索工作区文件，"
-        "也能执行 shell 命令。直接告诉我需求即可，比如「列出目录」或「读取 xxx.md」。"
-    ),
+    "greeting": SELF_INTRO_MAIN,
     "thanks": "不客气！还有其它需要随时告诉我。",
     "ack": "好的，需要时随时找我。",
 }
@@ -184,15 +199,14 @@ def make_plan_node(
 
         if not specs:
             if raw_content and is_explicit_empty_plan(raw_content):
-                # plan.md：寒暄/非实质请求 → 空计划 `[]`（区别于解析失败）。
-                # 短路为草稿回复（同 classify_smalltalk 路径）——
-                # 不回退单任务、不进工具循环；否则寒暄会被当任务送进 execute。
-                return {
-                    "task_plan": [{"id": "t1", "desc": request, "status": "done"}],
-                    "draft_output": SMALLTALK_REPLIES["greeting"],
-                    "plan_tier": "single",
-                    "token_usage": usage,
-                }
+                # 显式空计划（plan.md 用于寒暄/简单问答）不代表任务已完成：
+                # 真正寒暄已在 filter / classify_smalltalk 短路，走到这里的是
+                # 需要回答的问题。回退单任务交给主 Agent（带历史 + 工具）作答，
+                # 否则会把「你好！我是工作区助手…」当成本轮答案。
+                logger.info(
+                    "plan LLM returned empty plan; fall back to single task: %r",
+                    request[:80],
+                )
             return {"task_plan": _single(request), "plan_tier": "single", "token_usage": usage}
 
         tasks = [

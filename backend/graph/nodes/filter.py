@@ -14,22 +14,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from .plan import classify_smalltalk
+from .plan import SELF_INTRO_MAIN, classify_smalltalk
 
 logger = logging.getLogger(__name__)
 
-# 固定模板（工具介绍）：命中无意义输入时直接返回，**不调用模型**。
-# 说明当前可用的文件/命令能力，并引导用户给出具体指令。
-TOOL_INTRO_TEMPLATE = (
-    "你好！我是工作区助手，可以直接读写你的工作区文件、检索知识库，并执行 shell 命令。"
-    "我目前可以帮你做这些事：\n"
-    "- 读取 / 新建 / 编辑 / 删除 / 重命名文件（read_file / write_file / edit_file / delete_file）\n"
-    "- 列出目录、按 glob 查找、按内容 grep 检索（ls / glob / grep）\n"
-    "- 执行 shell 命令（shell_exec）\n"
-    "- 检索知识库文档并据其作答（RAG）\n"
-    "- 把子任务委派给 research / code / file 专职子 Agent（task）\n"
-    "直接把需求告诉我就行，比如「列出当前目录」「读取 README.md 并总结」或「创建 notes.txt」。"
-)
+# 固定模板（系统介绍）：命中无意义输入时直接返回，**不调用模型**。
+TOOL_INTRO_TEMPLATE = SELF_INTRO_MAIN
 
 
 def _last_human_msg(state: dict[str, Any]):

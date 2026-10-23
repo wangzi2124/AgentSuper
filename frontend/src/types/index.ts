@@ -291,6 +291,21 @@ export interface FileChange {
   external?: boolean
 }
 
+/** [查看改动] 单个文件的 unified diff 文本 */
+export interface DiffFile {
+  file: string
+  diff: string
+}
+
+/** [查看改动] 某轮次（或某步骤）的 diff 响应 */
+export interface TurnDiff {
+  files: DiffFile[]
+  truncated: boolean
+  reason: string
+  /** 本轮记录的写步骤数（>1 才显示步骤选择器） */
+  steps: number
+}
+
 export interface MultiAgentSSEEvent {
   // 注：后端从不发 'agent_stream'（子 Agent 增量文本走 text_delta），故此处不列。
   // [队列] turn_done = 本回合完成但还有排队任务（同一条 SSE 流继续）；queue_drain = 队列提示。
@@ -373,6 +388,8 @@ export interface MultiAgentMessage {
   timestamp: Date
   isError?: boolean
   errorInfo?: ChatError
+  /** [模型切换] 压缩后的历史占位消息，完整性校验时允许其不在活跃列表 */
+  is_compacted?: boolean
   /** 流式中的占位消息（未完成），持久化/合并时过滤 */
   live?: boolean
   /** [S2/B4] 幂等 id：user 消息首次发送时生成，重试时复用，保证服务端去重 */
@@ -391,16 +408,8 @@ export interface MultiAgentMessage {
   files_changed?: FileChange[]
   /** [撤回改动] 该轮次的文件改动是否已撤回（restore-snapshot 成功后置 true） */
   snapshotRestored?: boolean
-  /** [查看改动] 已按需拉取的 diff 文本（内存态，不落 IndexedDB；撤回后清空） */
-  diffFiles?: { file: string; diff: string }[]
-  /** [查看改动] diff 文本是否因过长被截断 */
-  diffTruncated?: boolean
-  /** [查看改动] 无法渲染的原因（老消息无 after_tree / 快照不可用）；空串表示可渲染 */
-  diffReason?: string
   /** [逐步快照] 本轮记录的写步骤数（>1 才显示步骤选择器）；来自整轮 diff 响应 */
   diffSteps?: number
-  /** [逐步快照] 当前查看的步骤下标；undefined = 整轮净 diff */
-  diffStep?: number
   /** [队列] 该条用户消息是「执行中追加的排队任务」，尚未被回答 */
   queued?: boolean
   /** [队列] 该排队任务的后端入队 id（用于移除） */

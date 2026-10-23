@@ -33,6 +33,7 @@ describe('MultiAgentResponse 输出部件渲染', () => {
       props: {
         routingStatus: '',
         isLast: false,
+        running: true,
         message: base({
           content: '正文两段+答案收尾',
           parts: [
@@ -72,6 +73,7 @@ describe('MultiAgentResponse 输出部件渲染', () => {
       props: {
         routingStatus: '',
         isLast: false,
+        running: true,
         message: base({
           content: '历史答案',
           steps: [step('s1', '检索知识库', 'completed', { detail: '找到 3 条结果' })],
@@ -90,6 +92,7 @@ describe('MultiAgentResponse 输出部件渲染', () => {
       props: {
         routingStatus: '',
         isLast: false,
+        running: true,
         message: base({
           parts: [{ seq: 0, kind: 'text', text: '唯一正文' }],
         }),
@@ -100,6 +103,38 @@ describe('MultiAgentResponse 输出部件渲染', () => {
     expect(wrapper.findAll('.o-text')[0].text()).toBe('唯一正文')
     // 单 agent 内容与 message.content 一致 → 不重复展示 final answer
     expect(wrapper.findAll('.text .md-stub').length).toBe(1)
+  })
+
+  // [P0 bug] 完成态折叠时，最终答案必须可见（单 Agent 内容相同也不能被吞掉）
+  it('[P0] 折叠态最终答案始终可见（即使与单 Agent 内容相同）', () => {
+    const wrapper = mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message: base({}) },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+    // Agent 面板默认折叠
+    expect(wrapper.find('.agents').exists()).toBe(false)
+    expect(wrapper.findAll('.text .md-stub').map(n => n.text())).toEqual(['完整答案'])
+  })
+
+  it('[P0] 手动展开后：内容相同去重，内容不同仍展示最终答案', async () => {
+    // 相同 → 展开后只保留 Agent 面板里的一份
+    const same = mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message: base({}) },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+    await same.find('.thought-toggle').trigger('click')
+    expect(same.findAll('.md-stub').map(n => n.text())).toEqual(['完整答案'])
+
+    // 不同 → Agent 面板内容 + 最终答案都可见
+    const msg = base({})
+    msg.content = '最终答案'
+    msg.agents[0].content = '执行过程'
+    const diff = mount(MultiAgentResponse, {
+      props: { routingStatus: '', isLast: false, message: msg },
+      global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
+    })
+    await diff.find('.thought-toggle').trigger('click')
+    expect(diff.findAll('.md-stub').map(n => n.text())).toEqual(['执行过程', '最终答案'])
   })
 
   it('files_changed 渲染改动文件卡片（状态徽标 + 相对路径 + 增减行）', () => {
@@ -189,10 +224,12 @@ describe('MultiAgentResponse 输出部件渲染', () => {
     expect(card.text()).toContain('已复制')
   })
 
-  it('剪贴板不可用（非安全上下文）→ 降级 prompt 手动复制', async () => {
+  it('剪贴板不可用（非安全上下文）→ 选中路径文本 + toast 提示', async () => {
     const prompt = vi.fn()
     vi.stubGlobal('prompt', prompt)
-    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
+    Object.assign(navigator, {
+      clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+    })
     const message = base({})
     message.plan_path = '/tmp/plan.md'
     const wrapper = mount(MultiAgentResponse, {
@@ -200,7 +237,9 @@ describe('MultiAgentResponse 输出部件渲染', () => {
       global: { stubs: { MarkdownContent: { template: '<div class="md-stub">{{ text }}</div>', props: ['text'] } } },
     })
     await wrapper.find('.plan-file').trigger('click')
-    expect(prompt).toHaveBeenCalledWith(expect.stringContaining('计划文件路径'), '/tmp/plan.md')
+    // 降级不再用 window.prompt，而是选中路径 + toast 提示手动复制
+    expect(prompt).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('已选中路径')
     expect(wrapper.find('.plan-file').text()).toContain('点击复制路径')
     vi.unstubAllGlobals()
   })
@@ -250,10 +289,9 @@ describe('MultiAgentResponse 文件改动 diff 展开', () => {
     expect(loadDiff).toHaveBeenCalledTimes(1)
   })
 
-  it('已缓存 diffFiles 时展开不再请求', async () => {
-    const loadDiff = vi.fn()
-    const message = withFiles({
-      diffFiles: [{
+  it('同一轮次重复展开使用组件内缓存，不再请求', async () => {
+    const loadDiff = vi.fn().mockResolvedValue({
+      files: [{
         file: 'backend/app/x.py',
         diff: [
           'diff --git a/backend/app/x.py b/backend/app/x.py',
@@ -267,34 +305,46 @@ describe('MultiAgentResponse 文件改动 diff 展开', () => {
           '+line3',
         ].join('\n'),
       }],
-      diffTruncated: false,
-      diffReason: '',
+      truncated: false,
+      reason: '',
+      steps: 1,
     })
-    const wrapper = mountIt(message, loadDiff)
+    const wrapper = mountIt(withFiles(), loadDiff)
     await wrapper.find('.fc-toggle').trigger('click')
-    expect(loadDiff).not.toHaveBeenCalled()
+    expect(loadDiff).toHaveBeenCalledTimes(1)
     const lines = wrapper.findAll('.fc-dl')
     expect(wrapper.find('.fc-diff-path').text()).toBe('backend/app/x.py')
     const cls = lines.map(n => n.classes()[1])
     expect(cls).toEqual(['meta', 'meta', 'meta', 'meta', 'hunk', 'ctx', 'del', 'add', 'add'])
+    // 收起再展开：组件内已缓存，不再请求
+    await wrapper.find('.fc-toggle').trigger('click')
+    await wrapper.find('.fc-toggle').trigger('click')
+    expect(loadDiff).toHaveBeenCalledTimes(1)
   })
 
   it('老消息无 after_tree → 展示 diffReason 而非报错', async () => {
-    const wrapper = mountIt(withFiles({ diffReason: '该消息为旧版本记录，无 after_tree，无法渲染 diff' }))
+    const loadDiff = vi.fn().mockResolvedValue({
+      files: [],
+      truncated: false,
+      reason: '该消息为旧版本记录，无 after_tree，无法渲染 diff',
+      steps: 0,
+    })
+    const wrapper = mountIt(withFiles(), loadDiff)
     await wrapper.find('.fc-toggle').trigger('click')
     expect(wrapper.find('.fc-diff-hint').text()).toContain('after_tree')
     expect(wrapper.find('.fc-diff-file').exists()).toBe(false)
   })
 
   it('只有 1 个写步骤时不显示步骤选择器', async () => {
-    const wrapper = mountIt(withFiles({ diffFiles: [], diffSteps: 1 }))
+    const loadDiff = vi.fn().mockResolvedValue({ files: [], truncated: false, reason: '', steps: 1 })
+    const wrapper = mountIt(withFiles(), loadDiff)
     await wrapper.find('.fc-toggle').trigger('click')
     expect(wrapper.find('.fc-steps').exists()).toBe(false)
   })
 
   it('多步骤 → 步骤选择器可切到单步并回传 step 下标', async () => {
     const loadDiff = vi.fn().mockResolvedValue({ files: [], truncated: false, reason: '', steps: 3 })
-    const wrapper = mountIt(withFiles({ diffSteps: 3 }), loadDiff)
+    const wrapper = mountIt(withFiles(), loadDiff)
     await wrapper.find('.fc-toggle').trigger('click')
     // 整轮先拉一次（不带 step）
     expect(loadDiff).toHaveBeenNthCalledWith(1, 'm1', undefined)
@@ -315,7 +365,7 @@ describe('MultiAgentResponse 文件改动 diff 展开', () => {
     const loadDiff = vi.fn()
       .mockResolvedValueOnce({ files: [], truncated: false, reason: '', steps: 2 })
       .mockRejectedValueOnce(new Error('该轮次缺少逐步快照'))
-    const wrapper = mountIt(withFiles({ diffSteps: 2 }), loadDiff)
+    const wrapper = mountIt(withFiles(), loadDiff)
     await wrapper.find('.fc-toggle').trigger('click')
     await wrapper.findAll('.fc-step')[1].trigger('click')
     await wrapper.vm.$nextTick()
@@ -337,12 +387,13 @@ describe('MultiAgentResponse 文件改动 diff 展开', () => {
   })
 
   it('diff 截断提示 + 撤回后按钮禁用', async () => {
-    const wrapper = mountIt(withFiles({ diffTruncated: true, snapshotRestored: true }))
+    const loadDiff = vi.fn().mockResolvedValue({ files: [], truncated: true, reason: '', steps: 0 })
+    const wrapper = mountIt(withFiles({ snapshotRestored: true }), loadDiff)
     const restore = wrapper.find('.fc-restore')
     expect(restore.text()).toBe('已撤回')
     expect(restore.attributes('disabled')).toBeDefined()
     await wrapper.find('.fc-toggle').trigger('click')
-    // 无 diffFiles 时先提示「无可展示的 diff」，截断提示作为附加说明一并渲染
+    // 无 diff 文件时先提示「无可展示的 diff」，截断提示作为附加说明一并渲染
     const hints = wrapper.findAll('.fc-diff-hint').map(n => n.text())
     expect(hints).toContain('无可展示的 diff')
     expect(hints).toContain('diff 过长已截断')

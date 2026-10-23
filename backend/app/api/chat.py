@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..deps import PlatformContext, get_context
+from ..deps import ModelSwitchError, PlatformContext, get_context
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -38,6 +38,11 @@ async def chat(body: ChatRequest, ctx: PlatformContext = Depends(get_context)) -
     sess = ctx.sessions.ensure(
         tid, directory=body.directory, user_id=body.user_id
     )
+    if body.target_model and body.target_model != sess.model:
+        try:
+            await ctx.switch_model(sess.id, body.target_model)
+        except ModelSwitchError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     state = await ctx.run(body.message, session_id=sess.id, user_id=body.user_id)
     output = state.get("final_output", "")
     return {
@@ -57,6 +62,11 @@ async def chat_stream(
     sess = ctx.sessions.ensure(
         body.session_id, directory=body.directory, user_id=body.user_id
     )
+    if body.target_model and body.target_model != sess.model:
+        try:
+            await ctx.switch_model(sess.id, body.target_model)
+        except ModelSwitchError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     async def event_source():
         async for ev in ctx.stream(body.message, session_id=sess.id, user_id=body.user_id):

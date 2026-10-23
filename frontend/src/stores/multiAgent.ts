@@ -329,6 +329,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         cost: (m as any).cost,
         files_changed: (m as any).files_changed || [],
         snapshotRestored: !!((m as any).snapshot_restored),
+        is_compacted: !!((m as any).is_compacted),
         // [C8] 计划文件路径（plan Agent 落盘产物）——历史回放也要能看到「查看计划」入口
         plan_path: (m as any).plan_path || undefined,
         partial_error: (m as any).partial_error ?? null,
@@ -596,8 +597,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (event.user_msg_id) {
       for (let i = session.messages.length - 1; i >= 0; i--) {
         const m = session.messages[i]
-        if (m.role === 'user' && m.id !== event.user_msg_id) {
-          m.id = event.user_msg_id
+        if (m.role === 'user') {
+          if (m.id !== event.user_msg_id) m.id = event.user_msg_id
           break
         }
       }
@@ -1003,26 +1004,14 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
   }
 
-  // [查看改动] 拉取某条 assistant 消息对应轮次的 diff 文本（展开文件改动时按需加载）
-  // 不落 IndexedDB：diff 体积大且可随时重取，只在内存里缓存到 message 上。
+  // [查看改动] 拉取某条 assistant 消息对应轮次的 diff 文本（展开文件改动时按需加载）。
+  // 只返回数据，不写回 message：缓存由 DiffViewer 自管（按 messageId+step 命名空间），
+  // 避免把 UI 缓存字段塞进消息模型。
   // step 省略 = 整轮净 diff；传 step=N = 只看第 N 步（每 step 快照）。
   async function fetchMessageDiff(messageId: string, step?: number) {
     const s = activeSessionId.value ? sessions.value[activeSessionId.value] : undefined
     if (!s?.conversationId) throw new Error('会话尚未在服务器创建，无法查看改动')
-    const result = await apiFetchTurnDiff(s.conversationId, messageId, '', step)
-    const msg = s.messages.find(m => m.id === messageId)
-    if (msg) {
-      msg.diffFiles = result.files
-      msg.diffTruncated = result.truncated
-      msg.diffReason = result.reason
-      if (step == null) {
-        msg.diffSteps = result.steps
-        msg.diffStep = undefined
-      } else {
-        msg.diffStep = step
-      }
-    }
-    return result
+    return apiFetchTurnDiff(s.conversationId, messageId, '', step)
   }
 
   // [撤回改动] 恢复某条 assistant 消息对应轮次的文件改动（调后端 restore-snapshot）
@@ -1032,13 +1021,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     const result = await apiRestoreSnapshot(s.conversationId, messageId)
     const msg = s.messages.find(m => m.id === messageId)
     if (msg) {
+      // DiffViewer 监听 restored 变化自行清空 diff 缓存，消息模型不再持有 UI 缓存。
       msg.snapshotRestored = true
-      // 改动已被撤回 → 已展开的 diff 立刻失效，避免用户对着过期内容点「已撤回」
-      msg.diffFiles = undefined
-      msg.diffTruncated = false
-      msg.diffReason = ''
-      msg.diffSteps = 0
-      msg.diffStep = undefined
     }
     await persistSession(activeSessionId.value!)
     return result
@@ -1077,15 +1061,59 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
   }
 
-  // [模型切换] 选择器变更 → PATCH 会话默认模型（opencode switchModel 持久化语义）
-  function persistSelectedModel() {
+  // [模型切换] 选择器变更 → PATCH 会话默认模型（opencode switchModel 持久化语义）。
+  // 已存在会话必须等服务端门禁/迁移成功后再改 UI；失败保留旧模型并提示。
+  async function persistSelectedModel(target?: string): Promise<boolean> {
+    const model = target || selectedModel.value
+    // 参考 opencode FAST_BOOT：provider 目录未就绪前不 set，失败显式报错。
+    await loadModels(true)
+    if (!modelOptions.value.some(o => o.value === model)) {
+      setNotice(`模型目录未就绪或模型不存在：${model}`)
+      return false
+    }
     const s = activeSessionId.value ? sessions.value[activeSessionId.value] : undefined
-    const sessionId = s?.conversationId || activeSessionId.value
-    if (!s || !sessionId) return
-    const providerID = selectedModel.value.split('/')[0]
-    apiUpdateSession(sessionId, { model: { id: selectedModel.value, providerID } })
-      .then(() => loadConversations())
-      .catch(e => console.error('Failed to persist session model:', e))
+    // 新会话尚未落库（只有本地 id）：只改本地选择，等服务端创建会话时再继承。
+    if (!s || !s.conversationId) {
+      selectedModel.value = model
+      return true
+    }
+    const sessionId = s.conversationId
+    const previous = selectedModel.value
+    const before = new Map(s.messages.map(m => [m.id, m]))
+    const beforeIds = [...before.keys()]
+    try {
+      setNotice('正在切换模型，历史加载中…')
+      const providerID = model.split('/')[0]
+      await apiUpdateSession(sessionId, { model: { id: model, providerID } })
+      // §3.1 消息完整性：切换后从服务端核对，未压缩消息不得丢失。
+      try {
+        const detail = await getConversation(sessionId, 'multi-agent')
+        const afterIds = new Set(detail.messages.map(m => m.id))
+        const afterContents = new Set(detail.messages.map(m => m.content))
+        const lost = beforeIds.filter(id => {
+          const old = before.get(id) as any
+          if (!old || old.is_compacted) return false
+          return !afterIds.has(id) && !afterContents.has(old.content)
+        })
+        if (lost.length) {
+          await apiUpdateSession(sessionId, {
+            model: { id: previous, providerID: previous.split('/')[0] },
+          })
+          setNotice('消息丢失，已回滚模型切换')
+          return false
+        }
+      } catch {
+        // 历史拉取失败不阻断切换；本地列表原地保留。
+      }
+      selectedModel.value = model
+      setNotice('')
+      await loadConversations()
+      return true
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setNotice(`切换模型失败：${msg}`)
+      return false
+    }
   }
 
   return {

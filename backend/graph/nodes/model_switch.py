@@ -75,7 +75,9 @@ def make_model_switch_node() -> Callable[[dict[str, Any]], dict[str, Any]]:
             "model_switch_log": log,
             "pending_model_switch": None,
             "context_summary": summary or existing_summary,
-            "messages": [handoff, *messages],
+            # 只追加交接消息；旧实现把 [handoff, *messages] 交回 add_messages，
+            # 会重复写入整段历史（消息翻倍、ID 冲突）。
+            "messages": [handoff],
         }
 
     return model_switch_node

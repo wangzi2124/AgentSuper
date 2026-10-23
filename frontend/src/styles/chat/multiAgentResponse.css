@@ -1,3 +1,7 @@
+/* 本条消息的编排层样式：思考态 + 折叠开关 + Agent 面板容器 + 最终答案 + 错误。
+   Agent 面板内部样式在 AgentPanel.vue，工具卡片在 AgentStepCard.vue，
+   文件改动/diff 在 DiffViewer.vue，计划文件在 PlanFileChip.vue。 */
+
 .response { font-size: 16px; line-height: 1.75; }
 .routing { display: flex; align-items: center; gap: 8px; padding: 10px 0; font-size: 14px; color: var(--text-secondary); }
 .spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
@@ -40,92 +44,7 @@ transition: border-color var(--duration) var(--ease), color var(--duration) var(
 .tt-chevron { flex-shrink: 0; transition: transform 0.2s var(--ease); color: var(--text-muted); }
 .thought-toggle.open .tt-chevron { transform: rotate(180deg); }
 
-/* Agent 面板：统一克制的卡片（弱化装饰光带，统一圆角/边框） */
+/* Agent 面板容器（面板卡片样式在 AgentPanel.vue） */
 .agents { display: flex; flex-direction: column; gap: 10px; }
-.agent {
-position: relative;
-border: 1px solid var(--border);
-border-radius: 12px;
-padding: 14px 16px;
-background: var(--surface-elevated);
-transition: border-color var(--duration) var(--ease), box-shadow var(--duration) var(--ease);
-}
-.agent::before { display: none; }
-.agent.running {
-border-color: color-mix(in srgb, var(--primary) 36%, var(--border));
-}
-.agent-h { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 14px; }
-.avatar {
-width: 26px; height: 26px;
-font-size: 14px;
-border-radius: 8px;
-background: var(--surface);
-display: inline-flex; align-items: center; justify-content: center;
-flex-shrink: 0;
-border: 1px solid var(--border);
-}
-.name { font-weight: 600; color: var(--text); }
-.badge { font-size: 11px; padding: 2px 9px; border-radius: var(--radius-pill); margin-left: auto; font-weight: 600; letter-spacing: 0.02em; flex-shrink: 0; }
-.badge.running { background: var(--primary-glow); color: var(--primary); }
-.badge.completed { background: var(--success-soft); color: var(--success); }
-.badge.failed { background: var(--danger-soft); color: var(--danger); }
-
-/* 运行中占位（无部件时提示正在初始化） */
-.steps { display: flex; flex-direction: column; gap: 2px; margin: 10px 0 4px; }
-.step-item {
-padding: 4px 6px;
-border-radius: 6px;
-font-size: 14px;
-color: var(--text-secondary);
-}
-.step-row { display: flex; align-items: center; gap: 8px; }
-.step-icon { font-size: 12px; flex-shrink: 0; width: 10px; text-align: center; color: var(--text-secondary); }
-.step-name { font-weight: 500; }
-.step-time { margin-left: auto; color: var(--text-secondary); font-size: 13px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
-.step-time.spinning { color: var(--primary); animation: spin 0.8s linear infinite; }
-/* 输出部件流：正文块按真实输出顺序交错渲染 */
-.o-parts { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 2px; }
-.o-text > *:first-child { margin-top: 0; }
-
-/* 极简工具卡片：统一为克制的行内提示条（无边框重绘，仅浅底） */
-.o-tool {
-display: flex;
-align-items: center;
-gap: 8px;
-padding: 5px 10px;
-border-radius: 8px;
-font-size: 13px;
-background: color-mix(in srgb, var(--bg-subtle) 60%, transparent);
-border: 1px solid transparent;
-transition: border-color var(--duration) var(--ease), background var(--duration) var(--ease);
-}
-.o-tool.running { background: color-mix(in srgb, var(--primary) 8%, transparent); border-color: color-mix(in srgb, var(--primary) 22%, transparent); }
-.o-tool.failed { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 22%, transparent); }
-.o-tool-icon { font-size: 12px; flex-shrink: 0; width: 12px; text-align: center; color: var(--text-secondary); }
-.o-tool-icon.completed { color: var(--success); }
-.o-tool-icon.failed { color: var(--danger); }
-.o-tool-icon.running { color: var(--primary); }
-.o-tool-name {
-font-weight: 600;
-color: var(--primary);
-flex-shrink: 0;
-font-family: 'JetBrains Mono', Consolas, monospace;
-font-size: 12px;
-}
-/* 非工具阶段（思考/检索/生成…）：不用等宽字体，弱化为次要色 */
-.o-tool.is-step .o-tool-name {
-font-family: inherit;
-color: var(--text-secondary);
-}
-.o-tool-title {
-color: var(--text-secondary);
-white-space: nowrap;
-overflow: hidden;
-text-overflow: ellipsis;
-min-width: 0;
-flex: 1;
-}
-.o-tool-time { margin-left: auto; color: var(--text-secondary); font-size: 12px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
-.o-tool-spin { width: 10px; height: 10px; margin-left: auto; border: 1.5px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
 
 .err { padding: 10px 14px; background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: 12px; font-size: 13px; color: var(--danger); margin-top: 4px; }

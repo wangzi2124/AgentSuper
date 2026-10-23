@@ -25,6 +25,12 @@ class AgentState(TypedDict, total=False):
     budget_total: float
     sub_results: Annotated[dict[str, str], merge_dicts]
     context_summary: str
+    # 摘要之后保留的近期原文起点（稳定消息 id，跨模型切换不变）
+    context_tail_start_id: str | None
+    context_bound: bool
+    context_window: int
+    compress_threshold: int
+    keep_recent_tokens: int
     context_compressed: bool
     compress_count: int
     memory_context: str

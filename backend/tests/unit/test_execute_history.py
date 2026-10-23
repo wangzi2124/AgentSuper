@@ -104,6 +104,52 @@ async def test_rag_context_merged_into_system():
     assert "7天内可退" in sent[0]["content"]
 
 
+def test_summary_preferred_when_tail_starts_after_old_summary():
+    msgs = [
+        SystemMessage(id="s0", content="[历史摘要]\nOLD SUMMARY"),
+        HumanMessage(id="h1", content="recent question"),
+        AIMessage(id="a1", content="recent answer"),
+        HumanMessage(id="h2", content="current question"),
+    ]
+    hist = _conversation_history(
+        {
+            "messages": msgs,
+            "context_summary": "NEW SUMMARY",
+            "context_tail_start_id": "h1",
+            "context_bound": True,
+        }
+    )
+    assert hist[0] == {"role": "system", "content": "[历史摘要]\nNEW SUMMARY"}
+    joined = "\n".join(h["content"] for h in hist)
+    assert "OLD SUMMARY" not in joined
+    assert "recent question" in joined
+    assert "recent answer" in joined
+    assert "current question" not in joined
+
+
+def test_auto_compressed_summary_kept_with_tail():
+    msgs = [
+        SystemMessage(id="s0", content="[历史摘要]\nAUTO SUMMARY"),
+        HumanMessage(id="h1", content="kept question"),
+        AIMessage(id="a1", content="kept answer"),
+        HumanMessage(id="h2", content="current question"),
+    ]
+    hist = _conversation_history(
+        {
+            "messages": msgs,
+            "context_summary": "AUTO SUMMARY",
+            "context_tail_start_id": "h1",
+            "context_bound": False,
+        }
+    )
+    assert [h for h in hist if h["role"] == "system"] == [
+        {"role": "system", "content": "[历史摘要]\nAUTO SUMMARY"}
+    ]
+    joined = "\n".join(h["content"] for h in hist)
+    assert "kept question" in joined
+    assert "kept answer" in joined
+
+
 def test_history_budget_trims_oldest():
     msgs = []
     for i in range(50):

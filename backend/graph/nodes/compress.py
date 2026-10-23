@@ -40,8 +40,20 @@ def make_compress_node(
 
         if compressor is not None:
             # 用 cognition 的阈值 + 保留最近 token 的增量压缩（§4.3）
+            # 阈值与目标模型绑定：目标窗口更小 → 更早压缩（agent-3 §2.2）。
+            from cognition.compressor import COMPRESS_THRESHOLD, KEEP_RECENT_TOKENS
+
+            threshold = int(state.get("compress_threshold") or COMPRESS_THRESHOLD)
+            keep_tokens = int(state.get("keep_recent_tokens") or KEEP_RECENT_TOKENS)
             try:
-                result = await compressor(messages, existing, model)
+                try:
+                    result = await compressor(
+                        messages, existing, model,
+                        threshold=threshold, keep_tokens=keep_tokens,
+                    )
+                except TypeError:
+                    # 兼容旧的三参数 compressor（测试/自定义注入）
+                    result = await compressor(messages, existing, model)
             except Exception as e:  # noqa: BLE001
                 logger.warning("compressor failed, skip: %s", e)
                 return {"token_usage": {"compressed": False}, "context_compressed": True}
@@ -54,6 +66,10 @@ def make_compress_node(
                 "token_usage": {"compressed": True},
                 "context_compressed": True,
             }
+            if recent:
+                tail_id = getattr(recent[0], "id", None)
+                if tail_id:
+                    payload["context_tail_start_id"] = str(tail_id)
             if RemoveMessage is not None and REMOVE_ALL_MESSAGES is not None:
                 payload["messages"] = [
                     RemoveMessage(id=REMOVE_ALL_MESSAGES),
@@ -97,6 +113,10 @@ def make_compress_node(
             "token_usage": {"compressed": True},
             "context_compressed": True,
         }
+        if recent:
+            tail_id = getattr(recent[0], "id", None)
+            if tail_id:
+                payload["context_tail_start_id"] = str(tail_id)
         if RemoveMessage is not None and REMOVE_ALL_MESSAGES is not None:
             payload["messages"] = [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),

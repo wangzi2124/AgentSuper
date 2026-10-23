@@ -112,16 +112,19 @@ async def test_greeting_flow_routes_to_synthesize():
     assert final["final_output"] == SMALLTALK_REPLIES["greeting"]
 
 
-async def test_plan_llm_empty_plan_short_circuits():
-    """LLM 按 plan.md 对寒暄输出空计划 `[]` → 短路为草稿，不回退单任务。"""
-    # 长于单任务阈值（≥50 字）且带串行信号 → 走 LLM 分解路径；
-    # LLM 判定寒暄输出 []（此时三层门禁已放行到模型）。
+async def test_plan_llm_empty_plan_falls_back_to_single():
+    """LLM 按 plan.md 输出空计划 `[]` 时回退单任务（不能伪造寒暄答案）。
+
+    `[]` 同时被 plan.md 用于「简单问答」；若短路成 greeting 草稿，追问句
+    （如「代号和端口分别是什么？」）会答非所问。真正寒暄由 filter /
+    classify_smalltalk 在进入 plan 前处理。
+    """
     msg = "非常感谢你一直以来耐心细致的帮助与支持，辛苦了，然后我们慢慢聊一聊最近的情况吧"
     model = _StubModel("```json\n[]\n```")
     node = make_plan_node(model)
     out = await node({"messages": [HumanMessage(content=msg)]})
-    assert out["task_plan"] == [{"id": "t1", "desc": msg, "status": "done"}]
-    assert out["draft_output"] == SMALLTALK_REPLIES["greeting"]
+    assert out["task_plan"] == [{"id": "t1", "desc": msg, "status": "pending"}]
+    assert "draft_output" not in out
     # 仍调了一次 LLM（未命中快速路径才走的分解路径）
     assert len(model.calls) == 1
 
