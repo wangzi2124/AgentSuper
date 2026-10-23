@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import re
 import tempfile
 import time
 import uuid
@@ -59,6 +60,56 @@ def reset_session_workspace(token: contextvars.Token) -> None:
 def current_session_workspace() -> str:
     """当前上下文（本会话）绑定的工作目录；未设置返回空串。"""
     return _session_workspace_var.get()
+
+
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_SPLIT = re.compile(r"\|\||&&|\s&\s|[|;\n]")
+_TOKEN = re.compile(r"\s*(?:\"([^\"]+)\"|'([^']+)'|(\S+))")
+
+
+def _first_token(segment: str) -> str:
+    """取一段简单命令的首 token（跳过 `FOO=bar` 前缀），小写、去引号。"""
+    pos = 0
+    while pos < len(segment):
+        match = _TOKEN.match(segment, pos)
+        if not match:
+            return ""
+        token = next((g for g in match.groups() if g is not None), "")
+        pos = match.end()
+        if not token or _ENV_ASSIGN.match(token):
+            continue
+        return token.strip("'\"").lower()
+    return ""
+
+
+def command_keys(command: str) -> list[str]:
+    """拆出命令中每个简单命令的首 token（命令白名单判定键）。
+
+    只有**所有**段的 base 命令都被授权，整条命令才可免审；管道/串联里只要混入
+    未授权命令就仍需询问用户。无法安全静态解析的写法（`$(...)`、反引号、
+    重定向 `<`/`>`）返回空列表 → 强制人工审批，避免白名单变成任意执行的跳板。
+    """
+    text = str(command or "").strip()
+    if not text or any(token in text for token in ("$(", "`", "<", ">")):
+        return []
+    keys: list[str] = []
+    for segment in _SHELL_SPLIT.split(text):
+        key = _first_token(segment.strip())
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def base_command(command: str) -> str:
+    """提取命令白名单键：首个简单命令的第一个 token（跳过 `FOO=bar` 前缀）。
+
+    仅用于展示/审批记录；判定请用 `command_keys`（多段命令逐段校验）。
+    """
+    keys = command_keys(command)
+    if keys:
+        return keys[0]
+    text = str(command or "").strip()
+    return _first_token(text) if text else ""
 
 
 class NeedsPermission(Exception):

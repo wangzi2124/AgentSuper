@@ -131,6 +131,10 @@ def make_file_tools(vfs: VirtualFileSystem) -> dict[str, Callable[..., Any]]:
 
 
 WRITE_TOOLS = frozenset({"write_file", "edit_file", "append_file", "delete_file"})
+# 读工具同样过审批门控：沙箱/允许根内由 `ctx.request_permission` 自动放行（零弹窗），
+# 越界读取才询问用户。此前读工具 `require_approval=False`，越界直接抛 "路径越界"，
+# 与 PermissionManager `external_default=ask` 的语义不一致（读取无法申请授权）。
+READ_TOOLS = frozenset({"read_file", "ls", "grep", "glob"})
 
 
 def register_file_tools(
@@ -158,7 +162,7 @@ def register_file_tools(
             name=name,
             description=(fn.__doc__ or "").strip(),
             scope=scope,
-            require_approval=name in WRITE_TOOLS,
+            require_approval=name in WRITE_TOOLS or name in READ_TOOLS,
         )
         registered.append(name)
     return registered
@@ -166,6 +170,7 @@ def register_file_tools(
 
 __all__ = [
     "MAX_MATCHES",
+    "READ_TOOLS",
     "WRITE_TOOLS",
     "append_file",
     "delete_file",

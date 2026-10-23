@@ -708,9 +708,7 @@ class PlatformContext:
         """迁移前原文快照（必须先于任何摘要/绑定写入）。"""
         from langchain_core.messages import messages_to_dict
 
-        backup_dir = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "data", "model_switches"
-        )
+        backup_dir = PlatformContext._switch_dir()
         os.makedirs(backup_dir, exist_ok=True)
         stamp = int(time.time() * 1000)
         path = os.path.join(backup_dir, f"{session_id}_{stamp}.json")
@@ -743,6 +741,72 @@ class PlatformContext:
         except Exception:  # noqa: BLE001 - 标记失败不掩盖主流程结果
             logger.warning("更新模型切换备份标记失败: %s", path, exc_info=True)
 
+    @staticmethod
+    def _switch_dir() -> str:
+        """模型切换备份/审计目录（`data/model_switches/`）。"""
+        return os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "data", "model_switches"
+        )
+
+    @classmethod
+    def _append_switch_audit(
+        cls,
+        session_id: str,
+        old_model: str | None,
+        target: str,
+        status: str,
+        *,
+        error: str = "",
+        summarized: bool = False,
+        tokens: int = 0,
+        threshold: int = 0,
+        tail_start_id: str | None = None,
+    ) -> None:
+        """追加一条模型切换审计事件（`switches.jsonl`）。
+
+        成功与失败都记录（status: committed / rejected / rolled_back），失败带
+        `error` 原因，供事后人工核对（agent-3 §2.3「迁移失败记录人工核对事件」）。
+        审计写入失败不影响主流程。
+        """
+        path = os.path.join(cls._switch_dir(), "switches.jsonl")
+        record = {
+            "session_id": session_id,
+            "from": old_model,
+            "to": target,
+            "status": status,
+            "summarized": bool(summarized),
+            "tokens": tokens,
+            "threshold": threshold,
+            "at": time.time(),
+        }
+        if tail_start_id:
+            record["tail_start_id"] = tail_start_id
+        if error:
+            record["error"] = error
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:  # noqa: BLE001 - 审计失败不影响切换结果
+            logger.warning("写入模型切换审计失败", exc_info=True)
+
+    @classmethod
+    def _record_switch_failure(
+        cls,
+        backup_path: str | None,
+        session_id: str,
+        old_model: str | None,
+        target: str,
+        status: str,
+        reason: str,
+    ) -> None:
+        """失败收尾：备份标记 rolled_back + 审计事件（含失败原因）。"""
+        if backup_path:
+            cls._mark_switch_backup(backup_path, "rolled_back")
+        cls._append_switch_audit(
+            session_id, old_model, target, status, error=reason
+        )
+
     async def switch_model(self, session_id: str, target: str) -> dict[str, Any]:
         """切换会话模型：门禁 → 生成摘要 → 原子写入绑定 → 持久化模型 id。
 
@@ -750,9 +814,15 @@ class PlatformContext:
         """
         target = (target or "").strip()
         if not target:
+            PlatformContext._append_switch_audit(
+                session_id, None, "", "rejected", error="目标模型为空"
+            )
             raise ModelSwitchError("目标模型为空", 400)
         sess = self.sessions.get(session_id)
         if sess is None:
+            PlatformContext._append_switch_audit(
+                session_id, None, target, "rejected", error="会话不存在"
+            )
             raise ModelSwitchError("会话不存在", 404)
         if target == sess.model:
             return {
@@ -765,9 +835,17 @@ class PlatformContext:
         limits = read_limits(target) or {}
         window = int(limits.get("context_length") or 0)
         if window <= 0:
-            raise ModelSwitchError(f"目标模型上下文窗口未知，已拒绝切换：{target}", 400)
+            reason = f"目标模型上下文窗口未知，已拒绝切换：{target}"
+            PlatformContext._append_switch_audit(
+                session_id, sess.model, target, "rejected", error=reason
+            )
+            raise ModelSwitchError(reason, 400)
         if sess.status == "running" or session_id in self.cancels:
-            raise ModelSwitchError("会话正在运行，请等待本轮完成后再切换模型", 409)
+            reason = "会话正在运行，请等待本轮完成后再切换模型"
+            PlatformContext._append_switch_audit(
+                session_id, sess.model, target, "rejected", error=reason
+            )
+            raise ModelSwitchError(reason, 409)
 
         messages = await self._raw_messages(session_id)
         from cognition.compressor import (
@@ -800,6 +878,15 @@ class PlatformContext:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("切换模型备份失败: %s", exc)
+            PlatformContext._append_switch_audit(
+                session_id,
+                old_model,
+                target,
+                "failed",
+                error=f"迁移备份失败：{exc}",
+                tokens=tokens,
+                threshold=threshold,
+            )
             raise ModelSwitchError(f"迁移备份失败，已保留原模型：{exc}", 500) from exc
 
         recent: list[Any] = []
@@ -850,13 +937,18 @@ class PlatformContext:
                         getattr(tail, "id", None)
                         or PlatformContext.stable_message_id(session_id, tail)
                     )
-        except ModelSwitchError:
-            PlatformContext._mark_switch_backup(backup_path, "rolled_back")
+        except ModelSwitchError as exc:
+            PlatformContext._record_switch_failure(
+                backup_path, session_id, old_model, target, "rolled_back", str(exc)
+            )
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("切换模型时历史摘要失败：%s", exc)
-            PlatformContext._mark_switch_backup(backup_path, "rolled_back")
-            raise ModelSwitchError(f"历史摘要生成失败，已保留原模型：{exc}", 500) from exc
+            reason = f"历史摘要生成失败，已保留原模型：{exc}"
+            PlatformContext._record_switch_failure(
+                backup_path, session_id, old_model, target, "rolled_back", reason
+            )
+            raise ModelSwitchError(reason, 500) from exc
 
         from .session import repository as repo
 
@@ -882,8 +974,11 @@ class PlatformContext:
             repo.upsert_epoch(session_id, baseline, baseline_seq, snapshot)
         except Exception as exc:  # noqa: BLE001 - 绑定写失败必须保留旧模型
             logger.warning("模型切换绑定写入失败：%s", exc)
-            PlatformContext._mark_switch_backup(backup_path, "rolled_back")
-            raise ModelSwitchError(f"模型绑定写入失败，已保留原模型：{exc}", 500) from exc
+            reason = f"模型绑定写入失败，已保留原模型：{exc}"
+            PlatformContext._record_switch_failure(
+                backup_path, session_id, old_model, target, "rolled_back", reason
+            )
+            raise ModelSwitchError(reason, 500) from exc
 
         # §3.1 消息完整性：切换不得丢失任何未压缩消息。
         after_ids = [
@@ -896,7 +991,14 @@ class PlatformContext:
                 repo.upsert_epoch(session_id, baseline, baseline_seq, old_snapshot)
             except Exception:  # noqa: BLE001
                 logger.warning("回滚上下文绑定失败", exc_info=True)
-            PlatformContext._mark_switch_backup(backup_path, "rolled_back")
+            PlatformContext._record_switch_failure(
+                backup_path,
+                session_id,
+                old_model,
+                target,
+                "rolled_back",
+                f"消息完整性校验失败，丢失 {len(lost)} 条消息，已回滚模型切换",
+            )
             raise ModelSwitchError(
                 f"消息完整性校验失败，丢失 {len(lost)} 条消息，已回滚模型切换", 500
             )
@@ -911,32 +1013,27 @@ class PlatformContext:
                 repo.upsert_epoch(session_id, baseline, baseline_seq, old_snapshot)
             except Exception:  # noqa: BLE001
                 logger.warning("回滚上下文绑定失败", exc_info=True)
-            PlatformContext._mark_switch_backup(backup_path, "rolled_back")
+            PlatformContext._record_switch_failure(
+                backup_path,
+                session_id,
+                old_model,
+                target,
+                "rolled_back",
+                f"模型持久化失败，已保留原模型：{exc}",
+            )
             raise ModelSwitchError(f"模型持久化失败，已保留原模型：{exc}", 500) from exc
 
         PlatformContext._mark_switch_backup(backup_path, "committed")
-        try:
-            backup_dir = os.path.dirname(backup_path)
-            with open(
-                os.path.join(backup_dir, "switches.jsonl"), "a", encoding="utf-8"
-            ) as fh:
-                fh.write(
-                    json.dumps(
-                        {
-                            "session_id": session_id,
-                            "from": old_model,
-                            "to": target,
-                            "tokens": tokens,
-                            "threshold": threshold,
-                            "summarized": bool(summary),
-                            "at": time.time(),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
-        except Exception:  # noqa: BLE001 - 审计失败不影响已提交切换
-            logger.warning("写入模型切换审计失败", exc_info=True)
+        PlatformContext._append_switch_audit(
+            session_id,
+            old_model,
+            target,
+            "committed",
+            summarized=bool(summary),
+            tokens=tokens,
+            threshold=threshold,
+            tail_start_id=tail_start_id,
+        )
 
         return {
             "switched": True,
@@ -1389,6 +1486,12 @@ class PlatformContext:
     ) -> bool:
         """发起一次工具审批（§9 `execution/approval.py` 高危审批流）。
 
+        免审规则（与 `PermissionManager` 语义对齐）：
+        - 路径类工具：沙箱根 / 会话目录 / 「工作目录」面板 / 持久白名单内的路径直接
+          放行；越界按 `EXTERNAL_PATH_DEFAULT`（ask/allow/deny）处理 —— ask 时弹审批。
+        - `shell_exec`：命令白名单 / 临时命令授权命中直接放行；否则按
+          `EXTERNAL_PATH_DEFAULT` 处理（ask 时弹审批）。路径免审**不能**绕过命令审批。
+
         - 规范机制：`ctx.approvals`（`ApprovalQueue`）登记审批请求，是本平台权威记录。
         - 前端传输：复用既有 `/api/permission/*`（`app.permission.PermissionManager`）
           作为 UI 通道——它提供 `pending` 轮询与 `respond`，与前端 `stores/permission.ts`
@@ -1402,32 +1505,73 @@ class PlatformContext:
                 await self.permission_hook(session_id=session_id, tool=tool, args=args, emit=emit)
             )
 
-        # 沙箱/允许根内路径免审批（对齐 opencode external_directory ask：仅越界才询问用户）
         raw_path = args.get("path") or args.get("file") or args.get("workdir")
-        if raw_path and self.vfs.is_allowed(str(raw_path)):
-            return True
-
-        rid = await self.approvals.request(tool, args, requester=session_id)
-        path = str(raw_path) if raw_path else tool
+        command = str(args.get("command") or "").strip()
 
         legacy = None
         try:  # pragma: no cover - 依赖既有 app 子系统
-            from execution.permission import get_manager
+            from execution.permission import command_keys, get_manager
 
             legacy = get_manager()
         except Exception:  # noqa: BLE001
+            command_keys = None  # type: ignore[assignment]
             legacy = None
+
+        default_decision = getattr(legacy, "external_default", "ask") if legacy else "ask"
+
+        keys: list[str] = []
+        if command:
+            keys = command_keys(command) if command_keys is not None else []
+            if legacy is not None:
+                if keys:
+                    decisions = [legacy.check_command(key) for key in keys]
+                    if all(decision == "allow" for decision in decisions):
+                        return True
+                    if any(decision == "deny" for decision in decisions):
+                        return False
+                elif default_decision == "allow":
+                    return True
+                elif default_decision == "deny":
+                    return False
+            else:
+                if default_decision == "allow":
+                    return True
+                if default_decision == "deny":
+                    return False
+            operation = "command"
+            path = keys[0] if keys else command[:80]
+        else:
+            # 沙箱/允许根内路径免审批（对齐 opencode external_directory ask：仅越界才询问）
+            if raw_path and self.vfs.is_allowed(str(raw_path)):
+                return True
+            if default_decision == "allow":
+                return True
+            if default_decision == "deny":
+                return False
+            path = str(raw_path) if raw_path else tool
+            if tool in {"read_file", "ls", "grep", "glob"}:
+                operation = "read"
+            elif tool in {"write_file", "edit_file", "append_file", "delete_file"}:
+                operation = "write"
+            else:
+                operation = "tool"
+
+        rid = await self.approvals.request(tool, args, requester=session_id)
 
         if legacy is not None:
             req = legacy.create_request(
-                path=path, operation="tool", tool_name=tool, tool_args=args, session_id=session_id
+                path=path,
+                operation=operation,
+                tool_name=tool,
+                tool_args=args,
+                session_id=session_id,
             )
             await emit(
                 {
                     "type": "permission_request",
                     "request_id": req.id,
                     "path": req.path,
-                    "operation": "tool",
+                    "operation": operation,
                     "tool_name": tool,
                     "tool_args": args,
                     "created_at": req.created_at.isoformat(),
@@ -1437,9 +1581,15 @@ class PlatformContext:
             decision = await legacy.await_decision(req.id)
             allowed = decision == "allowed"
             await self.approvals.decide(rid, allowed, reason=decision)
-            if allowed and raw_path:
-                add_allowed_root(str(raw_path))
-                self.remember_approved_root(session_id, str(raw_path))
+            if allowed:
+                if command and keys:
+                    # 「允许本次」→ 5 分钟内同一批 base 命令免审；「允许并记住」
+                    # 由 `PermissionManager.respond(remember=True)` 写持久白名单。
+                    for key in keys:
+                        legacy.add_temp_command_approval(key)
+                elif raw_path:
+                    add_allowed_root(str(raw_path))
+                    self.remember_approved_root(session_id, str(raw_path))
             return allowed
 
         from execution.approval import APPROVAL_TIMEOUT_SEC
@@ -1449,7 +1599,7 @@ class PlatformContext:
                 "type": "permission_request",
                 "request_id": rid,
                 "path": path,
-                "operation": "tool",
+                "operation": operation,
                 "tool_name": tool,
                 "tool_args": args,
                 "created_at": time.time(),

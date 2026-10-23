@@ -33,7 +33,6 @@ from .nodes import (
     make_supervisor_node,
     make_synthesize_node,
 )
-from .nodes.model_switch import make_model_switch_node
 from .routers import route_after_grade, route_after_plan, route_after_supervisor
 from .state import AgentState
 from .subagent import SUBAGENTS, make_runner, make_task_tool
@@ -71,8 +70,9 @@ def default_registry(
 ) -> tuple[ToolRegistry, VirtualFileSystem]:
     vfs = vfs or VirtualFileSystem()
     registry = ToolRegistry()
-    # 经 `register_file_tools` 注册：写类工具（write/edit/append/delete）标记
-    # `require_approval=True`（§5.3）——沙箱内路径由审批门控自动放行，越界才弹审批。
+    # 读/写文件工具都标 `require_approval=True`（§5.3）：沙箱/允许根内由审批门控
+    # 自动放行（零弹窗），越界才人工审批。shell 命令同理 —— 命令白名单命中直接放行，
+    # 否则弹审批（见 `PlatformContext.request_permission` 的 command 分支）。
     from execution.tools.file_tools import register_file_tools
 
     register_file_tools(registry, vfs, scope=DEFAULT_TOOL_SCOPE)
@@ -82,6 +82,7 @@ def default_registry(
             name="shell_exec",
             description=(shell_exec.__doc__ or "").strip(),
             scope=DEFAULT_TOOL_SCOPE,
+            require_approval=True,
         )
     return registry, vfs
 
@@ -193,7 +194,6 @@ def build_main_graph(
     # `"parallel"`，该节点是死接线；并行一律走 `Send → parallel_worker`。）
     builder.add_node("parallel_worker", make_parallel_worker_node(subagent_runner))
     builder.add_node("synthesize", make_synthesize_node(synthesize_model))
-    builder.add_node("model_switch", make_model_switch_node())
     builder.add_node("memory_store", make_memory_store_node(store))
 
     builder.set_entry_point("filter")
@@ -209,7 +209,6 @@ def build_main_graph(
         "compress": "context_compress",
         "synthesize": "synthesize",
         "end": END,
-        "switch_model": "model_switch",
     },
 )
     builder.add_conditional_edges(
@@ -228,7 +227,6 @@ def build_main_graph(
     builder.add_edge("execute_subagent", "supervisor")
     builder.add_edge("parallel_worker", "synthesize")
     builder.add_edge("context_compress", "supervisor")
-    builder.add_edge("model_switch", "supervisor")
     builder.add_edge("synthesize", "memory_store")
     builder.add_edge("memory_store", END)
 

@@ -357,7 +357,11 @@ def test_account_register_login_token_roundtrip(tmp_path, monkeypatch):
     token, _ = auth.issue_token(uid)
     assert auth.verify_token(uid, token) is True
     assert auth.verify_token("u-other", token) is False  # sub 不匹配
-    assert auth.verify_token(uid, token[:-1] + ("0" if token[-1] != "0" else "1")) is False
+    head, sig = token.rsplit(".", 1)
+    mid = len(sig) // 2
+    # 改末尾字符可能落在 base64 填充位（解码结果不变）→ 改中间字符才必然破坏签名
+    tampered = sig[:mid] + ("A" if sig[mid] != "A" else "B") + sig[mid + 1 :]
+    assert auth.verify_token(uid, f"{head}.{tampered}") is False
 
 
 def test_auth_middleware_enforced_on_api(tmp_path, monkeypatch):
@@ -747,6 +751,186 @@ def test_request_permission_auto_allows_in_sandbox(client, tmp_path_factory):
     finally:
         reset_allowed_roots(token)
     assert ctx.vfs.is_allowed(str(ext / "y.txt")) is False
+
+
+def test_request_permission_command_requires_approval_then_reuses_temp(client, tmp_path):
+    """shell 命令：白名单未命中 → 人工审批；「允许本次」后同 base 命令 5 分钟内免审。"""
+    import asyncio
+
+    from execution.permission import PermissionManager, get_manager, set_manager
+
+    ctx = client.app.state.platform
+    previous = get_manager()
+    mgr = PermissionManager(
+        workspace=str(client.app.state.platform.vfs.root),
+        whitelist_path=str(tmp_path / "data"),
+        external_default="ask",
+        approval_timeout=5,
+    )
+    set_manager(mgr)
+    try:
+        async def scenario():
+            emitted: list[dict] = []
+
+            async def emit(event):
+                emitted.append(event)
+
+            task = asyncio.create_task(
+                ctx.request_permission(
+                    session_id="s_cmd",
+                    tool="shell_exec",
+                    args={"command": "echo hello", "workdir": str(ctx.vfs.root)},
+                    emit=emit,
+                )
+            )
+            req = None
+            for _ in range(300):
+                await asyncio.sleep(0.01)
+                pending = mgr.get_pending_requests()
+                if pending:
+                    req = pending[0]
+                    break
+            assert req is not None, "命令未触发人工审批"
+            assert req.operation == "command"
+            assert req.path == "echo"
+            assert mgr.respond(req.id, "allowed") is True
+            assert await task is True
+            # 同一 base 命令再次执行 → 临时授权命中，不再弹审批
+            before = len(emitted)
+            again = await ctx.request_permission(
+                session_id="s_cmd",
+                tool="shell_exec",
+                args={"command": "echo world", "workdir": str(ctx.vfs.root)},
+                emit=emit,
+            )
+            # 多段命令：echo 已授权但 cat 未授权 → 仍需审批；批准后整条链路免审
+            chain = "echo chain | cat"
+            chain_task = asyncio.create_task(
+                ctx.request_permission(
+                    session_id="s_cmd",
+                    tool="shell_exec",
+                    args={"command": chain, "workdir": str(ctx.vfs.root)},
+                    emit=emit,
+                )
+            )
+            chain_req = None
+            for _ in range(300):
+                await asyncio.sleep(0.01)
+                pending = mgr.get_pending_requests()
+                if pending:
+                    chain_req = pending[0]
+                    break
+            assert chain_req is not None, "管道中未授权命令未触发审批"
+            assert chain_req.path == "echo"
+            mgr.respond(chain_req.id, "allowed")
+            assert await chain_task is True
+            chain_again = await ctx.request_permission(
+                session_id="s_cmd",
+                tool="shell_exec",
+                args={"command": chain, "workdir": str(ctx.vfs.root)},
+                emit=emit,
+            )
+            return again, chain_again, emitted, before
+
+        again, chain_again, emitted, before = asyncio.run(scenario())
+        assert again is True
+        assert chain_again is True
+        assert len(emitted) == before + 1  # 管道仅弹一次
+        assert emitted and emitted[0]["operation"] == "command"
+    finally:
+        set_manager(previous)
+
+
+def test_request_permission_read_outside_follows_external_default(client, tmp_path_factory):
+    """读工具越界不再硬失败：ask 时弹审批；deny 时直接拒绝且不弹窗。"""
+    import asyncio
+
+    from execution.permission import PermissionManager, get_manager, set_manager
+
+    ctx = client.app.state.platform
+    previous = get_manager()
+    outside = tmp_path_factory.mktemp("read_outside")
+    target = str(outside / "outside_read.txt")
+
+    async def call(default: str):
+        mgr = PermissionManager(
+            workspace=str(ctx.vfs.root),
+            whitelist_path=str(outside / f"data-{default}"),
+            external_default=default,
+            approval_timeout=5,
+        )
+        set_manager(mgr)
+        emitted: list[dict] = []
+
+        async def emit(event):
+            emitted.append(event)
+
+        task = asyncio.create_task(
+            ctx.request_permission(
+                session_id="s_read", tool="read_file", args={"path": target}, emit=emit
+            )
+        )
+        if default == "ask":
+            req = None
+            for _ in range(300):
+                await asyncio.sleep(0.01)
+                pending = mgr.get_pending_requests()
+                if pending:
+                    req = pending[0]
+                    break
+            assert req is not None, "越界读取未触发人工审批"
+            assert req.operation == "read"
+            mgr.respond(req.id, "denied")
+        return await task, emitted
+
+    try:
+        denied, _ = asyncio.run(call("deny"))
+        assert denied is False
+        allowed, emitted = asyncio.run(call("ask"))
+        assert allowed is False  # 用户拒绝
+        assert emitted and emitted[0]["operation"] == "read"
+    finally:
+        set_manager(previous)
+
+
+def test_request_permission_read_approved_adds_session_root(client, tmp_path_factory):
+    import asyncio
+
+    from execution.permission import PermissionManager, get_manager, set_manager
+
+    ctx = client.app.state.platform
+    previous = get_manager()
+    outside = tmp_path_factory.mktemp("read_approved")
+    target = str(outside / "approved_read.txt")
+    mgr = PermissionManager(
+        workspace=str(ctx.vfs.root),
+        whitelist_path=str(outside / "data-approve"),
+        external_default="ask",
+        approval_timeout=5,
+    )
+    set_manager(mgr)
+    try:
+        async def scenario():
+            async def emit(event):
+                return None
+
+            task = asyncio.create_task(
+                ctx.request_permission(
+                    session_id="s_read_ok", tool="read_file", args={"path": target}, emit=emit
+                )
+            )
+            for _ in range(300):
+                await asyncio.sleep(0.01)
+                pending = mgr.get_pending_requests()
+                if pending:
+                    mgr.respond(pending[0].id, "allowed")
+                    break
+            return await task
+
+        assert asyncio.run(scenario()) is True
+        assert target in ctx.allowed_roots_for("s_read_ok")
+    finally:
+        set_manager(previous)
 
 
 def test_approved_external_write_survives_turn_end_and_next_turn(client, tmp_path_factory):

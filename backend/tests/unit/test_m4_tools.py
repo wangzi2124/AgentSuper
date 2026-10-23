@@ -45,7 +45,8 @@ def test_register_file_tools_marks_writes_approval(vfs):
     names = register_file_tools(reg, vfs)
     assert "read_file" in names and "write_file" in names
     assert reg.needs_approval("write_file") is True
-    assert reg.needs_approval("read_file") is False
+    # 读工具也走审批：沙箱内由 permission hook 免审放行，越界才询问用户。
+    assert reg.needs_approval("read_file") is True
 
 
 def test_glob_respects_sandbox(vfs):

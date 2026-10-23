@@ -184,3 +184,4 @@ async def test_switch_model_preserves_fact_in_next_turn(monkeypatch, tmp_path):
     assert len(payload["messages"]) == 2
     audit = (backup_dir / "switches.jsonl").read_text(encoding="utf-8").strip()
     assert json.loads(audit)["session_id"] == "ses_e2e"
+    assert json.loads(audit)["status"] == "committed"

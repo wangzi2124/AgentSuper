@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from graph.events import reset_event_queue, set_event_queue
 from graph.nodes.base import reset_permission_hook, set_permission_hook
 from graph.usage import merge_usage, usage_delta
 from models.router import reset_request_model, set_request_model
@@ -151,6 +152,78 @@ def _track_agent_event(agents: dict[str, dict[str, Any]], ev: dict[str, Any]) ->
             agent["error"] = ev["error"]
 
 
+def _ensure_agent_started(
+    seen: list[str], agents_map: dict[str, dict[str, Any]], ev: dict[str, Any]
+) -> tuple[str, list[dict[str, Any]]]:
+    """确保事件所属 Agent 已下发 `agent_start`（子 Agent 首次出现时补发）。"""
+    agent_id = str(ev.get("agent_id") or "build")
+    agent_name = str(ev.get("agent_name") or agent_id)
+    if agent_id in seen:
+        return agent_id, []
+    seen.append(agent_id)
+    start_ev = {
+        "type": "agent_start",
+        "agent_id": agent_id,
+        "agent_name": agent_name,
+        "agent_avatar": str(ev.get("agent_avatar") or ""),
+    }
+    _track_agent_event(agents_map, start_ev)
+    return agent_id, [start_ev]
+
+
+def _part_event_to_sse(
+    ev: dict[str, Any], seen: list[str], agents_map: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """把图内 part 事件（`graph.events`）转成前端 SSE 事件。
+
+    - `tool_start`/`tool_end` → `agent_step`（同一 step_id 原位更新）；
+    - 子 Agent 的 `agent_start`/`agent_end` → `agent_start`/`agent_done`；
+    - 未知类型忽略（权限/心跳等走各自通道）。
+    """
+    etype = ev.get("type")
+    if etype in ("tool_start", "tool_end"):
+        agent_id, out = _ensure_agent_started(seen, agents_map, ev)
+        step: dict[str, Any] = {
+            "type": etype,
+            "step_id": str(ev.get("step_id") or ""),
+            "name": str(ev.get("tool_name") or ev.get("name") or ""),
+            "status": str(ev.get("status") or ("running" if etype == "tool_start" else "completed")),
+            "tool_name": str(ev.get("tool_name") or ev.get("name") or ""),
+            "agent_id": agent_id,
+        }
+        if etype == "tool_start":
+            step["tool_args"] = ev.get("tool_args") or {}
+        else:
+            step["tool_result"] = ev.get("tool_result")
+            step["duration_ms"] = ev.get("duration_ms")
+        step_ev = {
+            "type": "agent_step",
+            "agent_id": agent_id,
+            "agent_name": str(ev.get("agent_name") or agent_id),
+            "step": step,
+        }
+        _track_agent_event(agents_map, step_ev)
+        return out + [step_ev]
+    if etype == "agent_start":
+        _, out = _ensure_agent_started(seen, agents_map, ev)
+        return out
+    if etype == "agent_end":
+        agent_id, out = _ensure_agent_started(seen, agents_map, ev)
+        failed = str(ev.get("status") or "").lower() in ("failed", "error")
+        done_ev = {
+            "type": "agent_error" if failed else "agent_done",
+            "agent_id": agent_id,
+            "agent_name": str(ev.get("agent_name") or agent_id),
+        }
+        if failed and ev.get("error"):
+            done_ev["error"] = str(ev["error"])
+        if ev.get("content"):
+            done_ev["content"] = str(ev["content"])
+        _track_agent_event(agents_map, done_ev)
+        return out + [done_ev]
+    return []
+
+
 def _turn_meta(
     agents_map: dict[str, dict[str, Any]], files_changed: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -227,6 +300,20 @@ async def _graph_events(
     # 本回合选中的模型（模型管理页）随 contextvar 传播到图节点任务；此前 body.model
     # 只写进会话元数据、不参与调用（改 key/换模型都不生效的根因）。
     model_token = set_request_model(getattr(sess, "model", None))
+    # 图内 part 事件（tool_start/tool_end、子 Agent 面板）经此队列实时下发给前端。
+    event_q: asyncio.Queue = asyncio.Queue()
+    event_token = set_event_queue(event_q)
+
+    def _drain_part_events() -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        while True:
+            try:
+                ev = event_q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            out.extend(_part_event_to_sse(ev, seen, agents_map))
+        return out
+
     agen = ctx.graph.astream(
         state, config={"configurable": {"thread_id": sess.id}}, stream_mode=["updates", "messages"]
     ).__aiter__()
@@ -235,6 +322,8 @@ async def _graph_events(
         while True:
             if cancel.is_set():
                 break
+            for part_ev in _drain_part_events():
+                yield part_ev
             get_task = asyncio.ensure_future(perm_q.get())
             done, _ = await asyncio.wait(
                 {next_task, get_task},
@@ -244,6 +333,8 @@ async def _graph_events(
             if not done:
                 # 心跳：图仍在执行但没有节点完成（长工具循环），继续等下一块。
                 # next_task 保持挂起，get_task 重建（与既有每轮重建语义一致）。
+                for part_ev in _drain_part_events():
+                    yield part_ev
                 yield {"type": "heartbeat", "ts": round(time.time(), 3)}
                 get_task.cancel()
                 continue
@@ -256,6 +347,8 @@ async def _graph_events(
                     chunk = next_task.result()
                 except StopAsyncIteration:
                     break
+                for part_ev in _drain_part_events():
+                    yield part_ev
                 if isinstance(chunk, tuple) and len(chunk) == 2:
                     mode, payload = chunk
                     if mode == "messages":
@@ -316,6 +409,7 @@ async def _graph_events(
     finally:
         if not next_task.done():
             next_task.cancel()
+        reset_event_queue(event_token)
         reset_permission_hook(token)
         reset_request_model(model_token)
 

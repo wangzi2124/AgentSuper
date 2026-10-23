@@ -20,6 +20,7 @@ from execution.tool_registry import ToolRegistry
 from models.router import get_model
 from prompts.loader import PromptLoader
 
+from .events import push_event
 from .nodes.base import run_tool_loop
 
 logger = logging.getLogger(__name__)
@@ -96,8 +97,41 @@ async def run_subagent(
         )
     messages.append({"role": "user", "content": task})
 
-    result = await run_tool_loop(
-        model, messages, scoped, scope=SUBTASK_SCOPE, max_rounds=spec.max_rounds
+    push_event(
+        {
+            "type": "agent_start",
+            "agent_id": spec.name,
+            "agent_name": spec.name,
+        }
+    )
+    try:
+        result = await run_tool_loop(
+            model,
+            messages,
+            scoped,
+            scope=SUBTASK_SCOPE,
+            max_rounds=spec.max_rounds,
+            agent_id=spec.name,
+        )
+    except Exception as exc:
+        push_event(
+            {
+                "type": "agent_end",
+                "agent_id": spec.name,
+                "agent_name": spec.name,
+                "status": "failed",
+                "error": str(exc),
+            }
+        )
+        raise
+    push_event(
+        {
+            "type": "agent_end",
+            "agent_id": spec.name,
+            "agent_name": spec.name,
+            "status": "completed",
+            "content": result.get("text", ""),
+        }
     )
     return {
         "agent": spec.name,

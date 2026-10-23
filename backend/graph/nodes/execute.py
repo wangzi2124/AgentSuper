@@ -187,7 +187,7 @@ def make_execute_node(
             messages.append({"role": "user", "content": user_blocks})
         messages.append({"role": "user", "content": task.get("desc", "")})
 
-        result = await run_tool_loop(model, messages, registry, scope=scope)
+        result = await run_tool_loop(model, messages, registry, scope=scope, agent_id="build")
 
         task_id = task.get("id", "t?")
         for t in plan:

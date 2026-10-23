@@ -38,7 +38,9 @@ def test_default_registry_marks_writes_approval(tmp_path):
     assert reg.needs_approval("edit_file") is True
     assert reg.needs_approval("append_file") is True
     assert reg.needs_approval("delete_file") is True
-    assert reg.needs_approval("read_file") is False
+    # 读工具越界也要人工审批（沙箱内 hook 免审放行）
+    for name in ("read_file", "ls", "grep", "glob"):
+        assert reg.needs_approval(name) is True
     # 文件工具集已完整注册（glob/append/delete 在旧 vfs.tools() 中缺失）
     assert {"read_file", "write_file", "edit_file", "ls", "grep", "glob", "append_file", "delete_file"} <= set(
         reg.names()

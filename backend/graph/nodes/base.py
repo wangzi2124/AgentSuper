@@ -8,19 +8,22 @@ import inspect
 import json
 import logging
 import re
+import time
 import typing
 from typing import Any, Awaitable, Callable
 
 from execution.tool_registry import ToolDefinition, ToolRegistry
+from harness.adapter import call_argument_error
+from harness.hooks import run_post_tool, run_pre_tool
 from models.router import TierModel
 from observability.metrics import record_llm_call
 from observability.tracing import trace_span
 from utils.json_repair import (
     is_tool_call_markup,
     parse_answer_envelope,
-    parse_tool_args,
 )
 
+from ..events import push_event
 from ..usage import empty_usage, merge_usage, usage_from_result
 
 logger = logging.getLogger(__name__)
@@ -290,8 +293,13 @@ async def run_tool_loop(
     *,
     scope: str | None = None,
     max_rounds: int = MAX_TOOL_ROUNDS,
+    agent_id: str = "build",
 ) -> dict[str, Any]:
-    """LLM 工具调用循环，返回 {text, rounds, tool_trace, usage}。"""
+    """LLM 工具调用循环，返回 {text, rounds, tool_trace, usage}。
+
+    `agent_id` 用于 part 事件归属（主 Agent = build，子 Agent = 各自名字），
+    前端按 `step_id` 把 tool_start/tool_end 原位更新成一条工具 part。
+    """
     tool_defs = build_tool_defs(registry, scope)
     convo = [dict(m) for m in messages]
     roots_note = _authorized_roots_note()
@@ -370,29 +378,55 @@ async def run_tool_loop(
             }
         )
         for tc in result.tool_calls:
-            raw_args = tc.arguments
-            if isinstance(raw_args, dict):
-                args: dict[str, Any] = raw_args
-            else:
-                # 宽容解析：弱模型常见坏 JSON（单引号/尾逗号/未转义换行/围栏）
-                # —— utils.json_repair.parse_tool_args，修复失败才回退空参数
-                args = parse_tool_args(
-                    raw_args if isinstance(raw_args, str) else None
-                ) or {}
+            parsed_args, arg_error = call_argument_error(tc)
+            args: dict[str, Any] = parsed_args or {}
+            step_id = f"tool-{tc.id or f'{rounds}-{len(tool_trace)}'}"
+            push_event(
+                {
+                    "type": "tool_start",
+                    "step_id": step_id,
+                    "agent_id": agent_id,
+                    "name": tc.name,
+                    "tool_name": tc.name,
+                    "tool_args": args,
+                    "status": "running",
+                }
+            )
+            started = time.perf_counter()
             td = registry.get(tc.name)
             if td is None:
                 output = f"错误：未知工具 {tc.name}"
-            elif td.require_approval:
-                hook = _permission_hook_var.get()
-                approved = await hook(tc.name, args) if hook is not None else True
-                if not approved:
-                    output = f"已拒绝执行工具 {tc.name}（用户未授权）。"
+            elif arg_error:
+                # agent-4 §2.1 错误恢复：非法 JSON 作为工具结果回灌，让模型自修
+                output = f"错误：{arg_error}"
+            else:
+                args = run_pre_tool(tc.name, args)
+                if td.require_approval:
+                    hook = _permission_hook_var.get()
+                    approved = await hook(tc.name, args) if hook is not None else True
+                    if not approved:
+                        output = f"已拒绝执行工具 {tc.name}（用户未授权）。"
+                    else:
+                        with trace_span("tool.call", tool=tc.name):
+                            output = await _dispatch(td, args)
                 else:
                     with trace_span("tool.call", tool=tc.name):
                         output = await _dispatch(td, args)
-            else:
-                with trace_span("tool.call", tool=tc.name):
-                    output = await _dispatch(td, args)
+                output = run_post_tool(tc.name, args, output)
+            duration_ms = round((time.perf_counter() - started) * 1000, 3)
+            failed = td is None or str(output).startswith(("错误", "已拒绝"))
+            push_event(
+                {
+                    "type": "tool_end",
+                    "step_id": step_id,
+                    "agent_id": agent_id,
+                    "name": tc.name,
+                    "tool_name": tc.name,
+                    "tool_result": output,
+                    "status": "failed" if failed else "completed",
+                    "duration_ms": duration_ms,
+                }
+            )
             tool_trace.append({"name": tc.name, "args": args, "output": output})
             convo.append(
                 {"role": "tool", "tool_call_id": tc.id, "content": output}

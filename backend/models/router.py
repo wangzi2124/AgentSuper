@@ -337,41 +337,89 @@ class TierModel:
             return min(mt, LOCAL_OLLAMA_MAX_TOKENS)
         return mt
 
+    def _harness_mode(self, endpoint: dict[str, Any]) -> str:
+        """能力探测（agent-4 §3）：请求选中 > 直连模型 > 端点别名，未知保守回退。"""
+        from harness.capabilities import mode_override, resolve_mode
+
+        candidates: list[str] = []
+        for mid in (request_model(), self._direct_model(), endpoint.get("model")):
+            text = str(mid or "").strip()
+            if text and text not in candidates:
+                candidates.append(text)
+        for mid in candidates:
+            override = mode_override(mid)
+            if override:
+                return override
+        for mid in candidates:
+            try:
+                from .catalog import read_capabilities
+
+                caps = read_capabilities(mid)
+            except Exception:  # noqa: BLE001
+                caps = {}
+            if caps:
+                return resolve_mode(mid, caps)
+        return "fallback"
+
     def _kwargs(
         self, messages: list[Any], tools: list[dict] | None
     ) -> dict[str, Any]:
+        kwargs, _ = self._kwargs_with_mode(messages, tools)
+        return kwargs
+
+    def _kwargs_with_mode(
+        self, messages: list[Any], tools: list[dict] | None
+    ) -> tuple[dict[str, Any], str]:
+        from harness.history import normalize_history
+        from harness.adapter import inject_fallback_prompt
+
         endpoint = self._endpoint()
+        mode = self._harness_mode(endpoint)
+        rendered = normalize_history(
+            [_render_message(m) for m in messages], mode
+        )
         kwargs: dict[str, Any] = {
             "model": endpoint["model"],
             "api_base": endpoint.get("api_base"),
             "api_key": endpoint.get("api_key"),
-            "messages": [_render_message(m) for m in messages],
+            "messages": rendered,
             "temperature": self.temperature,
             "max_tokens": self._max_tokens_for(endpoint),
             "timeout": self._timeout_for(endpoint),
             "num_retries": self.max_retries,
         }
         if tools:
-            kwargs["tools"] = tools
+            if mode == "fallback":
+                kwargs["messages"] = inject_fallback_prompt(rendered, tools)
+            else:
+                kwargs["tools"] = tools
         kwargs.update(self._provider_kwargs(endpoint))
         kwargs.update(self.extra)
-        return kwargs
+        return kwargs, mode
 
     async def ainvoke(
         self, messages: list[Any], *, tools: list[dict] | None = None, **kwargs: Any
     ) -> ChatResult:
-        call_kwargs = self._kwargs(messages, tools)
+        call_kwargs, mode = self._kwargs_with_mode(messages, tools)
         call_kwargs.update(kwargs)
         resp = await litellm.acompletion(**call_kwargs)
-        return _parse_response(resp, str(call_kwargs.get("model", "")))
+        from harness.adapter import apply_result
+
+        return apply_result(
+            _parse_response(resp, str(call_kwargs.get("model", ""))), mode
+        )
 
     def invoke(
         self, messages: list[Any], *, tools: list[dict] | None = None, **kwargs: Any
     ) -> ChatResult:
-        call_kwargs = self._kwargs(messages, tools)
+        call_kwargs, mode = self._kwargs_with_mode(messages, tools)
         call_kwargs.update(kwargs)
         resp = litellm.completion(**call_kwargs)
-        return _parse_response(resp, str(call_kwargs.get("model", "")))
+        from harness.adapter import apply_result
+
+        return apply_result(
+            _parse_response(resp, str(call_kwargs.get("model", ""))), mode
+        )
 
     async def astream(
         self,
@@ -388,13 +436,39 @@ class TierModel:
         全部收敛在此。观测/计费由调用方基于返回值完成。
         """
         from .stream import stream_chat
+        from harness.adapter import apply_result, inject_fallback_prompt
+        from harness.history import normalize_history
+        from harness.streaming import StreamToolCallParser
 
         endpoint = self._endpoint()
+        mode = self._harness_mode(endpoint)
+        rendered = normalize_history(
+            [_render_message(m) for m in messages], mode
+        )
+        call_tools = tools
+        parser = None
+        if tools and mode == "fallback":
+            rendered = inject_fallback_prompt(rendered, tools)
+            call_tools = None
+        if mode == "fallback":
+            parser = StreamToolCallParser()
+
+        user_on_text = on_text
+
+        def _filtered(text: str) -> None:
+            if parser is None:
+                if user_on_text is not None:
+                    user_on_text(text)
+                return
+            for event in parser.feed(text):
+                if event["type"] == "text" and user_on_text is not None:
+                    user_on_text(event["text"])
+
         extra_kwargs = {**self._provider_kwargs(endpoint), **self.extra, **extra}
-        return await stream_chat(
-            [_render_message(m) for m in messages],
+        result = await stream_chat(
+            rendered,
             model=endpoint["model"],
-            tools=tools,
+            tools=call_tools,
             api_key=endpoint.get("api_key"),
             api_base=endpoint.get("api_base"),
             extra=extra_kwargs,
@@ -403,8 +477,13 @@ class TierModel:
             timeout=self._timeout_for(endpoint),
             num_retries=self.max_retries,
             disable_thinking=disable_thinking,
-            on_text=on_text,
+            on_text=_filtered,
         )
+        if parser is not None:
+            for event in parser.finalize():
+                if event["type"] == "text" and user_on_text is not None:
+                    user_on_text(event["text"])
+        return apply_result(result, mode)
 
 
 def get_model(tier: str = "auto", **kwargs: Any) -> TierModel:
