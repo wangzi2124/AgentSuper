@@ -320,13 +320,13 @@ async def test_empty_answer_never_returns_empty_string():
     assert "failing" in out["text"]  # 摘要里带有出错工具轨迹
 
 
-async def test_empty_answer_all_success_falls_back_to_placeholder():
-    """轨迹全部成功但模型始终空回复 → 沿用占位文案（不返回空串）。"""
+async def test_empty_answer_all_success_falls_back_to_model_empty_notice():
+    """轨迹全部成功但模型始终空回复 → 明确提示模型未产出内容。"""
     out = await run_tool_loop(
         _ToolThenAlwaysEmptyModel(tool_name="noop"),
         [{"role": "user", "content": "go"}],
         _registry(),
     )
-    assert out["text"] == "(达到最大工具轮数，未产出最终答案)"
+    assert "模型未产出可展示内容" in out["text"]
 
 

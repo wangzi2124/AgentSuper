@@ -81,7 +81,7 @@ HTTP / SSE
 ```
 
 - **TurnHarness**：`harness/kernel.py`。`PlatformContext.run/stream` 已接入；`turn_id` 通过 contextvar 传播。
-- **AgentLoop**：`run_tool_loop`。默认完整响应；`graph/nodes/execute.py` 传 `stream=True`，回退模型在 `ToolCallReady` 时提前执行工具。
+- **AgentLoop**：`run_tool_loop`。默认完整响应；`graph/nodes/execute.py` 传 `stream=True`，回退模型在 `ToolCallReady` 时提前执行工具。空回复最多补答 2 次，之后收尾；不把 thinking 模型的 reasoning 冒充答案。
 - **模型切换**：`harness/switch.py`。门禁 → 原文备份 → 摘要/精确值探针 → 原子写 epoch → 持久化 model；失败回滚。
 - **压缩**：`harness/compression.py`。切换走 `compress_messages`；图节点走 `compress_graph_messages`；手动 compact 走 `tail_snapshot`。
 - **上下文视图**：`harness/context.py`。`[摘要] + [tail 原文] + [tool_history 回插] + [当前 user]`。
@@ -236,7 +236,7 @@ npx vitest run tests/integration/
 
 当前实测（2026-10-24，本地 Windows）：
 
-- 后端：`514 passed, 16 skipped`
+- 后端：`519 passed, 18 skipped`
 - Harness 覆盖率：`90.80%`（门槛 90%）
 - 前端单测：`104 passed`
 - 前端 live SSE 集成：`119 passed`

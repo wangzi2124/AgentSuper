@@ -162,7 +162,7 @@ cd backend
 
 当前实测（2026-10-24，本地 Windows）：
 
-- 后端：`514 passed, 16 skipped`
+- 后端：`519 passed, 18 skipped`
 - Harness 覆盖率：`90.80%`（门槛 90%）
 - 前端单测：`104 passed`
 - 前端 live SSE：`119 passed`

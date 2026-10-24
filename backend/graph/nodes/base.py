@@ -472,6 +472,7 @@ async def run_tool_loop(
     tool_history: list[dict[str, Any]] = []
     continued_parts: list[str] = []
     last_finish = "stop"
+    empty_nudges = 0
 
     while rounds < max_rounds:
         if rounds:
@@ -601,7 +602,8 @@ async def run_tool_loop(
                 }
             # 空回复（既无 tool_calls 也无正文）：不能把空串当答案返回，否则上层会
             # 静默丢弃（无持久化 / 无 text_delta），表现为「Agent 跑完却没有任何回答」。
-            if rounds < max_rounds:
+            if rounds < max_rounds and empty_nudges < 2:
+                empty_nudges += 1
                 logger.warning(
                     "模型给出空回复（model=%s round=%d，已有 %d 次工具调用）→ 要求补答",
                     label,
@@ -613,6 +615,7 @@ async def run_tool_loop(
                 continue
             break  # 轮数已尽：交由下方纯文本收尾
 
+        empty_nudges = 0
         if early:
             early_calls = list(early.values())
             if len(early_calls) == len(result.tool_calls):
@@ -727,8 +730,14 @@ async def run_tool_loop(
     # 最后防线：连收尾调用都没给出非空文本 —— 绝不能返回空串（上层见空即静默丢弃）。
     # 若已有工具调用，用工具轨迹摘要兜底（让用户看到「写被拒/报错」等真实原因）；
     # 否则退回既有的占位文案。
-    fallback_text = _fallback_text(tool_trace) or "(达到最大工具轮数，未产出最终答案)"
-    if continued_parts and not _fallback_text(tool_trace):
+    tool_fallback = _fallback_text(tool_trace)
+    if tool_fallback:
+        fallback_text = tool_fallback
+    elif empty_nudges >= 2:
+        fallback_text = "（模型未产出可展示内容，请换模型或重试）"
+    else:
+        fallback_text = "(达到最大工具轮数，未产出最终答案)"
+    if continued_parts and not tool_fallback:
         fallback_text = "".join(continued_parts) + _TRUNCATION_NOTICE
     return {
         "text": fallback_text,
