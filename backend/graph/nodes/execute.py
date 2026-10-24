@@ -11,6 +11,13 @@ from typing import Any, Callable
 from execution.tool_registry import ToolRegistry
 from models.router import TierModel, resolve_model
 
+from ..tool_history import (
+    human_count,
+    last_human_id,
+    merge_tool_history,
+    message_id,
+    should_inject,
+)
 from .base import content_text, run_tool_loop
 
 TOOL_SCOPE = "location"
@@ -86,6 +93,12 @@ def _conversation_history(
         start = cut
 
     summary = str(state.get("context_summary") or "").strip()
+    current_turn = human_count(raw)
+    tool_history = state.get("tool_history") or []
+    tool_turn = state.get("tool_history_turn")
+    anchor_id = state.get("tool_history_anchor_id")
+    inject_tools = bool(tool_history) and should_inject(tool_turn, current_turn)
+    anchor_pos: int | None = None
     history: list[dict[str, Any]] = []
     # 摘要始终以 state.context_summary 为准（模型切换/自动压缩都会更新它）。
     # 旧 checkpoint 里可能还留着上一版 [历史摘要] system 消息；窗口包含它时跳过，
@@ -103,6 +116,17 @@ def _conversation_history(
         if not text.strip():
             continue
         history.append({"role": role, "content": text})
+        if inject_tools and anchor_id and message_id(msg) == anchor_id:
+            anchor_pos = len(history)
+
+    if inject_tools:
+        injected = [
+            dict(m) for m in tool_history if isinstance(m, dict)
+        ]
+        if anchor_pos is not None:
+            history[anchor_pos:anchor_pos] = injected
+        else:
+            history.extend(injected)
 
     if budget_chars is None:
         window = int(state.get("context_window") or 0)
@@ -189,6 +213,24 @@ def make_execute_node(
 
         result = await run_tool_loop(model, messages, registry, scope=scope, agent_id="build")
 
+        tool_updates: dict[str, Any] = {}
+        new_tool_history = result.get("tool_history") or []
+        if new_tool_history:
+            raw_messages = state.get("messages") or []
+            merged, turn, anchor = merge_tool_history(
+                state.get("tool_history") or [],
+                new_tool_history,
+                existing_turn=state.get("tool_history_turn"),
+                new_turn=human_count(raw_messages),
+                existing_anchor=state.get("tool_history_anchor_id"),
+                new_anchor=last_human_id(raw_messages),
+            )
+            tool_updates = {
+                "tool_history": merged,
+                "tool_history_turn": turn,
+                "tool_history_anchor_id": anchor,
+            }
+
         task_id = task.get("id", "t?")
         for t in plan:
             if t.get("id") == task_id:
@@ -202,6 +244,7 @@ def make_execute_node(
             "draft_output": result["text"],
             "tool_rounds": state.get("tool_rounds", 0) + result["rounds"],
             "token_usage": result.get("usage") or {},
+            **tool_updates,
         }
 
     return execute_node

@@ -24,6 +24,11 @@ from utils.json_repair import (
 )
 
 from ..events import push_event
+from ..tool_history import (
+    cap_tool_history,
+    make_tool_call_message,
+    make_tool_result_message,
+)
 from ..usage import empty_usage, merge_usage, usage_from_result
 
 logger = logging.getLogger(__name__)
@@ -297,7 +302,7 @@ async def run_tool_loop(
     agent_id: str = "build",
     adapter: Any | None = None,
 ) -> dict[str, Any]:
-    """LLM 工具调用循环，返回 {text, rounds, tool_trace, usage}。
+    """LLM 工具调用循环，返回 {text, rounds, tool_trace, tool_history, usage}。
 
     模型差异全部收敛在 Harness 的 `ToolAdapter`：本循环只消费标准
     ``tool_calls``。`agent_id` 用于 part 事件归属（主 Agent = build）。
@@ -315,6 +320,7 @@ async def run_tool_loop(
     rounds = 0
     usage_total = empty_usage()
     tool_trace: list[dict[str, Any]] = []
+    tool_history: list[dict[str, Any]] = []
 
     while rounds < max_rounds:
         with trace_span("llm.call", rounds=rounds):
@@ -352,6 +358,7 @@ async def run_tool_loop(
                     "text": answer,
                     "rounds": rounds,
                     "tool_trace": tool_trace,
+                    "tool_history": cap_tool_history(tool_history),
                     "usage": usage_total,
                 }
             # 空回复（既无 tool_calls 也无正文）：不能把空串当答案返回，否则上层会
@@ -368,24 +375,30 @@ async def run_tool_loop(
                 continue
             break  # 轮数已尽：交由下方纯文本收尾
 
+        round_calls = [
+            (tc.id or f"call_{rounds}_{idx}", tc.name, tc.arguments)
+            for idx, tc in enumerate(result.tool_calls)
+        ]
+        tool_history.append(make_tool_call_message(round_calls, result.content or ""))
         convo.append(
             {
                 "role": "assistant",
                 "content": result.content or "",
                 "tool_calls": [
                     {
-                        "id": tc.id,
+                        "id": call_id,
                         "type": "function",
-                        "function": {"name": tc.name, "arguments": tc.arguments},
+                        "function": {"name": name, "arguments": arguments},
                     }
-                    for tc in result.tool_calls
+                    for call_id, name, arguments in round_calls
                 ],
             }
         )
-        for tc in result.tool_calls:
+        for idx, tc in enumerate(result.tool_calls):
             parsed_args, arg_error = call_argument_error(tc)
             args: dict[str, Any] = parsed_args or {}
-            step_id = f"tool-{tc.id or f'{rounds}-{len(tool_trace)}'}"
+            call_id = round_calls[idx][0]
+            step_id = f"tool-{call_id}"
             push_event(
                 {
                     "type": "tool_start",
@@ -434,8 +447,11 @@ async def run_tool_loop(
                 }
             )
             tool_trace.append({"name": tc.name, "args": args, "output": output})
+            tool_history.append(
+                make_tool_result_message(call_id, tc.name, output)
+            )
             convo.append(
-                {"role": "tool", "tool_call_id": tc.id, "content": output}
+                {"role": "tool", "tool_call_id": call_id, "content": output}
             )
 
     # 工具轮数耗尽：做一次「纯文本收尾」调用（不带工具），避免把占位文案当最终答案
@@ -464,6 +480,7 @@ async def run_tool_loop(
                 "text": final_text,
                 "rounds": rounds,
                 "tool_trace": tool_trace,
+                "tool_history": cap_tool_history(tool_history),
                 "usage": usage_total,
             }
     except Exception:  # noqa: BLE001 - 收尾失败仍走占位文案兜底
@@ -476,5 +493,6 @@ async def run_tool_loop(
         "text": _fallback_text(tool_trace) or "(达到最大工具轮数，未产出最终答案)",
         "rounds": rounds,
         "tool_trace": tool_trace,
+        "tool_history": cap_tool_history(tool_history),
         "usage": usage_total,
     }

@@ -47,6 +47,11 @@ class AgentState(TypedDict, total=False):
     user_id: str
     draft_output: str
     tool_rounds: int
+    # Bounded tool call/result history from the most recent tool-bearing turn.
+    # Kept separate from ``messages`` so frontend history stays user/assistant only.
+    tool_history: list[dict[str, Any]]
+    tool_history_turn: int | None
+    tool_history_anchor_id: str | None
     trace: list[dict[str, Any]]
     # 模型绑定（实际切换由 `PlatformContext.switch_model` 完成，绑定存于
     # session_context_epoch.snapshot 与会话 model 字段；此处保留供 resolve_model 读）
