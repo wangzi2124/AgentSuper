@@ -98,6 +98,17 @@ _TEST_RE = re.compile(
     re.IGNORECASE,
 )
 
+_INTRO_RE = re.compile(
+    r"^(?:"
+    r"(?:请|麻烦)?(?:简单|简要|简短)?(?:地)?(?:介绍|说说|讲讲)(?:一下)?(?:你自己|你)?"
+    r"|你是谁|你是什么|你是做什么的"
+    r"|你能做什么|你能干什么|你会什么|你可以做什么"
+    r"|你有哪些功能|你有什么功能|你有什么能力"
+    r"|怎么用|如何使用|使用说明|自我介绍"
+    r")[!！~～。.，,\s?？]*$",
+    re.IGNORECASE,
+)
+
 SELF_INTRO_MAIN = (
     "你好！我是基于 RAG + Agent（检索增强生成）的知识库智能系统，"
     "支持文档上传、向量检索、多模型对话、Skills 和 Plugins 动态扩展。\n\n"
@@ -113,6 +124,7 @@ SELF_INTRO_MAIN = (
 
 SMALLTALK_REPLIES = {
     "greeting": SELF_INTRO_MAIN,
+    "intro": SELF_INTRO_MAIN,
     "thanks": "不客气！还有其它需要随时告诉我。",
     "ack": "好的，需要时随时找我。",
 }
@@ -129,6 +141,8 @@ def classify_smalltalk(text: str) -> str | None:
         return "ack"
     if _TEST_RE.match(s):
         return "greeting"
+    if _INTRO_RE.match(s):
+        return "intro"
     return None
 
 

@@ -24,6 +24,8 @@
 | 能力 | 说明 |
 | --- | --- |
 | **Agent Harness** | 原生/文本双路径工具调用、历史归一化、流式执行、确定性 tool id |
+| **快速寒暄/介绍** | “你好/谢谢/简单介绍/你是谁/你能做什么”走固定模板，不调用模型 |
+| **Ollama 兼容** | 原生 tools 与无 tools 文本回退双路径；本地模型默认不设为默认模型 |
 | **RAG 混合检索** | 向量 + BM25 + RRF；章节感知分块、父子块展开、grade/rewrite 质量门禁 |
 | **多 Agent 编排** | Supervisor → plan/RAG/memory/compress → execute → synthesize；支持串行与并行扇出 |
 | **跨模型切换** | 原文快照、摘要迁移、精确值探针、原子提交/回滚、审计 |
@@ -137,6 +139,12 @@ cd backend
 cd frontend
 npm test
 npm run build
+# 先退出 Ollama（托盘退出），设置用户环境变量，再重启 Ollama：
+setx OLLAMA_CONTEXT_LENGTH 4096
+setx OLLAMA_NUM_PARALLEL 1
+setx OLLAMA_MAX_LOADED_MODELS 1
+setx OLLAMA_FLASH_ATTENTION 1
+setx OLLAMA_KV_CACHE_TYPE q8_0
 
 # 需后端已启动
 $env:LIVE_API_BASE='http://127.0.0.1:8000'
