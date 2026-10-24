@@ -6,8 +6,9 @@ import type { FileContent, VoiceMessageData, MultiAgentMessage } from '../types'
 import { useAuthStore } from '../stores/auth'
   import { useChatSettingsStore } from '../stores/chatSettings'
 import { synthesize, speakNative, stopNative } from '../api/voice'
-import MultiAgentResponse from '../components/MultiAgentResponse.vue'
+import ConversationTimeline from '../components/ConversationTimeline.vue'
 import ChatInput from '../components/ChatInput.vue'
+import PermissionInlineCard from '../components/PermissionInlineCard.vue'
 import VoiceBubble from '../components/VoiceBubble.vue'
 
 const route = useRoute()
@@ -392,7 +393,7 @@ async function handleCopy(messageId: string, text: string) {
               </template>
 
               <template v-else>
-                <MultiAgentResponse :message="msg" :routingStatus="agent.routingStatus" :isLast="idx === messages.length - 1" :running="agent.loading && idx === messages.length - 1" :loadDiff="agent.fetchMessageDiff" @restore="handleRestore(msg)" />
+                <ConversationTimeline :message="msg" :routingStatus="agent.routingStatus" :isLast="idx === messages.length - 1" :running="agent.loading && idx === messages.length - 1" :loadDiff="agent.fetchMessageDiff" @restore="handleRestore(msg)" />
               </template>
 
               <div class="message-footer">
@@ -446,6 +447,8 @@ async function handleCopy(messageId: string, text: string) {
     </div>
 
     <div v-if="agent.notice" class="chat-notice">{{ agent.notice }}</div>
+
+    <PermissionInlineCard />
 
     <!-- 待发消息队列提示条 -->
     <div v-if="queueCount" class="send-queue-bar">

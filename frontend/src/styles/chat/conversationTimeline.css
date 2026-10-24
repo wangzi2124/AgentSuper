@@ -1,0 +1,25 @@
+.timeline { display: flex; flex-direction: column; gap: 8px; font-size: 15px; line-height: 1.7; }
+.timeline-status { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 12px; min-height: 20px; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
+.status-dot.running { background: var(--primary); animation: pulse 1.2s ease-in-out infinite; }
+.status-dot.error { background: var(--danger); }
+.status-model { margin-left: auto; color: var(--text-muted); font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11px; }
+@keyframes pulse { 50% { opacity: .35; } }
+.agent-filter { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-chip { border: 1px solid var(--border); background: transparent; color: var(--text-secondary); border-radius: 999px; padding: 2px 9px; font: inherit; font-size: 11px; cursor: pointer; }
+.agent-chip.active { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); background: var(--primary-glow); }
+.timeline-toggle { align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; padding: 2px 0; cursor: pointer; }
+.timeline-toggle svg { transition: transform .18s var(--ease); }
+.timeline-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.timeline-items { display: flex; flex-direction: column; gap: 6px; border-left: 1px solid var(--border); padding-left: 12px; margin-left: 4px; }
+.timeline-text { color: var(--text); font-size: 14px; }
+.timeline-empty { color: var(--text-muted); font-size: 13px; padding: 6px 0; }
+.timeline-final { margin-top: 4px; color: var(--text); }
+.timeline-error { display: flex; gap: 8px; align-items: baseline; padding: 9px 12px; border-radius: 8px; background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent); color: var(--danger); font-size: 13px; }
+.err-type { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11px; text-transform: uppercase; }
+.err-code { margin-left: auto; font-size: 11px; opacity: .75; }
+@media (prefers-reduced-motion: reduce) { .status-dot.running { animation: none; } }
+
+.reasoning-block { border-left: 2px solid var(--border); padding-left: 10px; color: var(--text-secondary); font-size: 13px; }
+.reasoning-block summary { cursor: pointer; color: var(--text-muted); font-size: 12px; }
+.reasoning-block[open] summary { margin-bottom: 6px; }

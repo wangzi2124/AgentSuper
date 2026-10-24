@@ -263,7 +263,7 @@ export interface VoiceMessageData {
 // Agent 输出部件（对齐 opencode Part：正文与工具调用按 agent 真实输出顺序交错）
 export interface AgentOutputPart {
   seq: number
-  kind: 'text' | 'tool'
+  kind: 'text' | 'tool' | 'reasoning'
   /** kind=text：正文增量（相邻文本段会合并成同一 part，直到下一个工具打断） */
   text?: string
   /** kind=tool：工具/步骤调用（渲染为极简卡片，不展示参数/结果） */

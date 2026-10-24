@@ -436,3 +436,15 @@ font-size: 12px; font-weight: 600; cursor: pointer; flex-shrink: 0;
   .slash-panel { width: calc(100% - 16px); max-height: 50vh; border-radius: 14px; }
   .slash-tip { display: none; }
 }
+
+/* Harness composer: compact bottom bar */
+.chat-input { padding: 8px clamp(10px, 2.5vw, 28px) calc(10px + env(safe-area-inset-bottom, 0px)); }
+.input-card { max-width: 920px; border-radius: 14px; padding: 9px 12px 8px; background: var(--surface-elevated); border: 1px solid var(--border); box-shadow: 0 8px 22px rgba(15, 23, 42, 0.10); }
+.input-card:focus-within { box-shadow: 0 0 0 3px var(--primary-glow); }
+.input-card textarea { font-size: 14px; min-height: 26px; }
+.input-actions { gap: 5px; }
+.model-pill { height: 27px; }
+@media (max-width: 640px) {
+  .input-card { border-radius: 12px; padding: 8px 10px 7px; }
+  .chat-input { padding-left: 8px; padding-right: 8px; }
+}

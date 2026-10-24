@@ -192,7 +192,7 @@ function handleLogout() {
 
     <!-- Bottom Section -->
     <div class="sidebar-bottom">
-      <PermissionDialog />
+      <PermissionDialog v-if="!route.path.startsWith('/multi-agent')" />
 
       <!-- User Card：头像/昵称（用量/监控信息已移入个人设置面板） -->
       <div v-if="showUserCard" class="user-card">

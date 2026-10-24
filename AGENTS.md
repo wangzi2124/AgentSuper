@@ -1,148 +1,258 @@
-﻿# AGENTS.md — Knowledge Base System (RAG + AI Agent)
+﻿# AGENTS.md — Knowledge Base System (Harness)
 
-## Architecture
+> 面向 coding agent 的工作手册。人类入口看 [`README.md`](README.md)。
+> 架构权威：`docs/harness-architecture-design.md`；差距/验收：`docs/harness-design-gap-matrix.md`。
+> 文档与实际代码冲突时，以当前代码 + 测试 + 设计文档为准，并同步修正本文件。
 
-- **Two-tier app**: `backend/` (FastAPI + LangGraph + ChromaDB) + `frontend/` (Vue 3 + Pinia + Vite SPA)
-- **Backend entrypoint**: `backend/app/main.py` — `app = create_app(include_app=True)`, lifespan calls `ensure_runtime_state`（⚠ 旧的 `backend/main.py` 已不存在）
-- **Runtime wiring** (`backend/app/runtime.py`): `_load_env_to_os()` → VectorStore → LocalEmbeddings → Retriever → Reranker → SkillLoader → PluginLoader → RAGAgent
-- **Filesystem layer** (`backend/app/filesystem/`): rewritten to mirror opencode `@opencode-ai/core/filesystem` — `fsutil.py` (FSUtil path/mime/glob helpers), `shell.py` (platform shell), `ripgrep.py` + `search.py` (glob/grep with pure-Python fallback when `rg` binary is absent — Windows env confirmed `ripgrep_binary()` → None), `filesystem.py` (FileSystem service), `watcher.py` (FileSystemWatcher — [P2 #10] 原生优先: `watchdog` 已装, `start()` 用其原生事件监听, 缺失时回退 mtime 轮询; `poll()` 恒基于快照可用; `has_native_binding()` 反映真实能力). Legacy modules (`core.py`/`gitignore.py`/`models.py`/`project.py`) kept; `__init__.py` re-exports both old (`get_project`/`set_project`/`ScanCache`/`Project`/`GitignoreMatcher`/`FileNode`) and new (`FileSystem`/`FileSystemWatcher`/`RawMatch`/`DirEntry`) names so `runtime.py` and `file_tools.py` imports are unchanged.
-- **Agent flow** (`backend/graph/main_graph.py`，主图按 `agent.md` §3.2): `supervisor` → `plan` / `rag` / `memory_recall` / `context_compress` / `execute_subagent` → 回 `supervisor`（迭代硬闸门）→ `synthesize` → `memory_store` → END；状态 schema 见 `backend/graph/state.py` 的 `AgentState`（§3.1）
-  - 旧两节点 RAG 流（`retrieve` → `rerank` → `generate`）与 `app/agent/graph.py` 已随「核心架构更新」删除
-- **Config**: `backend/config.py`（**顶层模块**，`from config import settings`；`app/config.py` 已不存在）读 `backend/.env` via pydantic-settings with `extra="allow"` (non-Settings env vars allowed)
-- **Frontend routes**: `/multi-agent` (default)、`/multi-agent/:id`、`/documents`、`/skills`、`/plugins`、`/custom-tools`、`/vectors`、`/generated`、`/monitoring`、`/logs`、`/model-manager`、`/login`。单 Agent 的**前端**路由 (`/chat`、`/m`) 与其视图（`ChatView.vue`/`MobileView.vue`/`stores/chat.ts` 等）已删除 —— multi-agent 是**前端**唯一聊天入口。**注意**（后端与前端不同步）：平台图的旧端点 `POST /api/chat` + `POST /api/chat/stream`（以及裸 `/chat`、`/chat/stream`，为 agent.md §9 契约）**仍在挂载**（`app/main.py:283`/`288`、`app/api/chat.py`），仅前端不再调用；见下方 "Chat SSE streaming"。
+## 0. 先读什么
 
-## Developer Commands
+- **后端主链路**：`backend/app/main.py` → `backend/app/deps.py` → `backend/graph/main_graph.py` → `backend/graph/nodes/`
+- **Harness 层**：`backend/harness/`（工具协议、TurnHarness、压缩、切换、预算、错误、安全）
+- **前端主链路**：`frontend/src/views/MultiAgentView.vue` → `frontend/src/stores/multiAgent.ts` → `frontend/src/harness/`
+- **测试**：`backend/tests/`、`frontend/tests/`
+- 旧的 `backend/app/agent/**`、`backend/app/context/**`、`backend/scripts/**` **已删除**，不要按旧路径找代码。
+
+## 1. 仓库结构
+
+```text
+backend/
+  app/
+    main.py                 # FastAPI 入口；挂载 /api、裸 /chat 契约、启动清理
+    deps.py                 # PlatformContext：会话、图、切换、权限、并发
+    api/                    # chat / compat / sessions / documents / models / ...
+    session/                # session.db、history、service、repository
+  graph/
+    main_graph.py           # LangGraph 主图
+    nodes/                  # supervisor/plan/rag/execute/compress/parallel/...
+    routers.py              # plan tier、RAG grade/rewrite、并行门禁
+    state.py                # AgentState
+    subagent.py             # 子 Agent / task 工具
+    events.py               # 图内 part 事件 + turn_id
+    checkpoint.py           # AsyncSqliteSaver
+  harness/
+    kernel.py               # TurnHarness：run/stream 生命周期
+    contracts.py            # TurnContext / TurnResult / EventEnvelope
+    capabilities.py         # ModelProfile / mode / TTL
+    adapter.py              # 原生/回退统一输出 + 确定性 tool id
+    tool_adapter.py         # complete/stream
+    history.py              # 历史归一化
+    delimiters.py           # 文本回退定界符
+    streaming.py            # 流式解析/前置抑制
+    tool_history.py         # 跨轮工具历史（锚点/上限/过期）
+    context.py              # 模型视角装配（摘要 + tail + 工具历史）
+    compression.py          # 压缩计划/摘要/精确值/tail
+    switch.py               # SwitchService 状态机
+    budget.py               # BudgetLedger
+    schema.py               # ToolSchemaCache + 15 上限
+    retry.py                # 可重试错误退避
+    errors.py               # HarnessError / classify_error
+    security.py             # 密钥脱敏
+  models/                   # TierModel / LiteLLM / stream / catalog
+  cognition/                # compressor / token_counter / tool_output
+  execution/                # VFS / permission / tool_registry / tools
+  observability/            # trace / metrics / cost
+  prompts/                  # system/*.md, nodes/*.md
+  tests/                    # unit / contract / integration / e2e / perf / reliability / security
+
+frontend/
+  src/
+    harness/                # events / adapter / reducer / useHarnessTurn
+    stores/multiAgent.ts    # 会话、消息、队列、持久化；事件交给 harness
+    api/multiAgent.ts       # SSE transport
+    views/MultiAgentView.vue
+    mobile/                 # MobileShell + 移动页；MobileChat 复用 MultiAgentView
+    types/index.ts          # 共享 TS 类型
+  tests/unit|integration
+```
+
+## 2. 当前架构
+
+### 2.1 一轮请求（后端）
+
+```text
+HTTP / SSE
+  → PlatformContext.run/stream
+  → TurnHarness (TurnContext: turn_id, session, model)
+  → LangGraph: filter → supervisor → plan/rag/memory/compress → execute
+  → AgentLoop (graph/nodes/base.py:run_tool_loop)
+  → ToolAdapter (native / fallback)
+  → ToolRegistry → PermissionGate → Executor
+  → synthesize → memory_store → END
+```
+
+- **TurnHarness**：`harness/kernel.py`。`PlatformContext.run/stream` 已接入；`turn_id` 通过 contextvar 传播。
+- **AgentLoop**：`run_tool_loop`。默认完整响应；`graph/nodes/execute.py` 传 `stream=True`，回退模型在 `ToolCallReady` 时提前执行工具。
+- **模型切换**：`harness/switch.py`。门禁 → 原文备份 → 摘要/精确值探针 → 原子写 epoch → 持久化 model；失败回滚。
+- **压缩**：`harness/compression.py`。切换走 `compress_messages`；图节点走 `compress_graph_messages`；手动 compact 走 `tail_snapshot`。
+- **上下文视图**：`harness/context.py`。`[摘要] + [tail 原文] + [tool_history 回插] + [当前 user]`。
+- **工具历史**：`harness/tool_history.py`。只保留最近一个有工具轮；最多 10 条 / 8KB / 单结果 2KB；最多注入 2 个用户轮。
+- **治理**：`BudgetLedger`、`classify_error`、`retry_async`、`redact_secrets`、`ToolSchemaCache`。
+
+### 2.2 前端（Harness 首版）
+
+```text
+MultiAgentView
+  → multiAgent store (session/messages/queue/persistence/retry policy)
+  → useHarnessTurn (SSE lifecycle + adapter + reducer)
+  → /api/chat/multi-agent/stream
+```
+
+- `frontend/src/harness/events.ts`：`HarnessEvent` / `TurnState`。
+- `frontend/src/harness/adapter.ts`：legacy 事件补 `turn_id`，缺 `seq` 保留 undefined。
+- `frontend/src/harness/reducer.ts`：`turn_id + seq` 去重、`step_id` 幂等 upsert、agent/text/permission/error/terminal。
+- `frontend/src/harness/useHarnessTurn.ts`：每轮 SSE + abort + reducer；store 负责队列、重试策略、IndexedDB。
+- `frontend/src/components/ConversationTimeline.vue`：opencode 式单一执行时间线；从 `message.agents[].parts` 派生，不改 store 消息结构。
+- `frontend/src/components/TimelineToolRow.vue`：紧凑工具行 + 展开参数/输出；`PermissionInlineCard.vue`：聊天内联审批。
+- `ChatInput.vue` 仍承载附件/语音/模型/Agent/排队逻辑，仅做紧凑 Composer 样式；不要为了视觉重写语音状态机。
+- **前端设计文档章节尚未补**；当前以代码与测试为准。
+
+## 3. 开发命令
+
+### 3.1 后端
 
 ```powershell
-# Backend (must use .venv Python directly)
 cd backend
-.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-# ⚠ 启动耗时 ~30-40s（ModelScope 拉 embedding 14 文件 + 技能播种 + 语音预热）—— 用 /api/auth/status 轮询就绪，别几秒没响应就判死。
-# ⚠ 本机(E:\ 盘)uvicorn --reload 热重载不可靠 —— WatchFiles 观察不到变更、强制轮询(WATCHFILES_FORCE_POLLING=1)也无效，
-#   且会残留死进程的幽灵 8000 端口监听(使新实例 bind 失败 / [Errno 10048])。
-#   改后端代码后：杀干净 python 进程(taskkill /PID <pid> /T /F)再重启，别依赖 reload；
-#   连旧进程常是 E:\Python313\python.exe 的 multiprocessing spawn 子进程，命令行不含 uvicorn，别漏杀。
+.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+# 启动约 30–40s；用 /api/auth/status 轮询就绪。
+# 不要依赖 --reload（E: 盘热重载不可靠）；改代码后杀进程树再起。
 ```
-> 语音（`backend/app/services/voice.py` + `backend/ttsclone/`）：
-
-> - **增量转写（边录边出字）**：`transcribe-serve` 常驻 worker，**faster-whisper int8 首选**（CTranslate2，`backend/ttsclone/models/faster-whisper-small`），回退 openai-whisper `small`；`faster-whisper>=1.2.1` 已在 `requirements-voice.txt`。首块自动语言检测并缓存（`lang_state`），后续块直用 `language="zh"`。实测稳态 ~**1.3s/6s音频块**；后端启动预热（`VoiceService.warmup()` 后台线程）。快速自检：`backend\.venv\Scripts\python.exe -X utf8 backend\scripts\voice_quickcheck.py [synth|worker|all]`（合成 ~15-18s / worker req2 ~1.3s，无鉴权）。
-> - **前端不出字根因（已修）**：`initLive` 须 `await ctx.resume()`（Chrome 自动播放策略下 AudioContext 默认 suspended，`onaudioprocess` 不触发）；tick 1800ms、最小分块 0.9s、`transcribeBusy` 跳块避免队列积压。
-> - **TTS 合成**：默认 `VOICE_TTS_MODEL_SIZE=0.6B`（API 单句 ~17s，1.7B ~37s / CLI 同规模）；`VoiceService.__init__` 未显式传参时从 Settings 取（别直接 new 时硬编码 1.7B 默认）。
-> - **[ASR/TTS 解耦 2026-10-17] 转写不再被 TTS 总开关连坐**：`POST /api/voice/transcribe` 门控改为 `svc.whisper_ready`（= `ttsclone/models/faster-whisper-small/model.bin` + `import faster_whisper`，或 `import whisper` + `~/.cache/whisper/small.pt`），**与 `VOICE_TTS_ENABLED` 无关**；`POST /api/voice/tts` 仍用 `svc.enabled`（`VOICE_TTS_ENABLED` + Qwen3-TTS 模型）。`runtime.py` 现在**恒构造** `VoiceService`（`ensure_models` 只在 TTS 开关开时启动，`warmup` 恒调用且内部自检 `whisper_ready`）；`GET /api/voice/status` 增 `asr_enabled`。此前 `voice_service = VoiceService() if voice_tts_enabled else None` → 只想语音输入的用户每块转写都 503，前端实时链路逐块 `catch{}` 静默 → 表现为「说了话但没有任何反应」。
-> - **语音依赖安装（ASR-only 最小集）**：`uv pip install --python .venv\Scripts\python.exe "faster-whisper>=1.2.1" "soundfile>=0.13.1" "av<19"`（三者现已在 `requirements.txt` 声明，可直接 `uv pip install -r requirements.txt`；该文件同时补齐了此前未声明的 `httpx`/`requests`/`tiktoken`/`tokenizers`/`pytest`/`pytest-asyncio`，可选依赖 langfuse/gradio/flash_attn/技能脚本包仍以注释列出不默认安装） + 模型 `backend/ttsclone/models/faster-whisper-small`（`huggingface_hub.snapshot_download("Systran/faster-whisper-small", local_dir=...)`，`model.bin` ~484MB，直连 HF 可用）。**`av<19` 必须锁**：PyAV 19 移除了 `av.open(metadata_errors=...)`，而 faster-whisper 1.2.1 的 `decode_audio` 仍传该参数 → `TypeError: open() got an unexpected keyword argument 'metadata_errors'`。`clone.py` 顶层 `import soundfile`（缺则 worker 直接退出、`stderr=DEVNULL` 只看到 "whisper worker exited unexpectedly"）。实测：启动预热后 `transcribe` 200，首次 ~2.0s / 复次 ~1.1s（SAPI 合成英文样本）。
-> - **`scripts/` 已整目录删除**：`download_tts_model.py`/`voice_quickcheck.py`/`smoke_voice_api.py` 源码随 `cfb11ef 核心架构更新` 移除；最后遗留的 `smoke_long_task_api.py`（引用已不存在的 `app.agent.long_task` 模块）也已删除，`backend/scripts/` 目录一并移除。错误信息与文档里对这些脚本的引用均已过期，勿再调用。
 
 ```powershell
-# （原「一键自检」backend\scripts\voice_quickcheck.py 已随 scripts/ 整目录删除，无可跑命令）
+# 全量
+.venv\Scripts\python.exe -m pytest
 
-# Frontend (port 5173, proxies /api → localhost:8000)
-cd frontend
-npm run dev
+# 单元 + 契约 + 可靠性 + 安全
+.venv\Scripts\python.exe -m pytest tests\unit tests\contract tests\reliability tests\security -q
 
-# Build frontend
-npm run build          # vue-tsc -b && vite build → dist/
-npm run preview
+# Harness 覆盖率门槛（.coveragerc: 90%）
+.venv\Scripts\python.exe -m pytest tests\unit tests\contract tests\reliability tests\security -q --cov=harness
+
+# 真实模型（默认 skip）
+$env:HARNESS_SMOKE_MODEL_A='deepseek/deepseek-v4-flash'
+$env:HARNESS_SMOKE_MODEL_B='deepseek/deepseek-v4-pro'
+.venv\Scripts\python.exe -m pytest tests\integration\test_harness_tool_history_smoke.py tests\perf\test_harness_perf.py -q
 ```
 
-## Key Conventions & Gotchas
+### 3.2 前端
 
-### Backend
-- **Python 3.14+** required (`.python-version`), **use `.venv\Scripts\python.exe`** directly (activate fails in subprocesses)
-- **`.env` injected into `os.environ`** at startup by `runtime.py:_load_env_to_os()` so plugins can read env vars via `os.environ.get()`
-- **LLM calls** need a real `LLM_API_KEY` in `.env`; LiteLLM cost-map fetch failure is non-blocking (falls back to local backup)
-- **Reranker model** downloads **ModelScope-first** (HF fallback) via `app/utils/model_download.py:download_model`; in network-restricted envs set `ENABLE_RERANKER=false` in `.env` or pre-download via ModelScope:
-  ```powershell
-  modelscope download --model cross-encoder/ms-marco-MiniLM-L6-v2 --local_dir data/models/cross-encoder/ms-marco-MiniLM-L6-v2
-  ```
-  **Runtime degradation**: if `Reranker()` construction or `rerank()` prediction fails, the pipeline degrades (no rerank, order preserved) instead of crashing startup or the query — retriever sub-chains also degrade independently (vector failure → BM25-only)
-- **Embedding model** (default: `BAAI/bge-small-zh-v1.5`) locally cached; English fallback `all-MiniLM-L6-v2`. Download via ModelScope:
-  ```powershell
-  modelscope download --model AI-ModelScope/bge-small-zh-v1.5 --local_dir data/models/BAAI/bge-small-zh-v1.5
-  ```
-- **ChatRequest** includes `use_vector_db: bool = False` (default off; frontend toggle per-message). Also accepts `files: list[FileContent]` for attachments (drag/drop/paste/paperclip from `ChatInput.vue`) and `directory` (session-bound working dir / opencode `ctx.directory`; used when creating a new session on first message). `FileContent` = `{filename, data (pure base64, no data URL prefix), mime_type}` (`app/models/schemas.py`).
-- **Chat attachments → model** (F8 backend, LangChain document loaders): `chat.py` threads `body.files` into the supervisor payload (`chat.py:456/590`) and into persistence (`_persist_multi_agent` stores `data.files` on the user message). Supervisor forwards the payload (incl. `files`) to every sub-agent. `rag`/`code` both route through `graph.py` which splits attachments via `_attachment_parts` (`graph.py:219`): `image/*` → multi-modal `image_url` data blocks; everything else (pdf/docx/xlsx/txt/md/csv/json…) is parsed through **`app/agent/attachment_loader.py`** `attachment_context_text()` and inlined as text context in the user message (6K-char budget). `web_search` injects the same attachment text into its synthesis prompt (never drops files). **Deps**: `langchain-community` (TextLoader/PyPDFLoader) + custom `python-docx`/`openpyxl` loaders (backend has those libs; `langchain-community` is sunset so the custom loaders in `attachment_loader.py` are the fallback path). Unknown/binary/oversized attachments degrade to a one-line hint, never crash the conversation. History replay: `getConversation` maps `data.files → msg.files`, `loadConversation` restores `msg.files` from the server. **图片 OCR**（截图/文档图，`IMAGE_USE_OCR=true`）→ `app/image_processor.py:ocr_image` 调 tesseract；`TESSERACT_CMD`/`TESSDATA_DIR`/`OCR_LANGUAGES`（默认 `chi_sim+eng`，chi_sim 缺失自动回退 eng）可显式覆盖默认 PATH/tessdata。本机实况：tesseract 5.4 **已装**于 `C:\Program Files\Tesseract-OCR`，但既不在 PATH、其 tessdata 也无写权限且只有 eng/osd → 中文 OCR 静默返回空；修法 = chi_sim.traineddata 放 `backend/data/tessdata`（.gitignore 覆盖）并由 `TESSDATA_DIR` 设置 `TESSDATA_PREFIX`（指向直接含 `*.traineddata` 的目录）。**勿用 `--tessdata-dir`**：pytesseract 0.3.13 在 Windows 下 `shlex.split(config, posix=not_windows)` 会原样保留引号 → `Error opening data file "..."`。
-- **Chat SSE streaming (multi-agent only)**: frontend calls `POST /api/chat/multi-agent/stream`; backend emits SSE events: `queued`, `routing`, `agent_start`, `agent_step`, `agent_stream`, `agent_done`, `agent_error`, `done`, `error`, `permission_request`. SSE error events include `retryable`, `status_code`, `error_type` fields for frontend retry logic. Non-streaming fallback at `POST /api/chat/multi-agent`. 旧单 Agent 的**前端调用方**已删除，但后端平台图端点 `POST /api/chat` + `POST /api/chat/stream` **仍在挂载**（`app/api/chat.py`，经 `app/main.py:283` 加 `/api` 前缀，并在 `:288` 以裸 `/chat`、`/chat/stream` 挂载以履行 agent.md §9 契约）；它们与 multi-agent 共用同一 `PlatformContext`/主图，被 live 集成测试覆盖，仅前端不再调用。真正删除的只有 `GET /api/chat/stream/status` 与 `/api/chat/conversations*`。
-- **Supervisor routing whitelist** (`app/agent/supervisor.py` facade, 代码已拆入 `app/agent/supermod/{constants,base,core,decompose}`，SupervisorAgent 经 3 级继承切片 `SupervisorAgentBase→SupervisorAgentCore→SupervisorAgentDecompose→SupervisorAgent`（原第 4 级 `parallel.py` 已删除：`_execute_parallel`/`_synthesize`/`_llm_decompose`/`_validate_subtasks` 随「`_decompose` 恒返回单个子任务」而不可达；该文件已 `git rm`（P1 #6a），`SupervisorAgent.__mro__` 里已无 `_execute_parallel`），首个切片类继承 `app.agent.base.BaseAgent`): `ROUTABLE_AGENTS = {"build", "plan"}`（rag/code/web_search 已合并为单一 `build`）。Decompose validation + LLM prompt only expose routable agents; `handle_message` re-filters subtasks and falls back to `build`. Prevents LLM returning `"supervisor"` (registered on the bus) causing self-recursive routing → `Agent 'supervisor' did not respond in time`. **Decompose robustness**: supervisor 层已不做 fan-out —— `_decompose` 是关键词快速路径，恒返回单个子任务（plan 意图关键词→`plan`，否则→`build`）；LLM 分解路径（`_llm_decompose`/`_validate_subtasks`）与并行汇总（`_execute_parallel`/`_synthesize`）已随 C4 删除，并行改由主 Agent 的 `tool_task` 委派链承担。 **Sub-agent timeouts 已全部消失（2026-10-18 复核）**：`SUB_AGENT_TIMEOUT`、`SUPERVISOR_TIMEOUT`、`AGENT_TIMEOUT_MULTIPLIERS`、`SUB_AGENT_TIMEOUT_EXTENDED`、`EXTENDED_TIMEOUT_AGENTS`、`LOCAL_MODEL_TIMEOUT_FACTOR` 六个旋钮，连同 `app/agent/timeouts.py`（`is_self_hosted_model`/`model_timeout_factor`/`scale_timeout`）、`chatmod/endpoints.py`、`supermod/base.py:_timeout_for`、`AgentBus.send_and_wait` 的 grace extension，全随目录重构删除；`.env` 里这些行也已清理，`.env.example` 不再文档化。当前图的执行路径**没有任何 `asyncio.wait_for` 超时**：`app/api/compat.py:138`（`ctx.graph.astream`）、`app/deps.py:406`（`graph.ainvoke`）、`app/deps.py:431`（`graph.astream`）都是裸 await —— 慢模型/卡死只能靠客户端断连或前端 interrupt 兜底；要恢复端到端超时须在这些调用点重包并新增 Settings 字段。注：`execution/approval.py` 的 `APPROVAL_TIMEOUT_SEC`（工具审批 60s）仍在，那是另一回事。
-- **Plan fan-out budget gate** (`graph/routers.py:should_plan_parallel`, agent-1 §2.4): parallel `Send` fan-out is gated on three conditions — task feature (`plan_tier == "parallel"` + ≥2 agent-owned pending subtasks), call count (`fanout_count < plan_max_fanout_calls`), and **remaining budget** (`_remaining_budget > plan_fanout_min_budget`). Remaining budget = `state["budget_total"] − token_usage.cost`; **`budget_total` is now populated from `settings.session_budget` in `app/deps.py:initial_state`** (previously production never set it → remaining always 0 → fan-out permanently unreachable, only tests could trip it). `session_budget` default `0` = no session budget → gate conservatively rejects (`_remaining_budget`→0). `plan_parallel_enabled` still defaults `False` (agent-1 §四「扇出默认关闭」).
-- **Sub-agent tools + permission bridge** (`app/agent/sub_tools.py`): `code`/`web_search` now use `tool_loop_chat` (LLM tool-call loop, ≤8 rounds) with workspace filesystem tools (`tool_ls/read_file/glob/grep/write_file/append_file/edit_file/delete_file/rename_file/execute/apply_patch`). `run_tool` reuses `app/tools/file_tools.py` (same PermissionManager); on `NeedsPermission` it emits a `permission_request` event to the event queue (forwarded to the multi-agent SSE stream) and **awaits** the user's approval via `mgr.await_decision` (mirrors `graph.py:_execute_tool`) — `allowed` adds a temp approval and retries the tool, `denied`/`expired` returns a denial message to the LLM; no event queue → immediate denial. Tool args are filtered to the function signature (LLM-typed strings no longer crash). Tool results are envelope-unwrapped via `fs.unwrap()`. **Tool results bounded like the main agent** (not a fixed 1500-char slice): `bound_tool_output` truncates oversized output, persists the full text to `data/truncation/`, and hints at `tool_read_file(offset)`/`tool_grep` continuation — so large-file reads inside sub-agents never lose information.
-- **Multi-agent realtime events**（设计文档 `docs/multi-agent-realtime-events-design.md` 已删除）: `/multi-agent/stream` streams per-sub-agent events `agent_start`/`agent_step`/`agent_done`/`agent_error` (frontend keys agents by `agent_id`, steps upserted by `step_id`). Event bridge = request-level `AgentEventCollector` (`app/agent/stream_events.py`) passed to sub-agents via `AgentMessage.payload["_event_queue"]` (supervisor forwards payload unchanged). `RAGAgentWrapper` wraps it as `TaggedEventQueue` handed to `RAGAgent.invoke(event_queue=...)` so `graph.py:_push_event` outputs become `agent_step` (tool_output/tool_heartbeat dropped; permission_request passed through to the frontend, which surfaces it via the shared `PermissionDialog` approval panel — approved requests retry the tool, denied/timed-out ones return a denial to the agent). Final `done` event + persisted assistant message carry `agents` snapshot (built by `collector.agents_snapshot()`) so history replay shows agent panels.
-- **Execution loop guards（现仅剩硬编码轮数上限）**：工具循环在 `graph/nodes/base.py:run_tool_loop`，上限是模块常量 `MAX_TOOL_ROUNDS = 8`（`base.py:22`，调用点可传 `max_rounds` 覆盖；`graph/subagent.py:38` 子任务默认 `max_rounds=6`）。**旧 `MAX_STEPS`（24）主上限、末轮 `MAX_STEPS_PROMPT` 结构化收尾、doom-loop 检测（`DOOM_LOOP_THRESHOLD`/`DOOM_LOOP_MAX_STRIKES` 指纹重复 → 策略变更提示 → 强制收尾）在当前图里全部不存在**、也不做指纹统计；这四个 Settings 字段本轮已从 `Settings` 移除。**达到工具轮数上限后的收尾行为**：`run_tool_loop` 先追加一条 `_FINAL_ROUND_NUDGE`（"轮数已达上限，请立即停止调用工具，用纯文本给出最终答案"）并做**一次不带工具的收尾 LLM 调用**（`base.py:370-399`，`_looks_like_tool_call_json` 命中则丢弃、`parse_answer_envelope` 解包），拿到非空文本即返回；只有当收尾调用也失败/为空时，才退回兜底文案 —— 已有异常工具轨迹用 `_fallback_text` 摘要，否则用占位文案 `(达到最大工具轮数，未产出最终答案)`（`base.py:404-409`）。另有两条中途纠正文：`_NUDGE_NOT_A_TOOL_CALL`（把工具调用写成正文时纠正一轮）与 `_NUDGE_EMPTY_ANSWER`（弱模型空回复时要求补答），均在轮数未满时触发（`app/agent/graphmod/constants.py` 那组护栏提示常量随目录重构删除）。审批钩子仍由 contextvar 注入（`set_permission_hook` → `_permission_hook_var`，现位于 `graph/nodes/base.py:33`，由 `app/api/compat.py` 在本回合设置），与旧图同名但已换文件。
-- **Task completion（finish-driven 逻辑已随旧图删除，读不到 finish_reason）**：旧实现读 `response.choices[0].finish_reason` 并经 `_normalize_finish_reason` 归一为 opencode 六值枚举（`stop`/`length`/`tool-calls`/`content-filter`/`error`/`unknown`，对齐 `llm/src/schema/ids.ts`）决定续跑与截断提示；`docs/task-completion-design.md` 已不存在。当前 `graph/nodes/base.py:run_tool_loop` 的续跑判据**只有一条** —— `if not result.tool_calls: return`（`base.py:188`），**完全不读 finish_reason**。后果：`length`（输出被模型截断）会被当成正常答案原样返回、没有补救提示；`content-filter` 同样静默当答案；只有「有 tool_calls」会继续循环（与旧图 `finish_reason == "tool-calls"` 等价的活儿被 tool_calls 有无直接取代）。
-- **Long-task / truncation prevention（部分已失效）**：`settings.llm_max_tokens`（`LLM_MAX_TOKENS`，默认 `32_000`）仍是活字段，`models/router.py:191` 用它做缺省 `max_tokens` 下发；**旧的硬编码点与提示规则全没了** —— `_llm_call`（`graph.py:447`）、`LONG_CONTENT_FILE_RULE`、`BATCH_WRITES_RULE`、`ARTIFACT_SKILL_HINT` 全库已无匹配（随 `app/agent/*` 目录重构删除）。制品写作规则正文**仍在**内置技能 `app/skills/bundled/productivity/artifact-writing/SKILL.md`（`BUNDLED_VERSION = 4`，现居 `app/skills/registry.py:53`，递增即刷新未改动的已播种副本），但没有系统提示去引导模型 `load_skill_artifact_writing`，需模型主动调用技能工具。`length` 不自动续跑（对齐 opencode）这条仍成立 —— 因为 finish_reason 根本没被读（见上条）。`docs/long-task-design.md` 已不存在。
-- **Tool output truncation + prune** (aligned with opencode `tool/truncate.ts` + `session/compaction.ts`): `bound_tool_output`（现居 `cognition/tool_output.py:87`；原 `app/context/tool_output.py`）截断新工具输出（默认 200 行/32KB；`tool_grep` 100/16KB、`tool_execute` 300/32KB、`tool_read_file` 200/32KB 紧限），超限时**把全文写到 `data/truncation/tool_*.txt`** 并附 `tool_read_file(offset)`/`tool_grep` 续读提示 —— 启动时 `app/main.py:113` 调 `cleanup_truncated()`（7 天保留，对齐 opencode `RETENTION`）。**⚠ 但主图/子 Agent 都不再调用它**（原 `graph.py` 与 `sub_tools.py` `run_tool` 已随目录重构删除，新循环 `graph/nodes/base.py:run_tool_loop` 把 `_dispatch` 的原始字符串原样回填）—— 接线缺口见本条末尾。`prune_tool_outputs` 回溯把旧轮工具输出替换为桩（保护/最低阈值），**桩也把原文落盘 `data/truncation/`** 便于模型重读。 **`prune_tool_outputs` 的 `tail_turns` 按「工具调用轮次」计数**（一个 `assistant`+`tool_calls` 消息计一轮，保护其之后的所有消息）——NOT user turns: a single request usually has one user message, so user-turn protection would exempt every tool output and prune never fires. **Threshold linkage 已断开**：原 `min(settings.tool_output_protect_tokens, compaction_threshold_tokens()//2)` 联动（`app/context/budget.py:prune_protect_tokens/prune_minimum_tokens`）随 `app/context/` 整目录删除；`TOOL_OUTPUT_PROTECT_TOKENS`、`TOOL_OUTPUT_PRUNE_MINIMUM_TOKENS`、`COMPACTION_THRESHOLD_TOKENS`、`COMPACTION_THRESHOLD_RATIO`、`COMPACTION_TARGET_RATIO`、`CONTEXT_PRESERVE_RECENT_TOKENS`、`CONTEXT_SAFETY_RATIO` 七个字段本轮已从 `Settings` 移除（复核无任何读者）。现 `prune_tool_outputs` 用函数默认值 `protect_tokens=40_000`/`minimum_tokens=20_000`/`tail_turns=2`（`cognition/tool_output.py:201`），压缩阈值用模块常量 `COMPRESS_THRESHOLD=80_000`/`KEEP_RECENT_TOKENS=20_000`（`cognition/compressor.py:17-18`）。**喂给 summarizer 的工具输出封顶**在 `cognition/compressor.py:19` 的 `TOOL_OUTPUT_MAX_CHARS = 2000`（序列化时对 role 为 Tool result/tool 的消息切片），不再是 `app/context/compaction.py`。**⚠ 接线状态**：`bound_tool_output` 与 `prune_tool_outputs` 现在**没有任何生产调用方** —— 新工具循环 `graph/nodes/base.py:run_tool_loop` 把工具结果原样塞进 `convo`（`base.py:233`），只有 `cleanup_truncated()` 在 `app/main.py:113` 启动时清理 7 天前的 `data/truncation/`；要恢复入口截断/存量回收，需在 `run_tool_loop` 里重新调用这两个函数。
-- **Context budget reserve cap（模块已删，字段本轮移除）**：`app/context/budget.py`（`usable_context_tokens` 的 `min(context_reserve_tokens, window//2)` 封顶、`prune_protect_tokens`/`prune_minimum_tokens`）随 `app/context/` 整目录删除；`MAX_CONTEXT_TOKENS` 与 `CONTEXT_RESERVE_TOKENS` 本轮已从 `Settings` 移除 —— 复核确认全库（含 `os.environ`/`getenv`）无任何读者，`.env` 里原本活跃的 `MAX_CONTEXT_TOKENS=131072`/`CONTEXT_RESERVE_TOKENS=32768` 与两份 env 文件的相关注释块一并删除。当前 token 预算/截断实现在 `cognition/token_counter.py:truncate_messages`（`max_tokens`/`reserve_tokens` 形参 + `estimate_tools` 扣除本轮 tools schema，超预算插 `[earlier messages truncated to fit context window]` 哨兵，`ensure_request_anchor` 保证至少有锚点），压缩水位在 `app/session/history.py`。**⚠ 接线状态**：`truncate_messages`/`ensure_request_anchor`/`sanitize_tool_messages` 目前**没有生产调用方** —— `estimate_tokens_messages` 仅被 `app/api/models.py:64` 与 `observability/trace_log.py:57` 用于 token 统计/追踪；即「预算封顶」在新架构里实际未接线，超长上下文目前只靠压缩节点兜底。
-- **Ollama model probe window & capability refresh** (`app/models/catalog.py:probe_ollama_models`): reads `details.context_length` from `/api/tags` instead of hardcoding `32768/8192` (e.g. `qwen3.5:4b` natively `262144`). **已收录 id 也会被真实值刷新**: probe 把 `/api/tags` 里**所有**模型的能力/窗口记录到 `_ollama_native`，`get_catalog` 组装快照后经 `_apply_ollama_native` 刷新**未被用户 override 的**字段 —— 修补了内置目录写错能力（如 `ollama/mistral:latest` / `ollama/llama3.1:latest` 曾硬编码 `tool_use: False` → 被当弱模型不挂工具）的过期默认。规则：capabilities 仅当 `/api/tags` 明确给出时采用（老版 ollama 无该字段 → 保留内置，不误降级）；`context_length`/`limits` 仅当探测到原生窗口（>0）时采用。用户 `override` 字段始终优先，不会被刷新覆盖。`resolve_context_length` / `resolve_max_output_tokens` take `min(global, declared)` and never amplify.
-- **Ollama thinking toggle** (per-model 优先 + global `OLLAMA_THINKING` fallback, default `disabled`, mirrors `DEEPSEEK_THINKING`): the per-model field `thinking` (`enabled`/`disabled`/`adaptive`, set in the frontend「模型管理 → 思考模式」dropdown, persisted on the catalog entry, added to `_strip_unknown_fields` known set) takes priority over global `OLLAMA_THINKING` > default `disabled`. `catalog.provider_api` sets `think` accordingly (enabled→`True` / disabled→`False` / adaptive→omit) and only engages when the model declares `caps.get("reasoning")` **value** `True` OR has an explicit per-model `thinking`. litellm+ollama with `think=True` puts the whole answer in `reasoning_content` with empty `content` (tool calls too) → tool loop breaks; hence default off. `.env`/`.env.example` document the global fallback as optional (commented out).
-- **Model name auto-prefixing** (`graph.py:216-220`): if `model` has no `/`, prepends `deepseek/` or `openai/` based on `api_base` — always use full names like `deepseek/deepseek-v4-flash`
-- **模型/密钥解析（`models/router.py:TierModel._endpoint`）**: 直连（无 `LITELLM_PROXY_URL`）时经 `models/catalog.provider_api(mid)` 取 `api_base`/`api_key`/`options` —— 优先级 **模型目录 Provider 注册（「模型管理」页保存的凭证）> `.env` `LLM_API_BASE`/`LLM_API_KEY`**；`options`（Ollama `num_ctx`/`think`、DeepSeek `thinking`）由 `litellm_extra_kwargs()` 展开，**不**直接透传（`_kwargs` 显式取 model/api_base/api_key，避免 `options` 泄漏给 litellm）。**根因修复（2026-10-16）**：此前 `_endpoint` 只读 `.env`，`provider_api` 仅被连通性自检调用 → 用户在「模型管理」改的 key/端点不参与聊天（「改了 key 聊天仍报旧 key 无效」）。
-- **请求选中的模型真实生效（contextvar `request_model`）**: `MultiAgentRequest.model` 经 `set_request_model()` 按回合注入 —— 落点 `deps.PlatformContext.run`/`.stream`（读 `sessions.get(id).model`）与 `app/api/compat.py:_graph_events`（主前端 SSE 路径，紧邻 `set_permission_hook`），随 context 传播到图节点任务（与 `graph/nodes/base.py` 的 permission hook 同一机制），`finally` reset。`TierModel._direct_model()` 优先级：**请求选中 > `TIER_{tier}_MODEL` > `settings.llm_model``**（无请求模型的后台任务/子 Agent 回落到后两者）。此前 `body.model` 只写进会话元数据（`sess.model` + `model_switched` 回显），**不参与调用**。
-- **AgentState.use_vector_db** (`graph.py:78`): when `false`, `_retrieve` returns empty context immediately — no KB search
-- **Tool call JSON error handling** (`graph.py:244-246`): `json.loads(tc.function.arguments)` wrapped in try/except — malformed args return error to LLM instead of crashing
-- **Skills**: Markdown files in `backend/skills/*.md` or `backend/skills/<name>/SKILL.md` with YAML frontmatter. Both formats mixed.
-- **Plugins**: Python files in `backend/plugins/*.py`, functions named `tool_*` are auto-registered
-  - Enabled state: presence of `backend/plugins/<module>.enabled` file (not YAML frontmatter)
-  - Disabled by default: `example_plugin.py`, `file_reader.py` (no `.enabled` file)
-- **Plugin tool name** format: `plugin_<PLUGIN_NAME>_<func_name>` where `PLUGIN_NAME` matches the `PLUGIN_NAME` attribute in the `.py` file (may contain hyphens, e.g. `plugin_internet-search_tool_internet_search`)
-- **filesystem plugin** (`plugin_filesystem_tool_*`): file ops — `tool_ls` (gitignored 项不列出, 对齐 opencode list 语义), `tool_read_file` (text with offset/limit — limit 默认 2000 行且输出受 50KB 字节硬上限约束、超限截断提示用 offset 续读、offset 越界报错，opencode read.ts 语义; 二进制检测只读前 4KB 样本; multimodal base64 for images/audio/video/pdf; **输出格式对齐 opencode**：行前缀 `{line}: {text}`，目录列出用 `<path>/<type>directory</type>/<entries>` 分页), `tool_write_file`, `tool_append_file` (chunked append for large files), `tool_edit_file` (single or global replace — **行尾保留**: 读取/写入均用 `newline=""`, `_detect_line_ending` 按 CRLF/LF 计数检测、old/new 归一化后转换到文件行尾再匹配、UTF-8 BOM 保留, 对齐 opencode edit.ts detectLineEnding/normalizeLineEndings/convertToLineEnding, 避免 Windows 上 LF→CRLF 或 Linux 上 CRLF→LF 的静默损坏; write/append 同样 `newline=""` 原样写入), `tool_glob`/`tool_grep` (optional `path` param to search any directory — renamed from `root`, 对齐 opencode glob/grep; absolute paths returned for custom paths; grep 输出 `Found N matches` + `path:`/`  Line N: text` 分组、glob 空结果 `No files found`, 对齐 opencode grep.ts/glob.ts toModelOutput), `tool_execute` (shell, max 300s timeout default / 600s cap; **supports pipes/redirects/&&/subshells via real shell**, 对齐 opencode bash 语义; param is `workdir`, NOT `work_dir`; **启动失败错误报告**: streaming 路径 `graph.py:_execute_tool_streaming` 与同步路径都返回 `Error starting command: <detail>` / `Error executing command: <detail>`，其中 `<detail>` 在异常消息为空时回退到 `repr(e)`/异常类型，并附带实际 `Command:` 与 `Workdir:` —— 避免 Windows 下 `create_subprocess_*` 抛空消息异常时用户拿到毫无信息的报错; **streaming 路径已改为 Popen+线程桥接**（对齐 opencode shell.ts 单路径语义）: `subprocess.Popen` 启动 + 后台线程逐行读管道 + `loop.call_soon_threadsafe` 推 `tool_output`/心跳回事件队列, 超时用轮询 `poll()` + 同步 `_kill_process_tree`(taskkill /T /F), 不再依赖事件循环自身的子进程能力 —— Windows + uvicorn `--reload` 下事件循环为 SelectorEventLoop（uvicorn 0.49 `loops/asyncio.py`: win32 + use_subprocess → SelectorEventLoop）, 旧实现 `asyncio.create_subprocess_*` 直接抛 `NotImplementedError` 导致「tool_execute 环境不可用」（2026-08-16 会话实锤: 连 `echo test` 都失败）; 已在 Selector/Proactor 双循环下验证 echo 流式事件、`node --check` 成功/语法错误 stderr 捕获、超时杀树无孤儿进程 全部通过; **cmd.exe 方言纠错**: LLM 训练语料偏 bash 会写 POSIX 语法给 cmd.exe（历史实锤 `.venv/Scripts/python.exe ...; echo "EXIT=$?"` → `'.venv' 不是内部或外部命令` + `$?` 字面打印）, 两层修复: ① [P0.2 提示词瘦身] Shell dialect 说明已从 system prompt 移到 `tool_execute` 的 tool schema 描述（`tools.py:create_filesystem_tools`，仅 win32 追加；不再占 system 预算）② 输出组装处检测失败签名（`不是内部或外部命令`/`is not recognized`/未展开 `$?`, file_tools.append_cmd_dialect_hint, 同步 `_format_execute_output` 与流式返回两处接入）追加 `[cmd.exe hint]`（反斜杠路径/%ERRORLEVEL%/& 替代 ;）供 LLM 下轮自纠; **子进程输出三级解码** `decode_process_output`(utf-8 严格→GBK→utf-8 replace): cmd.exe 中文报错是 GBK、node/npm 是 UTF-8, 单一编码必错一边 —— 同步 `_run_shell` 弃用 text=True 改字节管道+解码器, 流式 `_pump` 同用该解码器, 不依赖 `-X utf8`/locale)), `tool_apply_patch(patch_text)` (opencode apply_patch 语义 — `*** Begin Patch` / `*** Add File:` +`+` lines / `*** Update File:` +`-`/`+`/space lines / `*** Delete File:` / `*** End Patch`, output `Applied patch sequentially:` + `A|M|D <path>`, partial-apply failure reports applied ops; registered as a write tool so it clears the tool-output dedup cache after use). **All file tools return an envelope `{title, metadata, output}`** — consumer sites unwrap via `file_tools.unwrap(result)` (graph.py `_bound_plugin_result`, sub_tools.py `run_tool`); plain strings pass through unchanged. **Relative paths resolve against the session bound directory, else the git worktree (repo root) — NOT `backend/`** (`app/tools/file_tools.py:_workspace()` reads `get_project().worktree`; `graph.py` tool_execute `workdir` uses the same `_resolve`). `tool_ls` iterates `ScanCache` (`app/filesystem/core.py`, auto-invalidated on write/edit/delete/rename). `tool_glob`/`tool_grep` **filter out sensitive files per-match** (workspace `.env`/`*.db`/`permissions.json`, system dirs, un-authorized external paths are silently skipped). **`tool_glob`/`tool_grep` respect `.gitignore`** (opencode ripgrep 语义): `GitignoreMatcher` (`app/filesystem/gitignore.py`, 自包含实现 git 语义 — 层级 `.gitignore`/`!` 取反/尾部 `/` 仅目录/含 `/` 锚定/`**` 跨目录, 按 mtime 缓存规则) 由 `app/tools/file_tools.py:_gitignore_matcher()` 按 worktree 惰性构建; `tool_glob` 用 `matcher.glob()` 过滤、`tool_grep` 用 `matcher.walk()` **裁剪被忽略目录**（不再遍历 `node_modules`/`.venv`/`dist` 等垃圾路径）；`ScanCache` 通过构造参数 `ignored_checker=_gitignore_checker` 填充 `FileNode.ignored`（root 之外的搜索路径不忽略）。**Working directories are configured from the frontend「工作目录」panel** (persisted to `backend/data/runtime_workspaces.json`, runtime-effective, no restart) — the `.env` `EXTRA_WORKSPACES` variable is removed. Outside all workspaces: `EXTERNAL_PATH_DEFAULT` (ask/allow/deny, default `ask`); permission approval waits at most `PERMISSION_APPROVAL_TIMEOUT`s (default 60) then denies. Tool params (`offset`/`limit`/`overwrite`/`replace_all`/`context`/`count_only`/`files_only`/`timeout`/`workdir`/`patch_text`) are declared as typed schema AND coerced at runtime, so string-typed numbers from the LLM no longer crash.
-- **SSRF protection** (`app/utils/ssrf.py`): all outbound HTTP from `plugins/http_client.py` and network commands in `tool_execute` (curl/wget/ssh/scp/rsync/ping/…) pass through `check_url`/`_ssrf_check_command` — blocks private/loopback/link-local/metadata (169.254.169.254 etc.) IPs AND domains that resolve to them. Set `SSRF_ALLOW_INTERNAL=true` in `.env` to bypass for local debugging. Scheme restricted to http/https.
-- **Command blacklist** (`app/tools/file_tools.py:_check_command_blacklist`): interpreter commands (`python -c`, `node -e`, `powershell -Command`, `cmd /c`) get their inline arg scanned against `_DANGEROUS_PATTERNS` (os.system/subprocess/eval/urllib/socket./Invoke-Expression/whoami/curl…, case-insensitive) — the first-token whitelist alone can't stop `python -c "import os;os.system(...)"` from escaping it. Both `tool_execute` and `graph.py:_execute_tool` call it before execution. **Shell-aware segmented validation** (`file_tools.py:_validate_shell_command`): `tool_execute` supports real shell semantics (pipes/redirects/`&&`/subshells/`$(...)`/backticks/`%VAR%`), but `_split_shell_segments` (shlex `punctuation_chars=True`) splits the command at `; | || && & ( )` into simple-command segments and validates **each segment's** base command against the whitelist (env-prefix `FOO=bar` skipped), each segment runs blacklist + SSRF — so `cat x | evil` can no longer bypass the first-token whitelist. `$(...)` inner commands and backtick bodies are validated recursively. `_needs_shell` routes simple commands (no shell metachars outside quotes) through the original `shlex.split` + exec path (zero regression); complex ones run via real shell (Windows `cmd.exe`, POSIX `/bin/sh` — `shell=True`) in a new process group/session, and on timeout the **entire process tree is killed** (`_kill_process_tree` taskkill /T /F / `_async_kill_process_tree` killpg). Both `tool_execute` and `graph.py:_execute_tool_streaming` use this path.
-- **Shell 重定向目标权限检查** (`file_tools.py:_check_redirect_targets_permission`): `tool_execute` 通过 `>`、`>>`、`2>`、`2>>`、`&>` 写入的外部文件现在会经过权限检查（`_extract_redirect_targets` 用 shlex 解析重定向目标路径，`_check_redirect_targets_permission` 调用 `mgr.check(path, "write")`）。`/dev/null` 等特殊设备文件跳过。同步路径（`tool_execute`）和流式路径（`graph.py:_execute_tool_streaming`）均已接入。注意：`python -c "open(...).write(...)"` 等动态写入仍无法拦截（需要进程级沙箱）。
-- **Permission model & worktree** (`app/permission/manager.py`): `PermissionManager` is constructed with `workspace=backend/` (source-protection base for `app`/`plugins`/`skills`/`config`/`main.py` etc.) plus `project_worktree=<git repo root>` (from `app.filesystem.Project.from_git`, see `runtime.py`). The worktree makes repo-root paths (README, frontend/, docs/, …) classify as `workspace` — read/write there is allowed without external approval; `allow_source_writes=true` additionally lets the agent edit `backend/app` etc. source. **`.git` paths are ALWAYS denied for read+write** (`_is_git_path` matches any `.git` path component, applied in `check()` regardless of worktree/workspace membership) — this is what prevents reading repo-root `.git/config` now that the worktree extends the workspace past `backend/`. **Session working directory** (`set_session_workspace`, contextvar): the per-session bound directory (opencode `ctx.directory`) classifies as `workspace` in `classify_path` **before** the `temp` check (order: workspace → session dir → system → temp → extra → worktree) — a user-chosen session dir that happens to sit under `%TEMP%` is treated as a trusted workspace, not hijacked by the temp branch (which would bypass workspace protection for `.env`/DBs). Session dirs are contextvar-isolated (concurrent sessions don't leak) and revert to `external/ask` after the session ends. Session storage stays a single `backend/data/session.db` with `sessions.project_id` column isolation (NOT split per project); `project_scoped(project_id)` from `app/storage/paths.py` provides per-project session/cache/log dirs used for project-namespaced files. `FileStore` uploads are rooted at `global_paths()["data"]/uploads` (`runtime.py`)（原 `settings.upload_dir` 字段本轮已删除，全库无读者）。 **Shell 重定向目标权限检查** (`file_tools.py:_check_redirect_targets_permission`): `tool_execute` 通过 `>`、`>>`、`2>`、`2>>`、`&>` 写入的外部文件现在会经过权限检查（`_extract_redirect_targets` 用 shlex 解析重定向目标路径，`_check_redirect_targets_permission` 调用 `mgr.check(path, "write")`）。`/dev/null` 等特殊设备文件跳过。同步路径（`tool_execute`）和流式路径（`graph.py:_execute_tool_streaming`）均已接入。注意：`python -c "open(...).write(...)"` 等动态写入仍无法拦截（需要进程级沙箱）。
-- **Shared memory persistence** (`app/agent/memory.py`): `MemoryManager` persists unexpired entries to `settings.memory_persist_path` (`data/agent_memory.json`) on set/delete/clear and reloads on startup — restarts no longer lose memory. `persist_path` is constructor-injectable (tests/sandbox). **主 Agent 记忆工具** (`graph.py`): main RAG agent injects the shared `MemoryManager` (runtime.py) and exposes `tool_memory_set/get/search` to the LLM (opencode memory semantics) — model can actively remember/recall/search tagged facts, namespaced by `conversation_id` (session-isolated). Tools only registered when memory is injected. `_persist_sync()` keeps sync write-on-set; `_persist_async_debounced()` adds async debounced persistence (1s) for high-concurrency multi-agent writes.
-- **Admin endpoints & CORS**: sensitive write endpoints (`permission respond`/`workspaces`, `plugins toggle/call`, `skills toggle`, `config/summarization` POST) require `require_admin(request)` (`app/api/deps.py`). With `ADMIN_TOKEN` set → `Authorization: Bearer <token>` required; **unset → only localhost (127.0.0.1/::1) allowed, remote LAN access gets 403**. CORS defaults to localhost vite dev/preview origins (config `cors_origins`, env `CORS_ORIGINS` as JSON array).
-- **Unified API response envelope**: all `/api/*` responses are `{code, message, data}` (success `code=0`, errors non-zero) plus `detail` alias for backward compat. `backend/app/api/responses.py` provides `ok()`/`fail()`/`ApiError`/`error_response()`; `main.py` registers global handlers that convert `ApiError`, `HTTPException` and `RequestValidationError` into the envelope (no catch-all `Exception` handler — registering one overrides HTTPException handling and breaks status codes). Frontend `frontend/src/api/errors.ts` exports `apiRequest(url, init, auth=true)` (injects auth headers, unwraps `data`, throws `ApiError` with the backend `message`) + `parseErrorResponse`/`toApiError`.
-- **User auth & JWT** (optional, `app/auth.py` + `app/api/auth.py`): set `AUTH_TOKEN_SECRET` in `.env` to enable account login (unset → all checks off, default local behavior). `POST /api/auth/account/register` + `POST /api/auth/account/login` (username/password, server stores PBKDF2-HMAC-SHA256 salted hash) return a standard JWT (`header.payload.signature`, HS256, stdlib only, claims `iss=agent-super`/`sub=uid`/`iat`/`exp`). Legacy device TOFU still works (`/api/auth/register` + `/api/auth/token`, HMAC-only device secret). `AuthMiddleware` requires `X-User-Id` + `X-Auth-Token` on every `/api/*` request (skips `/api/auth/*`, non-`/api`, OPTIONS) and returns unified 401 `{code:401, message:'未登录或会话已过期，请重新登录'}`. `GET /api/auth/account/me` re-verifies the token manually. Frontend `frontend/src/api/auth.ts`: `getAuthInitInfo()` returns a **shared init promise** (probes `/api/auth/status`, restores/validates stored session — all callers await the SAME promise, so no 401 race); `ensureAuth()` is a void wrapper for `fetch.ts:addAuthHeaders`; session persisted in localStorage (`user_id`/`username`/`token`/`expires_at`/`account_type`). Router guard + `stores/auth.ts` gate `/login` when auth is enabled. Config: `auth_token_ttl` (30d), `auth_users_path` (`data/auth_users.json`).
-- **Generated file plugins** (auto-save to `backend/data/generated/`):
-  - `docx_generator.py` → `tool_create_docx(title, sections, output_path)`. Extension auto-forced to `.docx`
-  - `pdf_generator.py` → `tool_create_pdf(title, sections, output_path)`. Extension auto-forced to `.pdf`. Requires `reportlab`
-  - `excel_generator.py` → `tool_create_excel(sheets, output_path)`. Extension auto-forced to `.xlsx`. Supports multiple sheets. Requires `openpyxl`
-  - `kb_export.py` → `tool_export_kb_to_docx(query, title, top_k)`. Combines KB retrieval + docx generation
-- **System prompt** (`backend/app/agent/tools.py`): lists available tools + instructions. When adding a new plugin/generator, update this file so the LLM knows about it. Currently has dedicated sections for docx/pdf/xlsx but NOT for pptx. Includes **planning & final report guidance**: multi-step/multi-file tasks must first output a `## 实施计划` checklist, and must always end with a `## 完成情况` section (已完成/未完成/下一步).
-- **Conversation persistence**: primary store is `backend/data/session.db` (see "Session management" below); legacy `conversations.db` kept read-only, lazily migrated on access
-- **Session management** (`backend/app/session/`):
-  - **`session.db`** normalized tables: `sessions` / `session_messages` (append-only event log with per-session `seq`) / `message_parts` / `session_context_epoch` / `session_inputs` (**LIVE**: the pending-task queue driving "执行中追加任务" — `delivery: steer|queue`, `promoted_seq`; drained per turn; see the `/{id}/prompts` routes below) / `session_tasks`. Legacy `conversations.db` stays read-only; lazy migration keeps `conversation_id == session.id`
-  - **`/api/sessions` routes** (`router.py`): `POST ''` create, `GET ''` list (`project`/`roots`/`search`/`archived`/`kind`), `GET/PATCH/DELETE /{id}`, `POST /{id}/fork?message_id=`, `GET /{id}/messages?after_seq=` (**每条消息附 `parts`**，`repository.list_parts_for_messages` 批量加载), `DELETE /{id}/messages/{message_id}` (单条删除), `GET /{id}/context`, `POST /{id}/compact`, `POST /{id}/revert`, `POST /{id}/interrupt`, `GET /{id}/children`, `GET /{id}/status`, plus the **live** pending-task queue: `POST /{id}/prompts` (enqueue while a turn is running), `GET /{id}/prompts` (list pending, steer-first newest-first), `DELETE /{id}/prompts/{prompt_id}`. The legacy **singular** `POST /{id}/prompt` endpoint is **removed**; its replacement is the `/{id}/prompts` queue above (backed by `session_inputs`). Isolation via `X-User-Id` (default `anonymous`) + `resolve_session_context` (403 on cross-user access). Frontend full client: `frontend/src/api/sessions.ts` (create/list/get/update/delete/fork/messages/context/compact/revert/interrupt/children/status/deleteSessionMessage).
-  - **SessionService** (`service.py`): per-session serial execution via `write_lock(session_id)` (held by `_persist_multi_agent` in `chat.py`); `fork`/`compact`/`revert` are async and acquire it too. `repository.append_message` computes `seq` atomically inside `BEGIN IMMEDIATE` (INSERT `SELECT COALESCE(MAX(seq),0)+1`) — no separate read-then-write race. **No executor/coordinator anymore**: `build_executor` and `SessionCoordinator` were removed with the single-agent mode; `agent_executor.py` now only holds `classify_error` + `PartBridgeQueue`.
-  - **Context epoch + compaction baseline** (`history.py`): `history.load` filters by `max(epoch.baseline_seq, latest compaction seq)`; when compression actually changes history, a compaction message is appended + `replace_epoch_after_compaction` + sets `session.time_compacted`, and `load` always brings back the newest checkpoint as a `system` message → watermark survives restart/replay. **Tail replay**: `load` also honors `epoch.snapshot.tail_start_seq` (or `tail_start_id` via `repository.seq_of_message`) so the preserved recent turns are replayed verbatim — model view = `[summary checkpoint] + [tail original turns] + [new messages]` (opencode `preserveRecent` semantics). The standalone compactor `scripts/compact_session.py`（已随 `scripts/` 删除，见下条）曾经把 `tail_start_id`+`tail_start_seq` 写进 compaction message/part/epoch snapshot。 `service.compact` (manual `/compact` endpoint) also writes a tail snapshot — it locates the current view's first non-compaction message and passes `{tail_start_id, tail_start_seq}` to `replace_epoch_after_compaction`, so the manual path is lossless too (`[checkpoint] + [tail original turns] + [new messages]`), same as the script path. **Session REST deps must be `async def`** (`deps.py:resolve_session_context`): the SQLite pool (`db.py:_ConnectionPool`) is main-thread bound, and a sync FastAPI dependency runs in a threadpool worker → `sqlite3.ProgrammingError: SQLite objects created in a thread...` on every session-scoped `/api/sessions/*` endpoint (only create/list worked).
-  - **Standalone compactor：`scripts/compact_session.py` 已不存在**（`scripts/` 整目录移除，`backend/scripts/` 已无任何源码）。原脚本的 `.env` 依赖项也已失效：`SUMMARIZATION_API_BASE`（本地 Ollama 需要它，否则 litellm 把 `ollama/…` 路由到 `llm_api_base` → 404 `/api/generate`）、`compaction_threshold_tokens`、`compaction_threshold_ratio`、`context_preserve_recent_tokens` 四个 Settings 字段本轮已从 `Settings` 移除。压缩现在**内联在请求路径**：阈值与保留量是 `cognition/compressor.py` 的模块常量（`COMPRESS_THRESHOLD=80_000`、`KEEP_RECENT_TOKENS=20_000`、`TOOL_OUTPUT_MAX_CHARS=2000`），9 段式摘要模板在 `prompts/nodes/compress.md`（含自检清单），入口是 `graph/nodes/compress.py:make_compress_node`（`keep_recent=6`）；水位与 tail 回放在 `app/session/history.py`（`initialize_epoch`/`replace_epoch_after_compaction`，`load` 读 `epoch.snapshot` 的 `tail_start_id`/`tail_start_seq` 逐字回放保留的近期轮次）。仍活着的相关字段只有四个：`context_tail_turns`、`compaction_tail_messages`（二者驱动 `app/session/service.py:21` 的 `_auto_tail_limit()`）、`summarization_model`、`summarization_keep_messages`（后两者由 `app/api/config.py` 的 `GET/POST /api/config/summarization` 管理，`require_admin`）。**⚠ 本轮顺带修的隐患**：`compaction_tail_messages` 此前只在 `.env.example` 文档化、未声明为 Settings 字段 —— `extra="allow"` 下 `.env` 里没这行时 `settings.compaction_tail_messages` 直接 `AttributeError`，`_auto_tail_limit()` 在 compact 路径必炸；现已补为正式字段（默认 `0` = 按 `context_tail_turns × 2` 折算）。
-  - **Sub-sessions / tasks** (`task_bridge.py` + `bus.py:cancel_pending`): multi-agent requests register a `kind='task'` child session mapped to a bus thread_id; `service.remove`/`interrupt` cascade to child sessions (task_bridge); `fork` copies messages (with parts) via `_copy_message` up to `message_id`
-  - **Undo/revert** (`repository.revert_to_message`): deletes all messages after the target message (and their parts), rolls epoch baseline back to the newest remaining compaction (0 if none); `service.revert` returns `{deleted, messages}`. Revert also **cascades**: cancels the AgentBus task via `task_bridge.cancel_children(child_ids)` + deletes child sessions + `clear_inputs` (drops queued prompts)
-  - **Message model**: `Message.type` ∈ user/assistant/system/tool/compaction/epoch; `chat.py:_msg_type_to_role` maps `compaction` → `system` role
-- **SummarizationMiddleware** (`backend/app/middleware/summarization.py`): optional **hierarchical** LLM-based context compression. Configure `SUMMARIZATION_MODEL` in `.env` to enable. Falls back to truncation if unset or fails. When it actually compresses, the caller persists a compaction baseline (see Session management above)
-- **Chunking**: default `chunk_size=500`/`chunk_overlap=200` from `.env` (doc says 1000 in README but `.env.example` and `config.py` default to 500). **Chapter-aware**: auto-splits at `第X章`/`Chapter X` boundaries, stores `chapter_title`/`chapter_number` in metadata
-- **ChromaDB batch limit**: batching at 5000 per call in `vector_store.py` to avoid `ValueError`
-- **Hybrid search**: vector + BM25 fused via pure RRF (`score = Σ 1/(k+rank)`, k=60, no per-path weights — agent-2 §13.3.1/D12). BM25 index auto-built on startup and updated on each upload. Requires `rank_bm25` + `jieba`
-- **Chapter intent detection** (`backend/app/rag/intent.py`): regex matches `第X章`/`Chapter X` → skips vector search, queries `ChapterStore` directly
-- **KB cleanup** (`backend/app/services/kb_cleanup.py`): `clear_all_kb` (vectors + chapters + BM25 + uploads) / `clear_expired` (TTL by document `created_at`) / `delete_document_data` (single-doc cascade, shared with `documents.py` delete route). All run under the shared `_doc_processing_lock` (`get_processing_lock`). Endpoints in `vectors.py`: `POST /api/vectors/clear`, `POST /api/vectors/clear-expired`, `GET /api/vectors/config` — clear endpoints require admin (`require_admin`). Config (`.env`): `VECTOR_STORE_AUTO_CLEAR` (clear on startup), `VECTOR_STORE_TTL_DAYS` (>0 enables retention), `VECTOR_STORE_CLEANUP_INTERVAL_HOURS` (scheduler loop, default 24). Frontend: 向量库页面「清空向量库 / 清理过期」按钮 (`stores/vectors.ts:clearAll/clearExpired`).
-- **CodeAct 受控执行器** (`backend/app/codeact/`, design `docs/codeact-sandbox-design.md` v2.2): `tool_code_exec` (main agent only — registered in `graphmod/base.py`, special-cased in `graphmod/tools.py:_execute_tool`; placeholder `_codeact_tool_placeholder` is stripped when `CODEACT_ENABLED=false`) runs model-written Python in a controlled sandbox (stdlib-only; `os`/`subprocess`/`socket`/`open` blocked; file/network access ONLY via the RPC whitelist `api.read_file/write_file/append_file/list_dir/glob/grep/web_search/save_artifact`). **Enabling `CODEACT_ENABLED` (default false) also tightens `tool_execute`'s `python -c`/`node -e` inline entrypoint** (§4.0, `tools/fstools/execv.py:_check_codeact_inline`, called per-segment from `_validate_shell_command` — raises a directive error pointing at `tool_code_exec`) **and injects the §10 prompt section** (`agent/tools.py:build_system_prompt_no_kb`, gated on the setting). Six defense layers: host-side AST guard (`codeact/ast_guard.analyze_code`, **called first in `ExecutionSession.run`**, `CODEACT_MAX_CODE_CHARS`/`CODEACT_MAX_AST_NODES`) → Job Object memory/process caps (`codeact_max_memory_mb`/`codeact_max_processes`) → subprocess timeout (`codeact_timeout` + RPC `codeact_rpc_timeout`) → RPC whitelist → output truncation (`codeact_max_output_chars`, oversize dumped to `data/codeact/`) → consecutive-failure circuit breaker (`codeact_max_retries`): `graphmod/tools.py:_tool_code_exec` keeps a per-conversation consecutive-failure counter (`agent._codeact_failures[conversation_id]`, reset on success) and returns a stop message once at limit; `graphmod/generate.py:_generate_impl` detects the trip in the tool loop → injects `CODEACT_DISABLED_PROMPT` (structured finish) + rebuilds `tool_defs`; `graphmod/base.py:_build_tool_defs` **final-stage filters** `tool_code_exec` out of the schema (other tools unaffected; works even if the per-conversation tool cache already mounted it). Host concurrency is throttled by an `asyncio.Semaphore(codeact_max_concurrent)` (`codeact/session.py:_get_semaphore`; queue wait does NOT count against the execution timeout).
-- **Toggling skills/plugins** at runtime calls `await agent.refresh_tools()` which rebuilds LangGraph — now **async + `asyncio.Lock`** (`graph.py:_refresh_lock`) so a rebuild never races an in-flight request.
-- **Monitoring** (`backend/app/monitor.py`): in-memory counters (`record_request`/`record_model_call`) exposed at `GET /api/monitor/stats`; **cumulative totals persist** to `data/monitor_stats.json` (survive restart, throttled `_SAVE_INTERVAL_SECONDS`). **[P1 #12] time-window view**: each request/model call is also appended to `data/metrics.jsonl` (JSONL ring buffer, throttled, pruned to `_METRICS_RETENTION_HOURS`=24h), and `/api/monitor/stats?window_hours=24` adds a `recent` block (last-window calls/tokens/cost/requests) — `get_recent_stats()`. Frontend `MonitoringView.vue` renders a "最近 Nh" section. `RequestLogMiddleware` logs every HTTP request. `_llm_call` wrapper records model, tokens, duration, and tool-rounds.
-- **Concurrency control**: global cap `settings.max_concurrent_agents` (`.env` `MAX_CONCURRENT_AGENTS`, default `4`) enforced by `PlatformContext.semaphore` (`app/deps.py:248`, built in `build_context` from `MAX_CONCURRENT_AGENTS`) and checked in `app/api/compat.py` (`multi_agent_stream`：`sem.locked()` → `queued` 事件 + `queue_position`). When all slots are full, new requests queue and receive a `queued` SSE event with `queue_position`. The legacy `GET /api/chat/stream/status` endpoint is **removed** (no active/queue depth API). **session.db connection pool** (`app/session/db.py` `_ConnectionPool`): `_get_db()` borrows pooled connections (size = max(6, max_concurrent_agents+2)), `close()` returns them to the pool; WAL + `busy_timeout=10000`. Non-default paths bypass the pool.
-- **Session content preservation** (`frontend/src/stores/multiAgent.ts`): `loadConversation()` always fetches from server as the single source of truth and **overwrites** the IndexedDB cache (`frontend/src/api/session-cache.ts`); offline falls back to the last cached content. SSE streaming messages are still persisted to IndexedDB on send/done/error events (offline snapshot). Messages survive page refresh and SSE disconnection. `SessionState` tracks `streamPhase` (`idle`/`queued`/`running`) and `queuePosition` per session.
-- **Error retry mechanism**: Three-layer retry — litellm `num_retries=2` → TaskRunner exponential backoff (2s/4s/8s, max 3 attempts) → frontend auto-retry countdown (5s, max 2 times) + manual retry button. Errors classified as retryable (429/5xx/network/timeout) vs non-retryable (401/context_overflow). `ChatError` type carries `retryable`/`statusCode` for UI decisions.
-- **Tests** (pytest, `backend/pytest.ini`: `testpaths=tests`, `-q`, `asyncio_mode=auto`): `cd backend && .venv\Scripts\python.exe -m pytest` → 当前 **202 passed**。`pytest`/`pytest-asyncio` 装在 `.venv` 里（重装：`uv pip install --python .venv\Scripts\python.exe pytest pytest-asyncio`）。前端：`$env:LIVE_API_BASE='http://127.0.0.1:8000'; npx vitest run tests/integration/`（119 passed，需后端起着）+ `npm run build`（vue-tsc 即 typecheck）。旧的「无测试框架」说法作废。
-- **[目录重构 2026-10]** `backend/app/agent/**`（graph.py、graphmod/、supermod/、supervisor.py、attachment_loader.py、timeouts.py …）与 `backend/app/utils/**` 已在「核心架构更新」提交中整目录移除（旧代码曾被搬到 `backend1/` 后删除）——主图在 `backend/graph/**`（`nodes/{supervisor,plan,rag,memory,compress,execute,parallel,synthesize}.py`），配置在顶层 `backend/config.py`，可用包是顶层 `backend/utils/`（`json_repair`/`model_download`/`ssrf`）。**权威方案文档 = 桌面 `agent.txt`（即代码里引用的 `agent.md`）**，与本文冲突时以它为准；本文其余 `app/agent/*`、`app/config.py` 引用为历史遗留。**[2026-10-18 配置审计追加]** 额外已失效的路径/概念：① `app/api/chatmod/`（`chatmod/persist.py`、`chatmod/endpoints.py`）整目录已不存在；② `app/context/`（`budget.py`/`compaction.py`/`tool_output.py`）已不存在，对应实现在 `cognition/tool_output.py` + `cognition/compressor.py` + `app/session/history.py`；③ 函数级引用如 `_generate`/`_llm_call`/`_route_to`/`_ensure_user_message`/`_persist_multi_agent`/`_normalize_finish_reason` 均已不存在（新循环入口是 `graph/nodes/base.py:run_tool_loop`）；④ 设计文档 `docs/task-completion-design.md`、`docs/long-task-design.md`、`docs/multi-agent-realtime-events-design.md` 已删除（现存 `docs/codeact-sandbox-design.md`、`docs/移动端聊天交互设计要点-ChatGPT范式.md`）；⑤ `backend/scripts/` 整目录已删除（含 `compact_session.py`、`smoke_long_task_api.py`）；⑥ `Settings` 已由 99 字段精简到 **66** 字段（本轮删 34 个无读者项 + 补 1 个漏声明字段，`.env`/`.env.example` 同步清理）。凡本文与上述路径冲突，一律以实际代码 + `agent.txt` 为准。
+```powershell
+cd frontend
+npm install
+npm run dev          # 5173；/api 代理到 8000
 
-### Frontend
-- **No lint/typecheck npm script** — only `build` runs vue-tsc then vite build
-- **Mobile responsive module** (`frontend/src/styles/mobile.css`, imported by `main.ts`, bundled via Vite): central mobile adaptation for ALL views/components. Breakpoints 768px/480px (aligned with `style.css`); no rules on desktop. Because views/components use `<style scoped>`, the module overrides scoped/inline rules using `!important` at declaration level. Handles: safe-area vars (`--safe-*`), iOS input font-size (16px to avoid zoom), touch-friendly `.btn` height, page padding/card tightening, chat header/toolbar wrapping, stat-grid 2-col, `DirPickerModal` as bottom sheet, `GeneratedFilesView` output modal full-width, `WeatherAlert` full-screen popup, table horizontal scroll. **When adding a new view/component**: add its mobile rules here rather than per-file `@media` (unless it already has scoped `@media`, which the global module leaves to the component).
-- **Vant 移动端外壳（MobileShell）**: mobile UI is Vant 4. **[P2 #9] 按需 + 动态**: `main.ts` 不再静态引入 Vant；改为 `src/mobile/vant.ts:ensureVant(app)` —— 仅当视口 ≤768px 时**动态按需**加载并 `app.use` 移动页实际用到的 17 个组件（`vant/es/<comp>` + `vant/es/<comp>/style/index`，字面量 import 避免 Vite glob 展开）+ toast/dialog 函数式样式；桌面端永不调用 → 永不加载 Vant（此前 `app.use(Vant)` 整包 558KB JS + 194KB CSS）。新增移动组件时须在 `mobile/vant.ts` 的 `COMPONENT_IMPORTS`/`STYLE_IMPORTS` 同步登记。`App.vue` renders `MobileShell` (`src/mobile/MobileShell.vue`) on viewport ≤768px (`window.matchMedia('(max-width: 768px)')`, reactive via `addEventListener('change')`) and keeps the desktop Sidebar layout otherwise; Login stays full-screen. MobileShell = Vant `van-nav-bar` (top title + left menu drawer via `van-popup`) + content + `van-tabbar` (5 tabs: 聊天/文档/技能/插件/向量库, `route` mode). **Independent mobile page components** in `src/mobile/views/` reuse the same Pinia stores as desktop, dispatched by `route.name` via the `mobileViews` map in MobileShell (unmapped routes fall back to the original `<router-view/>` view): `MobileChat` (reuses the full `MultiAgentView` so streaming/attachments/permission/workspace all keep working; `mobile.css` hides the duplicate `.chat-header` title and compacts it into a toolbar, hiding `.ws-manager`), `MobileDocuments` (Vant `van-uploader` + `van-swipe-cell` delete), `MobileSkills`/`MobilePlugins` (`van-cell` + `van-switch`), `MobileVectors` (search + doc filter action-sheet + load-more + clear), `MobileGenerated` (reuses download/run sandbox), `MobileMonitoring` (Vant stat cells), `MobileCustomTools` (Vant `van-popup` create/pin forms). Vant theme color is aligned to `--primary` via `--van-primary-color: #4f46e5`. **Mobile page gotchas**: `v-model` on a popup `show` must bind to a plain ref, not an expression like `!!x` (compiler error); `chunk.metadata.*` is typed `unknown` so coerce with `String(...)` before binding to typed props; Vant `@select` emits a typed action without custom `value` fields — read via `(option as any).value`.
-- **fetch-based API clients** in `frontend/src/api/` (no axios)
-- **TypeScript types** in `frontend/src/types/index.ts` shared across stores and views
-- **Model list**: the multi-agent selector is driven by backend `GET /api/models` (`frontend/src/api/models.ts:fetchModels` → `modelsToOptions`); `frontend/src/config/models.ts` `SUPPORTED_MODELS` is only an **offline fallback** (used until the catalog loads)
-- **Vector DB toggle** in `frontend/src/views/MultiAgentView.vue`: checkbox bound to `chat.useVectorDb`, sent as `use_vector_db` in ChatRequest. **Session working directory** (`ctx.directory`): chosen at new-chat (dir menu / DirPickerModal), stored in `multiAgent.sessionDirectory`, sent as `directory` in ChatRequest; server persists it on the session (first message creates the session) and `loadConversation` re-syncs it. Chat endpoints pass `body.directory` through `_resolve_multi_agent_parent` (`chat.py`) so the session is created with the right directory. **[会话中途改目录 2026-10-12]** `_resolve_multi_agent_parent` 现在对**已有会话**也采纳本次携带的 `directory`：非空且与库里不同时 `service.update(user_id, conv_id, directory=new_dir)`（`repository.update_session` 的 `allowed` 集合已加 `"directory"`）并按新目录返回——修掉"用户中途在「工作目录」面板改选 D 盘目录被静默丢弃、agent 仍在创建时的默认目录（`discover_project_root`→`backend/`）执行"（实锤 session `ses_209da2fe9s448a1b6`：消息写"在 D 盘…"但会话 `directory=E:\AgentSuper\backend`）。空 `directory` 不改动。
-- **ChatGPT 式滚动交互**（`frontend/src/views/MultiAgentView.vue` + `frontend/src/styles/mobile.css`）：**用户滚动优先** — `onScroll` 仅处理 `e.isTrusted === true` 的用户手势滚动来更新 `isNearBottom`（距底 <100px 判定）；程序滚动（`scrollTo` 等，`isTrusted=false`）直接 return，避免 smooth 回底中途按钮闪烁。**回到底部按钮**：`showScrollBtn = computed(() => !isNearBottom && messages.length > 0)`，点击 `scrollToBottom()` 平滑回底并恢复自动跟随，`<transition name="scroll-fade">` 包裹按钮。移动端触控适配在 `mobile.css` L481-506（48px 触控区、safe-area、毛玻璃、深色模式），由独立升级脚本 `scripts/upgrade_chat_scroll.py` 注入（含 `@@CHAT_SCROLL_INJECTED@@` 标记，非 `upgrade_mobile_ui.py`）。设计依据见 `docs/移动端聊天交互设计要点-ChatGPT范式.md`（v1.1）。
-- **Generated Files view**: shows all files in `data/generated/`. Has "Run" button for `.js` files (browser sandbox with mock `fs`/`require`). Not for `.docx`/`.pdf`/`.xlsx`.
-- **Session cache** (`frontend/src/api/session-cache.ts`): IndexedDB layer for persisting chat messages. `saveSessionToCache()`/`loadSessionFromCache()`. **[#11 双真相源]** 在线时服务端是**唯一真相源**：后端在回合开始（send_and_wait 前）即落库 user 消息（`app/session/service.py` + `repository.append_message`，原 `chatmod/persist.py:_ensure_user_message` 已随目录重构删除；按 `client_msg_id` 幂等复用 + 首条消息生成标题的语义现由 `service.py` 的 prompt/input 队列承担），done/断连兜底（原 `_persist_multi_agent(user_msg_id=...)` / `_persist_interrupted_partial(user_msg_id=...)` 已删，函数级引用勿再追）只补 assistant；`loadConversation()` 在线直接取服务器消息并**整条覆盖**缓存，**不再与本地缓存合并**（`mergeServerAndCache` 已删除）——IndexedDB 仅作**离线只读**回退（服务器取不到时显示最后缓存内容）。Messages saved on send/done/error events. **Cache key = server conversation id** (`stores/multiAgent.ts` `persistSession` uses `session.conversationId || sessionId`, and deletes the old client-genId orphan on migration), so a new session's cache is readable under its server id. **[P2 #11] 墓碑已移除**: 曾有的 `CachedSession.deletedIds`（tombstone）机制已删除——`persistSession` 每次**整条覆盖**缓存（不残留已删消息），撤销/删除都会先 `abort()` 在途流（SSE 事件顶部 `if (signal.aborted) return`），删除以服务器为准；服务器删成功而缓存未更新的极端情况下以服务器为准（显示服务器内容）才是正确语义。**Undo** (`undoMessage`) calls backend `revertSession(conversationId, targetMsgId)` (`POST /api/sessions/{id}/revert`), keeps `[0, index)`, 然后整条覆盖缓存（无墓碑）。 **[撤销×在途流 竞态 2026-10-12]** `undoMessage` 现在会先停止在途生成（`abortController.abort()` + `await interruptSession()` + `cancelAutoRetry()` + 复位 `streamPhase='idle'`）再 revert——否则撤销后 SSE 事件继续回写 `streamPhase`，对话框永远卡在「思考生成回答」；后端 `_persist_interrupted_partial`（原 `chatmod/persist.py`，模块已删）同时改为先探测 `child_id` 是否已被 revert 级联删除（`_session_gone`），已删除则**整体跳过**（既不复活刚撤销的轮次、也不再抛 `SessionNotFound` 刷 ERROR），竞态下写中途消失则捕获 `SessionNotFound` 静默降级。 **DataCloneError fix**: `saveSessionToCache()` applies `JSON.parse(JSON.stringify(raw))` before `store.put(data)` to strip non-cloneable values (functions, circular refs, undefined, Map/Set) that cause `DataCloneError` in IndexedDB structured clone algorithm.
-- **Session list/detail/rename/delete**: the old `/api/chat/conversations*` endpoints are **removed** (backend `chat.py` no longer has them). Frontend `api/sessions.ts` exposes `listConversations(kind)`/`getConversation(id, kind)`/`renameConversation`/`deleteConversation` as thin adapters over the `/api/sessions` REST (kind = `multi-agent` maps to `?kind=`). `api/multiAgent.ts` keeps the SSE stream sender (`sendMultiAgentStream`). Only the `multiAgent` store + `MultiAgentChatHistory` remain — single-agent `stores/chat.ts`, `stores/mobileChat.ts`, `api/chat.ts`, `ChatView.vue`, `MobileView.vue`, `ChatHistory.vue` etc. are **deleted**.
+npm test             # vitest run
+npm run build        # vue-tsc -b && vite build
+npm run typecheck    # vue-tsc -b
+```
 
-### When adding new API routes
-- Add backend router in `backend/app/api/`, include via `app.include_router()` in `backend/main.py`
-- Add frontend API client in `frontend/src/api/`
-- Vite dev proxy forwards `/api/*` to backend — works automatically
+```powershell
+# live SSE 集成（需后端已启动）
+$env:LIVE_API_BASE='http://127.0.0.1:8000'
+npx vitest run tests/integration/
+```
 
-### When adding new plugin tool
-- Function must be named `tool_<name>`; loader introspects its signature for JSON schema
-- Docstring becomes tool description in LLM tool definitions
-- Create `backend/plugins/<name>.enabled` file to enable the plugin
-- Update the system prompt for the agent (`backend/prompts/loader.py` 的 `build_system_prompt` + `backend/prompts/` 下的角色/节点 `.md` 提示词文件；旧的 `backend/app/agent/tools.py` 已随目录重构删除) if LLM needs explicit instructions about when to use it
+## 4. 契约与不变量
+
+### 4.1 SSE 事件
+
+- 事件字段：`type`、`turn_id`、`session_id`、`seq`，以及 payload（`agent_id`、`step_id`、`answer`、`error_type`、`error_code`、`retryable`、`status_code` 等）。
+- `compat._sse` 为每个 turn 维护单调 `seq`；前端严格按 `turn_id + seq` 去重/排序。
+- legacy 事件没有 `turn_id` 时，前端归入当前 turn；没有 `seq` 时按到达顺序。
+- 终态：`done`（会话空闲）或 `turn_done`（还有排队轮次）；两者都必须被 store 收尾。
+
+### 4.2 工具调用
+
+- 统一结构：`ToolCall(id, name, arguments: str)`；Loop 不感知厂商格式。
+- 确定性 tool id：`call_{seq}_{sha1(name+args)[:8]}`。
+- 原生路径：`tool_calls`；回退路径：定界符解析；两者都经 `normalize_history`。
+- 参数非法 → 错误作为工具结果回灌，不崩溃。
+- 未知工具/权限拒绝 → 明确错误文本，不执行。
+- 工具输出先过 `bound_tool_output`（头尾保留 + 落盘 `data/truncation/`），再进 `tool_history`。
+
+### 4.3 模型切换
+
+必须满足：
+
+1. 切换前写原文快照；失败拒绝。
+2. 目标 `context_length` 未知拒绝。
+3. 会话 running 拒绝。
+4. 压缩阈值/保留量与目标窗口绑定。
+5. 预算累计不清零。
+6. 摘要 + tail 通过精确值探针。
+7. 绑定/模型/审计原子；失败回滚旧模型。
+8. 消息 ID 稳定：`sessionId:seq` 或逻辑哈希，禁止 index / model+index。
+
+### 4.4 预算与错误
+
+- `BudgetLedger` 单调累计；`SESSION_BUDGET=0` 表示不限。
+- 预算耗尽返回 `budget-exceeded` 并推 `budget_exceeded` 事件。
+- **已知差异**：当前是调用后结算，不是严格“调用前预扣”；不要把它描述成预扣。
+- 可重试：429/5xx/超时；不可重试：401/参数/上下文超限/预算/切换门禁。
+- API/SSE 错误必须带 `retryable`、`status_code`、`error_type`、`error_code`。
+
+## 5. 后端陷阱
+
+- **Python**：`backend/.python-version` 为 3.13；始终用 `backend\.venv\Scripts\python.exe`。
+- **启动慢**：embedding 模型、技能播种、语音预热；不要几秒没响应就判定死。
+- **uvicorn --reload**：E: 盘不可靠，且可能残留幽灵 8000；改代码后 `taskkill /PID <pid> /T /F`。
+- **会话存储**：模型视角历史主要来自 graph checkpoint；`session.db` 负责 UI/事件/队列/epoch。不要把两者混为一个真相源。
+- **`session_inputs`**：执行中追加任务走 `/api/sessions/{id}/prompts` 队列；旧单数 `/prompt` 已删除。
+- **权限**：无审批通道时 `require_approval` 工具一律拒绝；`.git` 路径永远拒绝；Shell 重定向目标要过写权限。
+- **工具名**：默认 registry 注册的是 `read_file` / `write_file` / `edit_file` / `ls` / `grep` / `glob` / `append_file` / `delete_file` / `shell_exec` / `task`；插件工具名以加载器注册结果为准，不要硬编码旧前缀。
+- **压缩**：`cognition/compressor.py` 是 canonical；`harness/compression.py` 是统一门面。不要再新增第三套压缩逻辑。
+- **自动压缩/手动 compact**：`ContextHarness` + `tail_snapshot` 语义；手动 compact 也要写 tail 起点。
+- **模型目录**：`models/catalog.py` 读取能力/窗口；`harness/capabilities.build_profile` 有 60s TTL，人工 override 优先。
+- **上下文窗口**：未知窗口时 `resolve_mode` 保守回退；不要在未知窗口上做原生工具假设。
+- **不要重新引入**：`MAX_STEPS`、`SUB_AGENT_TIMEOUT`、`SUPERVISOR_TIMEOUT`、`AGENT_TIMEOUT_MULTIPLIERS`、`DOOM_LOOP_*`；这些字段/逻辑已删除。
+- **不要引用**：`backend/scripts/`（整目录已删除）、旧 `backend/app/agent/**`、`app/context/**`、`scripts/compact_session.py`。
+
+## 6. 前端陷阱
+
+- **store 公共 API 不变**：`send`/`cancel`/`loadConversation`/`undoMessage` 等签名保持；内部事件处理走 `useHarnessTurn`。
+- **不要重置消息列表**：`model_switched` 只更新后续 turn 的模型；消息 key 用稳定 id。
+- **持久化**：`text_delta` 不写 IndexedDB；queued/done/turn_done/error 等阶段才写。服务端是唯一真相源，缓存只做离线回退。
+- **权限**：`permission_request` 归一化后交给 `PermissionStore`；不要塞回 reducer 里弹窗。
+- **排队**：`turn_done` 由 store 决定 drain/下一轮；controller 只产出终态。
+- **移动端**：`MobileChat` 复用 `MultiAgentView`；改聊天逻辑时先确认移动端不被破坏。
+- **聊天表面**：主结构是 `ConversationTimeline` 的单一时间线；不要重新引入按 Agent 分块的 `MultiAgentResponse` 作为主渲染路径。
+- **只展示真实工具**：时间线过滤 `!step.tool_name` 的 Harness 图内节点（filter/plan/rag/execute_subagent 等）；不要渲染 `NODE_LABELS` 或 Agent 过滤 chips。
+- **工具步骤**：默认紧凑行，点击展开；不要默认展开所有参数/输出，避免长任务淹没最终答案。
+- **审批**：聊天页用 `PermissionInlineCard`，`Sidebar` 中的模态在 `/multi-agent` 路由隐藏；不要两套同时弹。
+- **旧组件**：`MultiAgentResponse.vue` / `AgentPanel.vue` 仍保留给旧测试与回滚，但视图不再引用；验收通过前不要删。
+- **构建**：没有独立 lint script；`npm run build` 内含 `vue-tsc -b`。
+
+## 7. 新增/修改时的落点
+
+- **新 API**：`backend/app/api/` 加 router → `app/main.py` include；前端 `frontend/src/api/` 加 client → `errors.ts` 统一解包。
+- **新工具**：`execution/tool_registry.py` 注册；函数名 `tool_*`（插件）或 `register_function`；更新工具描述；权限/沙箱/输出边界要一起考虑。
+- **新 Skill**：`backend/skills/` Markdown + frontmatter；需要时更新 `skills` 目录 UI/loader。
+- **新 Plugin**：`backend/plugins/*.py`，`tool_*` 自动注册；`.enabled` 文件控制启用。
+- **新前端事件**：先加 `harness/events.ts` 类型 + `adapter`/`reducer` 分支 + 单测，再接 store/view。
+- **新提示词**：`prompts/system/*.md`、`prompts/nodes/*.md`；不要把大段规则塞进 Python。
+
+## 8. 验收与已知缺口
+
+当前实测（2026-10-24，本地 Windows）：
+
+- 后端：`514 passed, 16 skipped`
+- Harness 覆盖率：`90.80%`（门槛 90%）
+- 前端单测：`104 passed`
+- 前端 live SSE 集成：`119 passed`
+- 前端 `npm run build`：通过
+- 真实模型：DeepSeek `deepseek/deepseek-v4-flash → deepseek-v4-pro`；E2E 8 条、PF-01/02/05/06/07 通过
+
+已知缺口：
+
+- **D-01**：预算事件已补，但计费仍是调用后结算，不是严格预扣。
+- **前端 Harness 设计文档章节**尚未补；代码/测试已落地。
+- 真实模型/性能测试默认 env-gated；缺 `HARNESS_SMOKE_MODEL_A/B` 时记为 blocked，不要伪报通过。
+- `backend/README.md`、`frontend/README.md` 未随本文件一起重写（本轮只更新根文档）。
+
+## 9. 文档索引
+
+- `docs/harness-architecture-design.md`：Harness v2 设计（权威）
+- `docs/harness-design-gap-matrix.md`：G-01~G-16、§13 验收、阶段记录
+- `docs/agent.md`、`agent-1.md`~`agent-4.md`：历史设计依据
+- `docs/codeact-sandbox-design.md`：CodeAct
+- `docs/移动端聊天交互设计要点-ChatGPT范式.md`：移动端聊天
+- `README.md`：人类入口

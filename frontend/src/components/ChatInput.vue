@@ -915,6 +915,11 @@ function onKeydown(e: KeyboardEvent) {
       if (item) { e.preventDefault(); slashUse(item); return }
     }
   }
+  if (e.key === 'Escape' && props.loading) {
+    e.preventDefault()
+    emit('cancel')
+    return
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     handleSend()

@@ -402,3 +402,16 @@ transition: all var(--duration) var(--ease);
   background: color-mix(in srgb, #f59e0b 12%, transparent);
   color: #b45309;
 }
+
+/* Harness chat surface: compact opencode-style timeline */
+.multi-agent-view .message-wrapper { max-width: 920px; }
+.multi-agent-view .chat-message { gap: 0; margin-bottom: 18px; }
+.multi-agent-view .avatar { display: none; }
+.multi-agent-view .bubble { background: transparent; border: 0; border-radius: 0; padding: 0; box-shadow: none; }
+.multi-agent-view .user .bubble { flex: none; max-width: 78%; padding: 8px 12px; border-radius: 12px; background: var(--bg-subtle, color-mix(in srgb, var(--bg) 75%, transparent)); border: 1px solid var(--border); }
+.multi-agent-view .assistant .bubble { background: transparent; }
+.multi-agent-view .message-footer { margin-top: 4px; opacity: .55; }
+.multi-agent-view .chat-message:hover .message-footer { opacity: 1; }
+.multi-agent-view .message-actions { gap: 2px; }
+.multi-agent-view .send-queue-bar { max-width: 920px; margin: 0 auto 6px; }
+.multi-agent-view .chat-footer { max-width: 100%; }
