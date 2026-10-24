@@ -75,3 +75,70 @@ def supports_native_tools(
     model_id: str | None, capabilities: dict[str, bool] | None = None
 ) -> bool:
     return resolve_mode(model_id, capabilities) == NATIVE
+
+
+_PROFILE_TTL = 60.0
+_profile_cache: dict[str, tuple[float, "ModelProfileSnapshot"]] = {}
+
+
+def clear_profile_cache() -> None:
+    _profile_cache.clear()
+
+
+def build_profile(
+    model_id: str | None,
+    *,
+    capabilities: dict[str, bool] | None = None,
+    limits: dict[str, int] | None = None,
+    force: bool = False,
+) -> "ModelProfileSnapshot":
+    """Build the per-request model profile (catalog + env override + TTL)."""
+    import time
+
+    from .contracts import ModelProfileSnapshot
+
+    mid = (model_id or "").strip()
+    now = time.time()
+    cached = _profile_cache.get(mid)
+    if cached and not force and now - cached[0] < _PROFILE_TTL:
+        return cached[1]
+
+    caps = capabilities
+    if caps is None:
+        try:
+            from models.catalog import read_capabilities
+
+            caps = read_capabilities(mid)
+        except Exception:  # noqa: BLE001
+            caps = {}
+    lims = limits
+    if lims is None:
+        try:
+            from models.catalog import read_limits
+
+            lims = read_limits(mid)
+        except Exception:  # noqa: BLE001
+            lims = {}
+
+    mode = resolve_mode(mid, caps)
+    source = "env" if mode_override(mid) else ("catalog" if caps else "default")
+    profile = ModelProfileSnapshot(
+        model_id=mid,
+        tool_mode=mode,
+        context_length=int((lims or {}).get("context_length") or 0),
+        max_output_tokens=int((lims or {}).get("max_output_tokens") or 0),
+        vision=bool((caps or {}).get("vision")),
+        reasoning=bool((caps or {}).get("reasoning")),
+        source=source,
+    )
+    _profile_cache[mid] = (now, profile)
+    return profile
+
+
+__all__ = [
+    "build_profile",
+    "clear_profile_cache",
+    "mode_override",
+    "resolve_mode",
+    "supports_native_tools",
+]

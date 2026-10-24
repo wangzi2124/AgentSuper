@@ -12,10 +12,14 @@ import time
 import typing
 from typing import Any, Awaitable, Callable
 
+from cognition.tool_output import bound_tool_output, prune_tool_outputs
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from harness.adapter import call_argument_error
+from harness.budget import BudgetExceeded, BudgetLedger
 from harness.hooks import run_post_tool, run_pre_tool
-from models.router import TierModel
+from harness.retry import retry_async
+from harness.schema import ToolSchemaCache
+from models.router import TierModel, normalize_finish_reason
 from observability.metrics import record_llm_call
 from observability.tracing import trace_span
 from utils.json_repair import (
@@ -24,7 +28,7 @@ from utils.json_repair import (
 )
 
 from ..events import push_event
-from ..tool_history import (
+from harness.tool_history import (
     cap_tool_history,
     make_tool_call_message,
     make_tool_result_message,
@@ -48,6 +52,20 @@ _FINAL_ROUND_NUDGE = "工具调用轮数已达上限。请立即停止调用工�
 _NUDGE_EMPTY_ANSWER = (
     "你上一条回复是空的。请直接用纯文本给出对用户问题的最终答案（不要输出 JSON，不要再调用工具）。"
 )
+
+
+_NUDGE_CONTINUE_LENGTH = (
+    "上一条回答因输出长度限制被截断。请从中断处继续，直接给出剩余内容，不要重复已输出的部分。"
+)
+_CONTENT_FILTER_TEXT = "（模型输出被安全策略拦截，无法继续生成。）"
+_TRUNCATION_NOTICE = "\n\n（回答因模型输出长度限制被截断。）"
+_MODEL_ERROR_TEXT = "（模型调用失败，暂时无法生成回答。）"
+
+
+def _finish_reason(value: Any) -> str:
+    """Accept both provider values and already-normalized canonical values."""
+    raw = str(value or "stop").strip().lower().replace("-", "_")
+    return normalize_finish_reason(raw)
 
 
 def _json_object_candidate(text: str) -> dict[str, Any] | None:
@@ -202,23 +220,23 @@ def json_schema_for(fn: Any) -> dict[str, Any]:
     return schema
 
 
+_TOOL_SCHEMA_CACHE = ToolSchemaCache()
+
+
 def build_tool_defs(
     registry: ToolRegistry, scope: str | None = None
 ) -> list[dict[str, Any]]:
-    defs: list[dict[str, Any]] = []
-    for td in registry.definitions(scope):
-        params = td.parameters or json_schema_for(td.fn)
-        defs.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": td.name,
-                    "description": td.description,
-                    "parameters": params,
-                },
-            }
-        )
-    return defs
+    def _build(td: ToolDefinition) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": td.name,
+                "description": td.description,
+                "parameters": td.parameters or json_schema_for(td.fn),
+            },
+        }
+
+    return _TOOL_SCHEMA_CACHE.build(registry, scope, _build)
 
 
 def _fallback_text(tool_trace: list[dict[str, Any]]) -> str:
@@ -266,6 +284,135 @@ async def _dispatch(
         return f"错误：{e or repr(e)}"
 
 
+async def _execute_tool_call(
+    tc: Any,
+    call_id: str,
+    registry: ToolRegistry,
+    agent_id: str,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    parsed_args, arg_error = call_argument_error(tc)
+    args: dict[str, Any] = parsed_args or {}
+    step_id = f"tool-{call_id}"
+    push_event(
+        {
+            "type": "tool_start",
+            "step_id": step_id,
+            "agent_id": agent_id,
+            "name": tc.name,
+            "tool_name": tc.name,
+            "tool_args": args,
+            "status": "running",
+        }
+    )
+    started = time.perf_counter()
+    td = registry.get(tc.name)
+    if td is None:
+        output = f"错误：未知工具 {tc.name}"
+    elif arg_error:
+        output = f"错误：{arg_error}"
+    else:
+        args = run_pre_tool(tc.name, args)
+        if td.require_approval:
+            hook = _permission_hook_var.get()
+            approved = await hook(tc.name, args) if hook is not None else False
+            if not approved:
+                output = f"已拒绝执行工具 {tc.name}（用户未授权）"
+            else:
+                with trace_span("tool.call", tool=tc.name):
+                    output = await _dispatch(td, args)
+        else:
+            with trace_span("tool.call", tool=tc.name):
+                output = await _dispatch(td, args)
+        output = run_post_tool(tc.name, args, output)
+
+    output = bound_tool_output(str(output), tool_name=tc.name)
+    duration_ms = round((time.perf_counter() - started) * 1000, 3)
+    failed = td is None or str(output).startswith(("错误", "已拒绝"))
+    push_event(
+        {
+            "type": "tool_end",
+            "step_id": step_id,
+            "agent_id": agent_id,
+            "name": tc.name,
+            "tool_name": tc.name,
+            "tool_result": output,
+            "status": "failed" if failed else "completed",
+            "duration_ms": duration_ms,
+        }
+    )
+    trace = {"name": tc.name, "args": args, "output": output}
+    history = make_tool_result_message(call_id, tc.name, output)
+    return output, trace, history
+
+
+def _chat_result_from_stream(stream_result: Any) -> Any:
+    from models.types import ChatResult, ToolCall
+
+    calls: list[ToolCall] = []
+    for call in getattr(stream_result, "tool_calls", None) or []:
+        fn = getattr(call, "function", None)
+        name = getattr(fn, "name", None) if fn is not None else getattr(call, "name", "")
+        args = (
+            getattr(fn, "arguments", "")
+            if fn is not None
+            else getattr(call, "arguments", "")
+        )
+        calls.append(
+            ToolCall(
+                id=str(getattr(call, "id", "") or ""),
+                name=str(name or ""),
+                arguments=args if isinstance(args, str) else json.dumps(args),
+            )
+        )
+    raw_usage = getattr(stream_result, "usage", None)
+    usage = {}
+    if raw_usage is not None:
+        if isinstance(raw_usage, dict):
+            usage = raw_usage
+        else:
+            usage = {
+                "input": getattr(raw_usage, "prompt_tokens", 0) or 0,
+                "output": getattr(raw_usage, "completion_tokens", 0) or 0,
+                "total": getattr(raw_usage, "total_tokens", 0) or 0,
+            }
+    return ChatResult(
+        content=str(getattr(stream_result, "content", "") or ""),
+        tool_calls=calls,
+        finish_reason=getattr(stream_result, "finish_reason", "stop") or "stop",
+        usage=usage,
+        model="",
+    )
+
+
+async def _stream_step(
+    adapter: Any,
+    convo: list[dict[str, Any]],
+    tool_defs: list[dict[str, Any]] | None,
+    registry: ToolRegistry,
+    agent_id: str,
+    round_no: int,
+) -> tuple[Any, dict[str, tuple[Any, str, dict[str, Any], dict[str, Any]]]]:
+    from harness.tool_adapter import Done, ToolCallReady
+
+    early: dict[str, tuple[Any, str, dict[str, Any], dict[str, Any]]] = {}
+    result = None
+    async for event in adapter.stream(convo, tool_defs):
+        if isinstance(event, ToolCallReady):
+            call = event.call
+            call_id = call.id or f"call_{round_no}_{len(early)}"
+            call.id = call_id
+            if call_id not in early:
+                output, trace, history = await _execute_tool_call(
+                    call, call_id, registry, agent_id
+                )
+                early[call_id] = (call, output, trace, history)
+        elif isinstance(event, Done):
+            result = _chat_result_from_stream(event.response)
+    if result is None:
+        raise RuntimeError("stream finished without Done event")
+    return result, early
+
+
 def _authorized_roots_note() -> str:
     """把本回合已授权的额外根目录告知模型。
 
@@ -301,6 +448,8 @@ async def run_tool_loop(
     max_rounds: int = MAX_TOOL_ROUNDS,
     agent_id: str = "build",
     adapter: Any | None = None,
+    budget: BudgetLedger | None = None,
+    stream: bool = False,
 ) -> dict[str, Any]:
     """LLM 工具调用循环，返回 {text, rounds, tool_trace, tool_history, usage}。
 
@@ -321,21 +470,107 @@ async def run_tool_loop(
     usage_total = empty_usage()
     tool_trace: list[dict[str, Any]] = []
     tool_history: list[dict[str, Any]] = []
+    continued_parts: list[str] = []
+    last_finish = "stop"
 
     while rounds < max_rounds:
-        with trace_span("llm.call", rounds=rounds):
-            result = await tool_adapter.complete(convo, tool_defs or None)
+        if rounds:
+            convo = prune_tool_outputs(convo)
+        if budget is not None:
+            try:
+                budget.ensure_available()
+            except BudgetExceeded as exc:
+                logger.warning("tool loop stopped by budget: %s", exc)
+                push_event(
+                    {
+                        "type": "budget_exceeded",
+                        "agent_id": agent_id,
+                        "status": "failed",
+                        "error": str(exc),
+                    }
+                )
+                return {
+                    "text": "（会话预算已用尽，已停止继续调用模型。）",
+                    "rounds": rounds,
+                    "tool_trace": tool_trace,
+                    "tool_history": cap_tool_history(tool_history),
+                    "usage": usage_total,
+                    "finish_reason": "budget-exceeded",
+                    "budget_exceeded": True,
+                }
+        early: dict[str, tuple[Any, str, dict[str, Any], dict[str, Any]]] = {}
+        if (
+            stream
+            and getattr(tool_adapter, "mode", "") == "fallback"
+            and getattr(tool_adapter, "can_stream", lambda: False)()
+        ):
+            with trace_span("llm.call", rounds=rounds):
+                result, early = await _stream_step(
+                    tool_adapter,
+                    convo,
+                    tool_defs or None,
+                    registry,
+                    agent_id,
+                    rounds,
+                )
+        else:
+            with trace_span("llm.call", rounds=rounds):
+                result = await retry_async(
+                    lambda: tool_adapter.complete(convo, tool_defs or None)
+                )
         rounds += 1
         label = model.model_name() if hasattr(model, "model_name") else model.tier
-        usage_total = merge_usage(usage_total, usage_from_result(result, label))
+        call_usage = usage_from_result(result, label)
+        usage_total = merge_usage(usage_total, call_usage)
+        if budget is not None:
+            budget.charge(float(call_usage.get("cost") or 0))
         record_llm_call(
             result.model or model.tier,
             result.usage.get("input", 0),
             result.usage.get("output", 0),
         )
 
+        last_finish = _finish_reason(result.finish_reason)
+
         if not result.tool_calls:
             text = result.content or ""
+            if last_finish == "content-filter":
+                return {
+                    "text": _CONTENT_FILTER_TEXT,
+                    "rounds": rounds,
+                    "tool_trace": tool_trace,
+                    "tool_history": cap_tool_history(tool_history),
+                    "usage": usage_total,
+                    "finish_reason": last_finish,
+                }
+            if last_finish == "error":
+                return {
+                    "text": text.strip() or _MODEL_ERROR_TEXT,
+                    "rounds": rounds,
+                    "tool_trace": tool_trace,
+                    "tool_history": cap_tool_history(tool_history),
+                    "usage": usage_total,
+                    "finish_reason": last_finish,
+                }
+            if last_finish == "length":
+                if text.strip() and rounds < max_rounds:
+                    continued_parts.append(text)
+                    convo.append({"role": "assistant", "content": text})
+                    convo.append(
+                        {"role": "user", "content": _NUDGE_CONTINUE_LENGTH}
+                    )
+                    continue
+                answer = "".join(continued_parts + ([text] if text else []))
+                if not answer.strip():
+                    answer = _NUDGE_CONTINUE_LENGTH
+                return {
+                    "text": answer + _TRUNCATION_NOTICE,
+                    "rounds": rounds,
+                    "tool_trace": tool_trace,
+                    "tool_history": cap_tool_history(tool_history),
+                    "usage": usage_total,
+                    "finish_reason": last_finish,
+                }
             if _looks_like_tool_call_json(text):
                 if rounds < max_rounds:
                     # 工具调用被模型写成了正文（无原生 tool_calls）→ 纠正一轮，不当答案返回。
@@ -354,12 +589,15 @@ async def run_tool_loop(
             envelope = parse_answer_envelope(text)
             answer = envelope or text
             if answer.strip():
+                if continued_parts:
+                    answer = "".join(continued_parts) + answer
                 return {
                     "text": answer,
                     "rounds": rounds,
                     "tool_trace": tool_trace,
                     "tool_history": cap_tool_history(tool_history),
                     "usage": usage_total,
+                    "finish_reason": last_finish,
                 }
             # 空回复（既无 tool_calls 也无正文）：不能把空串当答案返回，否则上层会
             # 静默丢弃（无持久化 / 无 text_delta），表现为「Agent 跑完却没有任何回答」。
@@ -374,6 +612,17 @@ async def run_tool_loop(
                 convo.append({"role": "user", "content": _NUDGE_EMPTY_ANSWER})
                 continue
             break  # 轮数已尽：交由下方纯文本收尾
+
+        if early:
+            early_calls = list(early.values())
+            if len(early_calls) == len(result.tool_calls):
+                for idx, tc in enumerate(result.tool_calls):
+                    if not tc.id and early_calls[idx][0].id:
+                        tc.id = early_calls[idx][0].id
+            known = {tc.id for tc in result.tool_calls if tc.id}
+            for call_id, (call, *_rest) in early.items():
+                if call_id not in known:
+                    result.tool_calls.append(call)
 
         round_calls = [
             (tc.id or f"call_{rounds}_{idx}", tc.name, tc.arguments)
@@ -395,93 +644,82 @@ async def run_tool_loop(
             }
         )
         for idx, tc in enumerate(result.tool_calls):
-            parsed_args, arg_error = call_argument_error(tc)
-            args: dict[str, Any] = parsed_args or {}
             call_id = round_calls[idx][0]
-            step_id = f"tool-{call_id}"
-            push_event(
-                {
-                    "type": "tool_start",
-                    "step_id": step_id,
-                    "agent_id": agent_id,
-                    "name": tc.name,
-                    "tool_name": tc.name,
-                    "tool_args": args,
-                    "status": "running",
-                }
-            )
-            started = time.perf_counter()
-            td = registry.get(tc.name)
-            if td is None:
-                output = f"错误：未知工具 {tc.name}"
-            elif arg_error:
-                # agent-4 §2.1 错误恢复：非法 JSON 作为工具结果回灌，让模型自修
-                output = f"错误：{arg_error}"
+            if call_id in early:
+                _, output, trace, history = early[call_id]
             else:
-                args = run_pre_tool(tc.name, args)
-                if td.require_approval:
-                    hook = _permission_hook_var.get()
-                    # 无审批通道 → 拒绝（绝不静默放行高危工具）
-                    approved = await hook(tc.name, args) if hook is not None else False
-                    if not approved:
-                        output = f"已拒绝执行工具 {tc.name}（用户未授权）。"
-                    else:
-                        with trace_span("tool.call", tool=tc.name):
-                            output = await _dispatch(td, args)
-                else:
-                    with trace_span("tool.call", tool=tc.name):
-                        output = await _dispatch(td, args)
-                output = run_post_tool(tc.name, args, output)
-            duration_ms = round((time.perf_counter() - started) * 1000, 3)
-            failed = td is None or str(output).startswith(("错误", "已拒绝"))
-            push_event(
-                {
-                    "type": "tool_end",
-                    "step_id": step_id,
-                    "agent_id": agent_id,
-                    "name": tc.name,
-                    "tool_name": tc.name,
-                    "tool_result": output,
-                    "status": "failed" if failed else "completed",
-                    "duration_ms": duration_ms,
-                }
-            )
-            tool_trace.append({"name": tc.name, "args": args, "output": output})
-            tool_history.append(
-                make_tool_result_message(call_id, tc.name, output)
-            )
+                output, trace, history = await _execute_tool_call(
+                    tc, call_id, registry, agent_id
+                )
+            tool_trace.append(trace)
+            tool_history.append(history)
             convo.append(
                 {"role": "tool", "tool_call_id": call_id, "content": output}
             )
 
-    # 工具轮数耗尽：做一次「纯文本收尾」调用（不带工具），避免把占位文案当最终答案
     _prior_nudges = {_FINAL_ROUND_NUDGE, _NUDGE_NOT_A_TOOL_CALL, _NUDGE_EMPTY_ANSWER}
     if not (convo and convo[-1].get("role") == "user" and convo[-1].get("content") in _prior_nudges):
         convo.append({"role": "user", "content": _FINAL_ROUND_NUDGE})
+    if budget is not None:
+        try:
+            budget.ensure_available()
+        except BudgetExceeded as exc:
+            logger.warning("final tool-loop call stopped by budget: %s", exc)
+            push_event(
+                {
+                    "type": "budget_exceeded",
+                    "agent_id": agent_id,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+            return {
+                "text": "（会话预算已用尽，已停止继续调用模型。）",
+                "rounds": rounds,
+                "tool_trace": tool_trace,
+                "tool_history": cap_tool_history(tool_history),
+                "usage": usage_total,
+                "finish_reason": "budget-exceeded",
+                "budget_exceeded": True,
+            }
     try:
         with trace_span("llm.call", rounds=rounds, final=True):
-            final = await tool_adapter.complete(convo, None)
+            final = await retry_async(lambda: tool_adapter.complete(convo, None))
         rounds += 1
         label = model.model_name() if hasattr(model, "model_name") else model.tier
-        usage_total = merge_usage(usage_total, usage_from_result(final, label))
+        final_usage = usage_from_result(final, label)
+        usage_total = merge_usage(usage_total, final_usage)
+        if budget is not None:
+            budget.charge(float(final_usage.get("cost") or 0))
         record_llm_call(
             final.model or model.tier,
             final.usage.get("input", 0),
             final.usage.get("output", 0),
         )
+        final_finish = _finish_reason(final.finish_reason)
+        last_finish = final_finish
         final_text = (final.content or "").strip()
-        if _looks_like_tool_call_json(final_text):
+        if final_finish == "content-filter":
+            final_text = _CONTENT_FILTER_TEXT
+        elif final_finish == "error":
+            final_text = final_text or _MODEL_ERROR_TEXT
+        elif _looks_like_tool_call_json(final_text):
             final_text = ""
         else:
             envelope = parse_answer_envelope(final_text)
             final_text = envelope or final_text
+        if final_finish == "length" and final_text:
+            final_text += _TRUNCATION_NOTICE
         if (final_text or "").strip():
+            if continued_parts:
+                final_text = "".join(continued_parts) + final_text
             return {
                 "text": final_text,
                 "rounds": rounds,
                 "tool_trace": tool_trace,
                 "tool_history": cap_tool_history(tool_history),
                 "usage": usage_total,
+                "finish_reason": last_finish,
             }
     except Exception:  # noqa: BLE001 - 收尾失败仍走占位文案兜底
         logger.warning("工具轮数耗尽后的纯文本收尾调用失败", exc_info=True)
@@ -489,10 +727,14 @@ async def run_tool_loop(
     # 最后防线：连收尾调用都没给出非空文本 —— 绝不能返回空串（上层见空即静默丢弃）。
     # 若已有工具调用，用工具轨迹摘要兜底（让用户看到「写被拒/报错」等真实原因）；
     # 否则退回既有的占位文案。
+    fallback_text = _fallback_text(tool_trace) or "(达到最大工具轮数，未产出最终答案)"
+    if continued_parts and not _fallback_text(tool_trace):
+        fallback_text = "".join(continued_parts) + _TRUNCATION_NOTICE
     return {
-        "text": _fallback_text(tool_trace) or "(达到最大工具轮数，未产出最终答案)",
+        "text": fallback_text,
         "rounds": rounds,
         "tool_trace": tool_trace,
         "tool_history": cap_tool_history(tool_history),
         "usage": usage_total,
+        "finish_reason": last_finish,
     }

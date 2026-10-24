@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import uuid
-from typing import Any
+from typing import Any, Callable
 
 from utils.json_repair import parse_json_value
 
@@ -161,33 +161,60 @@ def _dict_to_call(item: Any) -> HarnessToolCall | None:
     )
 
 
-def _to_tool_call(call: HarnessToolCall) -> Any:
+def stable_call_id(name: str, arguments: str, sequence: int = 0) -> str:
+    """Deterministic tool-call id for replay, dedup and cross-process logs."""
+    digest = hashlib.sha1(
+        f"{name}\0{arguments}".encode("utf-8", errors="replace")
+    ).hexdigest()[:8]
+    return f"call_{sequence}_{digest}"
+
+
+IdFactory = Callable[[str, str], str]
+
+
+def _to_tool_call(
+    call: HarnessToolCall,
+    sequence: int = 0,
+    id_factory: IdFactory | None = None,
+) -> Any:
     from models.types import ToolCall
 
-    return ToolCall(
-        id=f"harness-{uuid.uuid4().hex[:12]}",
-        name=call.name,
-        arguments=call.arguments,
+    ident = (
+        id_factory(call.name, call.arguments)
+        if id_factory is not None
+        else stable_call_id(call.name, call.arguments, sequence)
     )
+    return ToolCall(id=ident, name=call.name, arguments=call.arguments)
 
 
-def apply_result(result: Any, mode: str) -> Any:
-    """归一化模型响应：统一成 ``tool_calls``，正文去掉调用块。"""
+def apply_result(
+    result: Any,
+    mode: str,
+    *,
+    id_factory: IdFactory | None = None,
+) -> Any:
+    """归一化模型响应：统一到 ``tool_calls``，正文去掉调用块。"""
     from .delimiters import NAME_OPEN
 
     content = result.content or ""
     calls: list = list(result.tool_calls or [])
+    seq = 0
 
     if NAME_OPEN in content:
         parsed, cleaned = parse_tool_calls(content)
         if parsed:
-            calls.extend(_to_tool_call(c) for c in parsed)
+            for call in parsed:
+                seq += 1
+                calls.append(_to_tool_call(call, seq, id_factory))
             result.content = cleaned
 
     if not calls and mode == NATIVE:
         embedded, prelude = extract_embedded_native_calls(result.content or "")
         if embedded:
-            calls = [_to_tool_call(c) for c in embedded]
+            calls = []
+            for call in embedded:
+                seq += 1
+                calls.append(_to_tool_call(call, seq, id_factory))
             result.content = prelude
 
     result.tool_calls = calls
@@ -223,4 +250,5 @@ __all__ = [
     "extract_embedded_native_calls",
     "inject_fallback_prompt",
     "render_tool_call",
+    "stable_call_id",
 ]

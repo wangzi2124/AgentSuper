@@ -9,15 +9,11 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from execution.tool_registry import ToolRegistry
+from harness.budget import BudgetLedger
+from harness.context import assemble_model_view
 from models.router import TierModel, resolve_model
 
-from ..tool_history import (
-    human_count,
-    last_human_id,
-    merge_tool_history,
-    message_id,
-    should_inject,
-)
+from harness.tool_history import human_count, last_human_id, merge_tool_history
 from .base import content_text, run_tool_loop
 
 TOOL_SCOPE = "location"
@@ -35,112 +31,23 @@ VISION_SYSTEM_PREFIX = (
 _HISTORY_BUDGET_CHARS = 12_000
 
 # 历史里不需要回灌的 role（工具中间结果属噪音；压缩摘要另以 system 保留）。
-_SKIP_HISTORY_ROLES = ("tool",)
+
 
 
 def _has_image_block(blocks: list[dict[str, Any]]) -> bool:
     return any(isinstance(b, dict) and b.get("type") == "image_url" for b in blocks)
 
 
-def _history_role(msg: Any) -> str | None:
-    """把 LangChain 消息映射为 LLM 对话 role；不可回灌的返回 None。"""
-    role = getattr(msg, "type", None) or getattr(msg, "role", None) or ""
-    if role in ("human", "user"):
-        return "user"
-    if role in ("ai", "assistant"):
-        return "assistant"
-    if role in ("system",):
-        return "system"
-    if role in _SKIP_HISTORY_ROLES:
-        return None
-    return None
-
-
 def _conversation_history(
     state: dict[str, Any], budget_chars: int | None = None
 ) -> list[dict[str, Any]]:
-    """把 checkpoint 中的既有对话转为 LLM 对话消息（不含本回合用户消息）。
-
-    三层分离后的模型视角：`[迁移摘要] + [近期原文]`。
-    - `context_summary` 来自会话摘要层（模型切换时写入），原文仍在 checkpoint；
-    - `context_tail_start_id` 标记保留原文起点（稳定消息 id），找不到时退化为最近 12 条；
-    - 系统摘要**永不参与预算裁剪**（否则精确值会最先被丢掉）。
-    - 预算按目标窗口动态放大（窗口未知时用 12K 字符兜底）。
-    """
-    raw = list(state.get("messages") or [])
-    if not raw:
-        return []
-    # 末尾 human（含附件分块）的最后一个 human 视为本回合请求，排除。
-    cut = len(raw)
-    for i in range(len(raw) - 1, -1, -1):
-        r = getattr(raw[i], "type", None) or getattr(raw[i], "role", None)
-        if r in ("human", "user"):
-            cut = i
-            break
-
-    tail_id = state.get("context_tail_start_id")
-    start = 0
-    if tail_id:
-        for i, msg in enumerate(raw[:cut]):
-            mid = msg.get("id") if isinstance(msg, dict) else getattr(msg, "id", None)
-            if mid == tail_id:
-                start = i
-                break
-        else:
-            start = max(0, cut - 12)
-    elif state.get("context_bound"):
-        # 绑定生效但没有 tail（摘要覆盖全部历史）→ 不再重复注入旧原文。
-        start = cut
-
-    summary = str(state.get("context_summary") or "").strip()
-    current_turn = human_count(raw)
-    tool_history = state.get("tool_history") or []
-    tool_turn = state.get("tool_history_turn")
-    anchor_id = state.get("tool_history_anchor_id")
-    inject_tools = bool(tool_history) and should_inject(tool_turn, current_turn)
-    anchor_pos: int | None = None
-    history: list[dict[str, Any]] = []
-    # 摘要始终以 state.context_summary 为准（模型切换/自动压缩都会更新它）。
-    # 旧 checkpoint 里可能还留着上一版 [历史摘要] system 消息；窗口包含它时跳过，
-    # 避免同时注入两份摘要，也避免 tail 起点在其之后导致摘要丢失。
-    if summary:
-        history.append({"role": "system", "content": f"[历史摘要]\n{summary}"})
-
-    for msg in raw[start:cut]:
-        role = _history_role(msg)
-        if role is None:
-            continue
-        text = content_text(getattr(msg, "content", ""))
-        if summary and role == "system" and text.startswith("[历史摘要]"):
-            continue
-        if not text.strip():
-            continue
-        history.append({"role": role, "content": text})
-        if inject_tools and anchor_id and message_id(msg) == anchor_id:
-            anchor_pos = len(history)
-
-    if inject_tools:
-        injected = [
-            dict(m) for m in tool_history if isinstance(m, dict)
-        ]
-        if anchor_pos is not None:
-            history[anchor_pos:anchor_pos] = injected
-        else:
-            history.extend(injected)
-
-    if budget_chars is None:
-        window = int(state.get("context_window") or 0)
-        budget_chars = (
-            max(8_000, min(60_000, int(window * 2))) if window > 0 else _HISTORY_BUDGET_CHARS
-        )
-    # 预算裁剪：只裁非 system 消息，摘要始终保留。
-    systems = [h for h in history if h["role"] == "system"]
-    convo = [h for h in history if h["role"] != "system"]
-    total = sum(len(h["content"]) for h in convo)
-    while convo and total > budget_chars:
-        total -= len(convo[0]["content"])
-        convo.pop(0)
-    return systems + convo
+    """Assemble the model view via ContextHarness (summary + tail + tool history)."""
+    return assemble_model_view(
+        state,
+        content_text=content_text,
+        budget_chars=budget_chars,
+        history_budget_chars=_HISTORY_BUDGET_CHARS,
+    )
 
 
 def _multimodal_user_content(state: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -211,7 +118,15 @@ def make_execute_node(
             messages.append({"role": "user", "content": user_blocks})
         messages.append({"role": "user", "content": task.get("desc", "")})
 
-        result = await run_tool_loop(model, messages, registry, scope=scope, agent_id="build")
+        result = await run_tool_loop(
+            model,
+            messages,
+            registry,
+            scope=scope,
+            agent_id="build",
+            budget=BudgetLedger.from_state(state),
+            stream=True,
+        )
 
         tool_updates: dict[str, Any] = {}
         new_tool_history = result.get("tool_history") or []

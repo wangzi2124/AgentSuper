@@ -46,6 +46,7 @@ av<19
 # 测试
 pytest
 pytest-asyncio
+pytest-cov
 
 # 以下默认不安装，按需启用：
 # langfuse                # 可观测性追踪；设置 LANGFUSE_PUBLIC_KEY 后生效，未安装时自动跳过

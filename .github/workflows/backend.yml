@@ -1,0 +1,26 @@
+name: backend
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv pip install --system -r requirements.txt
+      - name: Unit + contract + integration
+        run: python -m pytest tests/unit tests/contract tests/integration -q
+      - name: Reliability + security
+        run: python -m pytest tests/reliability tests/security -q
+      - name: Harness coverage gate
+        run: python -m pytest tests/unit tests/contract tests/reliability tests/security -q --cov=harness

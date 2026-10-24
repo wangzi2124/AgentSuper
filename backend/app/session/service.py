@@ -10,6 +10,8 @@ import logging
 import time as tmod
 from typing import Any, Optional
 
+from harness.compression import tail_snapshot as build_tail_snapshot
+
 from . import history as session_history
 from . import repository
 from . import task_bridge
@@ -192,16 +194,13 @@ class SessionService:
                 checkpoint = "[compacted]"
             # 定位压缩时模型视角的第一条原文作为 tail 起点 → 压缩后视角无损：
             # [checkpoint] + [tail 原文] + [压缩后新增]（与脚本/executor 路径一致）
-            tail_snapshot: dict = {}
             load = session_history.load(session_id)
             tail_msgs = [m for m in load.messages if m.type != "compaction"]
             if mode == "auto":
                 limit = tail_messages if tail_messages is not None else _auto_tail_limit()
                 if limit > 0 and len(tail_msgs) > limit:
                     tail_msgs = tail_msgs[-limit:]
-            for m in tail_msgs:
-                tail_snapshot = {"tail_start_id": m.id, "tail_start_seq": m.seq}
-                break
+            tail_snapshot: dict = build_tail_snapshot(tail_msgs)
             repository.append_message(session_id, "compaction", {"content": checkpoint, "mode": mode})
             session_history.replace_epoch_after_compaction(session_id, checkpoint, tail_snapshot)
             repository.update_session(session_id, time_compacted=int(tmod.time() * 1000))

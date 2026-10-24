@@ -65,11 +65,17 @@ def reset_event_queue(token: Token) -> None:
 
 
 def push_event(event: dict[str, Any]) -> None:
-    """把一个 part 事件推入本回合队列；没有队列时静默忽略。"""
+    """把一条 part 事件推入本回合队列；没有队列时静默忽略。"""
     queue = _event_queue.get()
     if queue is None:
         return
     try:
+        from harness.kernel import current_turn
+
+        turn = current_turn()
+        if turn is not None:
+            event.setdefault("turn_id", turn.turn_id)
+            event.setdefault("session_id", turn.session_id)
         queue.put_nowait(event)
     except Exception:  # noqa: BLE001 - 事件推送失败不得影响主流程
         logger.debug("push_event failed", exc_info=True)

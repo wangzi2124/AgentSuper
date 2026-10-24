@@ -430,6 +430,20 @@ def _stream_events(client, payload):
     return [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: ")]
 
 
+def test_multi_agent_stream_events_have_turn_id(client):
+    events = _stream_events(client, {"message": "go"})
+    tracked = [
+        e for e in events
+        if e.get("type") in {"routing", "agent_start", "agent_step", "done", "error"}
+    ]
+    assert tracked
+    assert all(e.get("turn_id") for e in tracked)
+    assert all(e.get("session_id") for e in tracked)
+    seqs = [e["seq"] for e in tracked if isinstance(e.get("seq"), int)]
+    assert seqs == sorted(seqs)
+    assert len(seqs) == len(tracked)
+
+
 def test_history_replays_user_and_assistant(client):
     sid = _sid_after_turn(client)
     msgs = client.get(f"/api/sessions/{sid}/messages").json()

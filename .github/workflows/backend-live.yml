@@ -1,0 +1,28 @@
+name: backend-live
+
+on:
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_API_BASE: ${{ secrets.LLM_API_BASE }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      HARNESS_SMOKE_MODEL_A: ${{ secrets.HARNESS_SMOKE_MODEL_A }}
+      HARNESS_SMOKE_MODEL_B: ${{ secrets.HARNESS_SMOKE_MODEL_B }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv pip install --system -r requirements.txt
+      - name: Real-model smoke
+        run: python -m pytest tests/integration/test_harness_tool_history_smoke.py -q
+      - name: Performance smoke
+        run: python -m pytest tests/perf -q

@@ -228,6 +228,8 @@ export interface ChatError {
   message: string
   retryable: boolean
   statusCode?: number
+  errorType?: string
+  errorCode?: string
 }
 
 // 聊天消息
@@ -309,7 +311,7 @@ export interface TurnDiff {
 export interface MultiAgentSSEEvent {
   // 注：后端从不发 'agent_stream'（子 Agent 增量文本走 text_delta），故此处不列。
   // [队列] turn_done = 本回合完成但还有排队任务（同一条 SSE 流继续）；queue_drain = 队列提示。
-  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'turn_done' | 'queue_drain' | 'error' | 'queued' | 'text_delta' | 'model_switched'
+  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'turn_done' | 'queue_drain' | 'error' | 'queued' | 'text_delta' | 'model_switched' | 'heartbeat'
   agent_id: string
   agent_name?: string
   agent_avatar?: string

@@ -6,6 +6,7 @@ from harness.adapter import (
     call_argument_error,
     extract_embedded_native_calls,
     inject_fallback_prompt,
+    stable_call_id,
 )
 from harness.delimiters import NAME_CLOSE, NAME_OPEN, render_tool_call
 from models.router import ChatResult, ToolCall
@@ -64,6 +65,24 @@ def test_apply_result_native_embedded_json_strips_prelude():
     assert result.tool_calls[0].name == "tool_read_file"
     assert json.loads(result.tool_calls[0].arguments) == {"path": "b.txt"}
     assert result.content == "好的，我来读取。"
+
+
+def test_stable_call_id_is_deterministic_and_sequence_scoped():
+    first = stable_call_id("tool_read_file", '{"path": "a.txt"}', 1)
+    same = stable_call_id("tool_read_file", '{"path": "a.txt"}', 1)
+    next_one = stable_call_id("tool_read_file", '{"path": "a.txt"}', 2)
+
+    assert first == same
+    assert first != next_one
+    assert first.startswith("call_1_")
+
+
+def test_apply_result_without_factory_uses_stable_ids():
+    text = render_tool_call("tool_read_file", {"path": "a.txt"})
+    first = apply_result(ChatResult(content=text), "fallback")
+    second = apply_result(ChatResult(content=text), "fallback")
+
+    assert first.tool_calls[0].id == second.tool_calls[0].id
 
 
 def test_extract_embedded_list_format():

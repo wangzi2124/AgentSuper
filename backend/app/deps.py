@@ -35,6 +35,8 @@ from execution.tool_registry import ToolRegistry
 from graph.main_graph import build_main_graph, default_registry
 from graph.nodes.base import content_text
 from graph.subagent import SUBAGENTS
+from harness.kernel import TurnHarness
+from harness.switch import ModelSwitchError, SwitchDeps, SwitchService
 from models.router import reset_request_model, set_request_model
 from observability.metrics import MetricsRecorder, get_recorder
 
@@ -281,14 +283,6 @@ def initial_state(
     if budget_total > 0:
         state["budget_total"] = budget_total
     return state
-
-
-class ModelSwitchError(Exception):
-    """模型切换被门禁拒绝（携带 HTTP 状态码，供 API 层直接映射）。"""
-
-    def __init__(self, message: str, status_code: int = 400) -> None:
-        super().__init__(message)
-        self.status_code = status_code
 
 
 @dataclass
@@ -653,6 +647,8 @@ class PlatformContext:
     def __post_init__(self) -> None:
         if self.semaphore is None:
             self.semaphore = asyncio.Semaphore(max(1, int(self.max_concurrent)))
+        self.turn_harness = TurnHarness(self._run_turn)
+        self.stream_harness = TurnHarness(self._stream_turn)
 
     # ── 在途回合取消 ──────────────────────────────────────────────────────
     def begin_turn(self, session_id: str) -> asyncio.Event:
@@ -730,356 +726,34 @@ class PlatformContext:
             }
         return binding
 
-    def _write_switch_backup(
-        self,
-        session_id: str,
-        old_model: str | None,
-        target: str,
-        messages: list[Any],
-        tokens: int,
-        threshold: int,
-        keep_tokens: int,
-    ) -> str:
-        """迁移前原文快照（必须先于任何摘要/绑定写入）。"""
-        from langchain_core.messages import messages_to_dict
-
-        backup_dir = PlatformContext._switch_dir()
-        os.makedirs(backup_dir, exist_ok=True)
-        stamp = int(time.time() * 1000)
-        path = os.path.join(backup_dir, f"{session_id}_{stamp}.json")
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(
-                {
-                    "session_id": session_id,
-                    "from": old_model,
-                    "to": target,
-                    "tokens": tokens,
-                    "threshold": threshold,
-                    "keep_recent_tokens": keep_tokens,
-                    "status": "prepared",
-                    "messages": messages_to_dict(messages),
-                },
-                fh,
-                ensure_ascii=False,
-            )
-        return path
-
-    @staticmethod
-    def _mark_switch_backup(path: str, status: str) -> None:
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-            data["status"] = status
-            data["updated_at"] = time.time()
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, ensure_ascii=False)
-        except Exception:  # noqa: BLE001 - 标记失败不掩盖主流程结果
-            logger.warning("更新模型切换备份标记失败: %s", path, exc_info=True)
-
     @staticmethod
     def _switch_dir() -> str:
-        """模型切换备份/审计目录（`data/model_switches/`）。"""
+        """Model switch backup/audit directory (data/model_switches/)."""
         return os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "data", "model_switches"
         )
 
-    @classmethod
-    def _append_switch_audit(
-        cls,
-        session_id: str,
-        old_model: str | None,
-        target: str,
-        status: str,
-        *,
-        error: str = "",
-        summarized: bool = False,
-        tokens: int = 0,
-        threshold: int = 0,
-        tail_start_id: str | None = None,
-    ) -> None:
-        """追加一条模型切换审计事件（`switches.jsonl`）。
-
-        成功与失败都记录（status: committed / rejected / rolled_back），失败带
-        `error` 原因，供事后人工核对（agent-3 §2.3「迁移失败记录人工核对事件」）。
-        审计写入失败不影响主流程。
-        """
-        path = os.path.join(cls._switch_dir(), "switches.jsonl")
-        record = {
-            "session_id": session_id,
-            "from": old_model,
-            "to": target,
-            "status": status,
-            "summarized": bool(summarized),
-            "tokens": tokens,
-            "threshold": threshold,
-            "at": time.time(),
-        }
-        if tail_start_id:
-            record["tail_start_id"] = tail_start_id
-        if error:
-            record["error"] = error
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception:  # noqa: BLE001 - 审计失败不影响切换结果
-            logger.warning("写入模型切换审计失败", exc_info=True)
-
-    @classmethod
-    def _record_switch_failure(
-        cls,
-        backup_path: str | None,
-        session_id: str,
-        old_model: str | None,
-        target: str,
-        status: str,
-        reason: str,
-    ) -> None:
-        """失败收尾：备份标记 rolled_back + 审计事件（含失败原因）。"""
-        if backup_path:
-            cls._mark_switch_backup(backup_path, "rolled_back")
-        cls._append_switch_audit(
-            session_id, old_model, target, status, error=reason
-        )
-
     async def switch_model(self, session_id: str, target: str) -> dict[str, Any]:
-        """切换会话模型：门禁 → 生成摘要 → 原子写入绑定 → 持久化模型 id。
-
-        失败抛 `ModelSwitchError(status_code)`，旧模型与会话绑定保持不变。
-        """
-        target = (target or "").strip()
-        if not target:
-            PlatformContext._append_switch_audit(
-                session_id, None, "", "rejected", error="目标模型为空"
-            )
-            raise ModelSwitchError("目标模型为空", 400)
-        sess = self.sessions.get(session_id)
-        if sess is None:
-            PlatformContext._append_switch_audit(
-                session_id, None, target, "rejected", error="会话不存在"
-            )
-            raise ModelSwitchError("会话不存在", 404)
-        if target == sess.model:
-            return {
-                "switched": False,
-                "model": sess.model,
-                "summarized": False,
-            }
+        """Delegate the switch state machine to harness.switch.SwitchService."""
+        from .session import repository as repo
         from models.catalog import read_limits
 
-        limits = read_limits(target) or {}
-        window = int(limits.get("context_length") or 0)
-        if window <= 0:
-            reason = f"目标模型上下文窗口未知，已拒绝切换：{target}"
-            PlatformContext._append_switch_audit(
-                session_id, sess.model, target, "rejected", error=reason
-            )
-            raise ModelSwitchError(reason, 400)
-        if sess.status == "running" or session_id in self.cancels:
-            reason = "会话正在运行，请等待本轮完成后再切换模型"
-            PlatformContext._append_switch_audit(
-                session_id, sess.model, target, "rejected", error=reason
-            )
-            raise ModelSwitchError(reason, 409)
-
-        messages = await self._raw_messages(session_id)
-        from cognition.compressor import (
-            compress_context,
-            enforce_precision,
-            estimate_tokens,
-            extract_precision_values,
-            serialize_messages,
+        deps = SwitchDeps(
+            get_session=self.sessions.get,
+            persist_session=self.sessions.persist,
+            read_messages=self._raw_messages,
+            graph_state=self.state,
+            context_binding=self.context_binding,
+            read_limits=read_limits,
+            get_epoch=repo.get_epoch,
+            upsert_epoch=repo.upsert_epoch,
+            stable_message_id=PlatformContext.stable_message_id,
+            is_running=lambda sid: sid in self.cancels,
+            backup_dir=PlatformContext._switch_dir(),
+            set_request_model=set_request_model,
+            reset_request_model=reset_request_model,
         )
-
-        tokens = (
-            sum(estimate_tokens(serialize_messages([m])) for m in messages)
-            if messages
-            else 0
-        )
-        threshold = max(2_000, int(window * 0.6))
-        keep_tokens = max(1_000, min(20_000, int(window * 0.25)))
-        summary = ""
-        tail_start_id: str | None = None
-        old_model = sess.model
-        before_ids = [
-            PlatformContext.stable_message_id(session_id, m) for m in messages
-        ]
-
-        # §2.3：原文快照必须先于摘要/绑定写入；备份失败即拒绝切换。
-        try:
-            backup_path = PlatformContext._write_switch_backup(
-                self,
-                session_id, old_model, target, messages, tokens, threshold, keep_tokens
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("切换模型备份失败: %s", exc)
-            PlatformContext._append_switch_audit(
-                session_id,
-                old_model,
-                target,
-                "failed",
-                error=f"迁移备份失败：{exc}",
-                tokens=tokens,
-                threshold=threshold,
-            )
-            raise ModelSwitchError(f"迁移备份失败，已保留原模型：{exc}", 500) from exc
-
-        recent: list[Any] = []
-        try:
-            if tokens > threshold and messages:
-                existing_summary = self.context_binding(session_id).get("summary", "")
-                try:
-                    graph_summary = str(
-                        (await self.state(session_id)).get("context_summary") or ""
-                    )
-                except Exception:  # noqa: BLE001 - 空会话 / 无 checkpoint
-                    graph_summary = ""
-                if graph_summary and graph_summary != existing_summary:
-                    existing_summary = graph_summary
-                model_token = set_request_model(target)
-                try:
-                    result = await compress_context(
-                        messages,
-                        existing_summary=existing_summary,
-                        model=None,
-                        threshold=threshold,
-                        keep_tokens=keep_tokens,
-                        raise_on_error=True,
-                        segment_tokens=max(4_000, min(12_000, threshold // 4)),
-                    )
-                finally:
-                    reset_request_model(model_token)
-                summary = str(result.get("summary") or "").strip()
-                if not summary:
-                    raise ModelSwitchError("历史无法压缩到目标模型窗口，已保留原模型", 400)
-                recent = list(result.get("recent") or [])
-                recent_ids = {id(m) for m in recent}
-                older = [m for m in messages if id(m) not in recent_ids]
-                summary = enforce_precision(summary, older)
-                # §3.2 确定性事实探针：原文中的路径/命令/数字必须在摘要+近期原文中。
-                preserved = f"{summary}\n{serialize_messages(recent)}"
-                facts = extract_precision_values(serialize_messages(messages))
-                missing = [t for t in facts if t not in preserved]
-                if missing:
-                    raise ModelSwitchError(
-                        f"事实探针失败，缺少 {len(missing)} 个精确值，已保留原模型："
-                        + ", ".join(missing[:5]),
-                        500,
-                    )
-                if recent:
-                    tail = recent[0]
-                    tail_start_id = (
-                        getattr(tail, "id", None)
-                        or PlatformContext.stable_message_id(session_id, tail)
-                    )
-        except ModelSwitchError as exc:
-            PlatformContext._record_switch_failure(
-                backup_path, session_id, old_model, target, "rolled_back", str(exc)
-            )
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("切换模型时历史摘要失败：%s", exc)
-            reason = f"历史摘要生成失败，已保留原模型：{exc}"
-            PlatformContext._record_switch_failure(
-                backup_path, session_id, old_model, target, "rolled_back", reason
-            )
-            raise ModelSwitchError(reason, 500) from exc
-
-        from .session import repository as repo
-
-        epoch = repo.get_epoch(session_id)
-        baseline = epoch.baseline if epoch else ""
-        # 无既有纪元时用 0（不是 latest_seq）：切换只新增摘要绑定，
-        # 不能让 history.load 把切换前的全部消息当成「基线之前」跳过。
-        baseline_seq = epoch.baseline_seq if epoch else 0
-        old_snapshot = dict(epoch.snapshot or {}) if epoch else {}
-        snapshot = dict(old_snapshot)
-        snapshot["context_window"] = window
-        snapshot["compress_threshold"] = threshold
-        snapshot["keep_recent_tokens"] = keep_tokens
-        if summary:
-            snapshot["summary"] = summary
-            snapshot["tail_start_id"] = tail_start_id
-            snapshot["summary_model"] = target
-            snapshot["summary_at"] = time.time()
-        # 只有确实存在摘要/近期原文绑定时才标记生效；否则不干扰图内自动压缩摘要。
-        if snapshot.get("summary") or snapshot.get("tail_start_id"):
-            snapshot["model_switch"] = True
-        try:
-            repo.upsert_epoch(session_id, baseline, baseline_seq, snapshot)
-        except Exception as exc:  # noqa: BLE001 - 绑定写失败必须保留旧模型
-            logger.warning("模型切换绑定写入失败：%s", exc)
-            reason = f"模型绑定写入失败，已保留原模型：{exc}"
-            PlatformContext._record_switch_failure(
-                backup_path, session_id, old_model, target, "rolled_back", reason
-            )
-            raise ModelSwitchError(reason, 500) from exc
-
-        # §3.1 消息完整性：切换不得丢失任何未压缩消息。
-        after_ids = [
-            PlatformContext.stable_message_id(session_id, m)
-            for m in await self._raw_messages(session_id)
-        ]
-        lost = [mid for mid in before_ids if mid not in after_ids]
-        if lost:
-            try:
-                repo.upsert_epoch(session_id, baseline, baseline_seq, old_snapshot)
-            except Exception:  # noqa: BLE001
-                logger.warning("回滚上下文绑定失败", exc_info=True)
-            PlatformContext._record_switch_failure(
-                backup_path,
-                session_id,
-                old_model,
-                target,
-                "rolled_back",
-                f"消息完整性校验失败，丢失 {len(lost)} 条消息，已回滚模型切换",
-            )
-            raise ModelSwitchError(
-                f"消息完整性校验失败，丢失 {len(lost)} 条消息，已回滚模型切换", 500
-            )
-
-        try:
-            sess.model = target
-            sess.updated_at = time.time()
-            self.sessions.persist(session_id)
-        except Exception as exc:  # noqa: BLE001 - 持久化失败必须回滚绑定
-            sess.model = old_model
-            try:
-                repo.upsert_epoch(session_id, baseline, baseline_seq, old_snapshot)
-            except Exception:  # noqa: BLE001
-                logger.warning("回滚上下文绑定失败", exc_info=True)
-            PlatformContext._record_switch_failure(
-                backup_path,
-                session_id,
-                old_model,
-                target,
-                "rolled_back",
-                f"模型持久化失败，已保留原模型：{exc}",
-            )
-            raise ModelSwitchError(f"模型持久化失败，已保留原模型：{exc}", 500) from exc
-
-        PlatformContext._mark_switch_backup(backup_path, "committed")
-        PlatformContext._append_switch_audit(
-            session_id,
-            old_model,
-            target,
-            "committed",
-            summarized=bool(summary),
-            tokens=tokens,
-            threshold=threshold,
-            tail_start_id=tail_start_id,
-        )
-
-        return {
-            "switched": True,
-            "from": old_model,
-            "to": target,
-            "summarized": bool(summary),
-            "tail_start_id": tail_start_id,
-            "context_window": window,
-            "compress_threshold": threshold,
-            "keep_recent_tokens": keep_tokens,
-        }
+        return await SwitchService(deps).switch(session_id, target)
 
     async def run(
         self,
@@ -1091,7 +765,28 @@ class PlatformContext:
         use_vector_db: bool = False,
         message_id: str | None = None,
     ) -> dict[str, Any]:
-        """执行一轮问答，返回最终状态（不含 BaseMessage 原始对象）。"""
+        """Single entry point: TurnHarness wraps the graph turn lifecycle."""
+        return await self.turn_harness.run(
+            question,
+            session_id=session_id,
+            user_id=user_id,
+            files=files,
+            use_vector_db=use_vector_db,
+            message_id=message_id,
+        )
+
+    async def _run_turn(
+        self,
+        _turn: Any,
+        question: str,
+        *,
+        session_id: str,
+        user_id: str = "anonymous",
+        files: list[Any] | None = None,
+        use_vector_db: bool = False,
+        message_id: str | None = None,
+    ) -> dict[str, Any]:
+        """TurnHarness runner: execute one graph turn and return its final state."""
         # `/技能名`：本轮强制加载技能正文（找不到/未启用则原样发送）
         from .skills.slash import apply_slash_skill
 
@@ -1137,7 +832,27 @@ class PlatformContext:
         files: list[Any] | None = None,
         use_vector_db: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
-        """逐节点流式执行，产出 `{event, node, data}` 事件。"""
+        """Single entry point: TurnHarness wraps the streaming turn lifecycle."""
+        async for item in self.stream_harness.stream(
+            question,
+            session_id=session_id,
+            user_id=user_id,
+            files=files,
+            use_vector_db=use_vector_db,
+        ):
+            yield item
+
+    async def _stream_turn(
+        self,
+        _turn: Any,
+        question: str,
+        *,
+        session_id: str,
+        user_id: str = "anonymous",
+        files: list[Any] | None = None,
+        use_vector_db: bool = False,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """TurnHarness runner: stream one graph turn as node events."""
         # `/技能名`：本轮强制加载技能正文（找不到/未启用则原样发送）
         from .skills.slash import apply_slash_skill
 

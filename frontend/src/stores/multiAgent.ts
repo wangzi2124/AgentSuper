@@ -1,6 +1,6 @@
 ﻿import { defineStore } from 'pinia'
 import { ref, computed, reactive, watch, onScopeDispose } from 'vue'
-import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, AgentStep, FileContent, AgentOutputPart, VoiceMessageData, QueuedPrompt } from '../types'
+import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, FileContent, VoiceMessageData, QueuedPrompt } from '../types'
 import {
   sendMultiAgentStream,
   restoreSnapshot as apiRestoreSnapshot,
@@ -29,6 +29,7 @@ import {
 } from '../api/sessions'
 import { loadModelCache, saveModelCache } from '../api/model-cache'
 import { classifyNetworkError } from '../api/errors'
+import { useHarnessTurn } from '../harness/useHarnessTurn'
 import { usePermissionStore } from './permission'
 
 function genId(): string {
@@ -41,50 +42,6 @@ function genId(): string {
 // 工具调用追加/原位更新 tool part；seq 单调递增保证顺序稳定，组件按序渲染。
 
 /** 下一个文本增量均并入最后一个 text part；否则新建一个 text part 追加到流尾。 */
-function appendAgentTextPart(agent: { parts?: AgentOutputPart[] }, delta: string) {
-  if (!agent.parts) agent.parts = []
-  const last = agent.parts[agent.parts.length - 1]
-  if (last && last.kind === 'text') {
-    last.text = (last.text || '') + delta
-  } else {
-    agent.parts.push({ seq: agent.parts.length, kind: 'text', text: delta })
-  }
-}
-
-/** agent_done 的权威内容：若流尾是 text part 直接替换占位正文，否则追加为最终答案段。 */
-function appendAgentFinalText(agent: { parts?: AgentOutputPart[] }, fullText: string) {
-  if (!agent.parts || agent.parts.length === 0) {
-    agent.parts = [{ seq: 0, kind: 'text', text: fullText }]
-    return
-  }
-  // 清掉流式期间残留的占位/垃圾文本段（{} / [] / 空白）——弱模型会先吐 {}，
-  // 最终答案已由 agent_done 权威给出，这里避免最终答案旁还挂着一个 {}。
-  agent.parts = agent.parts.filter(
-    p => !(p.kind === 'text' && ['', '{}', '[]'].includes((p.text || '').trim()))
-  )
-  if (agent.parts.length === 0) {
-    agent.parts = [{ seq: 0, kind: 'text', text: fullText }]
-    return
-  }
-  const last = agent.parts[agent.parts.length - 1]
-  if (last && last.kind === 'text') {
-    last.text = fullText
-  } else {
-    agent.parts.push({ seq: agent.parts.length, kind: 'text', text: fullText })
-  }
-}
-
-/** 工具/步骤事件：同一 step_id 原位更新（运行→完成），否则按到达顺序追加为 tool part。 */
-function appendAgentToolPart(agent: { parts?: AgentOutputPart[]; steps: AgentStep[] }, step: AgentStep) {
-  if (!agent.parts) agent.parts = []
-  const i = agent.parts.findIndex(p => p.kind === 'tool' && p.step?.step_id === step.step_id)
-  if (i >= 0 && agent.parts[i].step) {
-    agent.parts[i].step = step
-  } else {
-    agent.parts.push({ seq: agent.parts.length, kind: 'tool', step })
-  }
-}
-
 interface SessionState {
   messages: MultiAgentMessage[]
   conversationId: string | undefined
@@ -686,8 +643,32 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     const signal = controller.signal
 
     try {
-      await sendMultiAgentStream(reqData, (event: MultiAgentSSEEvent) => {
+      const harness = useHarnessTurn()
+      await harness.run(reqData, {
+        signal,
+        onSessionId: (sid) => {
+          if (!session.conversationId) session.conversationId = sid
+        },
+        onEvent: (event, turnState) => {
         if (signal.aborted) return
+
+          const reduced = turnState
+
+        if (
+          event.type === 'agent_start' ||
+          event.type === 'agent_step' ||
+          event.type === 'agent_done' ||
+          event.type === 'agent_error' ||
+          event.type === 'text_delta'
+        ) {
+          if (event.type === 'agent_start') routingStatus.value = ''
+          agentsMap = reduced.agents
+          assistantMsg.agents = Object.values(agentsMap)
+          if (event.type === 'text_delta') {
+            assistantMsg.content = reduced.assistantContent
+          }
+          return
+        }
 
         // 尽早记录服务器会话 id（后端在首个事件即注入），保证新会话也能被"停止"打断
         if (event.conversation_id && !session.conversationId) {
@@ -720,57 +701,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
         if (event.type === 'routing') {
           routingStatus.value = event.detail || 'Routing...'
-        } else if (event.type === 'agent_start') {
-          routingStatus.value = ''
-          agentsMap[event.agent_id] = {
-            agent_id: event.agent_id,
-            agent_name: event.agent_name || event.agent_id,
-            agent_avatar: event.agent_avatar,
-            status: 'running',
-            content: '',
-            steps: [],
-            parts: [],
-          }
-          assistantMsg.agents = Object.values(agentsMap)
-        } else if (event.type === 'agent_step' && event.step && event.step.step_id) {
-          const agent = agentsMap[event.agent_id]
-          if (agent) {
-            const i = agent.steps.findIndex(s => s.step_id === event.step!.step_id)
-            if (i >= 0) agent.steps[i] = event.step
-            else agent.steps.push(event.step)
-            // [parts] 工具调用按真实输出顺序追加/原位更新（同一 step_id 不重复插入）
-            appendAgentToolPart(agent, event.step)
-            assistantMsg.agents = Object.values(agentsMap)
-          }
-        } else if (event.type === 'text_delta') {
-          // [F2] message.part.delta 真增量：主回答逐增量实时渲染，不再等 done 一次性回填。
-          // done 事件仍携带权威完整 answer 兜底（漏帧/重连自动覆盖）。
-          if (event.delta) {
-            assistantMsg.content += event.delta
-          }
-          // [parts] 子 Agent 来源的增量文本（TaggedEventQueue 打上了 agent_id）也并入其 parts，
-          // 保持 text/tool 交错顺序与主回答一致。
-          const agent = event.agent_id ? agentsMap[event.agent_id] : null
-          if (agent && event.delta) {
-            agent.content += event.delta
-            appendAgentTextPart(agent, event.delta)
-            assistantMsg.agents = Object.values(agentsMap)
-          }
-        } else if (event.type === 'agent_done') {
-          const agent = agentsMap[event.agent_id]
-          if (agent) {
-            agent.status = 'completed'
-            if (event.content) {
-              agent.content = event.content
-              // [parts] done 携带权威完整正文：若尾部是 text part 则整体替换，
-              // 否则追加——保证最终答案一定落在 parts 流末尾的文本段。
-              appendAgentFinalText(agent, event.content)
-            }
-            assistantMsg.agents = Object.values(agentsMap)
-          }
-        } else if (event.type === 'agent_error') {
-          const agent = agentsMap[event.agent_id]
-          if (agent) { agent.status = 'failed'; agent.error = event.error; assistantMsg.agents = Object.values(agentsMap) }
         } else if (event.type === 'permission_request') {
           const permStore = usePermissionStore()
           permStore.handleIncoming({
@@ -833,12 +763,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             session.queuePosition = event.queue_size
           }
         }
-      }, signal, (sid) => {
-        // 后端在响应头 X-Session-Id 立即透出会话 id（先于任何 SSE 事件），
-        // 保证新会话在排队/等待全局并发槽位时，"停止/撤销"也能 POST /interrupt 打断后台任务
-        if (!session.conversationId) {
-          session.conversationId = sid
-        }
+        },
       })
     } catch (err: any) {
       session.streamPhase = 'idle'

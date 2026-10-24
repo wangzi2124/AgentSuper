@@ -27,6 +27,10 @@ from pydantic import BaseModel, Field
 from graph.events import reset_event_queue, set_event_queue
 from graph.nodes.base import reset_permission_hook, set_permission_hook
 from graph.usage import merge_usage, usage_delta
+from harness.contracts import TurnContext
+from harness.errors import classify_error
+from harness.kernel import reset_current_turn, set_current_turn
+from harness.security import redact_secrets
 from models.router import reset_request_model, set_request_model
 
 from execution.filesystem import reset_allowed_roots, set_allowed_roots
@@ -85,6 +89,19 @@ class DiffRequest(BaseModel):
 
 
 def _sse(event: dict) -> str:
+    try:
+        from harness.kernel import current_turn
+
+        turn = current_turn()
+        if turn is not None:
+            event.setdefault("turn_id", turn.turn_id)
+            event.setdefault("session_id", turn.session_id)
+            if "seq" not in event:
+                seq = int(turn.metadata.get("seq", 0)) + 1
+                turn.metadata["seq"] = seq
+                event["seq"] = seq
+    except Exception:  # noqa: BLE001
+        pass
     return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
 
 
@@ -483,8 +500,8 @@ async def multi_agent_stream(
                 yield _sse(
                     {
                         "type": "error",
-                        "error": str(exc),
-                        "detail": str(exc),
+                        "error": redact_secrets(str(exc)),
+                        "detail": redact_secrets(str(exc)),
                         "retryable": False,
                         "status_code": exc.status_code,
                         "error_type": "ModelSwitchError",
@@ -501,6 +518,13 @@ async def multi_agent_stream(
                 }
             )
 
+        turn = TurnContext(
+            turn_id=f"turn_{sess.id}_{uuid4().hex[:12]}",
+            session_id=sess.id,
+            user_id=user_id,
+            model=sess.model,
+        )
+        turn_token = set_current_turn(turn)
         cancel = ctx.begin_turn(sess.id)
         roots_token = _enter_roots(ctx, sess.id)
         slot_queued: int | None = None
@@ -570,7 +594,7 @@ async def multi_agent_stream(
                         yield _sse(ev)
 
                     snapshot = await ctx.state(sess.id)
-                    final = snapshot.get("final_output", "") or ""
+                    final = redact_secrets(snapshot.get("final_output", "") or "")
                     after_usage = snapshot.get("token_usage") or {}
                     usage = usage_delta(before_usage, after_usage)
                     files_changed, descriptor = snapshot_end(ctx.vfs, snap_begin)
@@ -629,17 +653,19 @@ async def multi_agent_stream(
                     turn_user_msg_id = f"um_{uuid4().hex[:12]}"
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001 - 统一转 error 事件
+        except Exception as exc:  # noqa: BLE001
             ctx.sessions.update(sess.id, status="error")
+            err = classify_error(exc)
             yield _sse(
                 {
                     "type": "error",
                     "agent_id": "",
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "detail": str(exc),
-                    "retryable": False,
-                    "status_code": None,
-                    "error_type": type(exc).__name__,
+                    "error": redact_secrets(f"{err.error_type}: {exc}"),
+                    "detail": redact_secrets(str(exc)),
+                    "retryable": err.retryable,
+                    "status_code": err.status_code,
+                    "error_type": err.error_type,
+                    "error_code": err.code,
                 }
             )
         finally:
@@ -647,6 +673,7 @@ async def multi_agent_stream(
                 ctx.queue_counter = max(0, ctx.queue_counter - 1)
             ctx.end_turn(sess.id)
             reset_allowed_roots(roots_token)
+            reset_current_turn(turn_token)
 
     return StreamingResponse(
         event_source(),
@@ -716,16 +743,19 @@ async def multi_agent(
         await _append_assistant(
             ctx,
             sess.id,
-            state.get("final_output", "") or "",
+            redact_secrets(state.get("final_output", "") or ""),
             ui={"files_changed": files_changed},
             message_id=assistant_msg_id,
         )
     except Exception as exc:  # noqa: BLE001
+        err = classify_error(exc)
         return {
-            "code": 500,
-            "message": f"{type(exc).__name__}: {exc}",
+            "code": err.status_code,
+            "message": redact_secrets(f"{err.error_type}: {exc}"),
             "data": None,
-            "detail": str(exc),
+            "detail": redact_secrets(str(exc)),
+            "retryable": err.retryable,
+            "error_type": err.error_type,
         }
     finally:
         reset_allowed_roots(roots_token)
@@ -736,7 +766,7 @@ async def multi_agent(
         "code": 0,
         "message": "ok",
         "data": {
-            "answer": state.get("final_output", ""),
+            "answer": redact_secrets(state.get("final_output", "") or ""),
             "conversation_id": sess.id,
             "title": sess.title,
             "sources": [],

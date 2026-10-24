@@ -13,9 +13,8 @@ from typing import Any, AsyncIterator, Callable
 
 from models.types import ChatResult, ToolCall
 
-from .adapter import apply_result, inject_fallback_prompt
-from .capabilities import FALLBACK, NATIVE, resolve_mode
-from .delimiters import HarnessToolCall
+from .adapter import apply_result, inject_fallback_prompt, stable_call_id
+from .capabilities import FALLBACK, NATIVE, build_profile
 from .history import normalize_history
 from .streaming import PreludeSuppressor, StreamToolCallParser
 
@@ -57,14 +56,6 @@ def _infer_model_id(model: Any) -> str:
     return ""
 
 
-def _to_tool_call(call: HarnessToolCall) -> ToolCall:
-    return ToolCall(
-        id=f"harness-{id(call):x}",
-        name=call.name,
-        arguments=call.arguments,
-    )
-
-
 class ToolAdapter:
     """能力探测 + 两条路径 + 统一输出。"""
 
@@ -77,7 +68,18 @@ class ToolAdapter:
     ) -> None:
         self.model = model
         self.model_id = model_id or _infer_model_id(model)
-        self.mode = mode or resolve_mode(self.model_id)
+        self.profile = build_profile(self.model_id)
+        self.mode = mode or self.profile.tool_mode
+        self._call_seq = 0
+
+    def _next_call_id(self, name: str, arguments: str) -> str:
+        self._call_seq += 1
+        return stable_call_id(name, arguments, self._call_seq)
+
+    def can_stream(self) -> bool:
+        return callable(getattr(self.model, "raw_stream", None)) or callable(
+            getattr(self.model, "astream", None)
+        )
 
     def prepare(
         self, messages: list[Any], tools: list[dict[str, Any]] | None
@@ -117,7 +119,9 @@ class ToolAdapter:
     ) -> ChatResult:
         prepared, call_tools = self.prepare(messages, tools)
         result = await self._raw_ainvoke(prepared, call_tools)
-        return apply_result(result, self.mode)
+        return apply_result(
+            result, self.mode, id_factory=self._next_call_id
+        )
 
     async def stream(
         self,
@@ -149,7 +153,14 @@ class ToolAdapter:
                         texts.append(event["text"])
                         queue.put_nowait(TextDelta(event["text"]))
                     else:
-                        call = _to_tool_call(event["call"])
+                        raw_call = event["call"]
+                        call = ToolCall(
+                            id=self._next_call_id(
+                                raw_call.name, raw_call.arguments
+                            ),
+                            name=raw_call.name,
+                            arguments=raw_call.arguments,
+                        )
                         calls.append(call)
                         queue.put_nowait(ToolCallReady(call))
                 return
@@ -187,12 +198,19 @@ class ToolAdapter:
                 texts.append(event["text"])
                 yield TextDelta(event["text"])
             elif event["type"] == "tool_call":
-                call = _to_tool_call(event["call"])
+                raw_call = event["call"]
+                call = ToolCall(
+                    id=self._next_call_id(raw_call.name, raw_call.arguments),
+                    name=raw_call.name,
+                    arguments=raw_call.arguments,
+                )
                 calls.append(call)
                 yield ToolCallReady(call)
 
         result = await task
-        result = apply_result(result, self.mode)
+        result = apply_result(
+            result, self.mode, id_factory=self._next_call_id
+        )
         if parser is not None:
             # 解析器已增量产出调用；避免用整段解析结果重复一次
             result.tool_calls = calls or result.tool_calls

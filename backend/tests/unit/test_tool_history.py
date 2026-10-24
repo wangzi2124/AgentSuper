@@ -6,14 +6,19 @@ from langchain_core.messages import AIMessage, HumanMessage
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from graph.nodes.base import run_tool_loop
 from graph.nodes.execute import _conversation_history
-from graph.tool_history import (
+from harness.tool_history import (
     MAX_RESULT_CHARS,
     MAX_TOOL_MESSAGES,
     MAX_TOTAL_CHARS,
+    bounded_text,
     cap_tool_history,
+    human_count,
+    last_human_id,
     make_tool_call_message,
     make_tool_result_message,
     merge_tool_history,
+    message_id,
+    should_inject,
 )
 from harness.history import normalize_fallback, normalize_native
 from harness.tool_adapter import ToolAdapter
@@ -274,3 +279,63 @@ def test_injected_history_normalizes_for_native_and_fallback():
     assert all(m["role"] != "tool" for m in fallback)
     assert all("tool_calls" not in m for m in fallback)
     assert "ORION-42" in json.dumps(fallback, ensure_ascii=False)
+
+
+def test_bounded_text_short_and_long_limits():
+    assert bounded_text("abc", 10) == "abc"
+    assert bounded_text("a" * 100, 20).startswith("a")
+    assert "truncated" in bounded_text("a" * 100, 20)
+
+
+def test_cap_single_round_over_slots_keeps_call_result_pairs():
+    calls = [(f"c{i}", "echo", "{}") for i in range(20)]
+    messages = [make_tool_call_message(calls)]
+    messages += [make_tool_result_message(f"c{i}", "echo", "x" * 500) for i in range(20)]
+
+    capped = cap_tool_history(messages)
+    call_ids = {
+        c["id"] for m in capped if m["role"] == "assistant" for c in m["tool_calls"]
+    }
+    tool_ids = {m["tool_call_id"] for m in capped if m["role"] == "tool"}
+    assert len(capped) <= MAX_TOOL_MESSAGES
+    assert call_ids == tool_ids
+
+
+def test_cap_single_round_shrinks_to_total_budget():
+    calls = [(f"c{i}", "echo", "{}") for i in range(9)]
+    messages = [make_tool_call_message(calls)]
+    messages += [make_tool_result_message(f"c{i}", "echo", "y" * 3000) for i in range(9)]
+
+    capped = cap_tool_history(messages)
+    assert sum(len(m.get("content") or "") for m in capped) <= MAX_TOTAL_CHARS
+
+
+def test_tool_history_id_helpers_support_dicts_and_objects():
+    from types import SimpleNamespace
+
+    dicts = [{"role": "user", "id": "u1"}, {"role": "human", "id": "u2"}]
+    objects = [SimpleNamespace(type="human", id="u3")]
+
+    assert human_count(dicts + objects) == 3
+    assert message_id(dicts[0]) == "u1"
+    assert last_human_id(dicts + objects) == "u3"
+    assert should_inject(1, 3) is True
+    assert should_inject(1, 4) is False
+    assert should_inject(3, 3) is False
+
+
+def test_merge_tool_history_without_existing():
+    new = [
+        make_tool_call_message([("c1", "echo", "{}")]),
+        make_tool_result_message("c1", "echo", "ok"),
+    ]
+    merged, turn, anchor = merge_tool_history(
+        None,
+        new,
+        existing_turn=None,
+        new_turn=1,
+        existing_anchor=None,
+        new_anchor="u1",
+    )
+    assert merged == new
+    assert turn == 1 and anchor == "u1"

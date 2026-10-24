@@ -11,6 +11,8 @@ from typing import Any, Callable
 
 from langchain_core.messages import SystemMessage
 
+from harness.compression import compress_graph_messages, tail_start_id
+
 logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - 版本差异兜底
@@ -21,12 +23,6 @@ except Exception:  # noqa: BLE001
     REMOVE_ALL_MESSAGES = None  # type: ignore
 
 KEEP_RECENT = 6
-
-
-def _render(msg: Any) -> str:
-    role = getattr(msg, "type", "user")
-    content = getattr(msg, "content", "")
-    return f"[{role}] {content}"
 
 
 def make_compress_node(
@@ -66,10 +62,9 @@ def make_compress_node(
                 "token_usage": {"compressed": True},
                 "context_compressed": True,
             }
-            if recent:
-                tail_id = getattr(recent[0], "id", None)
-                if tail_id:
-                    payload["context_tail_start_id"] = str(tail_id)
+            tail_id = tail_start_id(recent)
+            if tail_id:
+                payload["context_tail_start_id"] = tail_id
             if RemoveMessage is not None and REMOVE_ALL_MESSAGES is not None:
                 payload["messages"] = [
                     RemoveMessage(id=REMOVE_ALL_MESSAGES),
@@ -81,47 +76,28 @@ def make_compress_node(
         if len(messages) <= keep_recent:
             return {"token_usage": {"compressed": True}, "context_compressed": True}
 
-        older = messages[:-keep_recent]
-        recent = messages[-keep_recent:]
-
-        summary = existing
-        # 门禁（agent-1.md §1.4）：只有 C1(≥5000 token) + C2(含精确值) + C3(本会话
-        # LLM 摘要 < 上限) 全为真才调模型；否则退回规则截断，分文不花。
-        from cognition.compressor import enforce_precision, should_use_llm_summary
-
-        count = int(state.get("compress_count", 0) or 0)
-        if model is not None and should_use_llm_summary(older, compress_count=count):
-            try:
-                rendered = "\n".join(_render(m) for m in older)
-                prompt = (
-                    "把以下较早对话压缩为结构化摘要，保留路径/命令/数字等精确值。\n"
-                    f"已有摘要：{existing}\n\n{rendered}"
-                )
-                res = await model.ainvoke([{"role": "user", "content": prompt}])
-                summary = res.content or existing
-            except Exception:  # noqa: BLE001
-                summary = existing or "(压缩调用失败，保留最近消息)"
-            count += 1
-
-        # 精确值回填（§1.5）：纯规则、零 LLM 成本、**每次压缩后**都执行（不只是 LLM
-        # 分支）——走规则截断时 older 同样被丢弃，若不回填则路径/命令/数字一并丢失。
-        summary = enforce_precision(summary, older)
-
+        result = await compress_graph_messages(
+            messages,
+            existing_summary=existing,
+            model=model,
+            compress_count=int(state.get("compress_count", 0) or 0),
+            keep_recent=keep_recent,
+        )
+        summary = result.summary
         payload: dict[str, Any] = {
             "context_summary": summary,
-            "compress_count": count,
+            "compress_count": result.compress_count,
             "token_usage": {"compressed": True},
             "context_compressed": True,
         }
-        if recent:
-            tail_id = getattr(recent[0], "id", None)
-            if tail_id:
-                payload["context_tail_start_id"] = str(tail_id)
+        tail_id = result.tail_start_id
+        if tail_id:
+            payload["context_tail_start_id"] = tail_id
         if RemoveMessage is not None and REMOVE_ALL_MESSAGES is not None:
             payload["messages"] = [
                 RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                SystemMessage(content=f"[历史摘要]\n{summary}"),
-                *recent,
+                SystemMessage(content=f"[????]\n{summary}"),
+                *result.recent,
             ]
         return payload
 
