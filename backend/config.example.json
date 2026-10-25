@@ -1,0 +1,23 @@
+﻿{
+  "llm_model": "deepseek-chat",
+  "llm_api_key": "",
+  "llm_api_base": "https://api.deepseek.com",
+  "db_type": "sqlite",
+  "vector_store_path": "data/vector_store",
+  "plugins_dir": "plugins",
+  "max_concurrent_agents": 4,
+  "cors_origins": ["http://localhost:5173", "http://127.0.0.1:5173"],
+  "external_path_default": "ask",
+  "permission_approval_timeout": 180,
+  "allow_source_writes": false,
+  "deepseek_thinking": "disabled",
+  "ollama_thinking": "disabled",
+  "ollama_num_ctx": 8192,
+  "llm_max_tokens": 32000,
+  "compress_model_enabled": true,
+  "chain_log_enabled": true,
+  "voice_tts_enabled": false,
+  "session_budget": 0.0,
+  "plan_model_enabled": true,
+  "plan_parallel_enabled": false
+}

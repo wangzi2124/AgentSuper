@@ -236,11 +236,8 @@ async def stream_chat(
         **extra,
     )
 
-    # [Ollama 工具轮次非流式] 规格：工具调用轮次用 invoke，避免流式 finish_reason/tool_call id 缺陷
+    # [Ollama 工具轮次] 尝试流式路径：移除强制非流式，由 collect_stream + dialect 处理方言
     is_ollama = (model or "").lower().startswith(("ollama/", "ollama_chat/"))
-    if tools and is_ollama:
-        resp = await litellm.acompletion(**base)
-        return nonstream_result(resp, on_text)
 
     try:
         stream = await litellm.acompletion(

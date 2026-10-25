@@ -1,7 +1,29 @@
 from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.sources import PydanticBaseSettingsSource
+import json
 from typing import Optional
+
+
+class JsonConfigSettingsSource(PydanticBaseSettingsSource):
+    def __init__(self, settings_cls):
+        super().__init__(settings_cls)
+        self._path = Path(__file__).parent / "config.json"
+
+    def get_field_value(self, field, field_name):
+        return None, field_name, False
+
+    def __call__(self):
+        if not self._path.exists():
+            return {}
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            return raw if isinstance(raw, dict) else {}
+        except Exception:
+            return {}
+
 
 
 class Settings(BaseSettings):
@@ -272,6 +294,17 @@ class Settings(BaseSettings):
     chain_log_max_data_chars: int = 4000
     # 记录链路上的工具调用明细（tool_start/tool_end）。关闭可显著降低写入量
     chain_log_tool_calls: bool = True
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
+        return (
+            init_settings,
+            JsonConfigSettingsSource(settings_cls),
+            dotenv_settings,
+            env_settings,
+            file_secret_settings,
+        )
+
 
 
 settings = Settings()
