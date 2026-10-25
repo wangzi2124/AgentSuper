@@ -34,7 +34,7 @@ def test_whitelist_persists_and_allows_external_path(tmp_path):
     assert reloaded.check(str(target), "read") == "ask"
 
 
-def test_allow_and_remember_persists_path_whitelist(tmp_path):
+def test_remember_is_ignored_path_approvals_are_turn_scoped(tmp_path):
     external = tmp_path / "external"
     external.mkdir()
     target = external / "b.txt"
@@ -43,8 +43,8 @@ def test_allow_and_remember_persists_path_whitelist(tmp_path):
     req = mgr.create_request(str(target), "write", tool_name="write_file")
     assert mgr.respond(req.id, "allowed", remember=True) is True
 
-    assert str(target.resolve()) in mgr.list_whitelist()
-    assert mgr.check(str(target), "write") == "allow"
+    assert mgr.list_whitelist() == []
+    assert mgr.check(str(target), "write") == "ask"
 
 
 def test_temp_path_follows_external_default(tmp_path):
@@ -78,8 +78,13 @@ def test_command_whitelist_and_temp_approval_allow():
     mgr = PermissionManager(workspace=str(tmp), whitelist_path=str(tmp / "data"))
     assert mgr.check_command("git") == "ask"
     mgr.add_temp_command_approval("git")
-    assert mgr.check_command("git") == "allow"
-    assert mgr.check_command("rm") == "ask"
+    assert mgr.check_command("git") == "ask"
+    mgr.add_session_command_approval("s1", "git")
+    assert mgr.check_command("git", session_id="s1") == "allow"
+    assert mgr.check_command("git", session_id="s2") == "ask"
+    assert mgr.check_command("rm", session_id="s1") == "ask"
+    mgr.clear_session_command_approvals("s1")
+    assert mgr.check_command("git", session_id="s1") == "ask"
 
 
 def test_read_and_shell_tools_require_approval(tmp_path):
@@ -134,7 +139,7 @@ def test_remember_skips_non_absolute_and_tool_name_paths(tmp_path):
     absolute = tmp_path / "external" / "ok.txt"
     req = mgr.create_request(str(absolute), "write", tool_name="write_file")
     assert mgr.respond(req.id, "allowed", remember=True) is True
-    assert str(absolute.resolve()) in mgr.list_whitelist()
+    assert mgr.list_whitelist() == []
 
 
 def test_extra_workspaces_exclude_program_workspace(tmp_path):

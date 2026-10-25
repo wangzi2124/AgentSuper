@@ -2,6 +2,7 @@
 import { ref, computed, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showConfirmDialog, showToast } from 'vant'
+import { updateSession } from '../api/sessions'
 import { useVectorStore } from '../stores/vectors'
 
 // 7 个移动页改为异步组件：此前静态 import 会把全部移动页（且 MobileChat 静态引入
@@ -147,10 +148,19 @@ const mobileViews: Record<string, unknown> = {
     showLangPicker.value = false
   }
 
-  function saveSettings() {
-    // 直接写 store 状态（不依赖 setSessionDirectory 方法签名）
-    agent.sessionDirectory = formDirectory.value.trim()
-    showSettingsForm.value = false
+  async function saveSettings() {
+    const value = formDirectory.value.trim()
+    try {
+      if (agent.conversationId) {
+        const info = await updateSession(agent.conversationId, { directory: value })
+        agent.setSessionDirectory(info.directory || '')
+      } else {
+        agent.setSessionDirectory(value)
+      }
+      showSettingsForm.value = false
+    } catch (e: any) {
+      showToast(e?.message || '设置工作目录失败')
+    }
   }
 const currentView = computed(() => mobileViews[route.name as string] || null)
 </script>
@@ -296,7 +306,7 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
         <div class="form-field">
           <div class="form-label">工作目录</div>
           <van-field v-model="formDirectory" placeholder="如 F:\\tetris" clearable />
-          <div class="form-tip">作用于当前聊天会话（随消息发送到 Agent）</div>
+          <div class="form-tip">仅当前会话；留空使用系统临时目录</div>
         </div>
         <van-button type="primary" block round class="form-save" @click="saveSettings">
           保存设置

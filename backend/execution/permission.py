@@ -58,8 +58,29 @@ def reset_session_workspace(token: contextvars.Token) -> None:
 
 
 def current_session_workspace() -> str:
-    """当前上下文（本会话）绑定的工作目录；未设置返回空串。"""
+    """当前上下文（本会话）绑定的工作目录；未设置返回空串�?"""
     return _session_workspace_var.get()
+
+
+# Turn-scoped command approvals. Reset by the platform at the end of every turn.
+_turn_command_approvals_var: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "turn_command_approvals", default=frozenset()
+)
+
+
+def add_turn_command_approval(base_cmd: str) -> None:
+    key = str(base_cmd or "").strip().lower()
+    if not key:
+        return
+    _turn_command_approvals_var.set(_turn_command_approvals_var.get() | {key})
+
+
+def current_turn_command_approvals() -> frozenset[str]:
+    return _turn_command_approvals_var.get()
+
+
+def clear_turn_command_approvals() -> None:
+    _turn_command_approvals_var.set(frozenset())
 
 
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -276,6 +297,7 @@ class PermissionManager:
         self._command_whitelist: set[str] = set()
         # 命令临时授权（独立命名空间，不与路径临时授权混用）
         self._temp_command_approvals: OrderedDict[str, float] = OrderedDict()
+        self._turn_command_approvals: dict[str, set[str]] = {}
         self._load_whitelist()
         self._load_command_whitelist()
 
@@ -353,26 +375,22 @@ class PermissionManager:
         except Exception as e:
             logger.warning("Failed to save command whitelist: %s", e)
 
-    def check_command(self, base_cmd: str) -> str:
-        """命令级权限检查，返回 "allow" / "ask" / "deny"。
-
-        1. 命中持久化 command_whitelist -> "allow"；
-        2. 命中临时命令授权（TTL 内）-> "allow"；
-        3. 否则返回 self.external_default。
-        """
+    def check_command(self, base_cmd: str, session_id: str = "") -> str:
+        """Command-level check; only current-turn approvals are honored."""
         key = base_cmd.lower()
-        # 持久化白名单
-        if key in self._command_whitelist:
+        if key in current_turn_command_approvals():
             return "allow"
-        # 临时授权（含过期清理）
-        now = time.time()
-        expired = [k for k, t in self._temp_command_approvals.items() if now - t > _TEMP_APPROVAL_TTL]
-        for k in expired:
-            del self._temp_command_approvals[k]
-        if key in self._temp_command_approvals:
-            self._temp_command_approvals.move_to_end(key)
+        if session_id and key in self._turn_command_approvals.get(session_id, set()):
             return "allow"
         return self.external_default
+
+    def add_session_command_approval(self, session_id: str, base_cmd: str) -> None:
+        key = str(base_cmd or "").strip().lower()
+        if session_id and key:
+            self._turn_command_approvals.setdefault(session_id, set()).add(key)
+
+    def clear_session_command_approvals(self, session_id: str) -> None:
+        self._turn_command_approvals.pop(session_id, None)
 
     def add_temp_command_approval(self, base_cmd: str):
         """命令级临时授权，TTL过期后自动失效。"""
@@ -696,24 +714,7 @@ class PermissionManager:
         req.response = decision
         req.responded_at = datetime.now()
         req._event.set()
-        if remember and decision == "allowed":
-            if req.operation == "command":
-                # 命令维度：记住 base 命令（不记参数）
-                key = req.path.lower().strip()
-                if key and key not in self._command_whitelist:
-                    self._command_whitelist.add(key)
-                    self._save_command_whitelist()
-            elif req.operation in ("read", "write", "execute"):
-                # 只持久化真实的**绝对路径**：无路径参数的工具（path=tool 名）或
-                # 相对路径绝不能写进白名单，否则会得到 `.../write_file` 这类伪条目
-                # 并把一个不存在的相对路径当成授权根。
-                target = Path(str(req.path)).expanduser()
-                if target.is_absolute():
-                    self.add_whitelist(str(target))
-                else:
-                    logger.warning(
-                        "Skip remembering non-absolute permission path: %r", req.path
-                    )
+        # "remember" is intentionally ignored: approvals are turn-scoped.
         self._prune_pending_index(req)
         self.cleanup_expired()
         return True

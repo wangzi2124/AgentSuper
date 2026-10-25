@@ -82,6 +82,7 @@ HTTP / SSE
 
 - **TurnHarness**：`harness/kernel.py`。`PlatformContext.run/stream` 已接入；`turn_id` 通过 contextvar 传播。
 - **AgentLoop**：`run_tool_loop`。默认完整响应；`graph/nodes/execute.py` 传 `stream=True`，回退模型在 `ToolCallReady` 时提前执行工具。空回复最多补答 2 次，之后收尾；不把 thinking 模型的 reasoning 冒充答案。
+- **文件任务证据**：用户要求列目录/读文件，但本轮 `tool_trace` 为空时，禁止返回模型编造的文件清单；统一提示“先执行工具/换 tool-capable 模型”。
 - **模型切换**：`harness/switch.py`。门禁 → 原文备份 → 摘要/精确值探针 → 原子写 epoch → 持久化 model；失败回滚。
 - **压缩**：`harness/compression.py`。切换走 `compress_messages`；图节点走 `compress_graph_messages`；手动 compact 走 `tail_snapshot`。
 - **上下文视图**：`harness/context.py`。`[摘要] + [tail 原文] + [tool_history 回插] + [当前 user]`。
@@ -236,9 +237,9 @@ npx vitest run tests/integration/
 
 当前实测（2026-10-24，本地 Windows）：
 
-- 后端：`519 passed, 18 skipped`
+- 后端：`526 passed, 18 skipped`
 - Harness 覆盖率：`90.80%`（门槛 90%）
-- 前端单测：`104 passed`
+- 前端单测：`106 passed`
 - 前端 live SSE 集成：`119 passed`
 - 前端 `npm run build`：通过
 - 真实模型：DeepSeek `deepseek/deepseek-v4-flash → deepseek-v4-pro`；E2E 8 条、PF-01/02/05/06/07 通过
@@ -258,3 +259,14 @@ npx vitest run tests/integration/
 - `docs/codeact-sandbox-design.md`：CodeAct
 - `docs/移动端聊天交互设计要点-ChatGPT范式.md`：移动端聊天
 - `README.md`：人类入口
+
+## 10. 会话工作区与权限（2026-10-25）
+
+- **默认工作区**：跨平台系统临时目录 `tempfile.gettempdir()/agentsuper/<session_id>`；Windows 为 `%TEMP%`，macOS 为 `$TMPDIR`，Linux 为 `/tmp`。
+- **会话目录**：每个会话一个，仅当前会话生效；设置后替换 VFS 根；必须是已存在的绝对目录；清空回到 temp。
+- **权限**：只有当前会话目录自动放行；backend/cwd/其他路径一律人工审批；旧 `permissions.json` / `runtime_workspaces.json` 不再自动放行；`EXTERNAL_PATH_DEFAULT=allow` 不能绕过。
+- **审批时长**：仅本回合；目录审批覆盖整棵子树；回合结束失效；不再有“始终允许”。
+- **Shell**：默认 cwd 跟随会话 VFS 根；根内命令仍需审批。
+- **目录变更**：运行中 PATCH 返回 409；删除会话只清理自动 temp，不删用户目录。
+- **测试**：`backend/tests/integration/test_session_workspace_policy.py` 覆盖 temp 默认、替换根、清空、旧白名单忽略。
+

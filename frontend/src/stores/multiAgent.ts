@@ -367,9 +367,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (dir !== undefined) {
       sessionDirectory.value = dir
     } else {
-      // 自动使用设置里的默认工作目录（第一个工作区）
-      const perm = usePermissionStore()
-      sessionDirectory.value = perm.workspaces.length > 0 ? perm.workspaces[0] : ''
+      sessionDirectory.value = ''
     }
   }
 
@@ -647,7 +645,12 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       await harness.run(reqData, {
         signal,
         onSessionId: (sid) => {
-          if (!session.conversationId) session.conversationId = sid
+          if (!session.conversationId) {
+            session.conversationId = sid
+            import('../api/sessions').then(({ getSession }) => getSession(sid).then((info) => {
+              if (info.directory) sessionDirectory.value = info.directory
+            }).catch(() => {})).catch(() => {})
+          }
         },
         onEvent: (event, turnState) => {
         if (signal.aborted) return

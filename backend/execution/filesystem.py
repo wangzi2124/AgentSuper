@@ -24,6 +24,29 @@ _allowed_roots_var: contextvars.ContextVar[tuple[Path, ...]] = contextvars.Conte
     "vfs_allowed_roots", default=()
 )
 
+# Per-turn sandbox root. Empty means the VirtualFileSystem's own root.
+_active_root_var: contextvars.ContextVar[Path | None] = contextvars.ContextVar(
+    "vfs_active_root", default=None
+)
+
+
+def set_active_root(root: str) -> contextvars.Token:
+    """Bind the current turn's sandbox root (session workspace)."""
+    raw = str(root or "").strip()
+    try:
+        value = Path(raw).expanduser().resolve() if raw else None
+    except (OSError, RuntimeError):
+        value = None
+    return _active_root_var.set(value)
+
+
+def reset_active_root(token: contextvars.Token) -> None:
+    _active_root_var.reset(token)
+
+
+def current_active_root() -> Path | None:
+    return _active_root_var.get()
+
 
 def set_allowed_roots(roots: Iterable[str]) -> contextvars.Token:
     """设置本回合允许的额外根（工作目录 / 会话目录）；返回 token 供复位。"""
@@ -82,8 +105,13 @@ class VirtualFileSystem:
         self.root.mkdir(parents=True, exist_ok=True)
         self._history: list[_HistoryEntry] = []
 
+    @property
+    def active_root(self) -> Path:
+        """Current turn sandbox root (session workspace), else the default root."""
+        return _active_root_var.get() or self.root
+
     def _resolve(self, path: str) -> Path:
-        p = (self.root / path).resolve()
+        p = (self.active_root / path).resolve()
         if not self._within(p):
             raise PermissionError(f"路径越界: {path}")
         return p
@@ -96,22 +124,22 @@ class VirtualFileSystem:
         `add_allowed_root` 对 contextvar 的就地更新 —— 再查一次边界会把合法的外部写入误判为
         「路径越界」并让整轮 SSE 以 error 收尾（文件其实已落盘）。故对亲身写过的路径直读。
         """
-        return (self.root / path).resolve()
+        return (self.active_root / path).resolve()
 
     @staticmethod
     def _under(p: Path, root: Path) -> bool:
         return p == root or root in p.parents
 
     def _within(self, p: Path) -> bool:
-        """路径是否落在沙箱根或任一允许根内。"""
-        if self._under(p, self.root):
+        """路径是否落在当前 sandbox 根或任一允许根内。"""
+        if self._under(p, self.active_root):
             return True
         return any(self._under(p, r) for r in _allowed_roots_var.get())
 
     def is_allowed(self, path: str) -> bool:
-        """判断路径是否在沙箱/允许根内（供审批门控：在内则免审批，对齐 external ask 语义）。"""
+        """判断路径是否在当前 sandbox/允许根内（供审批门控）。"""
         try:
-            p = (self.root / path).resolve()
+            p = (self.active_root / path).resolve()
         except (OSError, RuntimeError):
             return False
         return self._within(p)
@@ -169,7 +197,7 @@ class VirtualFileSystem:
                 ):
                     if rx.search(line):
                         results.append(
-                            f"{f.relative_to(self.root)}:{i}: {line.strip()}"
+                            f"{f.relative_to(self.active_root)}:{i}: {line.strip()}"
                         )
                         if len(results) >= GREP_MAX_RESULTS:
                             return "\n".join(results) + "\n... (已截断)"

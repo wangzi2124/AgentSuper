@@ -27,9 +27,9 @@ watch(currentRequest, (req) => {
 const remainingSec = computed(() => Math.ceil(remainingMs.value / 1000))
 const barPct = computed(() => totalMs.value ? Math.min(100, (remainingMs.value / totalMs.value) * 100) : 0)
 
-function allow(remember: boolean = false) {
+function allow() {
   if (!currentRequest.value) return
-  perm.respond(currentRequest.value.id, 'allowed', remember)
+  perm.respond(currentRequest.value.id, 'allowed')
 }
 
 function deny() {
@@ -80,8 +80,7 @@ onBeforeUnmount(stopTicker)
     </div>
     <div class="perm-actions">
       <button class="btn-perm btn-perm-deny" @click="deny">拒绝</button>
-      <button class="btn-perm btn-perm-allow-once" @click="allow(false)">允许本次</button>
-      <button class="btn-perm btn-perm-allow-always" @click="allow(true)">允许并记住</button>
+      <button class="btn-perm btn-perm-allow-once" @click="allow">允许本回合</button>
     </div>
   </div>
 </template>

@@ -17,7 +17,7 @@ MAX_MATCHES = 500
 
 def _rel(vfs: VirtualFileSystem, path: Path) -> str:
     try:
-        return path.relative_to(vfs.root).as_posix()
+        return path.relative_to(vfs.active_root).as_posix()
     except ValueError:
         return path.as_posix()
 

@@ -15,10 +15,14 @@ import hashlib
 import json
 import logging
 import os
+import re
+import shutil
+import tempfile
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 from fastapi import Request
@@ -28,8 +32,15 @@ from execution.approval import ApprovalQueue
 from execution.filesystem import (
     VirtualFileSystem,
     add_allowed_root,
+    reset_active_root,
     reset_allowed_roots,
+    set_active_root,
     set_allowed_roots,
+)
+from execution.permission import (
+    add_turn_command_approval,
+    clear_turn_command_approvals,
+    get_manager,
 )
 from execution.tool_registry import ToolRegistry
 from graph.main_graph import build_main_graph, default_registry
@@ -41,6 +52,49 @@ from models.router import reset_request_model, set_request_model
 from observability.metrics import MetricsRecorder, get_recorder
 
 logger = logging.getLogger(__name__)
+
+_AUTO_WORKSPACE_ROOT = Path(tempfile.gettempdir()) / "agentsuper"
+
+
+def default_session_directory(session_id: str) -> str:
+    """Create and return the cross-platform temp workspace for a session."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(session_id or "session"))
+    path = (_AUTO_WORKSPACE_ROOT / safe).resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def normalize_session_directory(directory: str | None) -> str | None:
+    """Validate a user-selected session directory; empty means default temp."""
+    raw = str(directory or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ValueError("session directory must be an absolute path")
+    path = path.resolve()
+    if not path.is_dir():
+        raise ValueError(f"session directory does not exist: {path}")
+    if path.name.lower() == ".git" or ".git" in {p.lower() for p in path.parts}:
+        raise ValueError("session directory cannot be inside .git")
+    return str(path)
+
+
+def cleanup_auto_session_directory(session_id: str, directory: str | None) -> None:
+    """Remove only the auto-created temp workspace, never a user directory."""
+    if not directory:
+        return
+    expected = (_AUTO_WORKSPACE_ROOT / re.sub(r"[^A-Za-z0-9_.-]", "_", str(session_id))).resolve()
+    try:
+        actual = Path(directory).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return
+    if actual != expected or not actual.exists():
+        return
+    try:
+        shutil.rmtree(actual)
+    except OSError:
+        logger.warning("failed to clean session temp workspace: %s", actual, exc_info=True)
 
 
 def jsonable(obj: Any) -> Any:
@@ -484,11 +538,14 @@ class SessionStore:
         parent_id: str | None = None,
     ) -> Session:
         sid = session_id or f"ses_{uuid.uuid4().hex[:16]}"
+        resolved_directory = normalize_session_directory(directory)
+        if resolved_directory is None:
+            resolved_directory = default_session_directory(sid)
         sess = Session(
             id=sid,
             thread_id=sid,
             title=title or "新会话",
-            directory=directory,
+            directory=resolved_directory,
             user_id=user_id,
             kind=kind,
             model=model,
@@ -523,9 +580,15 @@ class SessionStore:
             # 会话中途改目录：采纳本次携带的非空值。
             # 模型不再由 ensure 静默更新 —— 切换必须走 `switch_model` 门禁/迁移。
             changed = False
-            if directory and directory != sess.directory:
-                sess.directory = directory
-                changed = True
+            if directory is not None or not sess.directory:
+                resolved_directory = normalize_session_directory(directory)
+                if resolved_directory is None:
+                    resolved_directory = default_session_directory(session_id)
+                if resolved_directory != sess.directory:
+                    previous = sess.directory
+                    sess.directory = resolved_directory
+                    cleanup_auto_session_directory(session_id, previous)
+                    changed = True
             if changed:
                 sess.updated_at = time.time()
                 self.persist(session_id)
@@ -572,13 +635,16 @@ class SessionStore:
 
     def delete(self, session_id: str) -> bool:
         with self._lock:
-            existed = self._items.pop(session_id, None) is not None
+            removed = self._items.pop(session_id, None)
+            existed = removed is not None
         try:
             from .session import repository as repo
 
             repo.remove_session(session_id)  # 递归删子会话（行不存在时静默）
         except Exception:  # noqa: BLE001
             logger.warning("session 落库 delete 失败: %s", session_id, exc_info=True)
+        if removed is not None:
+            cleanup_auto_session_directory(session_id, removed.directory)
         return existed
 
 
@@ -659,6 +725,9 @@ class PlatformContext:
 
     def end_turn(self, session_id: str) -> None:
         self.cancels.pop(session_id, None)
+
+    def is_running(self, session_id: str) -> bool:
+        return session_id in self.cancels
 
     def cancel_turn(self, session_id: str) -> bool:
         """请求取消在途回合；返回是否确有在途回合。"""
@@ -792,6 +861,8 @@ class PlatformContext:
 
         question, _skill = apply_slash_skill(question, self.skill_loader)
         token = set_allowed_roots(self.allowed_roots_for(session_id))
+        sess_for_root = self.sessions.get(session_id)
+        root_token = set_active_root(sess_for_root.directory if sess_for_root else "")
         model = self.session_model(session_id)
         binding = await self.resolve_context_binding(session_id)
         model_token = set_request_model(model)
@@ -819,6 +890,9 @@ class PlatformContext:
                 sess.status = "idle"
             self.end_turn(session_id)
             reset_allowed_roots(token)
+            reset_active_root(root_token)
+            clear_turn_command_approvals()
+            get_manager().clear_session_command_approvals(session_id)
             reset_request_model(model_token)
         self.sessions.touch(session_id)
         return jsonable(result)
@@ -870,8 +944,9 @@ class PlatformContext:
         )
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))
-        model_token = set_request_model(model)
         sess = self.sessions.get(session_id)
+        root_token = set_active_root(sess.directory if sess else "")
+        model_token = set_request_model(model)
         if sess is not None:
             sess.status = "running"
         self.begin_turn(session_id)
@@ -888,6 +963,9 @@ class PlatformContext:
                 sess.status = "idle"
             self.end_turn(session_id)
             reset_allowed_roots(token)
+            reset_active_root(root_token)
+            clear_turn_command_approvals()
+            get_manager().clear_session_command_approvals(session_id)
             reset_request_model(model_token)
         self.sessions.touch(session_id)
         snapshot = await self.state(session_id)
@@ -897,29 +975,15 @@ class PlatformContext:
         }
 
     def allowed_roots_for(self, session_id: str) -> list[str]:
-        """本会话免审的路径根：会话工作目录 + 用户额外工作区 + 持久白名单。
+        """Only the current session directory is auto-allowed.
 
-        严格对齐「只有工作目录 workspace 和白名单免审」：
-        - 会话目录（opencode `ctx.directory`，前端「会话工作目录」）
-        - 用户经「工作目录」面板添加的额外工作区
-        - 「允许并记住」写入的持久白名单
-        程序主工作区（backend/ 源码目录）**不再**默认并入 —— 它不是当前会话的
-        工作目录；用户若确实以它为工作目录，会话目录会单独带入。临时审批通过的
-        外部路径也只在本回合上下文生效，不跨回合沉淀（跨回合免审必须走白名单）。
+        Legacy global workspaces and persistent whitelists are intentionally
+        ignored. Everything else must be approved for the current turn.
         """
-        roots: list[str] = []
         sess = self.sessions.get(session_id)
         if sess and sess.directory:
-            roots.append(sess.directory)
-        try:  # pragma: no cover - 依赖既有 app 子系统
-            from execution.permission import get_manager
-
-            mgr = get_manager()
-            roots.extend(mgr.list_extra_workspaces())
-            roots.extend(mgr.list_whitelist())
-        except Exception:  # noqa: BLE001
-            pass
-        return roots
+            return [sess.directory]
+        return []
 
     async def state(self, session_id: str) -> dict[str, Any]:
         snap = await self.graph.aget_state({"configurable": {"thread_id": session_id}})
@@ -1267,7 +1331,7 @@ class PlatformContext:
                 command, str(args.get("workdir") or ""), legacy
             )
             if legacy is not None and keys:
-                decisions = [legacy.check_command(key) for key in keys]
+                decisions = [legacy.check_command(key, session_id=session_id) for key in keys]
                 if any(decision == "deny" for decision in decisions):
                     return False
                 # 命令本身在白名单内，但命令**访问的路径**越界 → 仍须人工审批
@@ -1323,12 +1387,14 @@ class PlatformContext:
                     # 「允许本次」→ 5 分钟内同一批 base 命令免审；「允许并记住」
                     # 由 `PermissionManager.respond(remember=True)` 写持久白名单。
                     for key in keys:
-                        legacy.add_temp_command_approval(key)
+                        add_turn_command_approval(key)
+                        if legacy is not None:
+                            legacy.add_session_command_approval(session_id, key)
                 elif not command:
                     # 仅在本回合图任务上下文内就地放行（不跨回合沉淀）。
                     # 跨回合免审必须由用户点「允许并记住」写入持久白名单。
                     for p in raw_paths:
-                        add_allowed_root(str(p))
+                        add_allowed_root(str(self._abs_for_permission(p)))
             return allowed
 
         from execution.approval import APPROVAL_TIMEOUT_SEC
@@ -1346,9 +1412,14 @@ class PlatformContext:
             }
         )
         allowed = await self.approvals.await_decision(rid) == "approved"
-        if allowed and not command:
-            for p in raw_paths:
-                add_allowed_root(str(p))
+        if allowed:
+            if command:
+                for key in keys:
+                    add_turn_command_approval(key)
+                    get_manager().add_session_command_approval(session_id, key)
+            else:
+                for p in raw_paths:
+                    add_allowed_root(str(self._abs_for_permission(p)))
         return allowed
 
     def _abs_for_permission(self, path_str: str) -> Any:
@@ -1357,7 +1428,7 @@ class PlatformContext:
 
         p = Path(str(path_str)).expanduser()
         if not p.is_absolute():
-            p = Path(self.vfs.root) / p
+            p = self.vfs.active_root / p
         try:
             return p.resolve()
         except (OSError, RuntimeError):
@@ -1392,7 +1463,7 @@ class PlatformContext:
 
         from execution.permission import command_path_tokens
 
-        base = Path(self.vfs.root)
+        base = self.vfs.active_root
         wd = Path(workdir).expanduser() if workdir else base
         if not wd.is_absolute():
             wd = base / wd

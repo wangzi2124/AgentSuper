@@ -1,18 +1,17 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { usePermissionStore } from '../stores/permission'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
+import { updateSession } from '../api/sessions'
 import DirPickerModal from './DirPickerModal.vue'
 import WeatherAlert from './WeatherAlert.vue'
 
 const emit = defineEmits<{ close: [] }>()
 
-const perm = usePermissionStore()
 const agent = useMultiAgentStore()
 const chatSettings = useChatSettingsStore()
 
-const wsInput = ref('')
+const wsInput = ref(agent.sessionDirectory || '')
 const wsBusy = ref(false)
 const wsError = ref('')
 const showDirPicker = ref(false)
@@ -20,7 +19,6 @@ const isWeatherEnabled = ref(false)
 const showWeather = ref(false)
 
 const messages = computed(() => agent.messages)
-const extraWorkspaces = computed(() => (perm.workspaces.length > 1 ? perm.workspaces.slice(1) : []))
 const autoRead = computed(() => chatSettings.autoRead)
 
 async function checkWeatherPlugin() {
@@ -36,29 +34,44 @@ async function checkWeatherPlugin() {
   }
 }
 
-async function handleAddWorkspace() {
+async function applyDirectory() {
   const path = wsInput.value.trim()
   if (!path) {
-    wsError.value = '请输入绝对路径，如 F:\\tetris'
+    wsError.value = '请输入已存在的绝对路径'
     return
   }
   wsBusy.value = true
   wsError.value = ''
   try {
-    await perm.addWorkspace(path)
-    wsInput.value = ''
+    if (agent.conversationId) {
+      const info = await updateSession(agent.conversationId, { directory: path })
+      agent.setSessionDirectory(info.directory || path)
+    } else {
+      agent.setSessionDirectory(path)
+    }
+    wsInput.value = agent.sessionDirectory
   } catch (e: any) {
-    wsError.value = e?.message || '添加失败'
+    wsError.value = e?.message || '设置工作目录失败'
   } finally {
     wsBusy.value = false
   }
 }
 
-async function handleRemoveWorkspace(path: string) {
+async function resetDirectory() {
+  wsBusy.value = true
+  wsError.value = ''
   try {
-    await perm.removeWorkspace(path)
+    if (agent.conversationId) {
+      const info = await updateSession(agent.conversationId, { directory: '' })
+      agent.setSessionDirectory(info.directory || '')
+    } else {
+      agent.setSessionDirectory('')
+    }
+    wsInput.value = agent.sessionDirectory
   } catch (e: any) {
-    wsError.value = e?.message || '移除失败'
+    wsError.value = e?.message || '恢复默认目录失败'
+  } finally {
+    wsBusy.value = false
   }
 }
 
@@ -75,38 +88,31 @@ function handleClearConversation() {
 }
 
 onMounted(() => {
-  perm.loadWorkspaces()
+  wsInput.value = agent.sessionDirectory || ''
   checkWeatherPlugin()
 })
 </script>
 
 <template>
   <div class="settings-panel">
-    <!-- 会话工作目录 -->
+    <!-- 当前会话工作目录：留空恢复系统临时目录 -->
     <div class="drawer-section">
       <div class="drawer-label">会话工作目录</div>
       <div class="ws-row">
         <button class="ws-pick-btn" title="选择目录" @click="showDirPicker = true">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         </button>
-        <input v-model="wsInput" class="ws-input" placeholder="F:\tetris" @keyup.enter="handleAddWorkspace" />
-        <button class="ws-add" :disabled="wsBusy" @click="handleAddWorkspace">
-          {{ wsBusy ? '添加中...' : '添加' }}
+        <input v-model="wsInput" class="ws-input" placeholder="选择目录或留空使用系统临时目录" @keyup.enter="applyDirectory" />
+        <button class="ws-add" :disabled="wsBusy" @click="applyDirectory">
+          {{ wsBusy ? '应用中...' : '应用' }}
         </button>
+        <button class="ws-add" :disabled="wsBusy" @click="resetDirectory">恢复默认</button>
       </div>
       <p v-if="wsError" class="ws-error">{{ wsError }}</p>
-      <div class="ws-list">
-        <div v-for="w in extraWorkspaces" :key="w" class="ws-item">
-          <span class="ws-dot"></span>
-          <span class="ws-path">{{ w }}</span>
-          <button class="ws-remove" title="移除" @click="handleRemoveWorkspace(w)">×</button>
-        </div>
-        <p v-if="extraWorkspaces.length === 0" class="ws-empty">
-          无额外工作区。添加后 Agent 可写该路径（无需重启）。
-        </p>
-      </div>
-      <p v-if="agent.sessionDirectory" class="drawer-session-dir" :title="agent.sessionDirectory">当前会话：{{ agent.sessionDirectory }}</p>
+      <p v-if="agent.sessionDirectory" class="drawer-session-dir" :title="agent.sessionDirectory">当前：{{ agent.sessionDirectory }}</p>
+      <p v-else class="ws-empty">默认使用系统临时目录下的独立会话目录；仅当前会话生效。</p>
     </div>
+
 
     <!-- 选项 -->
     <div class="drawer-section">

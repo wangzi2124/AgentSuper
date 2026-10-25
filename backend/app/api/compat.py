@@ -20,7 +20,7 @@ import time
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -33,7 +33,12 @@ from harness.kernel import reset_current_turn, set_current_turn
 from harness.security import redact_secrets
 from models.router import reset_request_model, set_request_model
 
-from execution.filesystem import reset_allowed_roots, set_allowed_roots
+from execution.filesystem import (
+    reset_active_root,
+    reset_allowed_roots,
+    set_active_root,
+    set_allowed_roots,
+)
 
 from ..deps import PlatformContext, get_context, initial_state
 from ..skills.slash import apply_slash_skill
@@ -253,11 +258,16 @@ async def _discard(event: dict) -> None:  # 非流式路径：审批事件无需
 
 
 def _enter_roots(ctx: PlatformContext, session_id: str | None):
-    """登记本回合允许的额外根（会话目录 + 「工作目录」面板），返回 contextvar token。
+    """Enter this turn's allowed roots and active sandbox root."""
+    roots_token = set_allowed_roots(ctx.allowed_roots_for(session_id or ""))
+    sess = ctx.sessions.get(session_id or "") if session_id else None
+    root_token = set_active_root(sess.directory if sess else "")
+    return roots_token, root_token
 
-    覆盖图执行与轮次快照（snapshot/restore/diff 也 `_resolve` 同一批外部路径）。
-    """
-    return set_allowed_roots(ctx.allowed_roots_for(session_id or ""))
+
+def _exit_roots(roots_token, root_token) -> None:
+    reset_allowed_roots(roots_token)
+    reset_active_root(root_token)
 
 
 async def _append_assistant(
@@ -475,12 +485,15 @@ async def multi_agent_stream(
     existing = (
         ctx.sessions.get(body.conversation_id) if body.conversation_id else None
     )
-    sess = ctx.sessions.ensure(
-        body.conversation_id,
-        directory=body.directory,
-        user_id=user_id,
-        model=None if existing else body.model,
-    )
+    try:
+        sess = ctx.sessions.ensure(
+            body.conversation_id,
+            directory=body.directory,
+            user_id=user_id,
+            model=None if existing else body.model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not sess.title or sess.title == "新会话":
         ctx.sessions.update(sess.id, title=body.message[:20])
 
@@ -526,7 +539,7 @@ async def multi_agent_stream(
         )
         turn_token = set_current_turn(turn)
         cancel = ctx.begin_turn(sess.id)
-        roots_token = _enter_roots(ctx, sess.id)
+        roots_token, root_token = _enter_roots(ctx, sess.id)
         slot_queued: int | None = None
         sem = ctx.semaphore
         try:
@@ -672,7 +685,7 @@ async def multi_agent_stream(
             if slot_queued is not None:
                 ctx.queue_counter = max(0, ctx.queue_counter - 1)
             ctx.end_turn(sess.id)
-            reset_allowed_roots(roots_token)
+            _exit_roots(roots_token, root_token)
             reset_current_turn(turn_token)
 
     return StreamingResponse(
@@ -692,12 +705,15 @@ async def multi_agent(
     existing = (
         ctx.sessions.get(body.conversation_id) if body.conversation_id else None
     )
-    sess = ctx.sessions.ensure(
-        body.conversation_id,
-        directory=body.directory,
-        user_id=user_id,
-        model=None if existing else body.model,
-    )
+    try:
+        sess = ctx.sessions.ensure(
+            body.conversation_id,
+            directory=body.directory,
+            user_id=user_id,
+            model=None if existing else body.model,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if body.target_model and body.target_model != sess.model:
         from ..deps import ModelSwitchError
 
@@ -714,7 +730,7 @@ async def multi_agent(
         ctx.sessions.update(sess.id, title=body.message[:20])
     user_msg_id = body.client_msg_id or f"um_{uuid4().hex[:12]}"
     before_usage = await _current_usage(ctx, sess.id)
-    roots_token = _enter_roots(ctx, sess.id)
+    roots_token, root_token = _enter_roots(ctx, sess.id)
     try:
         from ..snapshot import snapshot_begin, snapshot_end
 
@@ -758,7 +774,7 @@ async def multi_agent(
             "error_type": err.error_type,
         }
     finally:
-        reset_allowed_roots(roots_token)
+        _exit_roots(roots_token, root_token)
     usage = usage_delta(before_usage, state.get("token_usage") or {})
     _accumulate_session_usage(ctx, sess.id, usage)
     ctx.sessions.update(sess.id, status="idle", title=sess.title)
@@ -800,11 +816,11 @@ async def restore_snapshot(
             "restored_files": [],
             "missing": [],
         }
-    roots_token = _enter_roots(ctx, body.conversation_id)
+    roots_token, root_token = _enter_roots(ctx, body.conversation_id)
     try:
         return restore(ctx.vfs, descriptor)
     finally:
-        reset_allowed_roots(roots_token)
+        _exit_roots(roots_token, root_token)
 
 
 @router.post("/multi-agent/diff")
@@ -819,8 +835,8 @@ async def multi_agent_diff(
     descriptor = ctx.snapshots.get(body.message_id)
     if not descriptor:
         return {"files": [], "truncated": False, "reason": "无该轮快照", "steps": 0}
-    roots_token = _enter_roots(ctx, body.conversation_id)
+    roots_token, root_token = _enter_roots(ctx, body.conversation_id)
     try:
         return render_diff(ctx.vfs, descriptor, file=body.file or None)
     finally:
-        reset_allowed_roots(roots_token)
+        _exit_roots(roots_token, root_token)

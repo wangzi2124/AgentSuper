@@ -11,11 +11,11 @@ from app.deps import SessionStore
 from app.session import repository as repo
 
 
-def test_create_update_delete_write_through():
+def test_create_update_delete_write_through(tmp_path):
     store = SessionStore()
     sess = store.create(
         title="落库测试",
-        directory="C:/tmp-ws-it",
+        directory=str(tmp_path),
         user_id="u_it_store",
         model="ollama_chat/qwen2.5:3b",
     )

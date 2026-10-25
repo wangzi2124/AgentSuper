@@ -60,6 +60,24 @@ _NUDGE_CONTINUE_LENGTH = (
 _CONTENT_FILTER_TEXT = "（模型输出被安全策略拦截，无法继续生成。）"
 _TRUNCATION_NOTICE = "\n\n（回答因模型输出长度限制被截断。）"
 _MODEL_ERROR_TEXT = "（模型调用失败，暂时无法生成回答。）"
+_NO_TOOL_EVIDENCE_TEXT = (
+    "我还没有实际执行列目录/读文件工具，无法确认目录或文件内容。"
+    "请切换到支持工具调用的模型，或授权目标路径后重试。"
+)
+_FILE_TASK_RE = re.compile(
+    r"(?:列出|查看|看看|看|显示|读取|打开|read|ls|dir|find|grep|glob)"
+    r".{0,24}(?:文件|目录|文件夹|路径|盘|[\\w./-]+\\.\\w{1,8})"
+    r"|(?:文件|目录|文件夹|盘).{0,24}(?:有哪些|有什么|列表|内容|结构)",
+    re.IGNORECASE,
+)
+
+
+def _needs_tool_evidence(messages: list[Any]) -> bool:
+    for msg in reversed(messages):
+        if msg.get("role") in ("user", "human"):
+            text = content_text(msg.get("content", ""))
+            return bool(_FILE_TASK_RE.search(text))
+    return False
 
 
 def _finish_reason(value: Any) -> str:
@@ -461,6 +479,7 @@ async def run_tool_loop(
     tool_adapter = adapter or get_tool_adapter(model)
     tool_defs = build_tool_defs(registry, scope)
     convo = [dict(m) for m in messages]
+    requires_tool_evidence = _needs_tool_evidence(messages)
     roots_note = _authorized_roots_note()
     if roots_note and convo and convo[0].get("role") == "system":
         content = convo[0].get("content")
@@ -562,6 +581,8 @@ async def run_tool_loop(
                     )
                     continue
                 answer = "".join(continued_parts + ([text] if text else []))
+                if requires_tool_evidence and not tool_trace:
+                    answer = _NO_TOOL_EVIDENCE_TEXT
                 if not answer.strip():
                     answer = _NUDGE_CONTINUE_LENGTH
                 return {
@@ -592,6 +613,8 @@ async def run_tool_loop(
             if answer.strip():
                 if continued_parts:
                     answer = "".join(continued_parts) + answer
+                if requires_tool_evidence and not tool_trace:
+                    answer = _NO_TOOL_EVIDENCE_TEXT
                 return {
                     "text": answer,
                     "rounds": rounds,
@@ -713,6 +736,8 @@ async def run_tool_loop(
             final_text = envelope or final_text
         if final_finish == "length" and final_text:
             final_text += _TRUNCATION_NOTICE
+        if requires_tool_evidence and not tool_trace:
+            final_text = _NO_TOOL_EVIDENCE_TEXT
         if (final_text or "").strip():
             if continued_parts:
                 final_text = "".join(continued_parts) + final_text
@@ -737,7 +762,9 @@ async def run_tool_loop(
         fallback_text = "（模型未产出可展示内容，请换模型或重试）"
     else:
         fallback_text = "(达到最大工具轮数，未产出最终答案)"
-    if continued_parts and not tool_fallback:
+    if requires_tool_evidence and not tool_trace:
+        fallback_text = _NO_TOOL_EVIDENCE_TEXT
+    elif continued_parts and not tool_fallback:
         fallback_text = "".join(continued_parts) + _TRUNCATION_NOTICE
     return {
         "text": fallback_text,

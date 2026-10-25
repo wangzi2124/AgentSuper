@@ -24,11 +24,16 @@ class DummyPlanModel:
 
 
 class SubagentResultModel:
-    def __init__(self, text="完成"):
+    def __init__(self, text="完成", *, tool_call=False):
         self.tier = "fake"
         self._text = text
+        self._tool_call = tool_call
+        self._calls = 0
 
     async def ainvoke(self, messages, *, tools=None, **kwargs):
+        self._calls += 1
+        if self._tool_call and self._calls == 1:
+            return _tool_call("ls", {"path": "."})
         return ChatResult(content=self._text, finish_reason="stop")
 
 
@@ -66,7 +71,7 @@ async def test_parallel_plan_decomposes_and_merges(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "plan_fanout_min_budget", 0.0)
 
     def subagent_models(spec):
-        return SubagentResultModel(f"{spec.name} 输出")
+        return SubagentResultModel(f"{spec.name} 输出", tool_call=spec.name == "file")
 
     graph = build_main_graph(
         vfs=VirtualFileSystem(root=str(tmp_path)),

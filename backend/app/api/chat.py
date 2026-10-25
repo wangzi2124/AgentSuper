@@ -35,9 +35,12 @@ class ChatRequest(BaseModel):
 async def chat(body: ChatRequest, ctx: PlatformContext = Depends(get_context)) -> dict:
     tid = body.thread_id or body.session_id
     resumed = tid is not None and ctx.sessions.get(tid) is not None
-    sess = ctx.sessions.ensure(
-        tid, directory=body.directory, user_id=body.user_id
-    )
+    try:
+        sess = ctx.sessions.ensure(
+            tid, directory=body.directory, user_id=body.user_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if body.target_model and body.target_model != sess.model:
         try:
             await ctx.switch_model(sess.id, body.target_model)
@@ -59,9 +62,12 @@ async def chat(body: ChatRequest, ctx: PlatformContext = Depends(get_context)) -
 async def chat_stream(
     body: ChatRequest, ctx: PlatformContext = Depends(get_context)
 ) -> StreamingResponse:
-    sess = ctx.sessions.ensure(
-        body.session_id, directory=body.directory, user_id=body.user_id
-    )
+    try:
+        sess = ctx.sessions.ensure(
+            body.session_id, directory=body.directory, user_id=body.user_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if body.target_model and body.target_model != sess.model:
         try:
             await ctx.switch_model(sess.id, body.target_model)

@@ -4,8 +4,8 @@ import { usePermissionStore } from '../stores/permission'
 
 const perm = usePermissionStore()
 const request = computed(() => perm.pendingRequests[0] ?? null)
-function allow(remember = false) {
-  if (request.value) perm.respond(request.value.id, 'allowed', remember)
+function allow() {
+  if (request.value) perm.respond(request.value.id, 'allowed')
 }
 function deny() {
   if (request.value) perm.respond(request.value.id, 'denied')
@@ -26,8 +26,7 @@ function deny() {
     </div>
     <div class="perm-actions">
       <button type="button" class="perm-btn deny" @click="deny">拒绝</button>
-      <button type="button" class="perm-btn once" @click="allow(false)">允许本次</button>
-      <button type="button" class="perm-btn always" @click="allow(true)">始终允许</button>
+      <button type="button" class="perm-btn once" @click="allow">允许本回合</button>
     </div>
   </div>
 </template>
@@ -42,7 +41,7 @@ function deny() {
 .perm-tool { font-size: 10px; color: var(--text-muted); font-family: 'JetBrains Mono', Consolas, monospace; }
 .perm-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .perm-btn { border: 1px solid var(--border); background: var(--surface); color: var(--text-secondary); border-radius: 7px; padding: 5px 9px; font: inherit; font-size: 12px; cursor: pointer; }
-.perm-btn.once, .perm-btn.always { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 35%, var(--border)); }
+.perm-btn.once { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 35%, var(--border)); }
 .perm-btn.deny { color: var(--danger); }
 @media (max-width: 640px) { .perm-inline { flex-direction: column; align-items: stretch; } .perm-actions { justify-content: flex-end; } }
 </style>

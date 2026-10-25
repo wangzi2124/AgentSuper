@@ -9,7 +9,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .filesystem import bounded
+from .filesystem import bounded, current_active_root
 
 BLOCKED_PATTERNS = [
     "rm -rf /",
@@ -27,7 +27,7 @@ DEFAULT_OUTPUT_CHARS = 10_000
 def shell_exec(
     command: str,
     timeout: int = 30,
-    workdir: str = "./workspace",
+    workdir: str = "",
 ) -> str:
     """在沙箱中执行 Shell 命令。
 
@@ -44,9 +44,13 @@ def shell_exec(
             return f"❌ 命令被安全策略拒绝：包含危险模式 '{pat}'"
 
     timeout = min(max(int(timeout), 1), MAX_TIMEOUT)
-    cwd = Path(workdir)
+    base = current_active_root() or Path.cwd()
+    cwd = Path(workdir).expanduser() if workdir else base
+    if not cwd.is_absolute():
+        cwd = base / cwd
+    cwd = cwd.resolve()
     if not cwd.is_dir():
-        return f"❌ 工作目录不存在：{workdir}"
+        return f"\u9519\u8bef\uff1a\u5de5\u4f5c\u76ee\u5f55\u4e0d\u5b58\u5728\uff1a{workdir or cwd}"
 
     try:
         result = subprocess.run(
