@@ -134,6 +134,163 @@ _ollama_installed: Optional[set[str]] = None
 _ollama_native: dict[str, dict[str, Any]] = {}
 _ollama_lock = threading.Lock()
 
+# ── Ollama 运行时窗口（/api/ps）───────────────────────────────────────────
+# `/api/tags`、`/api/show` 只给模型**原生上限**，不代表服务器实际运行的 num_ctx
+# （OLLAMA_CONTEXT_LENGTH / 启动参数）。真正生效的窗口在 `/api/ps.context_length`，
+# 但该接口只列**已加载**模型。策略：
+#   - 每次解析前最多每 `_RUNTIME_CTX_TTL` 秒探一次 `/api/ps`（本地 HTTP，毫秒级）；
+#   - 探到的值按模型 id 记住（last-known），模型被卸载后继续沿用，避免窗口跳变。
+_RUNTIME_CTX_TTL = 30.0
+_runtime_ctx_last: dict[str, int] = {}
+_ps_cache: Optional[dict[str, int]] = None
+_ps_cache_at: float = 0.0
+_runtime_ctx_lock = threading.Lock()
+
+
+def _explicit_context_override(model_id: str) -> int:
+    """用户在「模型管理」显式设置的上下文长度（overrides[mid].context_length）。
+
+    只有 overrides 里真的写了该字段才算显式；探测器写入目录的值不算。
+    返回 0 表示未设置。
+    """
+    if not model_id:
+        return 0
+    try:
+        ov = (load_config().get("overrides") or {}).get(model_id) or {}
+        return max(0, int(ov.get("context_length") or 0))
+    except Exception:  # noqa: BLE001 - 配置损坏按未设置处理
+        return 0
+
+
+def _ps_snapshot(force: bool = False) -> dict[str, int]:
+    """`/api/ps` 快照：{模型名: 运行窗口}，30s 缓存；不可达返回 {}。"""
+    global _ps_cache, _ps_cache_at
+    now = time.time()
+    with _runtime_ctx_lock:
+        if not force and _ps_cache is not None and now - _ps_cache_at < _RUNTIME_CTX_TTL:
+            return dict(_ps_cache)
+        _ps_cache_at = now
+    out: dict[str, int] = {}
+    if local_endpoint_alive(_ollama_base_url()):
+        try:
+            import urllib.request
+
+            req = urllib.request.Request(
+                f"{_ollama_base_url()}/api/ps",
+                headers={"User-Agent": "agentsuper/0.1"},
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            for m in data.get("models") or []:
+                try:
+                    ctx = max(0, int(m.get("context_length") or 0))
+                except (TypeError, ValueError):
+                    ctx = 0
+                for name in {str(m.get("name") or ""), str(m.get("model") or "")}:
+                    if name:
+                        out[name] = ctx
+        except Exception:  # noqa: BLE001 - 未启动/超时按未知处理
+            out = {}
+    with _runtime_ctx_lock:
+        _ps_cache = dict(out)
+    return out
+
+
+def probe_runtime_context_length(model_id: Optional[str], force: bool = False) -> int:
+    """Ollama 模型的实际运行窗口（`/api/ps.context_length`），带 30s 探测节流。
+
+    读不到（未加载/未启动）时返回上次观测值；从未观测过返回 0。
+    """
+    mid = normalize_model(model_id)
+    if not is_ollama_model(mid):
+        return 0
+    name = get_ollama_model_name(mid)
+    ctx = _ps_snapshot(force=force).get(name, 0)
+    with _runtime_ctx_lock:
+        if ctx > 0:
+            _runtime_ctx_last[mid] = ctx
+        return _runtime_ctx_last.get(mid, 0)
+
+
+def runtime_context_lengths(model_ids: list[str]) -> dict[str, int]:
+    """批量计算每个模型的**实际**窗口（一次 `/api/ps` 探测，供 UI 只读展示）。"""
+    snap = _ps_snapshot()
+    explicit = load_config().get("overrides") or {}
+    out: dict[str, int] = {}
+    for raw in model_ids:
+        mid = normalize_model(raw) or raw
+        if not is_ollama_model(mid):
+            out[raw] = int(read_limits(mid).get("context_length") or 0)
+            continue
+        name = get_ollama_model_name(mid)
+        ctx = snap.get(name, 0)
+        if ctx > 0:
+            with _runtime_ctx_lock:
+                _runtime_ctx_last[mid] = ctx
+        try:
+            ov = int(((explicit.get(mid) or {})).get("context_length") or 0)
+        except Exception:  # noqa: BLE001
+            ov = 0
+        if ov > 0:
+            ctx = ov
+        elif ctx <= 0:
+            with _runtime_ctx_lock:
+                ctx = _runtime_ctx_last.get(mid, 0)
+        if ctx <= 0:
+            try:
+                from config import settings
+
+                ctx = int(settings.ollama_num_ctx or 0)
+            except Exception:  # noqa: BLE001
+                ctx = 0
+        out[raw] = ctx
+    return out
+
+
+def annotate_runtime_context(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """给目录条目补只读字段 `runtime_context_length`（不改 context_length 语义）。"""
+    ids = [str(e.get("id") or "") for e in entries if e.get("id")]
+    try:
+        runtime = runtime_context_lengths(ids)
+    except Exception:  # noqa: BLE001 - 展示字段失败不影响目录
+        runtime = {}
+    out: list[dict[str, Any]] = []
+    for e in entries:
+        item = dict(e)
+        mid = str(item.get("id") or "")
+        if mid in runtime:
+            item["runtime_context_length"] = runtime[mid]
+        out.append(item)
+    return out
+
+
+def effective_context_length(model_id: Optional[str], fallback: int = 0) -> int:
+    """调用链真正可用的上下文窗口。
+
+    - Ollama：用户显式覆盖 > `/api/ps`（含 last-known）> `fallback`
+      （通常是 `settings.ollama_num_ctx`；服务器未加载时的保守值）。
+    - 其它：目录声明值（历史行为）。
+    """
+    mid = normalize_model(model_id)
+    if not mid:
+        return max(0, int(fallback or 0))
+    if is_ollama_model(mid):
+        explicit = _explicit_context_override(mid)
+        if explicit > 0:
+            return explicit
+        runtime = probe_runtime_context_length(mid)
+        if runtime > 0:
+            return runtime
+        if not fallback:
+            try:
+                from config import settings
+
+                fallback = int(settings.ollama_num_ctx or 0)
+            except Exception:  # noqa: BLE001
+                fallback = 0
+        return max(0, int(fallback or 0))
+    return int(read_limits(mid).get("context_length") or 0) or max(0, int(fallback or 0))
+
 
 def _ollama_base_url() -> str:
     host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
@@ -698,7 +855,14 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False, "options": None}
     # 支持 ollama/ 和 ollama_chat/ 两种前缀（ollama_chat/ 是 LiteLLM 推荐的前缀）
     if is_ollama_model(mid):
-        opts: dict[str, Any] = {"num_ctx": resolve_context_length(mid, settings.ollama_num_ctx)}
+        # [运行时窗口] 默认**不下发** num_ctx，让 Ollama 用它自己的配置
+        # （OLLAMA_CONTEXT_LENGTH / 启动参数）。只有用户在「模型管理」显式设置
+        # 过上下文长度时才覆盖服务器；否则旧逻辑会把服务器设的 16k 硬压回 8192，
+        # prompt 超窗后由推理服务静默截断 → 表现为“模型忘记历史”。
+        opts: dict[str, Any] = {}
+        explicit_ctx = _explicit_context_override(mid)
+        if explicit_ctx > 0:
+            opts["num_ctx"] = explicit_ctx
         caps = read_capabilities(mid)
         entry = lookup(mid)
         # 思考开关优先级：模型条目 `thinking`（前端「模型管理」每模型配置）

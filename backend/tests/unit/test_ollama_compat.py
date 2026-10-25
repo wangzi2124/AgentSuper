@@ -3,7 +3,7 @@
 覆盖：
 - 前缀识别（ollama/ 与 ollama_chat/ 双识别，ollama_chat/ 为 LiteLLM 推荐前缀）；
 - 模型名提取（去掉任一前缀）；
-- Ollama 工具轮次强制非流式（避免 LiteLLM 流式工具调用缺陷）；
+- Ollama 工具轮次流式优先（方言归一化兜底，失败回退非流式）；
 - 内置目录使用 ollama_chat/ 前缀。
 """
 
@@ -64,27 +64,34 @@ def test_ollama_model_installed_accepts_ollama_chat(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ollama_tool_round_forces_nonstream(monkeypatch):
-    """带 tools 的 Ollama 调用应走非流式（invoke）路径，避免流式工具调用缺陷。"""
+async def test_ollama_tool_round_streams_first(monkeypatch):
+    """带 tools 的 Ollama 调用走流式优先（方言归一化兜底），失败才回退非流式。"""
     import models.stream as stream_mod
 
     called: dict[str, object] = {"stream": False, "nonstream": False}
 
+    class FakeStream:
+        def __aiter__(self):
+            async def gen():
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="stop",
+                            delta=SimpleNamespace(
+                                content="ok", reasoning_content=None, tool_calls=None
+                            ),
+                        )
+                    ],
+                )
+            return gen()
+
     async def fake_acompletion(**kwargs):
         if kwargs.get("stream"):
             called["stream"] = True
-            raise AssertionError("Ollama 工具轮次不应走流式")
+            return FakeStream()
         called["nonstream"] = True
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content="ok", tool_calls=None),
-                    finish_reason="stop",
-                )
-            ],
-            usage=None,
-            model=kwargs.get("model"),
-        )
+        raise AssertionError("流式成功时不应回退非流式")
 
     monkeypatch.setattr(stream_mod.litellm, "acompletion", fake_acompletion)
 
@@ -93,8 +100,8 @@ async def test_ollama_tool_round_forces_nonstream(monkeypatch):
         model="ollama_chat/qwen2.5:3b",
         tools=[{"type": "function", "function": {"name": "tool_ls"}}],
     )
-    assert called["nonstream"] is True
-    assert called["stream"] is False
+    assert called["stream"] is True
+    assert called["nonstream"] is False
     assert result.content == "ok"
 
 

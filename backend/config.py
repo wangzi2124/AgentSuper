@@ -257,9 +257,10 @@ class Settings(BaseSettings):
     # （含标准 tool_calls）。adaptive = 不显式下发，交推理服务默认；enabled 时顶层传 think=True。
     ollama_thinking: str = "disabled"
 
-    # Ollama 上下文窗口（num_ctx，传给本地推理服务的 options）。Ollama 默认 2048，
-    # 超出窗口的 prompt 会被服务器截断 -> 历史/长上下文静默丢失（模型答"记不清/无历史"）。
-    # 按本机内存/显存调大，例：3090 可 32768；OOM 则下调。
+    # Ollama 上下文窗口**回落值**（仅在 `/api/ps` 读不到运行窗口时用于预算/压缩）。
+    # 实际窗口以 Ollama 服务器配置为准（OLLAMA_CONTEXT_LENGTH / 启动参数），
+    # 只有「模型管理」里显式设置了上下文长度才会下发 num_ctx 覆盖服务器。
+    # 超出窗口的 prompt 会被服务器静默截断 -> 历史看似丢失，故回落值仍应保守。
     ollama_num_ctx: int = 8192
 
     # ── 共享记忆持久化 ──

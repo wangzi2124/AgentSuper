@@ -278,9 +278,9 @@ def initial_state(
     keep_recent_tokens = 0
     if model:
         try:
-            from models.catalog import read_limits
+            from models.catalog import effective_context_length
 
-            context_window = int(read_limits(model).get("context_length") or 0)
+            context_window = int(effective_context_length(model))
         except Exception:  # noqa: BLE001 - 目录不可用时按未知处理
             context_window = 0
     if context_window > 0:
@@ -805,7 +805,10 @@ class PlatformContext:
     async def switch_model(self, session_id: str, target: str) -> dict[str, Any]:
         """Delegate the switch state machine to harness.switch.SwitchService."""
         from .session import repository as repo
-        from models.catalog import read_limits
+        from models.catalog import effective_context_length
+
+        def _effective_limits(mid: str) -> dict[str, Any]:
+            return {"context_length": effective_context_length(mid)}
 
         deps = SwitchDeps(
             get_session=self.sessions.get,
@@ -813,7 +816,7 @@ class PlatformContext:
             read_messages=self._raw_messages,
             graph_state=self.state,
             context_binding=self.context_binding,
-            read_limits=read_limits,
+            read_limits=_effective_limits,
             get_epoch=repo.get_epoch,
             upsert_epoch=repo.upsert_epoch,
             stable_message_id=PlatformContext.stable_message_id,

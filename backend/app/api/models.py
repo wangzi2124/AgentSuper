@@ -21,11 +21,16 @@ from models.deepseek_tokenizer import count_messages_tokens, count_or_estimate, 
 router = APIRouter()
 
 
+def _catalog_models() -> list[dict]:
+    """目录快照 + 只读运行时窗口（`runtime_context_length`）。"""
+    return catalog.annotate_runtime_context(catalog.get_catalog())
+
+
 @router.get("/models")
 async def list_models():
     """模型目录：{models, default_model, small_model, image_caption_model, voice_model_size}。"""
     return ok({
-        "models": catalog.get_catalog(),
+        "models": _catalog_models(),
         "default_model": catalog.default_model(),
         "small_model": catalog.small_model(),
         "image_caption_model": catalog.image_caption_model(),
@@ -41,7 +46,7 @@ async def get_models_config():
     鉴权：ADMIN_TOKEN 已配置时需 Bearer 凭证，未配置时仅放行本机。
     """
     return ok({
-        "models": catalog.get_catalog(),
+        "models": _catalog_models(),
         "providers": catalog.provider_models_source(),
         "default_model": catalog.default_model(),
         "small_model": catalog.small_model(),
@@ -79,7 +84,7 @@ async def upsert_custom(req: Request):
         entry = catalog.upsert_custom_model(body)
     except ValueError as e:
         return fail(message=str(e))
-    return ok({"model": entry, "models": catalog.get_catalog()})
+    return ok({"model": entry, "models": _catalog_models()})
 
 
 @router.delete("/models/custom/{mid:path}", dependencies=[Depends(require_admin)])
@@ -87,7 +92,7 @@ async def delete_custom(mid: str):
     # {mid:path}: 模型 id 普遍含 '/'（如 deepseek/deepseek-v4-flash、ollama/llama3.1:latest），
     # 用普通 {mid} 只能匹配单段路径 → 删除目录模型时 404。
     removed = catalog.remove_custom_model(mid)
-    return ok({"removed": removed, "models": catalog.get_catalog()})
+    return ok({"removed": removed, "models": _catalog_models()})
 
 
 @router.put("/models/providers/{name:path}", dependencies=[Depends(require_admin)])
@@ -102,7 +107,7 @@ async def upsert_prov(name: str, req: Request):
     body = await req.json()
     entry = catalog.upsert_provider(name, body)
     return ok({"provider": entry, "providers": catalog.provider_models_source(),
-               "models": catalog.get_catalog()})
+               "models": _catalog_models()})
 
 
 @router.delete("/models/providers/{name:path}", dependencies=[Depends(require_admin)])
@@ -111,7 +116,7 @@ async def delete_prov(name: str):
         return fail(message=f"Provider 名称不能包含「/」：{name}，请填写 litellm 前缀")
     removed = catalog.remove_provider(name)
     return ok({"removed": removed, "providers": catalog.provider_models_source(),
-               "models": catalog.get_catalog()})
+               "models": _catalog_models()})
 
 
 @router.put("/models/defaults", dependencies=[Depends(require_admin)])
@@ -124,7 +129,7 @@ async def put_defaults(req: Request):
         body.get("image_caption_model"),
         body.get("voice_model_size"),
     )
-    return ok({**result, "models": catalog.get_catalog()})
+    return ok({**result, "models": _catalog_models()})
 
 
 @router.post("/models/reload", dependencies=[Depends(require_admin)])
@@ -135,7 +140,7 @@ async def reload_models():
     """
     catalog.reload_catalog()
     return ok({
-        "models": catalog.get_catalog(),
+        "models": _catalog_models(),
         "default_model": catalog.default_model(),
         "small_model": catalog.small_model(),
         "image_caption_model": catalog.image_caption_model(),
@@ -175,4 +180,4 @@ async def import_models(req: Request):
     except ValueError as e:
         return fail(message=str(e))
     catalog.reload_catalog()
-    return ok({**result, "models": catalog.get_catalog()})
+    return ok({**result, "models": _catalog_models()})

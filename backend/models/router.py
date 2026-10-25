@@ -312,15 +312,39 @@ class TierModel:
             return LOCAL_OLLAMA_TIMEOUT
         return self.timeout
 
-    def _max_tokens_for(self, endpoint: dict[str, Any]) -> int | None:
-        """本地 Ollama 收窄输出上限（CPU 跑飞生成保险）；支持 ollama/ 和 ollama_chat/ 前缀。"""
+    def _max_tokens_for(
+        self,
+        endpoint: dict[str, Any],
+        messages: list[Any] | None = None,
+        tools: list[dict] | None = None,
+    ) -> int | None:
+        """本地 Ollama 收窄输出上限；支持 ollama/ 和 ollama_chat/ 前缀。
+
+        [防截断] 不能只按固定上限：Ollama 的 num_ctx 是 prompt+输出共享窗口，
+        输出给太多会把 prompt 挤到窗口外、由推理服务**静默截断**（历史看似丢失）。
+        这里按实际运行窗口减去估算 prompt 动态收窄，保证一次调用装得下。
+        """
         mt = self.max_tokens
         if mt is None:
             return None
         mid = str(endpoint.get("model") or "")
-        if _is_ollama_model(mid):
-            return min(mt, LOCAL_OLLAMA_MAX_TOKENS)
-        return mt
+        if not _is_ollama_model(mid):
+            return mt
+        cap = min(mt, LOCAL_OLLAMA_MAX_TOKENS)
+        try:
+            from config import settings
+            from models.catalog import effective_context_length
+
+            window = int(effective_context_length(mid, settings.ollama_num_ctx) or 0)
+            if window > 0 and messages:
+                from cognition.token_counter import estimate_tokens_messages, estimate_tools
+
+                rendered = [_render_message(m) for m in messages]
+                est = int(estimate_tokens_messages(rendered)) + int(estimate_tools(tools))
+                cap = min(cap, max(512, window - est - 256))
+        except Exception as exc:  # noqa: BLE001 - 估算失败退回固定上限
+            logger.debug("ollama max_tokens 估算失败，用固定上限：%s", exc)
+        return cap
 
     def _transport_kwargs(
         self, messages: list[Any], tools: list[dict] | None
@@ -333,7 +357,7 @@ class TierModel:
             "api_key": endpoint.get("api_key"),
             "messages": [_render_message(m) for m in messages],
             "temperature": self.temperature,
-            "max_tokens": self._max_tokens_for(endpoint),
+            "max_tokens": self._max_tokens_for(endpoint, messages, tools),
             "timeout": self._timeout_for(endpoint),
             "num_retries": self.max_retries,
         }
@@ -379,7 +403,7 @@ class TierModel:
             api_key=endpoint.get("api_key"),
             api_base=endpoint.get("api_base"),
             extra=extra_kwargs,
-            max_tokens=self._max_tokens_for(endpoint),
+            max_tokens=self._max_tokens_for(endpoint, messages, tools),
             temperature=self.temperature,
             timeout=self._timeout_for(endpoint),
             num_retries=self.max_retries,
