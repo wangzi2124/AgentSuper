@@ -978,15 +978,32 @@ class PlatformContext:
         }
 
     def allowed_roots_for(self, session_id: str) -> list[str]:
-        """Only the current session directory is auto-allowed.
+        """Auto-allowed roots for this session turn.
 
-        Legacy global workspaces and persistent whitelists are intentionally
-        ignored. Everything else must be approved for the current turn.
+        Only two sources are auto-allowed:
+        1) Current session workspace directory (always present, defaults to system temp)
+        2) Runtime workspaces added via frontend "工作目录" panel (data/runtime_workspaces.json)
+
+        Everything else outside these roots requires manual approval.
         """
+        roots: list[str] = []
         sess = self.sessions.get(session_id)
         if sess and sess.directory:
-            return [sess.directory]
-        return []
+            d = str(sess.directory).strip()
+            if d and d not in roots:
+                roots.append(d)
+        try:
+            from execution.permission import get_manager
+
+            mgr = get_manager()
+            for w in mgr.list_extra_workspaces():
+                w = str(w).strip()
+                if not w or w in roots:
+                    continue
+                roots.append(w)
+        except Exception:
+            logger.debug("failed to collect runtime workspaces for allowed_roots", exc_info=True)
+        return roots
 
     async def state(self, session_id: str) -> dict[str, Any]:
         snap = await self.graph.aget_state({"configurable": {"thread_id": session_id}})
@@ -1438,7 +1455,7 @@ class PlatformContext:
             return p
 
     def _path_decision(self, path_str: str, operation: str, legacy: Any) -> str:
-        """单个路径的严格决策：allow（工作目录/白名单）/ ask（其他）/ deny（受保护）。"""
+        """单个路径的严格决策：allow（会话目录 + 前端工作目录）/ ask（其他）/ deny（受保护）。"""
         from execution.permission import is_git_path, is_sensitive_path
 
         resolved = self._abs_for_permission(path_str)
@@ -1454,9 +1471,18 @@ class PlatformContext:
             if operation == "read":
                 return "ask"
             return "deny" if operation in ("write", "execute") else "ask"
+        # 自动放行：仅会话工作目录（active_root）或本回合允许根（会话目录+前端工作目录）
         if self.vfs.is_allowed(str(resolved)):
             return "allow"
+        if legacy is not None:
+            try:
+                if legacy.classify_path(str(resolved)) == "workspace":
+                    # 额外工作区已收集进 allowed_roots，但保险起见仍放行
+                    return "allow"
+            except Exception:  # noqa: BLE001
+                pass
         return "ask"
+
 
     def _command_external_paths(
         self, command: str, workdir: str, legacy: Any

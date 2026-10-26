@@ -137,7 +137,11 @@ class VirtualFileSystem:
         return any(self._under(p, r) for r in _allowed_roots_var.get())
 
     def is_allowed(self, path: str) -> bool:
-        """判断路径是否在当前 sandbox/允许根内（供审批门控）。"""
+        """判断路径是否在当前 sandbox/允许根内（供审批门控）。
+
+        会话工作目录（active_root）与前端「工作目录」面板的额外工作区（allowed_roots）
+        均自动放行；持久白名单不再参与自动放行，外部路径一律需人工审批。
+        """
         try:
             p = (self.active_root / path).resolve()
         except (OSError, RuntimeError):
