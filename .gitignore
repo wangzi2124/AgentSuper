@@ -22,3 +22,4 @@ backend/.agents/steps/*.md
 /.agents/steps/*.md
 logs/*.jsonl
 data/*.db
+backend/config.json
