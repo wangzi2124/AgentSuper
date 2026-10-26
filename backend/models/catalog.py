@@ -212,6 +212,22 @@ def probe_runtime_context_length(model_id: Optional[str], force: bool = False) -
         return _runtime_ctx_last.get(mid, 0)
 
 
+def forget_runtime_context(model_id: Optional[str], *, reprobe: bool = True) -> int:
+    """丢弃某模型的 last-known 运行窗口（超窗错误后调用），可选立即强制重探。
+
+    返回重探到的窗口（未加载/不可达时为 0）。`effective_context_length` 随后会
+    回落到 `settings.ollama_num_ctx` 的保守值。
+    """
+    mid = normalize_model(model_id)
+    if not is_ollama_model(mid):
+        return 0
+    with _runtime_ctx_lock:
+        _runtime_ctx_last.pop(mid, None)
+    if reprobe:
+        return probe_runtime_context_length(mid, force=True)
+    return 0
+
+
 def runtime_context_lengths(model_ids: list[str]) -> dict[str, int]:
     """批量计算每个模型的**实际**窗口（一次 `/api/ps` 探测，供 UI 只读展示）。"""
     snap = _ps_snapshot()

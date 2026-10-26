@@ -35,7 +35,20 @@ function message(): MultiAgentMessage {
               tool_result: 'ORION-42',
             },
           },
-          { seq: 2, kind: 'text', text: 'I read the file.' },
+          {
+            seq: 2,
+            kind: 'notice',
+            notice: {
+              model: 'ollama_chat/x',
+              window: 4096,
+              budget: 2745,
+              reserve: 1024,
+              estimated_before: 5000,
+              estimated_after: 2500,
+              dropped_messages: 6,
+            },
+          },
+          { seq: 3, kind: 'text', text: 'I read the file.' },
         ],
       },
     ],
@@ -59,6 +72,8 @@ describe('ConversationTimeline', () => {
     expect(text).toContain('read_file')
     expect(text).toContain('ORION-42')
     expect(text).toContain('I read the file.')
+    expect(text).toContain('上下文已裁剪')
+    expect(text).toContain('5000 → 2500 tokens')
     expect(text).toContain('final answer')
     expect(wrapper.find('.agent-chip').exists()).toBe(false)
   })

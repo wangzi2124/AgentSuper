@@ -119,7 +119,7 @@ def test_runtime_context_lengths_batch_uses_snapshot(monkeypatch):
         ["ollama_chat/deepseek-r1:7b", "ollama_chat/unloaded", "deepseek/deepseek-v4-flash"]
     )
     assert got["ollama_chat/deepseek-r1:7b"] == 16384
-    assert got["ollama_chat/unloaded"] == 8192  # settings.ollama_num_ctx 回落
+    assert got["ollama_chat/unloaded"] == 4096  # settings.ollama_num_ctx 回落
     assert got["deepseek/deepseek-v4-flash"] == 160000
 
 

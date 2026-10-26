@@ -226,6 +226,22 @@ def _part_event_to_sse(
         }
         _track_agent_event(agents_map, step_ev)
         return out + [step_ev]
+    if etype == "context_truncated":
+        agent_id, out = _ensure_agent_started(seen, agents_map, ev)
+        return out + [
+            {
+                "type": "context_truncated",
+                "agent_id": agent_id,
+                "agent_name": str(ev.get("agent_name") or agent_id),
+                "model": ev.get("model"),
+                "window": ev.get("window"),
+                "budget": ev.get("budget"),
+                "reserve": ev.get("reserve"),
+                "estimated_before": ev.get("estimated_before"),
+                "estimated_after": ev.get("estimated_after"),
+                "dropped_messages": ev.get("dropped_messages"),
+            }
+        ]
     if etype == "agent_start":
         _, out = _ensure_agent_started(seen, agents_map, ev)
         return out

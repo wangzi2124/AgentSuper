@@ -23,6 +23,13 @@ import litellm
 
 from config import settings
 
+from .context_guard import (
+    FitResult,
+    fit_messages,
+    is_overflow_error,
+    record_actual_usage,
+    refit_after_overflow,
+)
 from .types import ChatResult, ToolCall
 
 logger = logging.getLogger(__name__)
@@ -317,6 +324,7 @@ class TierModel:
         endpoint: dict[str, Any],
         messages: list[Any] | None = None,
         tools: list[dict] | None = None,
+        window: int | None = None,
     ) -> int | None:
         """本地 Ollama 收窄输出上限；支持 ollama/ 和 ollama_chat/ 前缀。
 
@@ -335,29 +343,61 @@ class TierModel:
             from config import settings
             from models.catalog import effective_context_length
 
-            window = int(effective_context_length(mid, settings.ollama_num_ctx) or 0)
-            if window > 0 and messages:
+            effective = int(window or 0)
+            if effective <= 0:
+                effective = int(effective_context_length(mid, settings.ollama_num_ctx) or 0)
+            if effective > 0 and messages:
                 from cognition.token_counter import estimate_tokens_messages, estimate_tools
 
                 rendered = [_render_message(m) for m in messages]
                 est = int(estimate_tokens_messages(rendered)) + int(estimate_tools(tools))
-                cap = min(cap, max(512, window - est - 256))
+                cap = min(cap, max(512, effective - est - 256))
         except Exception as exc:  # noqa: BLE001 - 估算失败退回固定上限
             logger.debug("ollama max_tokens 估算失败，用固定上限：%s", exc)
         return cap
 
+    def _prepare_call(
+        self, messages: list[Any], tools: list[dict] | None
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], int | None, FitResult]:
+        """Resolve endpoint, fit the prompt, and compute the final output cap."""
+        endpoint = self._endpoint()
+        rendered = [_render_message(m) for m in messages]
+        fit = self._fit(endpoint, rendered, tools)
+        rendered = fit.messages
+        max_tokens = self._max_tokens_for(
+            endpoint, rendered, tools, window=fit.window or None
+        )
+        if fit.window > 0:
+            max_tokens = fit.reserve if max_tokens is None else min(max_tokens, fit.reserve)
+        return endpoint, rendered, max_tokens, fit
+
+    def _fit(
+        self,
+        endpoint: dict[str, Any],
+        rendered: list[dict[str, Any]],
+        tools: list[dict] | None,
+    ) -> FitResult:
+        mid = str(endpoint.get("model") or "")
+        try:
+            return fit_messages(mid, rendered, tools)
+        except Exception as exc:  # noqa: BLE001 - overflow must propagate
+            if is_overflow_error(exc):
+                raise
+            logger.warning("Ollama prompt fit failed for %s (passthrough): %s", mid, exc)
+            return FitResult(model=mid, messages=rendered)
+
     def _transport_kwargs(
         self, messages: list[Any], tools: list[dict] | None
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """纯传输 kwargs：只做消息渲染，不做任何 Harness 适配。"""
-        endpoint = self._endpoint()
+    ) -> tuple[dict[str, Any], dict[str, Any], FitResult]:
+        """纯传输 kwargs：消息渲染 + Ollama prompt 适配。"""
+        endpoint, rendered, max_tokens, fit = self._prepare_call(messages, tools)
         kwargs: dict[str, Any] = {
             "model": endpoint["model"],
             "api_base": endpoint.get("api_base"),
             "api_key": endpoint.get("api_key"),
-            "messages": [_render_message(m) for m in messages],
+            "messages": rendered,
             "temperature": self.temperature,
-            "max_tokens": self._max_tokens_for(endpoint, messages, tools),
+            "max_tokens": max_tokens,
             "timeout": self._timeout_for(endpoint),
             "num_retries": self.max_retries,
         }
@@ -365,23 +405,113 @@ class TierModel:
             kwargs["tools"] = tools
         kwargs.update(self._provider_kwargs(endpoint))
         kwargs.update(self.extra)
-        return kwargs, endpoint
+        if fit.num_ctx > 0:
+            kwargs["num_ctx"] = fit.num_ctx
+        return kwargs, endpoint, fit
+
+    @staticmethod
+    def _usage_input(usage: Any) -> int:
+        if usage is None:
+            return 0
+        if isinstance(usage, dict):
+            return int(usage.get("input") or usage.get("prompt_tokens") or 0)
+        return int(getattr(usage, "prompt_tokens", 0) or 0)
+
+    def _record_usage(self, endpoint: dict[str, Any], fit: FitResult, usage: Any) -> None:
+        if fit.window <= 0:
+            return
+        record_actual_usage(
+            str(endpoint.get("model") or ""),
+            fit.estimated_after,
+            self._usage_input(usage),
+        )
+
+    def _apply_overflow_retry(
+        self,
+        messages: list[Any],
+        tools: list[dict] | None,
+        extra: dict[str, Any],
+        exc: BaseException,
+    ) -> tuple[dict[str, Any], dict[str, Any], FitResult] | None:
+        """Invalidate the cached window and rebuild kwargs for one retry.
+
+        Returns ``None`` when the error is not an Ollama context overflow.
+        """
+        if getattr(exc, "preflight", False) or not is_overflow_error(exc):
+            return None
+        endpoint = self._endpoint()
+        if not _is_ollama_model(str(endpoint.get("model") or "")):
+            return None
+        rendered = [_render_message(m) for m in messages]
+        refit_after_overflow(str(endpoint.get("model") or ""), rendered, tools)
+        call_kwargs, endpoint, fit = self._transport_kwargs(messages, tools)
+        call_kwargs.update(extra)
+        return call_kwargs, endpoint, fit
 
     async def raw_ainvoke(
         self, messages: list[Any], *, tools: list[dict] | None = None, **kwargs: Any
     ) -> ChatResult:
-        call_kwargs, _ = self._transport_kwargs(messages, tools)
+        call_kwargs, endpoint, fit = self._transport_kwargs(messages, tools)
         call_kwargs.update(kwargs)
-        resp = await litellm.acompletion(**call_kwargs)
-        return _parse_response(resp, str(call_kwargs.get("model", "")))
+        try:
+            resp = await litellm.acompletion(**call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            retry = self._apply_overflow_retry(messages, tools, kwargs, exc)
+            if retry is None:
+                raise
+            call_kwargs, endpoint, fit = retry
+            resp = await litellm.acompletion(**call_kwargs)
+        result = _parse_response(resp, str(call_kwargs.get("model", "")))
+        self._record_usage(endpoint, fit, result.usage)
+        return result
 
     def raw_invoke(
         self, messages: list[Any], *, tools: list[dict] | None = None, **kwargs: Any
     ) -> ChatResult:
-        call_kwargs, _ = self._transport_kwargs(messages, tools)
+        call_kwargs, endpoint, fit = self._transport_kwargs(messages, tools)
         call_kwargs.update(kwargs)
-        resp = litellm.completion(**call_kwargs)
-        return _parse_response(resp, str(call_kwargs.get("model", "")))
+        try:
+            resp = litellm.completion(**call_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            retry = self._apply_overflow_retry(messages, tools, kwargs, exc)
+            if retry is None:
+                raise
+            call_kwargs, endpoint, fit = retry
+            resp = litellm.completion(**call_kwargs)
+        result = _parse_response(resp, str(call_kwargs.get("model", "")))
+        self._record_usage(endpoint, fit, result.usage)
+        return result
+
+    async def _stream_once(
+        self,
+        messages: list[Any],
+        tools: list[dict] | None,
+        on_text,
+        disable_thinking: bool,
+        extra: dict[str, Any],
+    ):
+        from .stream import stream_chat
+
+        endpoint, rendered, max_tokens, fit = self._prepare_call(messages, tools)
+        extra_kwargs = {**self._provider_kwargs(endpoint), **self.extra, **extra}
+        if fit.num_ctx > 0:
+            extra_kwargs["num_ctx"] = fit.num_ctx
+        result = await stream_chat(
+            rendered,
+            model=endpoint["model"],
+            tools=tools,
+            api_key=endpoint.get("api_key"),
+            api_base=endpoint.get("api_base"),
+            extra=extra_kwargs,
+            max_tokens=max_tokens,
+            temperature=self.temperature,
+            timeout=self._timeout_for(endpoint),
+            num_retries=self.max_retries,
+            disable_thinking=disable_thinking,
+            on_text=on_text,
+        )
+        self._record_usage(endpoint, fit, result.usage)
+        return result
 
     async def raw_stream(
         self,
@@ -392,24 +522,21 @@ class TierModel:
         disable_thinking: bool = False,
         **extra: Any,
     ):
-        from .stream import stream_chat
-
-        endpoint = self._endpoint()
-        extra_kwargs = {**self._provider_kwargs(endpoint), **self.extra, **extra}
-        return await stream_chat(
-            [_render_message(m) for m in messages],
-            model=endpoint["model"],
-            tools=tools,
-            api_key=endpoint.get("api_key"),
-            api_base=endpoint.get("api_base"),
-            extra=extra_kwargs,
-            max_tokens=self._max_tokens_for(endpoint, messages, tools),
-            temperature=self.temperature,
-            timeout=self._timeout_for(endpoint),
-            num_retries=self.max_retries,
-            disable_thinking=disable_thinking,
-            on_text=on_text,
-        )
+        try:
+            return await self._stream_once(
+                messages, tools, on_text, disable_thinking, extra
+            )
+        except Exception as exc:  # noqa: BLE001
+            if getattr(exc, "preflight", False) or not is_overflow_error(exc):
+                raise
+            endpoint = self._endpoint()
+            if not _is_ollama_model(str(endpoint.get("model") or "")):
+                raise
+            rendered = [_render_message(m) for m in messages]
+            refit_after_overflow(str(endpoint.get("model") or ""), rendered, tools)
+            return await self._stream_once(
+                messages, tools, on_text, disable_thinking, extra
+            )
 
     async def ainvoke(
         self, messages: list[Any], *, tools: list[dict] | None = None, **kwargs: Any

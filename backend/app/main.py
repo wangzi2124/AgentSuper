@@ -77,7 +77,9 @@ async def _init_app_runtime(app: FastAPI) -> None:
     from config import settings
     from app.runtime import ensure_runtime_state
     from app.session import SessionService, init_db
+    from observability.litellm_debug import configure_litellm_debug
 
+    configure_litellm_debug()
     await asyncio.to_thread(ensure_runtime_state, app)
 
     if settings.vector_store_auto_clear:

@@ -261,13 +261,25 @@ export interface VoiceMessageData {
 // ===== Multi-Agent Types =====
 
 // Agent 输出部件（对齐 opencode Part：正文与工具调用按 agent 真实输出顺序交错）
+export interface ContextTruncationNotice {
+  model?: string
+  window?: number
+  budget?: number
+  reserve?: number
+  estimated_before?: number
+  estimated_after?: number
+  dropped_messages?: number
+}
+
 export interface AgentOutputPart {
   seq: number
-  kind: 'text' | 'tool' | 'reasoning'
+  kind: 'text' | 'tool' | 'reasoning' | 'notice'
   /** kind=text：正文增量（相邻文本段会合并成同一 part，直到下一个工具打断） */
   text?: string
   /** kind=tool：工具/步骤调用（渲染为极简卡片，不展示参数/结果） */
   step?: AgentStep
+  /** kind=notice：上下文被裁剪的提示（不参与正文） */
+  notice?: ContextTruncationNotice
 }
 
 export interface AgentStreamData {
@@ -311,7 +323,7 @@ export interface TurnDiff {
 export interface MultiAgentSSEEvent {
   // 注：后端从不发 'agent_stream'（子 Agent 增量文本走 text_delta），故此处不列。
   // [队列] turn_done = 本回合完成但还有排队任务（同一条 SSE 流继续）；queue_drain = 队列提示。
-  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_done' | 'agent_error' | 'permission_request' | 'done' | 'turn_done' | 'queue_drain' | 'error' | 'queued' | 'text_delta' | 'model_switched' | 'heartbeat'
+  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_done' | 'agent_error' | 'context_truncated' | 'permission_request' | 'done' | 'turn_done' | 'queue_drain' | 'error' | 'queued' | 'text_delta' | 'model_switched' | 'heartbeat'
   agent_id: string
   agent_name?: string
   agent_avatar?: string
@@ -354,6 +366,13 @@ export interface MultiAgentSSEEvent {
   next_prompt_id?: string | null
   /** [队列] queue_drain 事件携带的剩余排队任务数 */
   queue_size?: number
+  /** [context_truncated] 本轮 prompt 被裁剪到运行时窗口的明细 */
+  window?: number
+  budget?: number
+  reserve?: number
+  estimated_before?: number
+  estimated_after?: number
+  dropped_messages?: number
 }
 
 /** [队列] 一条待处理任务（执行中追加的输入，后端 session_inputs 行） */

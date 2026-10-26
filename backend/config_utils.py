@@ -76,6 +76,7 @@ def effective_summary(s: Any) -> Dict[str, Any]:
         "max_concurrent_agents", "cors_origins", "external_path_default",
         "permission_approval_timeout", "allow_source_writes",
         "deepseek_thinking", "ollama_thinking", "ollama_num_ctx",
+        "ollama_context_guard", "litellm_debug",
         "compress_model_enabled", "llm_max_tokens", "chain_log_enabled",
         "voice_tts_enabled", "session_budget", "plan_model_enabled", "plan_parallel_enabled",
     ]

@@ -168,6 +168,32 @@ export function applyHarnessEvent(state: TurnState, event: HarnessEvent): TurnSt
       next.agents = { ...next.agents, [agent.agent_id]: agent }
       break
     }
+    case 'context_truncated': {
+      const agent = ensureAgent(next, event)
+      if (!agent.parts) agent.parts = []
+      const notice = {
+        model: event.model,
+        window: event.window,
+        budget: event.budget,
+        reserve: event.reserve,
+        estimated_before: event.estimated_before,
+        estimated_after: event.estimated_after,
+        dropped_messages: event.dropped_messages,
+      }
+      const duplicate = agent.parts.some(
+        p => p.kind === 'notice' && p.notice?.window === notice.window,
+      )
+      if (!duplicate) {
+        agent.parts.push({
+          seq: agent.parts.length,
+          kind: 'notice',
+          text: `上下文已裁剪：${notice.estimated_before ?? '—'} → ${notice.estimated_after ?? '—'} tokens（窗口 ${notice.window ?? '—'}）`,
+          notice,
+        })
+      }
+      next.agents = { ...next.agents, [agent.agent_id]: agent }
+      break
+    }
     case 'permission_request': {
       if (event.request_id) {
         next.pendingPermissions = [

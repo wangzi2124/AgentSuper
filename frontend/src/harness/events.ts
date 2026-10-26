@@ -42,6 +42,7 @@ export type HarnessEventType =
   | 'agent_step'
   | 'agent_done'
   | 'agent_error'
+  | 'context_truncated'
   | 'text_delta'
   | 'permission_request'
   | 'queued'

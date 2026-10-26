@@ -20,6 +20,9 @@
 .err-code { margin-left: auto; font-size: 11px; opacity: .75; }
 @media (prefers-reduced-motion: reduce) { .status-dot.running { animation: none; } }
 
+.timeline-notice { display: flex; align-items: baseline; gap: 7px; color: var(--text-muted); font-size: 12px; padding: 4px 0; }
+.notice-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warning, #d08a00); flex-shrink: 0; opacity: .8; }
+
 .reasoning-block { border-left: 2px solid var(--border); padding-left: 10px; color: var(--text-secondary); font-size: 13px; }
 .reasoning-block summary { cursor: pointer; color: var(--text-muted); font-size: 12px; }
 .reasoning-block[open] summary { margin-bottom: 6px; }

@@ -55,6 +55,24 @@ describe('harness reducer', () => {
     expect(state.answer).toBe('final')
   })
 
+  it('records context truncation as a notice part and deduplicates repeats', () => {
+    let state = createTurnState('t1')
+    const event = {
+      type: 'context_truncated', agent_id: 'build', turn_id: 't1', seq: 1,
+      model: 'ollama_chat/x', window: 4096, budget: 2745, reserve: 1024,
+      estimated_before: 5000, estimated_after: 2500, dropped_messages: 6,
+    } as any
+    state = applyHarnessEvent(state, adaptLegacyEvent(event))
+    state = applyHarnessEvent(state, adaptLegacyEvent({ ...event, seq: 2 }))
+    state = applyHarnessEvent(state, adaptLegacyEvent({
+      ...event, seq: 3, estimated_after: 2300, dropped_messages: 8,
+    }))
+    const notices = state.agents.build.parts?.filter(p => p.kind === 'notice') || []
+    expect(notices).toHaveLength(1)
+    expect(notices[0].notice?.window).toBe(4096)
+    expect(notices[0].notice?.dropped_messages).toBe(6)
+  })
+
   it('adapts legacy events without turn_id to the current turn', () => {
     const event = adaptLegacyEvent({ type: 'text_delta', agent_id: '', delta: 'x' } as any, 'turn-local')
     expect(event.turn_id).toBe('turn-local')

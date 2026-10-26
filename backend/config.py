@@ -260,8 +260,15 @@ class Settings(BaseSettings):
     # Ollama 上下文窗口**回落值**（仅在 `/api/ps` 读不到运行窗口时用于预算/压缩）。
     # 实际窗口以 Ollama 服务器配置为准（OLLAMA_CONTEXT_LENGTH / 启动参数），
     # 只有「模型管理」里显式设置了上下文长度才会下发 num_ctx 覆盖服务器。
-    # 超出窗口的 prompt 会被服务器静默截断 -> 历史看似丢失，故回落值仍应保守。
-    ollama_num_ctx: int = 8192
+    # 未知窗口时按最保守的 4096 估（Ollama 默认 n_ctx），否则按 8192 估会在 4096
+    # 服务器上直接 400；模型加载后用 `/api/ps` 的真实值覆盖。
+    ollama_num_ctx: int = 4096
+    # [上下文守卫] 传输层在每次 Ollama 调用前把 prompt 适配到真实窗口（默认开）。
+    # OLLAMA_CONTEXT_GUARD=0 可关闭，回滚到旧行为。
+    ollama_context_guard: bool = True
+    # [LiteLLM 调试] 默认开启 litellm debug，落盘到 data/logs/litellm-debug.log
+    # （脱敏 + 20MB×3 轮转）；LITELLM_DEBUG=0 可关闭。
+    litellm_debug: bool = True
 
     # ── 共享记忆持久化 ──
     # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失

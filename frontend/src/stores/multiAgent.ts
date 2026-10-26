@@ -662,6 +662,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           event.type === 'agent_step' ||
           event.type === 'agent_done' ||
           event.type === 'agent_error' ||
+          event.type === 'context_truncated' ||
           event.type === 'text_delta'
         ) {
           if (event.type === 'agent_start') routingStatus.value = ''

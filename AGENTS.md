@@ -87,7 +87,9 @@ HTTP / SSE
 - **压缩**：`harness/compression.py`。切换走 `compress_messages`；图节点走 `compress_graph_messages`；手动 compact 走 `tail_snapshot`。
 - **上下文视图**：`harness/context.py`。`[摘要] + [tail 原文] + [tool_history 回插] + [当前 user]`。
 - **工具历史**：`harness/tool_history.py`。只保留最近一个有工具轮；最多 10 条 / 8KB / 单结果 2KB；最多注入 2 个用户轮。
+- **Ollama prompt 适配**：`models/context_guard.py`，在 `TierModel` 传输层（`raw_invoke/raw_ainvoke/raw_stream`）执行。窗口 = 显式 override > `/api/ps` last-known > `OLLAMA_NUM_CTX`；输出预留 `max(512, 25%×窗口)`，估算裕量 `max(256, 8%×窗口)`；超预算先 `truncate_messages` + `sanitize_tool_messages`，保留 system + 最新 user；system+工具+当前 user 仍装不下时**自动扩展**：按所需最小窗口（2 的幂，上限 32768）随请求下发 `num_ctx`，让 Ollama 重载到更大窗口；只有超过自动上限才抛 `ContextOverflowError`。真实 `prompt_tokens` 按模型 EWMA 校准估算比；一次 overflow 会清窗口缓存、重探、重试一次。`OLLAMA_CONTEXT_GUARD=0` 关闭。
 - **治理**：`BudgetLedger`、`classify_error`、`retry_async`、`redact_secrets`、`ToolSchemaCache`。
+- **LiteLLM 调试**：`observability/litellm_debug.py`，默认 `litellm_debug=true`；启动时 `litellm._turn_on_debug()`，日志写 `data/logs/litellm-debug.log`（20MB×3 轮转，`redact_secrets` 过滤）。控制台仍保持 INFO；`LITELLM_DEBUG=0` 关闭。
 - **寒暄/自我介绍**：`filter`/`plan` 对 greeting/thanks/ack/test/intro 做全串锚定；intro 复用 `SELF_INTRO_MAIN`，命中即 `final_output`，零模型调用。不要用“包含介绍”这种宽匹配，避免误伤“介绍这个文件”。
 
 ### 2.2 前端（Harness 首版）
@@ -161,6 +163,7 @@ npx vitest run tests/integration/
 - `compat._sse` 为每个 turn 维护单调 `seq`；前端严格按 `turn_id + seq` 去重/排序。
 - legacy 事件没有 `turn_id` 时，前端归入当前 turn；没有 `seq` 时按到达顺序。
 - 终态：`done`（会话空闲）或 `turn_done`（还有排队轮次）；两者都必须被 store 收尾。
+- `context_truncated`：Ollama prompt 被裁剪时推送（`window`/`budget`/`reserve`/`estimated_before`/`estimated_after`/`dropped_messages`）；`compat` 透传，前端渲染为时间线内联提示，不进入正文。
 
 ### 4.2 工具调用
 
@@ -204,7 +207,7 @@ npx vitest run tests/integration/
 - **压缩**：`cognition/compressor.py` 是 canonical；`harness/compression.py` 是统一门面。不要再新增第三套压缩逻辑。
 - **自动压缩/手动 compact**：`ContextHarness` + `tail_snapshot` 语义；手动 compact 也要写 tail 起点。
 - **模型目录**：`models/catalog.py` 读取能力/窗口；`harness/capabilities.build_profile` 有 60s TTL，人工 override 优先。
-- **Ollama 窗口**：默认不下发 `num_ctx`，以 Ollama 服务器配置为准；运行时窗口取自 `/api/ps.context_length`（30s 快照 + per-model last-known），未加载时回落 `OLLAMA_NUM_CTX`。只有「模型管理」显式设置过 `context_length` 才下发覆盖；`/api/models` 的 `runtime_context_length` 是只读展示字段。
+- **Ollama 窗口**：默认不下发 `num_ctx`，以 Ollama 服务器配置为准；运行时窗口取自 `/api/ps.context_length`（30s 快照 + per-model last-known），未加载时回落 `OLLAMA_NUM_CTX`（默认 4096）。只有「模型管理」显式设置过 `context_length` 才下发覆盖；`/api/models` 的 `runtime_context_length` 是只读展示字段。prompt 适配守卫（`models/context_guard.py`）会按该窗口裁剪；**若 system+工具+当前消息仍装不下，会自动把 `num_ctx` 提升到所需窗口（2 的幂，上限 32768）**，只有超过上限才报错。不要把回落值再当 8192。
 - **上下文窗口**：未知窗口时 `resolve_mode` 保守回退；不要在未知窗口上做原生工具假设。
 - **Ollama**：`ollama/*` / `ollama_chat/*` 已适配；tools 模型走原生路径（流式工具调用由 stream 层转非流式），无 tools 模型走文本回退。本地 CPU 慢，默认不设为默认模型；冒烟用 `HARNESS_OLLAMA_TEST=1` + `HARNESS_OLLAMA_TOOLS_MODEL` / `HARNESS_OLLAMA_TEXT_MODEL`。
 - **不要重新引入**：`MAX_STEPS`、`SUB_AGENT_TIMEOUT`、`SUPERVISOR_TIMEOUT`、`AGENT_TIMEOUT_MULTIPLIERS`、`DOOM_LOOP_*`；这些字段/逻辑已删除。
@@ -222,6 +225,7 @@ npx vitest run tests/integration/
 - **只展示真实工具**：时间线过滤 `!step.tool_name` 的 Harness 图内节点（filter/plan/rag/execute_subagent 等）；不要渲染 `NODE_LABELS` 或 Agent 过滤 chips。
 - **工具步骤**：默认紧凑行，点击展开；不要默认展开所有参数/输出，避免长任务淹没最终答案。
 - **审批**：聊天页用 `PermissionInlineCard`，`Sidebar` 中的模态在 `/multi-agent` 路由隐藏；不要两套同时弹。
+- **上下文裁剪提示**：`context_truncated` → reducer 追加 `kind: 'notice'` 的 part → `ConversationTimeline` 内联一行；不要并进正文或弹窗。
 - **旧组件**：`MultiAgentResponse.vue` / `AgentPanel.vue` 仍保留给旧测试与回滚，但视图不再引用；验收通过前不要删。
 - **构建**：没有独立 lint script；`npm run build` 内含 `vue-tsc -b`。
 
@@ -236,12 +240,12 @@ npx vitest run tests/integration/
 
 ## 8. 验收与已知缺口
 
-当前实测（2026-10-24，本地 Windows）：
+当前实测（2026-10-26，本地 Windows）：
 
-- 后端：`526 passed, 18 skipped`
-- Harness 覆盖率：`90.80%`（门槛 90%）
-- 前端单测：`106 passed`
-- 前端 live SSE 集成：`119 passed`
+- 后端：`564 passed, 18 skipped`（`pytest` 全量）
+- Harness 覆盖率：本轮未重跑（venv 缺 `pytest-cov`；上次 `90.80%`，门槛 90%）
+- 前端单测：`107 passed`（`npm test`）
+- 前端 live SSE 集成：本轮未重跑（需后端；上次 `119 passed`）
 - 前端 `npm run build`：通过
 - 真实模型：DeepSeek `deepseek/deepseek-v4-flash → deepseek-v4-pro`；E2E 8 条、PF-01/02/05/06/07 通过
 

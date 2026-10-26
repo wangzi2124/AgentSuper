@@ -28,6 +28,20 @@ class _FakeGraph:
         async def _agen():
             push_event(
                 {
+                    "type": "context_truncated",
+                    "agent_id": "build",
+                    "agent_name": "build",
+                    "model": "ollama_chat/x",
+                    "window": 4096,
+                    "budget": 2745,
+                    "reserve": 1024,
+                    "estimated_before": 5000,
+                    "estimated_after": 2400,
+                    "dropped_messages": 4,
+                }
+            )
+            push_event(
+                {
                     "type": "tool_start",
                     "step_id": "tool-c1",
                     "name": "read_file",
@@ -111,3 +125,20 @@ def test_tool_events_become_agent_step_sse():
     # 子 Agent 收尾 → 面板状态 completed
     assert agents_map["code"]["status"] == "completed"
     assert "build" in seen and "code" in seen
+
+
+def test_context_truncated_is_forwarded_with_its_fields():
+    events, _, _ = asyncio.run(_collect())
+
+    notice = next(e for e in events if e["type"] == "context_truncated")
+    assert notice["agent_id"] == "build"
+    assert notice["window"] == 4096
+    assert notice["estimated_before"] == 5000
+    assert notice["estimated_after"] == 2400
+    assert notice["dropped_messages"] == 4
+
+    notice_idx = next(i for i, e in enumerate(events) if e["type"] == "context_truncated")
+    start_idx = next(
+        i for i, e in enumerate(events) if e["type"] == "agent_start" and e["agent_id"] == "build"
+    )
+    assert start_idx < notice_idx

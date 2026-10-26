@@ -86,6 +86,11 @@ _OVERFLOW_HINTS = (
     "context length",
     "maximum context",
     "context window",
+    "context size",
+    "exceeds the available context size",
+    "exceed_context_size_error",
+    "n_ctx",
+    "try increasing it",
     "too many tokens",
     "上下文长度",
 )

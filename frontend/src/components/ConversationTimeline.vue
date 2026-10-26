@@ -21,7 +21,7 @@ watch(() => props.running, (running) => {
   if (running) showTimeline.value = true
 })
 
-type Item = { key: string; kind: 'text' | 'tool' | 'reasoning'; text?: string; step?: any }
+type Item = { key: string; kind: 'text' | 'tool' | 'reasoning' | 'notice'; text?: string; step?: any; notice?: any }
 const items = computed<Item[]>(() => {
   const out: Item[] = []
   for (const agent of props.message.agents) {
@@ -30,6 +30,13 @@ const items = computed<Item[]>(() => {
       // 隐藏 Harness 图内节点（无 tool_name），只保留真实工具调用。
       if (part.kind === 'tool' && part.step?.tool_name) {
         out.push({ key: `${agent.agent_id}:${part.step.step_id}`, kind: 'tool', step: part.step })
+      } else if (part.kind === 'notice') {
+        out.push({
+          key: `${agent.agent_id}:notice:${part.seq}`,
+          kind: 'notice',
+          text: part.text,
+          notice: part.notice,
+        })
       } else if ((part.kind === 'text' || part.kind === 'reasoning') && (part.text || '').trim()) {
         out.push({
           key: `${agent.agent_id}:${part.seq}`,
@@ -81,6 +88,13 @@ const statusText = computed(() => {
     <div v-if="showTimeline" class="timeline-items">
       <template v-for="item in items" :key="item.key">
         <TimelineToolRow v-if="item.kind === 'tool'" :step="item.step" />
+        <div v-else-if="item.kind === 'notice'" class="timeline-notice">
+          <span class="notice-dot"></span>
+          <span>
+            上下文已裁剪：{{ item.notice?.estimated_before || '—' }} → {{ item.notice?.estimated_after || '—' }} tokens
+            （窗口 {{ item.notice?.window || '—' }}<template v-if="item.notice?.dropped_messages"> · 丢弃 {{ item.notice.dropped_messages }} 条</template>）
+          </span>
+        </div>
         <details v-else-if="item.kind === 'reasoning'" class="reasoning-block">
           <summary>思考过程</summary>
           <MarkdownContent :text="item.text || ''" />
