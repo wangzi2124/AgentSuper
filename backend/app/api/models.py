@@ -105,7 +105,10 @@ async def upsert_prov(name: str, req: Request):
     if "/" in name:
         return fail(message=f"Provider 名称不能包含「/」：{name}，请填写 litellm 前缀（如 deepseek）")
     body = await req.json()
-    entry = catalog.upsert_provider(name, body)
+    try:
+        entry = catalog.upsert_provider(name, body)
+    except ValueError as e:
+        return fail(message=str(e))
     return ok({"provider": entry, "providers": catalog.provider_models_source(),
                "models": _catalog_models()})
 

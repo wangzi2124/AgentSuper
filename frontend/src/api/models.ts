@@ -65,6 +65,7 @@ export interface ProviderInfo {
   api_base: string
   api_key: string
   enabled: boolean
+  type?: 'openai' | 'ollama'
   models: ModelInfo[]
 }
 

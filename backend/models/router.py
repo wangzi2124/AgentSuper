@@ -284,12 +284,14 @@ class TierModel:
             # None → litellm 原生发现（OLLAMA_HOST 环境变量 → localhost:11434）。
             return {
                 "model": mid,
+                "litellm_model": creds.get("litellm_model"),
                 "api_base": creds.get("api_base"),
                 "api_key": creds.get("api_key") or "ollama",
                 "options": creds.get("options"),
             }
         return {
             "model": mid,
+            "litellm_model": creds.get("litellm_model"),
             "api_base": creds.get("api_base") or settings.llm_api_base,
             "api_key": creds.get("api_key") or settings.llm_api_key,
             "options": creds.get("options"),
@@ -392,7 +394,7 @@ class TierModel:
         """纯传输 kwargs：消息渲染 + Ollama prompt 适配。"""
         endpoint, rendered, max_tokens, fit = self._prepare_call(messages, tools)
         kwargs: dict[str, Any] = {
-            "model": endpoint["model"],
+            "model": endpoint.get("litellm_model") or endpoint["model"],
             "api_base": endpoint.get("api_base"),
             "api_key": endpoint.get("api_key"),
             "messages": rendered,
@@ -498,7 +500,7 @@ class TierModel:
             extra_kwargs["num_ctx"] = fit.num_ctx
         result = await stream_chat(
             rendered,
-            model=endpoint["model"],
+            model=endpoint.get("litellm_model") or endpoint["model"],
             tools=tools,
             api_key=endpoint.get("api_key"),
             api_base=endpoint.get("api_base"),

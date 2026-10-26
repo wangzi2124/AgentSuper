@@ -140,3 +140,101 @@ async def test_non_ollama_tool_round_uses_stream(monkeypatch):
     )
     assert called["stream"] is True
     assert result.content == "hi"
+
+
+
+
+def test_ollama_type_provider_api_maps_to_native_chat(monkeypatch):
+    monkeypatch.setattr(
+        catalog,
+        "read_providers",
+        lambda: {"ollama-cloud": {"type": "ollama", "api_base": "https://ollama.com/v1", "api_key": "k"}},
+    )
+    creds = catalog.provider_api("ollama-cloud/gemma4:31b")
+    assert creds["api_base"] == "https://ollama.com"
+    assert creds["api_key"] == "k"
+    assert creds["is_ollama"] is True
+    assert creds["litellm_model"] == "ollama_chat/gemma4:31b"
+
+
+def test_ollama_type_provider_config_hint_requires_key_for_cloud(monkeypatch):
+    monkeypatch.setattr(
+        catalog,
+        "read_providers",
+        lambda: {"ollama-cloud": {"type": "ollama", "api_base": "https://ollama.com", "api_key": ""}},
+    )
+    hint = catalog.provider_config_hint("ollama-cloud/gemma4:31b")
+    assert "API Key" in hint
+
+
+def test_ollama_tags_url_accepts_root_v1_and_api():
+    assert catalog._ollama_tags_url("https://ollama.com") == "https://ollama.com/api/tags"
+    assert catalog._ollama_tags_url("https://ollama.com/v1") == "https://ollama.com/api/tags"
+    assert catalog._ollama_tags_url("https://ollama.com/api") == "https://ollama.com/api/tags"
+    assert catalog._ollama_tags_url("http://localhost:11434/api/chat") == "http://localhost:11434/api/tags"
+
+
+def test_upsert_provider_persists_type(monkeypatch):
+    cfg = {"providers": {}}
+    monkeypatch.setattr(catalog, "load_config", lambda: cfg)
+    monkeypatch.setattr(catalog, "save_config", lambda c: cfg.update(c))
+    monkeypatch.setattr(catalog, "reload_catalog", lambda: None)
+    entry = catalog.upsert_provider(
+        "ollama-cloud", {"type": "ollama", "api_base": "https://ollama.com", "api_key": "k"}
+    )
+    assert entry["type"] == "ollama"
+    assert cfg["providers"]["ollama-cloud"]["type"] == "ollama"
+
+
+def test_upsert_provider_rejects_reserved_ollama_prefix(monkeypatch):
+    monkeypatch.setattr(catalog, "load_config", lambda: {"providers": {}})
+    monkeypatch.setattr(catalog, "save_config", lambda c: None)
+    monkeypatch.setattr(catalog, "reload_catalog", lambda: None)
+    with pytest.raises(ValueError):
+        catalog.upsert_provider("ollama_chat", {"type": "ollama", "api_base": "https://ollama.com"})
+
+
+def test_probe_ollama_type_provider_uses_tags_with_bearer(monkeypatch):
+    import json as _json
+    import urllib.request as _urlreq
+
+    seen = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return _json.dumps(
+                {
+                    "models": [
+                        {
+                            "name": "gemma4:31b",
+                            "details": {"context_length": 131072},
+                            "capabilities": ["completion", "tools"],
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(req, timeout=0):
+        seen["url"] = req.full_url
+        seen["auth"] = req.get_header("Authorization") or ""
+        return _Resp()
+
+    monkeypatch.setattr(catalog, "local_endpoint_alive", lambda _base: True)
+    monkeypatch.setattr(_urlreq, "urlopen", fake_urlopen)
+    catalog._probe_cache.pop("ollama:cloud-test", None)
+
+    extras = catalog.probe_ollama_provider_models(
+        "cloud-test", "https://ollama.com", "secret", set(), force=True
+    )
+
+    assert seen["url"] == "https://ollama.com/api/tags"
+    assert seen["auth"] == "Bearer secret"
+    assert extras[0]["id"] == "cloud-test/gemma4:31b"
+    assert extras[0]["context_length"] == 131072
+    assert extras[0]["capabilities"]["tool_use"] is True

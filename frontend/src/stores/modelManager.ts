@@ -126,7 +126,7 @@ export const useModelManagerStore = defineStore('modelManager', () => {
     }
   }
 
-  async function updateProvider(name: string, data: Partial<{ label: string; api_base: string; api_key: string; enabled: boolean }>) {
+  async function updateProvider(name: string, data: Partial<{ label: string; api_base: string; api_key: string; enabled: boolean; type: 'openai' | 'ollama' }>) {
     saving.value = true
     busyId.value = name
     try {

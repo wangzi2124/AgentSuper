@@ -69,8 +69,8 @@ const showProviderForm = ref(false)
 const providerIsEdit = ref(false)
 // 「自定义模型前缀」高级项：默认收起，留空则按 Label / api_base 自动生成
 const providerAdvanced = ref(false)
-const providerForm = reactive<{ name: string; label: string; api_base: string; api_key: string; enabled: boolean }>({
-  name: '', label: '', api_base: '', api_key: '', enabled: true,
+const providerForm = reactive<{ name: string; label: string; api_base: string; api_key: string; enabled: boolean; type: 'openai' | 'ollama' }>({
+  name: '', label: '', api_base: '', api_key: '', enabled: true, type: 'openai',
 })
 
 // 生成 litellm 前缀的 slug（只保留 ASCII 字母数字，其余折叠为 '-'）
@@ -82,6 +82,9 @@ function deriveProviderName(): string {
   const fromLabel = _slug(providerForm.label)
   if (fromLabel) return fromLabel
   const raw = providerForm.api_base.trim()
+  if (providerForm.type === 'ollama') {
+    return /localhost|127\.0\.0\.1|\[::1\]/i.test(raw) ? 'ollama-local' : 'ollama-cloud'
+  }
   try {
     const u = new URL(/^https?:\/\//i.test(raw) ? raw : `http://${raw}`)
     const host = _slug((u.hostname || '').replace(/\./g, '-'))
@@ -98,9 +101,14 @@ function openProviderForm(p?: ProviderInfo) {
   providerForm.api_base = p?.api_base || ''
   providerForm.api_key = p?.api_key || ''
   providerForm.enabled = p?.enabled ?? true
+  providerForm.type = p?.type === 'ollama' ? 'ollama' : 'openai'
   showProviderForm.value = true
 }
 async function submitProvider() {
+  if (providerForm.type === 'ollama' && !providerForm.api_base.trim()) {
+    mm.setError('请填写 Ollama 服务地址（云端 https://ollama.com，本地 http://localhost:11434）')
+    return
+  }
   if (!providerForm.api_base.trim()) {
     mm.setError('请填写 api_base（OpenAI 兼容服务地址，如 http://127.0.0.1:8001/v1）')
     return
@@ -119,7 +127,11 @@ async function submitProvider() {
     return
   }
   // 仅在保存成功时关闭弹窗：失败时保留用户输入，否则错误 toast 容易被错过
-  const ok = await mm.updateProvider(name, { label: providerForm.label, api_base: providerForm.api_base, api_key: providerForm.api_key, enabled: providerForm.enabled })
+  if (providerForm.type === 'ollama' && (name === 'ollama' || name === 'ollama_chat')) {
+    mm.setError('Ollama 类型不能使用保留前缀 ollama / ollama_chat，请改用 ollama-cloud 或 ollama-local')
+    return
+  }
+  const ok = await mm.updateProvider(name, { label: providerForm.label, api_base: providerForm.api_base, api_key: providerForm.api_key, enabled: providerForm.enabled, type: providerForm.type })
   if (ok) showProviderForm.value = false
 }
 async function toggleProvider(p: ProviderInfo) {
@@ -365,6 +377,18 @@ function capOf(m: ModelInfo) {
           <input v-model="providerForm.label" class="ctrl" placeholder="本地 vLLM" />
         </label>
       </div>
+      <div class="form-row">
+        <label class="mm-field mm-wide"><span>接口类型</span>
+          <select v-model="providerForm.type" class="ctrl">
+            <option value="openai">OpenAI 兼容（/v1）</option>
+            <option value="ollama">Ollama（原生 /api/chat）</option>
+          </select>
+        </label>
+      </div>
+      <p v-if="providerForm.type === 'ollama'" class="hint provider-prefix-hint">
+        Ollama 类型会用 <code>/api/tags</code> 自动探测模型，并通过原生 <code>/api/chat</code> 调用。
+        云端填 <code>https://ollama.com</code> + API Key；本地填 <code>http://localhost:11434</code>（key 可留空）。
+      </p>
       <div class="form-row" v-if="providerIsEdit || providerAdvanced">
         <label class="mm-field mm-wide">
           <span>模型前缀（litellm）<template v-if="providerIsEdit"> — 不可修改</template></span>
@@ -380,12 +404,12 @@ function capOf(m: ModelInfo) {
       <p class="hint provider-prefix-hint">模型 id = <code>前缀/模型名</code>，前缀决定模型列表里的 id（如 <code>vllm/deepseek-r1:latest</code>）。留空自动按 Label / 服务地址生成，一般无需修改。</p>
       <div class="form-row">
         <label class="mm-field mm-wide"><span>api_base（OpenAI 兼容）</span>
-          <input v-model="providerForm.api_base" class="ctrl" placeholder="http://127.0.0.1:8001/v1" />
+          <input v-model="providerForm.api_base" class="ctrl" :placeholder="providerForm.type === 'ollama' ? 'https://ollama.com 或 http://localhost:11434' : 'http://127.0.0.1:8001/v1'" />
         </label>
       </div>
       <div class="form-row">
         <label class="mm-field mm-wide"><span>api_key（可选）</span>
-          <input v-model="providerForm.api_key" class="ctrl" type="password" placeholder="sk-..." />
+          <input v-model="providerForm.api_key" class="ctrl" type="password" :placeholder="providerForm.type === 'ollama' ? 'OLLAMA_API_KEY（本地可留空）' : 'sk-...'" />
         </label>
       </div>
       <div class="form-footer">

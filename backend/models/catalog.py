@@ -315,6 +315,30 @@ def _ollama_base_url() -> str:
     return host.rstrip("/")
 
 
+def _ollama_native_base(api_base: Optional[str]) -> str:
+    """把用户填写的 Ollama 地址归一为原生 API 根（去掉 /v1、/api、/api/chat）。
+
+    Ollama 同时提供原生 `/api/chat` 与 OpenAI 兼容 `/v1`。本系统走原生接口
+    （工具调用、think 参数行为更可控），因此注册表里允许用户填任意一种写法。
+    """
+    base = str(api_base or "").strip().rstrip("/")
+    for suffix in ("/api/chat", "/v1", "/api"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)].rstrip("/")
+            break
+    return base
+
+
+def _ollama_tags_url(api_base: Optional[str]) -> str:
+    base = _ollama_native_base(api_base)
+    return f"{base}/api/tags" if base else ""
+
+
+def _provider_type(reg: Optional[dict[str, Any]]) -> str:
+    value = str((reg or {}).get("type") or "openai").strip().lower()
+    return "ollama" if value == "ollama" else "openai"
+
+
 def is_ollama_model(model_id: Optional[str]) -> bool:
     """判断模型 ID 是否为 Ollama 模型（支持 ollama/ 和 ollama_chat/ 前缀）。
 
@@ -600,17 +624,30 @@ def read_hidden() -> set[str]:
 
 
 def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
-    """新增/更新一个 provider（前端模型管理写回 model_catalog.db）。"""
+    """新增/更新一个 provider（前端模型管理写入 model_catalog.db）。
+
+    `type` 决定调用协议：
+    - `openai`（默认）：`{name}/{model}` 直接交给 litellm，按 OpenAI 兼容服务处理；
+    - `ollama`：使用 Ollama 原生 `/api/chat`，模型 id 仍为 `{name}/{model}`，
+      调用时映射为 `ollama_chat/{model}`，并支持 `/api/tags` 自动探测模型。
+    """
     cfg = load_config()
     providers = dict(cfg.get("providers") or {})
     entry = dict(providers.get(name) or {})
-    for k in ("label", "api_base", "api_key", "enabled"):
+    for k in ("label", "api_base", "api_key", "enabled", "type"):
         if k in data and data[k] is not None:
             entry[k] = data[k]
     entry.setdefault("label", name)
     entry.setdefault("api_key", "")
     entry.setdefault("enabled", True)
     entry.setdefault("api_base", "")
+    ptype = _provider_type(entry)
+    if ptype == "ollama" and name in ("ollama", "ollama_chat"):
+        raise ValueError(
+            "Provider 名称不能使用保留前缀 ollama / ollama_chat（本地 Ollama 已占用）；"
+            "Ollama Cloud 请使用 ollama-cloud 等名称"
+        )
+    entry["type"] = ptype
     providers[name] = entry
     cfg["providers"] = providers
     save_config(cfg)
@@ -796,6 +833,72 @@ def probe_provider_models(provider_name: str, api_base: str, api_key: str,
         return []
 
 
+def probe_ollama_provider_models(provider_name: str, api_base: str, api_key: str,
+                                 known_ids: set[str], force: bool = False) -> list[dict[str, Any]]:
+    """探测注册表中 `type=ollama` 的 Provider（云端或远程 Ollama）的 `/api/tags`。
+
+    与本地 `probe_ollama_models` 的区别：使用该 Provider 自己的地址与 Bearer key，
+    不写入本地 Ollama 的全局缓存/已安装集合。失败返回 []，不阻塞启动或模型列表。
+    """
+    now = time.time()
+    cache_key = f"ollama:{provider_name}"
+    cached = _probe_cache.get(cache_key)
+    if cached and not force and now - cached[0] < _PROBE_TTL:
+        return cached[1]
+    url = _ollama_tags_url(api_base)
+    if not url:
+        _probe_cache[cache_key] = (now, [])
+        return []
+    if not local_endpoint_alive(_ollama_native_base(api_base)):
+        _probe_cache[cache_key] = (now, [])
+        return []
+    headers = {"User-Agent": "agentsuper/0.1"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        extras: list[dict[str, Any]] = []
+        for m in (data.get("models") or []):
+            name = (m.get("name") or m.get("model") or "").strip()
+            if not name:
+                continue
+            full = f"{provider_name}/{name}"
+            if full in known_ids:
+                continue
+            family = name.split(":", 1)[0]
+            raw_caps = set(m.get("capabilities") or [])
+            capabilities = {
+                "tool_use": "tools" in raw_caps,
+                "vision": "vision" in raw_caps,
+                "reasoning": "thinking" in raw_caps,
+            } if raw_caps else {"tool_use": True, "vision": False, "reasoning": False}
+            details = m.get("details") or {}
+            try:
+                native_ctx = int(details.get("context_length") or 0)
+            except (TypeError, ValueError):
+                native_ctx = 0
+            context_length = native_ctx if native_ctx > 0 else 32768
+            extras.append({
+                "id": full,
+                "provider": provider_name,
+                "family": family,
+                "name": f"{provider_name} {family}",
+                "description": f"探测自 {provider_name} /api/tags",
+                "capabilities": capabilities,
+                "context_length": context_length,
+                "limits": {"max_output_tokens": 8192},
+                "cost": dict(_ZERO_COST),
+            })
+        _probe_cache[cache_key] = (now, extras)
+        return extras
+    except Exception:
+        _probe_cache[cache_key] = (now, [])
+        return []
+
+
 def probe_configured_providers(known_ids: set[str], force: bool = False) -> list[dict[str, Any]]:
     """对所有 enabled 的自定义 provider 做 /v1/models 探测，合并增量条目。
 
@@ -814,6 +917,10 @@ def probe_configured_providers(known_ids: set[str], force: bool = False) -> list
     if len(targets) == 1:
         name, p = targets[0]
         try:
+            if _provider_type(p) == "ollama":
+                return probe_ollama_provider_models(
+                    name, p.get("api_base"), p.get("api_key") or "", known_ids, force=force
+                )
             return probe_provider_models(name, p.get("api_base"), p.get("api_key") or "", known_ids, force=force)
         except Exception:
             return []
@@ -823,6 +930,10 @@ def probe_configured_providers(known_ids: set[str], force: bool = False) -> list
     def _one(item: tuple[str, dict[str, Any]]) -> list[dict[str, Any]]:
         name, p = item
         try:
+            if _provider_type(p) == "ollama":
+                return probe_ollama_provider_models(
+                    name, p.get("api_base"), p.get("api_key") or "", known_ids, force=force
+                )
             return probe_provider_models(name, p.get("api_base"), p.get("api_key") or "", known_ids, force=force)
         except Exception:
             return []
@@ -868,8 +979,23 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     from config import settings
     mid = normalize_model(model_id)
     if not mid:
-        return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key, "is_ollama": False, "options": None}
-    # 支持 ollama/ 和 ollama_chat/ 两种前缀（ollama_chat/ 是 LiteLLM 推荐的前缀）
+        return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key,
+                "is_ollama": False, "litellm_model": None, "provider_type": "openai", "options": None}
+    provider = mid.split("/", 1)[0] if "/" in mid else ""
+    reg = read_providers().get(provider)
+    # 注册表中显式声明 type=ollama 的 Provider（如 Ollama Cloud）：走原生 /api/chat，
+    # 但模型 id 保持 `{provider}/{name}`，避免与本地 ollama/、ollama_chat/ 前缀冲突。
+    if reg and _provider_type(reg) == "ollama":
+        name = mid.split("/", 1)[1] if "/" in mid else mid
+        return {
+            "api_base": _ollama_native_base(reg.get("api_base")) or None,
+            "api_key": (reg.get("api_key") or "").strip() or "ollama",
+            "is_ollama": True,
+            "litellm_model": f"ollama_chat/{name}",
+            "provider_type": "ollama",
+            "options": None,
+        }
+    # 支持 ollama/ 与 ollama_chat/ 两种前缀（ollama_chat/ 是 LiteLLM 推荐的前缀）
     if is_ollama_model(mid):
         # [运行时窗口] 默认**不下发** num_ctx，让 Ollama 用它自己的配置
         # （OLLAMA_CONTEXT_LENGTH / 启动参数）。只有用户在「模型管理」显式设置
@@ -906,7 +1032,8 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         # 注册表未配 api_base 时读 OLLAMA_API_BASE（其次 OLLAMA_HOST）兜底。
         if not _ob:
             _ob = (os.environ.get("OLLAMA_API_BASE") or os.environ.get("OLLAMA_HOST") or "").strip()
-        return {"api_base": _ob or None, "api_key": _ok or "ollama", "is_ollama": True, "options": opts}
+        return {"api_base": _ob or None, "api_key": _ok or "ollama", "is_ollama": True,
+                "litellm_model": None, "provider_type": "ollama", "options": opts}
     # DeepSeek 思考模型（V4.1-Flash / V4-Pro 默认开思考）：按「推理模型」能力 + 全局
     # DEEPSEEK_THINKING 开关下发 thinking。**默认 disabled** —— 实测 agentic 工具循环里
     # 思考会吃光 max_tokens（reasoning==ct==上限、finish=length、零工具/零正文），
@@ -923,9 +1050,10 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     if reg:
         return {"api_base": reg.get("api_base") or settings.llm_api_base,
                 "api_key": reg.get("api_key") or settings.llm_api_key,
-                "is_ollama": False, "options": options}
+                "is_ollama": False, "litellm_model": None,
+                "provider_type": _provider_type(reg), "options": options}
     return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key,
-            "is_ollama": False, "options": options}
+            "is_ollama": False, "litellm_model": None, "provider_type": "openai", "options": options}
 
 
 def litellm_extra_kwargs(creds: Optional[dict]) -> dict:
@@ -985,6 +1113,16 @@ def provider_config_hint(model_id: Optional[str], *, creds: Optional[dict] = Non
     if not provider:
         return ""
     reg = read_providers().get(provider)
+    if reg and _provider_type(reg) == "ollama":
+        base = (reg.get("api_base") or "").strip()
+        key = (reg.get("api_key") or "").strip()
+        if not base:
+            return ("未配置 Ollama 服务地址：请在「模型管理」页为 Provider「%s」填写 api_base"
+                    "（云端 https://ollama.com，本地 http://localhost:11434）。" % provider)
+        if "ollama.com" in base.lower() and not key:
+            return ("Ollama Cloud 需要 API Key：请在「模型管理」页为 Provider「%s」填写 api_key"
+                    "（Ollama 控制台生成的 OLLAMA_API_KEY）。" % provider)
+        return ""
     if reg and reg.get("api_base"):
         return ""
     resolved = creds or provider_api(mid)
@@ -1055,6 +1193,7 @@ def provider_models_source() -> list[dict[str, Any]]:
         out.append({"provider": name, "label": p.get("label") or name,
                     "api_base": p.get("api_base") or "", "api_key": p.get("api_key") or "",
                     "enabled": bool(p.get("enabled", True)),
+                    "type": _provider_type(p),
                     "models": lookup_all(f"{name}/")})
     return out
 
