@@ -27,7 +27,6 @@ class ChatRequest(BaseModel):
     session_id: str | None = Field(default=None, description="会话 id")
     thread_id: str | None = Field(default=None, description="续跑线程 id")
     user_id: str = Field(default="anonymous")
-    directory: str | None = Field(default=None, description="会话工作目录")
     target_model: str | None = Field(default=None, description="会话内切换模型")
 
 
@@ -37,7 +36,7 @@ async def chat(body: ChatRequest, ctx: PlatformContext = Depends(get_context)) -
     resumed = tid is not None and ctx.sessions.get(tid) is not None
     try:
         sess = ctx.sessions.ensure(
-            tid, directory=body.directory, user_id=body.user_id
+            tid, user_id=body.user_id
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -64,7 +63,7 @@ async def chat_stream(
 ) -> StreamingResponse:
     try:
         sess = ctx.sessions.ensure(
-            body.session_id, directory=body.directory, user_id=body.user_id
+            body.session_id, user_id=body.user_id
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

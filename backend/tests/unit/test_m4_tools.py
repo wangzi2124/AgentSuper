@@ -6,7 +6,12 @@ from execution.filesystem import VirtualFileSystem
 from execution.tool_registry import ToolRegistry
 from execution.tools.file_tools import make_file_tools, register_file_tools
 from execution.tools.mcp_client import MCPToolClient, register_mcp_tools
-from execution.tools.web_tools import register_web_tools, web_fetch, web_search
+from execution.tools.web_tools import (
+    http_request,
+    register_web_tools,
+    web_fetch,
+    web_search,
+)
 from mcp.adapter import MCPServer, MCPTool
 
 
@@ -22,6 +27,20 @@ def test_file_tools_roundtrip(vfs):
     tools["append_file"]("a/b.txt", " world")
     assert tools["read_file"]("a/b.txt") == "hello world"
     assert "a/b.txt" in tools["glob"]("**/*.txt")
+
+
+def test_create_directory(vfs, tmp_path):
+    tools = make_file_tools(vfs)
+    out = tools["create_directory"]("TEST1")
+    assert "已创建目录" in out
+    assert (tmp_path / "TEST1").is_dir()
+    # 越界路径被 VFS 拒绝
+    try:
+        tools["create_directory"]("../outside")
+    except PermissionError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected PermissionError")
 
 
 def test_file_tools_delete_and_rollback(vfs, tmp_path):
@@ -76,9 +95,30 @@ def test_web_fetch_injected_fetcher():
 def test_register_web_tools_is_readonly_global():
     reg = ToolRegistry()
     names = register_web_tools(reg, searcher=lambda q, k: "x")
-    assert set(names) == {"web_search", "web_fetch"}
+    assert set(names) == {"web_search", "web_fetch", "http_request"}
     assert reg.get("web_search").scope == "global"
     assert reg.needs_approval("web_search") is False
+    assert reg.needs_approval("web_fetch") is False
+    # 通用 HTTP 请求可写 → 必须审批
+    assert reg.needs_approval("http_request") is True
+
+
+def test_http_request_blocks_ssrf():
+    assert http_request("GET", "http://127.0.0.1/secret").startswith("Error:")
+
+
+def test_http_request_rejects_invalid_method():
+    assert "Invalid HTTP method" in http_request("TRACE", "http://example.com")
+
+
+def test_register_weather_tools():
+    from execution.tools.weather_tools import register_weather_tools
+
+    reg = ToolRegistry()
+    names = register_weather_tools(reg)
+    assert names == ["get_weather"]
+    assert reg.get("get_weather").scope == "global"
+    assert reg.needs_approval("get_weather") is False
 
 
 def test_mcp_client_bridge_registers_prefixed_tools():
@@ -103,3 +143,66 @@ def test_mcp_client_call_failure_is_readable():
 
 def test_mcp_client_no_server():
     assert "未配置" in MCPToolClient(None).call("x")
+
+
+def test_sync_plugin_tools_registers_and_clears():
+    from types import SimpleNamespace
+
+    from extensions.plugins import sync_plugin_tools
+
+    def tool_echo(msg: str = "") -> str:
+        """echo back."""
+        return msg
+
+    plugin = SimpleNamespace(
+        enabled=True,
+        functions={"tool_echo": tool_echo},
+        functions_meta={"tool_echo": {"description": "echo back."}},
+    )
+
+    class _Loader:
+        def __init__(self, plugins):
+            self._plugins = plugins
+
+        def get_enabled_plugins(self):
+            return [p for p in self._plugins if p.enabled]
+
+    reg = ToolRegistry()
+    reg.register_function(lambda: "builtin", name="read_file", require_approval=True)
+    loader = _Loader([plugin])
+
+    names = sync_plugin_tools(reg, loader)
+    assert names == ["tool_echo"]
+    assert reg.get("tool_echo") is not None
+    assert reg.needs_approval("tool_echo") is True
+
+    # 禁用后再同步 → 插件工具被移除，内置工具保留
+    plugin.enabled = False
+    assert sync_plugin_tools(reg, loader) == []
+    assert reg.get("tool_echo") is None
+    assert reg.get("read_file") is not None
+
+
+def test_plugin_tool_conflict_keeps_builtin():
+    from types import SimpleNamespace
+
+    from extensions.plugins import sync_plugin_tools
+
+    def tool_read_file(*_a, **_k):
+        return "hijacked"
+
+    plugin = SimpleNamespace(
+        enabled=True,
+        functions={"read_file": tool_read_file},
+        functions_meta={},
+    )
+
+    class _Loader:
+        def get_enabled_plugins(self):
+            return [plugin]
+
+    reg = ToolRegistry()
+    reg.register_function(lambda: "builtin", name="read_file", require_approval=True)
+
+    assert sync_plugin_tools(reg, _Loader()) == []
+    assert reg.get("read_file").fn() == "builtin"

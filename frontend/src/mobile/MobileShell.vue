@@ -2,7 +2,6 @@
 import { ref, computed, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showConfirmDialog, showToast } from 'vant'
-import { updateSession } from '../api/sessions'
 import { useVectorStore } from '../stores/vectors'
 
 // 7 个移动页改为异步组件：此前静态 import 会把全部移动页（且 MobileChat 静态引入
@@ -10,7 +9,6 @@ import { useVectorStore } from '../stores/vectors'
 // 所有页面代码。改为 defineAsyncComponent 后只有当前路由对应的页面才会被拉取。
 const MobileChat = defineAsyncComponent(() => import('./views/MobileChat.vue'))
 const MobileDocuments = defineAsyncComponent(() => import('./views/MobileDocuments.vue'))
-const MobilePlugins = defineAsyncComponent(() => import('./views/MobilePlugins.vue'))
 const MobileVectors = defineAsyncComponent(() => import('./views/MobileVectors.vue'))
 const MobileGenerated = defineAsyncComponent(() => import('./views/MobileGenerated.vue'))
 const MobileMonitoring = defineAsyncComponent(() => import('./views/MobileMonitoring.vue'))
@@ -23,7 +21,6 @@ const router = useRouter()
 const tabs = [
   { name: 'MultiAgent', path: '/multi-agent', title: '聊天', icon: 'chat-o' },
   { name: 'Documents', path: '/documents', title: '文档', icon: 'description' },
-  { name: 'Plugins', path: '/plugins', title: '插件', icon: 'apps-o' },
   { name: 'Vectors', path: '/vectors', title: '向量库', icon: 'cluster-o' },
 ]
 
@@ -31,7 +28,6 @@ const tabs = [
 const menu = [
   { name: 'MultiAgent', path: '/multi-agent', title: '多智能体', vanIcon: 'chat-o', color: '#6d5ef1', soft: 'rgba(109,94,241,.12)' },
   { name: 'Documents', path: '/documents', title: '文档管理', vanIcon: 'description', color: '#3b82f6', soft: 'rgba(59,130,246,.12)' },
-  { name: 'Plugins', path: '/plugins', title: '插件', vanIcon: 'apps-o', color: '#06b6d4', soft: 'rgba(6,182,212,.12)' },
   { name: 'CustomTools', path: '/custom-tools', title: '自定义工具', vanIcon: 'setting-o', color: '#ec4899', soft: 'rgba(236,72,153,.12)' },
   { name: 'Skills', path: '/skills', title: '技能', vanIcon: 'fire-o', color: '#eab308', soft: 'rgba(234,179,8,.12)' },
   { name: 'Vectors', path: '/vectors', title: '向量库', vanIcon: 'cluster-o', color: '#10b981', soft: 'rgba(16,185,129,.12)' },
@@ -58,7 +54,6 @@ const mobileViews: Record<string, unknown> = {
   MultiAgent: MobileChat,
   MultiAgentConversation: MobileChat,
   Documents: MobileDocuments,
-  Plugins: MobilePlugins,
   Vectors: MobileVectors,
   Generated: MobileGenerated,
   Monitoring: MobileMonitoring,
@@ -67,22 +62,12 @@ const mobileViews: Record<string, unknown> = {
   /* @@CHAT_PANEL_SCRIPT@@ */
   // ── 设置分组（移动端聊天对齐 ChatGPT：头部控件收纳进左侧抽屉） ──
   import { useMultiAgentStore } from '../stores/multiAgent'
-  import { usePermissionStore } from '../stores/permission'
   import { useThemeStore, BG_VARIANTS } from '../stores/theme'
   import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
 
   const agent = useMultiAgentStore()
-  const perm = usePermissionStore()
   const theme = useThemeStore()
   const chatSettings = useChatSettingsStore()
-
-  // 工作目录摘要（过长省略展示）
-  const workspacesText = computed(() => {
-    const list = perm.workspaces
-    if (!list.length) return '未授权，点击刷新'
-    const shown = list.slice(0, 2).join(' · ')
-    return list.length > 2 ? shown + ' 等' + list.length + ' 个' : shown
-  })
 
   // 清空会话：二次确认（3 秒未确认自动复位）
   const clearConfirm = ref(false)
@@ -111,15 +96,11 @@ const mobileViews: Record<string, unknown> = {
       if (err?.message && !String(err.message).includes('cancel')) showToast(err.message || '清空失败')
     }
   }
-  function refreshWorkspaces() {
-    perm.loadWorkspaces()
-  }
   /* @@CHAT_SETTINGS_FORM_SCRIPT@@ */
-  // ── 设置表单：模型 / 向量库 / 工作目录 / 清空会话（弹层表单） ──
+  // ── 设置表单：模型 / 向量库 / 清空会话（弹层表单） ──
   const showSettingsForm = ref(false)
   const showModelPicker = ref(false)
   const formModel = ref(agent.selectedModel)
-  const formDirectory = ref(agent.sessionDirectory)
   const modelColumns = computed(() => agent.modelOptions.map(m => ({ text: m.label, value: m.value })))
   const formModelText = computed(
     () => agent.modelOptions.find(m => m.value === formModel.value)?.label || formModel.value
@@ -127,7 +108,6 @@ const mobileViews: Record<string, unknown> = {
 
   function openSettings() {
     formModel.value = agent.selectedModel
-    formDirectory.value = agent.sessionDirectory
     showSettingsForm.value = true
   }
 
@@ -148,19 +128,9 @@ const mobileViews: Record<string, unknown> = {
     showLangPicker.value = false
   }
 
-  async function saveSettings() {
-    const value = formDirectory.value.trim()
-    try {
-      if (agent.conversationId) {
-        const info = await updateSession(agent.conversationId, { directory: value })
-        agent.setSessionDirectory(info.directory || '')
-      } else {
-        agent.setSessionDirectory(value)
-      }
-      showSettingsForm.value = false
-    } catch (e: any) {
-      showToast(e?.message || '设置工作目录失败')
-    }
+  function saveSettings() {
+    // 工作目录不可修改：会话根固定为后端隔离临时目录，白名单在桌面「用户设置」维护。
+    showSettingsForm.value = false
   }
 const currentView = computed(() => mobileViews[route.name as string] || null)
 </script>
@@ -302,11 +272,6 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
         <div class="form-field form-row">
           <div class="form-label">向量库检索</div>
           <van-switch v-model="agent.useVectorDb" size="22" />
-        </div>
-        <div class="form-field">
-          <div class="form-label">工作目录</div>
-          <van-field v-model="formDirectory" placeholder="如 F:\\tetris" clearable />
-          <div class="form-tip">仅当前会话；留空使用系统临时目录</div>
         </div>
         <van-button type="primary" block round class="form-save" @click="saveSettings">
           保存设置

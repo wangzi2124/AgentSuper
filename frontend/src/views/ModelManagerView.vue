@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useModelManagerStore } from '../stores/modelManager'
 import type { ModelInfo, ProviderInfo } from '../api/models'
+import { validateProviderForm } from '../utils/providerForm'
 
 const mm = useModelManagerStore()
 
@@ -67,35 +68,12 @@ async function saveDefaults() {
 const showProviderForm = ref(false)
 // 正在编辑已有 Provider（而非新增）：此时前缀不可改
 const providerIsEdit = ref(false)
-// 「自定义模型前缀」高级项：默认收起，留空则按 Label / api_base 自动生成
-const providerAdvanced = ref(false)
 const providerForm = reactive<{ name: string; label: string; api_base: string; api_key: string; enabled: boolean; type: 'openai' | 'ollama' }>({
   name: '', label: '', api_base: '', api_key: '', enabled: true, type: 'openai',
 })
 
-// 生成 litellm 前缀的 slug（只保留 ASCII 字母数字，其余折叠为 '-'）
-function _slug(s: string): string {
-  return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-}
-// 前缀留空时的自动推导：优先 Label，其次 api_base 主机名，最后兜底 custom
-function deriveProviderName(): string {
-  const fromLabel = _slug(providerForm.label)
-  if (fromLabel) return fromLabel
-  const raw = providerForm.api_base.trim()
-  if (providerForm.type === 'ollama') {
-    return /localhost|127\.0\.0\.1|\[::1\]/i.test(raw) ? 'ollama-local' : 'ollama-cloud'
-  }
-  try {
-    const u = new URL(/^https?:\/\//i.test(raw) ? raw : `http://${raw}`)
-    const host = _slug((u.hostname || '').replace(/\./g, '-'))
-    if (host) return `prov-${host}${u.port ? '-' + u.port : ''}`
-  } catch { /* 解析失败按兜底 */ }
-  return 'custom'
-}
-
 function openProviderForm(p?: ProviderInfo) {
   providerIsEdit.value = !!p
-  providerAdvanced.value = !!p // 编辑时始终展示前缀（只读），便于看到模型 id 的前半段
   providerForm.name = p?.provider || ''
   providerForm.label = p?.label || ''
   providerForm.api_base = p?.api_base || ''
@@ -113,25 +91,19 @@ async function submitProvider() {
     mm.setError('请填写 api_base（OpenAI 兼容服务地址，如 http://127.0.0.1:8001/v1）')
     return
   }
-  // 新增时前缀留空 → 自动生成；编辑时不可改
-  const name = (providerIsEdit.value
-    ? providerForm.name
-    : (providerForm.name.trim() || deriveProviderName())).trim()
-  if (!name) {
-    mm.setError('无法自动生成前缀，请展开「高级：自定义模型前缀」填写（如 vllm）')
+  // Label 与模型前缀都必填、互不推导（规则见 utils/providerForm.ts）
+  const validated = validateProviderForm(
+    { label: providerForm.label, name: providerForm.name, type: providerForm.type },
+    providerIsEdit.value,
+  )
+  if (!validated.ok) {
+    mm.setError(validated.error || 'Provider 表单校验失败')
     return
   }
-  if (name.includes('/')) {
-    // Provider 名称是 litellm 前缀，不含 '/'；模型 id 形如 deepseek/deepseek-v4-flash
-    mm.setError(`Provider 名称不能包含「/」，请只填前缀（如想让「deepseek/deepseek-v4-flash」可用，名称填 deepseek）`)
-    return
-  }
+  providerForm.label = validated.label
+  providerForm.name = validated.name
   // 仅在保存成功时关闭弹窗：失败时保留用户输入，否则错误 toast 容易被错过
-  if (providerForm.type === 'ollama' && (name === 'ollama' || name === 'ollama_chat')) {
-    mm.setError('Ollama 类型不能使用保留前缀 ollama / ollama_chat，请改用 ollama-cloud 或 ollama-local')
-    return
-  }
-  const ok = await mm.updateProvider(name, { label: providerForm.label, api_base: providerForm.api_base, api_key: providerForm.api_key, enabled: providerForm.enabled, type: providerForm.type })
+  const ok = await mm.updateProvider(validated.name, { label: validated.label, api_base: providerForm.api_base, api_key: providerForm.api_key, enabled: providerForm.enabled, type: providerForm.type })
   if (ok) showProviderForm.value = false
 }
 async function toggleProvider(p: ProviderInfo) {
@@ -373,10 +345,22 @@ function capOf(m: ModelInfo) {
     <div class="dialog">
       <div class="form-title">{{ providerIsEdit ? '编辑 Provider' : '新增 Provider' }}</div>
       <div class="form-row">
-        <label class="mm-field mm-wide"><span>Label</span>
-          <input v-model="providerForm.label" class="ctrl" placeholder="本地 vLLM" />
+        <label class="mm-field mm-wide"><span>Label（显示名称）</span>
+          <input v-model="providerForm.label" class="ctrl" placeholder="本地 vLLM" maxlength="50" />
         </label>
       </div>
+      <div class="form-row">
+        <label class="mm-field mm-wide">
+          <span>模型前缀（litellm）<template v-if="providerIsEdit"> — 不可修改</template></span>
+          <input
+            v-model="providerForm.name"
+            class="ctrl"
+            placeholder="如 vllm / ollama-cloud / my_provider"
+            :disabled="providerIsEdit"
+          />
+        </label>
+      </div>
+      <p class="hint provider-prefix-hint">模型 id = <code>前缀/模型名</code>，前缀决定模型列表里的 id（如 <code>vllm/deepseek-r1:latest</code>）。前缀只能包含小写字母、数字、<code>_</code>、<code>-</code>。</p>
       <div class="form-row">
         <label class="mm-field mm-wide"><span>接口类型</span>
           <select v-model="providerForm.type" class="ctrl">
@@ -389,19 +373,6 @@ function capOf(m: ModelInfo) {
         Ollama 类型会用 <code>/api/tags</code> 自动探测模型，并通过原生 <code>/api/chat</code> 调用。
         云端填 <code>https://ollama.com</code> + API Key；本地填 <code>http://localhost:11434</code>（key 可留空）。
       </p>
-      <div class="form-row" v-if="providerIsEdit || providerAdvanced">
-        <label class="mm-field mm-wide">
-          <span>模型前缀（litellm）<template v-if="providerIsEdit"> — 不可修改</template></span>
-          <input v-model="providerForm.name" class="ctrl" :placeholder="deriveProviderName()" :disabled="providerIsEdit" />
-        </label>
-      </div>
-      <div class="form-row" v-if="!providerIsEdit">
-        <button type="button" class="mm-adv-toggle" @click="providerAdvanced = !providerAdvanced">
-          {{ providerAdvanced ? '收起自定义前缀' : '高级：自定义模型前缀' }}
-          <span class="mm-adv-current" v-if="!providerAdvanced">（当前：{{ deriveProviderName() }}）</span>
-        </button>
-      </div>
-      <p class="hint provider-prefix-hint">模型 id = <code>前缀/模型名</code>，前缀决定模型列表里的 id（如 <code>vllm/deepseek-r1:latest</code>）。留空自动按 Label / 服务地址生成，一般无需修改。</p>
       <div class="form-row">
         <label class="mm-field mm-wide"><span>api_base（OpenAI 兼容）</span>
           <input v-model="providerForm.api_base" class="ctrl" :placeholder="providerForm.type === 'ollama' ? 'https://ollama.com 或 http://localhost:11434' : 'http://127.0.0.1:8001/v1'" />
@@ -515,18 +486,6 @@ function capOf(m: ModelInfo) {
 .mm-field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 180px; }
 .mm-field > span { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
 .mm-field.mm-wide { flex: 2; }
-.mm-adv-toggle {
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--primary);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  text-align: left;
-}
-.mm-adv-toggle:hover { text-decoration: underline; }
-.mm-adv-current { color: var(--text-secondary); font-weight: 400; }
 .provider-prefix-hint { margin: 0 0 2px; }
 
 /* ── 默认/轻量模型选择：与聊天框模型胶囊同款样式（横向排列） ── */

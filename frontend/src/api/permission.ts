@@ -13,12 +13,12 @@ export async function fetchPendingRequests(): Promise<{ pending: Array<{
   return res.json()
 }
 
-// 回复权限请求（允许/拒绝），可记住决策
-export async function respondToRequest(requestId: string, decision: string, remember: boolean = false): Promise<void> {
+// 回复权限请求（允许/拒绝）—— 仅本回合有效，不提供「记住」
+export async function respondToRequest(requestId: string, decision: string): Promise<void> {
   const res = await fetch(BASE + '/request/' + encodeURIComponent(requestId) + '/respond', {
     method: 'POST',
     headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ decision, remember }),
+    body: JSON.stringify({ decision }),
   })
   if (!res.ok) {
     const err = await res.text()
@@ -26,7 +26,7 @@ export async function respondToRequest(requestId: string, decision: string, reme
   }
 }
 
-// 获取所有可写工作区（主工作区 + 额外工作区）
+// 获取「工作目录白名单」：仅用户添加的免审目录
 export async function fetchWorkspaces(): Promise<{ workspaces: string[] }> {
   const res = await fetch(BASE + '/workspaces', { headers: await addAuthHeaders() })
   if (!res.ok) throw new Error('Failed to fetch workspaces')
@@ -45,12 +45,12 @@ export async function browseDirectories(path: string): Promise<{
   return res.json()
 }
 
-// 运行时新增可写工作区（免重启生效）
-export async function addWorkspace(path: string): Promise<{ status: string; path: string; workspaces: string[] }> {
+// 添加白名单目录（create=true 时由后端创建缺失目录）
+export async function addWorkspace(path: string, create = false): Promise<{ status: string; path: string; workspaces: string[] }> {
   const res = await fetch(BASE + '/workspaces', {
     method: 'POST',
     headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path, create }),
   })
   if (!res.ok) {
     const err = await res.text()
@@ -59,7 +59,7 @@ export async function addWorkspace(path: string): Promise<{ status: string; path
   return res.json()
 }
 
-// 运行时移除可写工作区
+// 移除白名单目录
 export async function removeWorkspace(path: string): Promise<{ status: string; workspaces: string[] }> {
   const res = await fetch(BASE + '/workspaces?path=' + encodeURIComponent(path), {
     method: 'DELETE',

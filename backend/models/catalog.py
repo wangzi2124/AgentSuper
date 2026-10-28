@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -26,6 +27,11 @@ from typing import Any, Optional
 
 from models.builtin_catalog import BUILTIN_CATALOG as _BUILTIN_CATALOG  # noqa: F841 — 供 build_catalog 回退
 from models.builtin_catalog import ZERO_COST as _ZERO_COST            # noqa: F841 — 供 probes / upsert / get_catalog 默认填充
+
+# Provider（litellm 前缀）命名规则：小写字母/数字开头，允许 `_`/`-`。
+# 与前端 `utils/providerForm.ts` 保持一致；存量 provider 不做回溯校验。
+_PROVIDER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_PROVIDER_LABEL_MAX_LEN = 50
 
 
 def catalog_path() -> Path:
@@ -630,14 +636,34 @@ def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
     - `openai`（默认）：`{name}/{model}` 直接交给 litellm，按 OpenAI 兼容服务处理；
     - `ollama`：使用 Ollama 原生 `/api/chat`，模型 id 仍为 `{name}/{model}`，
       调用时映射为 `ollama_chat/{model}`，并支持 `/api/tags` 自动探测模型。
+
+    校验（与前端一致，防绕过）：
+    - 新增 provider 的 name（litellm 前缀）必须匹配 `^[a-z0-9][a-z0-9_-]*$`；
+      已有 provider 保留原名（兼容历史条目），不再校验字符集。
+    - label 为人类可读名称，必填（trim 后非空、≤ 50 字符）。
     """
     cfg = load_config()
     providers = dict(cfg.get("providers") or {})
+    name = str(name or "").strip()
+    is_new = name not in providers
+    if is_new:
+        if not name:
+            raise ValueError("Provider 名称（模型前缀）不能为空")
+        if not _PROVIDER_NAME_RE.fullmatch(name):
+            raise ValueError(
+                "Provider 名称（模型前缀）只能包含小写字母、数字、下划线和连字符，"
+                "且必须以字母或数字开头（如 vllm / ollama-cloud / my_provider）"
+            )
     entry = dict(providers.get(name) or {})
     for k in ("label", "api_base", "api_key", "enabled", "type"):
         if k in data and data[k] is not None:
             entry[k] = data[k]
-    entry.setdefault("label", name)
+    label = str(entry.get("label") or "").strip()
+    if not label:
+        raise ValueError("Provider Label（显示名称）不能为空")
+    if len(label) > _PROVIDER_LABEL_MAX_LEN:
+        raise ValueError(f"Provider Label 最长 {_PROVIDER_LABEL_MAX_LEN} 个字符")
+    entry["label"] = label
     entry.setdefault("api_key", "")
     entry.setdefault("enabled", True)
     entry.setdefault("api_base", "")

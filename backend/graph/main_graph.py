@@ -76,6 +76,13 @@ def default_registry(
     from execution.tools.file_tools import register_file_tools
 
     register_file_tools(registry, vfs, scope=DEFAULT_TOOL_SCOPE)
+    # 内置联网 / 天气能力（原 http-client / internet-search / weather 插件转为内置）：
+    # web_search、web_fetch 只读放行；http_request 需审批；get_weather 只读放行。
+    from execution.tools.weather_tools import register_weather_tools
+    from execution.tools.web_tools import register_web_tools
+
+    register_web_tools(registry)
+    register_weather_tools(registry)
     if with_shell:
         registry.register_function(
             shell_exec,

@@ -21,10 +21,7 @@ from pydantic import BaseModel
 
 from ..deps import (
     PlatformContext,
-    cleanup_auto_session_directory,
-    default_session_directory,
     get_context,
-    normalize_session_directory,
 )
 from ..image_processor import enrich_image_files
 
@@ -37,7 +34,6 @@ def _uid(x_user_id: str | None) -> str:
 
 class SessionCreate(BaseModel):
     title: str = ""
-    directory: str | None = None
     kind: str = "multi-agent"
     model: str | None = None
 
@@ -47,7 +43,6 @@ class SessionUpdate(BaseModel):
     archived: int | None = None
     agent: str | None = None
     model: dict | None = None
-    directory: str | None = None
 
 
 class PromptEnqueue(BaseModel):
@@ -71,7 +66,7 @@ async def create_session(
 ) -> dict:
     try:
         sess = ctx.sessions.create(
-            title=body.title, directory=body.directory, user_id=_uid(x_user_id),
+            title=body.title, user_id=_uid(x_user_id),
             kind=body.kind, model=body.model,
         )
     except ValueError as exc:
@@ -106,22 +101,13 @@ async def get_session(session_id: str, ctx: PlatformContext = Depends(get_contex
 async def update_session(
     session_id: str, body: SessionUpdate, ctx: PlatformContext = Depends(get_context)
 ) -> dict:
+    """更新会话元数据。
+
+    工作目录不可修改：免审范围只有「默认临时目录 + 内部数据目录 + 白名单」，
+    会话根固定为 `%TEMP%/agentsuper/<session_id>`（见 AGENTS.md §10）。
+    """
     sess = _must_get(ctx, session_id)
     fields: dict[str, Any] = {}
-    old_directory: str | None = None
-    new_directory: str | None = None
-    if "directory" in body.model_fields_set:
-        if ctx.is_running(session_id) or sess.status == "running":
-            raise HTTPException(status_code=409, detail="会话运行中，不能修改工作目录")
-        try:
-            new_directory = normalize_session_directory(body.directory)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if new_directory is None:
-            new_directory = default_session_directory(session_id)
-        if new_directory != sess.directory:
-            old_directory = sess.directory
-            fields["directory"] = new_directory
     if body.title is not None:
         fields["title"] = body.title
     if body.model is not None:
@@ -135,8 +121,6 @@ async def update_session(
                 raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     sess = ctx.sessions.update(session_id, **fields) if fields else ctx.sessions.get(session_id)
     assert sess is not None
-    if old_directory is not None and new_directory is not None:
-        cleanup_auto_session_directory(session_id, old_directory)
     return sess.to_session_info()
 
 

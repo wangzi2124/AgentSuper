@@ -1,40 +1,25 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
-import { updateSession } from '../api/sessions'
+import { usePermissionStore } from '../stores/permission'
 import DirPickerModal from './DirPickerModal.vue'
-import WeatherAlert from './WeatherAlert.vue'
 
 const emit = defineEmits<{ close: [] }>()
 
 const agent = useMultiAgentStore()
 const chatSettings = useChatSettingsStore()
+const perm = usePermissionStore()
 
-const wsInput = ref(agent.sessionDirectory || '')
+const wsInput = ref('')
 const wsBusy = ref(false)
 const wsError = ref('')
 const showDirPicker = ref(false)
-const isWeatherEnabled = ref(false)
-const showWeather = ref(false)
 
 const messages = computed(() => agent.messages)
 const autoRead = computed(() => chatSettings.autoRead)
 
-async function checkWeatherPlugin() {
-  try {
-    const { addAuthHeaders } = await import('../api/fetch')
-    const response = await fetch('/api/plugins/weather-alert/status', { headers: await addAuthHeaders() })
-    if (response.ok) {
-      const data = await response.json()
-      isWeatherEnabled.value = data.enabled
-    }
-  } catch (e) {
-    console.error('Failed to check weather plugin status:', e)
-  }
-}
-
-async function applyDirectory() {
+async function addWhitelist(create = false) {
   const path = wsInput.value.trim()
   if (!path) {
     wsError.value = '请输入已存在的绝对路径'
@@ -43,33 +28,31 @@ async function applyDirectory() {
   wsBusy.value = true
   wsError.value = ''
   try {
-    if (agent.conversationId) {
-      const info = await updateSession(agent.conversationId, { directory: path })
-      agent.setSessionDirectory(info.directory || path)
-    } else {
-      agent.setSessionDirectory(path)
-    }
-    wsInput.value = agent.sessionDirectory
+    await perm.addWorkspace(path, create)
+    wsInput.value = ''
   } catch (e: any) {
-    wsError.value = e?.message || '设置工作目录失败'
+    const msg = String(e?.message || '添加目录失败')
+    if (!create && msg.includes('directory_not_found')) {
+      if (confirm(`目录不存在：\n${path}\n\n是否创建该目录并加入白名单？`)) {
+        await addWhitelist(true)
+        return
+      }
+      wsError.value = '目录不存在'
+    } else {
+      wsError.value = msg.replace(/^Add workspace error:\s*/, '')
+    }
   } finally {
     wsBusy.value = false
   }
 }
 
-async function resetDirectory() {
+async function removeWhitelist(path: string) {
   wsBusy.value = true
   wsError.value = ''
   try {
-    if (agent.conversationId) {
-      const info = await updateSession(agent.conversationId, { directory: '' })
-      agent.setSessionDirectory(info.directory || '')
-    } else {
-      agent.setSessionDirectory('')
-    }
-    wsInput.value = agent.sessionDirectory
+    await perm.removeWorkspace(path)
   } catch (e: any) {
-    wsError.value = e?.message || '恢复默认目录失败'
+    wsError.value = e?.message || '移除目录失败'
   } finally {
     wsBusy.value = false
   }
@@ -88,29 +71,34 @@ function handleClearConversation() {
 }
 
 onMounted(() => {
-  wsInput.value = agent.sessionDirectory || ''
-  checkWeatherPlugin()
+  perm.loadWorkspaces()
 })
 </script>
 
 <template>
   <div class="settings-panel">
-    <!-- 当前会话工作目录：留空恢复系统临时目录 -->
+    <!-- 工作目录白名单：用户手动授权、全局免审的额外目录 -->
     <div class="drawer-section">
-      <div class="drawer-label">会话工作目录</div>
+      <div class="drawer-label">工作目录白名单</div>
       <div class="ws-row">
         <button class="ws-pick-btn" title="选择目录" @click="showDirPicker = true">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         </button>
-        <input v-model="wsInput" class="ws-input" placeholder="选择目录或留空使用系统临时目录" @keyup.enter="applyDirectory" />
-        <button class="ws-add" :disabled="wsBusy" @click="applyDirectory">
-          {{ wsBusy ? '应用中...' : '应用' }}
+        <input v-model="wsInput" class="ws-input" placeholder="选择或输入绝对路径" @keyup.enter="addWhitelist()" />
+        <button class="ws-add" :disabled="wsBusy" @click="addWhitelist()">
+          {{ wsBusy ? '处理中...' : '添加' }}
         </button>
-        <button class="ws-add" :disabled="wsBusy" @click="resetDirectory">恢复默认</button>
       </div>
       <p v-if="wsError" class="ws-error">{{ wsError }}</p>
-      <p v-if="agent.sessionDirectory" class="drawer-session-dir" :title="agent.sessionDirectory">当前：{{ agent.sessionDirectory }}</p>
-      <p v-else class="ws-empty">默认使用系统临时目录下的独立会话目录；仅当前会话生效。</p>
+      <ul v-if="perm.workspaces.length" class="ws-list">
+        <li v-for="w in perm.workspaces" :key="w" class="ws-item">
+          <span class="ws-dot"></span>
+          <span class="ws-path" :title="w">{{ w }}</span>
+          <button class="ws-remove" :disabled="wsBusy" title="移出白名单" @click="removeWhitelist(w)">×</button>
+        </li>
+      </ul>
+      <p v-else class="ws-empty">尚未添加目录；当前仅默认临时目录与程序内部数据目录免审。</p>
+      <p class="ws-empty">白名单内目录免人工审批；其余路径一律询问。改动下一回合生效。</p>
     </div>
 
 
@@ -139,16 +127,6 @@ onMounted(() => {
       </div>
     </div>
 
-    <!-- 辅助工具 -->
-    <div v-if="isWeatherEnabled" class="drawer-section">
-      <div class="drawer-label">辅助工具</div>
-      <button class="drawer-row-btn" @click="showWeather = true">
-        <span class="drawer-row-icon">🌤️</span>
-        <span class="drawer-row-text">天气预警</span>
-        <span class="drawer-row-chevron">›</span>
-      </button>
-    </div>
-
     <!-- 危险操作 -->
     <div class="drawer-section">
       <button
@@ -162,7 +140,6 @@ onMounted(() => {
     </div>
 
     <DirPickerModal :show="showDirPicker" @close="showDirPicker = false" @select="handleDirPick" />
-    <WeatherAlert v-if="isWeatherEnabled" :show="showWeather" @update:show="showWeather = $event" />
   </div>
 </template>
 

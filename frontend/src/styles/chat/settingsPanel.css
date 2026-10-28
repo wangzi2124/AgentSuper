@@ -1,4 +1,4 @@
-/* [用户设置] 面板：会话工作目录 / 选项 / 辅助工具 / 危险操作（从聊天设置抽屉迁移） */
+/* [用户设置] 面板：工作目录白名单 / 选项 / 辅助工具 / 危险操作（从聊天设置抽屉迁移） */
 .settings-panel { display: flex; flex-direction: column; gap: 18px; }
 .drawer-section { display: flex; flex-direction: column; gap: 8px; }
 .drawer-label {

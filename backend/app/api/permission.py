@@ -21,12 +21,12 @@ router = APIRouter()
 class RespondRequest(BaseModel):
     """权限响应请求模型。"""
     decision: str  # "allowed" | "denied"
-    remember: bool = False
 
 
 class WorkspaceRequest(BaseModel):
-    """新增工作区请求模型。"""
+    """新增白名单目录请求模型。"""
     path: str
+    create: bool = False
 
 
 def _rebuild_agent_prompt(request: Request):
@@ -78,7 +78,7 @@ async def respond(request_id: str, body: RespondRequest, request: Request):
     """响应指定的权限请求，允许或拒绝操作。"""
     require_admin(request)
     mgr = get_manager()
-    ok = mgr.respond(request_id, body.decision, remember=body.remember)
+    ok = mgr.respond(request_id, body.decision)
     if not ok:
         raise HTTPException(status_code=404, detail="Request not found or already responded")
     return {"status": "ok"}
@@ -131,36 +131,37 @@ async def browse_dirs(request: Request, path: str = ""):
 
 @router.get("/permission/workspaces", tags=["Permission"])
 async def list_workspaces():
-    """获取当前所有可写工作区（主工作区 + 额外工作区）。"""
+    """获取「工作目录白名单」：仅用户添加的免审目录（不含程序主工作区）。"""
     mgr = get_manager()
-    return {"workspaces": mgr.list_workspaces()}
+    return {"workspaces": mgr.list_extra_workspaces()}
 
 
 @router.post("/permission/workspaces", tags=["Permission"])
 async def add_workspace(body: WorkspaceRequest, request: Request):
-    """运行时新增可写工作区（免重启生效），并热更新 Agent 提示词。"""
+    """添加白名单目录（免重启生效）。
+
+    `create=false` 且目录不存在 → 404 `directory_not_found`，前端确认后可带
+    `create=true` 重试；目录必须可读取执行。
+    """
     require_admin(request)
-    raw = (body.path or "").strip().strip('"').strip("'")
-    if not raw:
-        raise HTTPException(status_code=400, detail="path is required")
-    if not Path(raw).is_absolute():
-        raise HTTPException(status_code=400, detail="path must be an absolute path, e.g. F:\\tetris")
     mgr = get_manager()
     try:
-        resolved = mgr.add_workspace(raw)
+        resolved = mgr.add_workspace(body.path, create=body.create)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="directory_not_found") from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     _rebuild_agent_prompt(request)
-    return {"status": "ok", "path": str(resolved), "workspaces": mgr.list_workspaces()}
+    return {"status": "ok", "path": str(resolved), "workspaces": mgr.list_extra_workspaces()}
 
 
 @router.delete("/permission/workspaces", tags=["Permission"])
 async def remove_workspace(request: Request, path: str):
-    """运行时移除可写工作区，并热更新 Agent 提示词。"""
+    """移除白名单目录，并热更新 Agent 提示词。"""
     require_admin(request)
     mgr = get_manager()
     ok = mgr.remove_workspace(path)
     if not ok:
         raise HTTPException(status_code=404, detail="Workspace not found")
     _rebuild_agent_prompt(request)
-    return {"status": "ok", "workspaces": mgr.list_workspaces()}
+    return {"status": "ok", "workspaces": mgr.list_extra_workspaces()}

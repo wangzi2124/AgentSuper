@@ -9,11 +9,13 @@ const mocks = vi.hoisted(() => ({
   sendStream: vi.fn(),
   restoreSnapshot: vi.fn(),
   getConversation: vi.fn(),
+  getSessionMessages: vi.fn(),
   listConversations: vi.fn(),
   revertSession: vi.fn(),
   interruptSession: vi.fn(),
   deleteSessionMessage: vi.fn(),
   deleteConversation: vi.fn(),
+  updateSession: vi.fn(),
   saveCache: vi.fn(),
   loadCache: vi.fn(),
   deleteCache: vi.fn(),
@@ -34,12 +36,13 @@ vi.mock('@/api/multiAgent', () => ({
 vi.mock('@/api/sessions', () => ({
   listConversations: mocks.listConversations,
   getConversation: mocks.getConversation,
+  getSessionMessages: mocks.getSessionMessages,
   renameConversation: vi.fn(),
   deleteConversation: mocks.deleteConversation,
   interruptSession: mocks.interruptSession,
   revertSession: mocks.revertSession,
   deleteSessionMessage: mocks.deleteSessionMessage,
-  updateSession: vi.fn(),
+  updateSession: mocks.updateSession,
   forkSession: mocks.forkSession,
   compactSession: mocks.compactSession,
   getSessionStatus: mocks.getSessionStatus,
@@ -71,7 +74,10 @@ beforeEach(() => {
   mocks.sendStream.mockReset()
   mocks.restoreSnapshot.mockReset()
   mocks.getConversation.mockReset()
+  mocks.getSessionMessages.mockReset()
   mocks.revertSession.mockReset()
+  mocks.updateSession.mockReset()
+  mocks.updateSession.mockResolvedValue({})
   mocks.interruptSession.mockReset()
   mocks.interruptSession.mockResolvedValue(undefined)
   mocks.deleteSessionMessage.mockReset()
@@ -282,7 +288,8 @@ describe('撤销 / 删除', () => {
     }
     await store.undoMessage(2)
     expect(store.messages.map(m => m.id)).toEqual(['m0', 'm1'])
-    expect(mocks.revertSession).toHaveBeenCalledWith('c1', 'm1')
+    // 后端 revert 语义 = 隐藏该消息及其之后 → 传撤销点本身（m2），不是 m1
+    expect(mocks.revertSession).toHaveBeenCalledWith('c1', 'm2')
     expect(mocks.saveCache).toHaveBeenCalled()
   })
 
@@ -305,7 +312,82 @@ describe('撤销 / 删除', () => {
     expect(store.sessions['s1'].streamPhase).toBe('idle')
     expect(store.sessions['s1'].loading).toBe(false)
     expect(store.sessions['s1'].abortController).toBeNull()
-    expect(mocks.revertSession).toHaveBeenCalledWith('c1', 'm0')
+    expect(store.sessions['s1'].messages.map(m => m.id)).toEqual(['m0'])
+    expect(mocks.revertSession).toHaveBeenCalledWith('c1', 'm1')
+  })
+
+  it('切换模型只按服务端前后对比，不被本地脏消息误判回滚', async () => {
+    const store = useMultiAgentStore()
+    mocks.fetchModels.mockResolvedValue({
+      models: [
+        { id: 'deepseek/deepseek-v4-flash', name: 'Flash', description: '', provider: 'deepseek' },
+        { id: 'deepseek/deepseek-v4-pro', name: 'Pro', description: '', provider: 'deepseek' },
+      ],
+      default_model: 'deepseek/deepseek-v4-flash',
+      small_model: null,
+      image_caption_model: null,
+      voice_model_size: null,
+    })
+    await store.loadModels()
+    store.activeSessionId = 's1'
+    store.selectedModel = 'deepseek/deepseek-v4-flash'
+    store.sessions['s1'] = {
+      // 本地缓存里有一条服务端已撤销的脏消息
+      messages: [
+        { id: 'stale', role: 'assistant', content: '已被服务端撤销', agents: [], timestamp: new Date() },
+      ],
+      conversationId: 'c1', conversationTitle: '', loading: false, abortController: null,
+      streamPhase: 'idle', queuePosition: null,
+    }
+    const serverMsgs = [
+      { id: 'm0', session_id: 'c1', type: 'user', content: 'hi', data: {}, seq: 1, time_created: 0 },
+      { id: 'm1', session_id: 'c1', type: 'assistant', content: 'hello', data: {}, seq: 2, time_created: 0 },
+    ]
+    mocks.getSessionMessages.mockResolvedValue(serverMsgs)
+    mocks.listConversations.mockResolvedValue([])
+
+    const ok = await store.persistSelectedModel('deepseek/deepseek-v4-pro')
+    expect(ok).toBe(true)
+    expect(store.selectedModel).toBe('deepseek/deepseek-v4-pro')
+    // 只有一次 PATCH（切换），没有回滚
+    expect(mocks.updateSession).toHaveBeenCalledTimes(1)
+    expect(mocks.updateSession).toHaveBeenCalledWith('c1', {
+      model: { id: 'deepseek/deepseek-v4-pro', providerID: 'deepseek' },
+    })
+  })
+
+  it('切换模型时服务端真的丢消息才回滚', async () => {
+    const store = useMultiAgentStore()
+    mocks.fetchModels.mockResolvedValue({
+      models: [
+        { id: 'deepseek/deepseek-v4-flash', name: 'Flash', description: '', provider: 'deepseek' },
+        { id: 'deepseek/deepseek-v4-pro', name: 'Pro', description: '', provider: 'deepseek' },
+      ],
+      default_model: 'deepseek/deepseek-v4-flash',
+      small_model: null,
+      image_caption_model: null,
+      voice_model_size: null,
+    })
+    await store.loadModels()
+    store.activeSessionId = 's1'
+    store.selectedModel = 'deepseek/deepseek-v4-flash'
+    store.sessions['s1'] = {
+      messages: [], conversationId: 'c1', conversationTitle: '', loading: false,
+      abortController: null, streamPhase: 'idle', queuePosition: null,
+    }
+    const before = [
+      { id: 'm0', session_id: 'c1', type: 'user', content: 'hi', data: {}, seq: 1, time_created: 0 },
+      { id: 'm1', session_id: 'c1', type: 'assistant', content: 'hello', data: {}, seq: 2, time_created: 0 },
+    ]
+    mocks.getSessionMessages
+      .mockResolvedValueOnce(before)
+      .mockResolvedValueOnce([before[0]])
+
+    const ok = await store.persistSelectedModel('deepseek/deepseek-v4-pro')
+    expect(ok).toBe(false)
+    expect(store.selectedModel).toBe('deepseek/deepseek-v4-flash')
+    // 切换 + 回滚
+    expect(mocks.updateSession).toHaveBeenCalledTimes(2)
   })
 
   it('deleteMessage 过滤 + 同步后端', async () => {
@@ -326,7 +408,7 @@ describe('撤销 / 删除', () => {
 })
 
 describe('会话加载', () => {
-  it('loadConversation 在线以服务器为唯一真相源（不合并缓存）+ 同步工作目录', async () => {
+  it('loadConversation 在线以服务器为唯一真相源（不合并缓存）+ 不暴露可写目录', async () => {
     mocks.getConversation.mockResolvedValue({
       id: 'c1', title: '标题', directory: '/work',
       messages: [{
@@ -341,7 +423,8 @@ describe('会话加载', () => {
     const store = useMultiAgentStore()
     await store.loadConversation('c1')
     expect(store.activeSessionId).toBe('c1')
-    expect(store.sessionDirectory).toBe('/work')
+    // 会话工作目录不可前端切换（白名单在用户设置维护）
+    expect((store as any).sessionDirectory).toBeUndefined()
     // 服务器为准：缓存里的 local 不再出现
     expect(store.messages.map(m => m.id)).toEqual(['m0'])
     // 历史回放也携带 files_changed（assistant 消息 data.files_changed）
@@ -420,14 +503,13 @@ describe('[撤回改动] restoreSnapshot store 方法', () => {
 })
 
 describe('send 请求载荷（对齐后端 ChatRequest）', () => {
-  it('use_vector_db / directory / agent_mode / files / voice / client_msg_id 一并透传', async () => {
+  it('use_vector_db / agent_mode / files / voice / client_msg_id 一并透传（不再携带 directory）', async () => {
     mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
       onEvent(ev({ type: 'done', conversation_id: 'server-1', answer: 'ok' }))
     })
     const store = useMultiAgentStore()
     store.useVectorDb = true
     store.agentMode = 'plan'
-    store.setSessionDirectory('E:/proj')
     const file: FileContent = { filename: 'a.pdf', data: 'base64', mime_type: 'application/pdf' }
     const voice: VoiceMessageData = { id: 'v1', url: '/audio/1.wav', duration: 2, waveform: [] }
     await store.send('做一个实施方案', undefined, [file], voice)
@@ -435,7 +517,7 @@ describe('send 请求载荷（对齐后端 ChatRequest）', () => {
     expect(req.message).toBe('做一个实施方案')
     expect(req.conversation_id).toBeUndefined() // 新会话首条
     expect(req.use_vector_db).toBe(true)
-    expect(req.directory).toBe('E:/proj')
+    expect('directory' in req).toBe(false)
     expect(req.agent_mode).toBe('plan')
     expect(req.client_msg_id).toBeTruthy() // 幂等 id 一定生成
     expect(req.files).toEqual([file])

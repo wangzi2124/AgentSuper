@@ -114,11 +114,11 @@ def _do_init(app):
     if _seeded:
         logger.info("Seeded bundled skills: %s", ", ".join(_seeded[:10]) + ("…" if len(_seeded) > 10 else ""))
 
-    # 可写工作目录完全由前端「工作目录」面板配置（持久化于 data/runtime_workspaces.json），
-    # 不再支持 .env 的 EXTRA_WORKSPACES。
-    # 文件工具的相对路径基准 = 项目 worktree（git 仓库根，见 app/tools/file_tools.py `_workspace()`）；
-    # 源码保护（app/plugins/skills/config/main.py 等）仍以 backend/ 为基准判定，
-    # 权限层通过 project_worktree 将仓库根下路径识别为 workspace。
+    # 免审目录只有三类：会话默认临时目录、程序内部数据目录、用户「工作目录白名单」
+    # （持久化于 data/runtime_workspaces.json，前端「用户设置」维护）。
+    # 文件工具的相对路径基准 = 项目 worktree（git 仓库根）；
+    # 源码保护（app/plugins/skills/config/main.py 等）仍以 backend/ 为基准判定。⚠️ 仓库根
+    # 不再自动免审，且白名单也压不过源码保护（写源码仍需逐次审批）。
 
     # ── opencode 风格文件系统:项目模型 + 分层存储 + 目录扫描缓存 ──
     # 项目:优先 git rev-parse 定位 worktree,ID 取 git 根哈希(持久化到 .git/opencode)

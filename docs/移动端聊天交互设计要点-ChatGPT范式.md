@@ -118,7 +118,7 @@
 | `.chat-header` | `.model-selector` 模型选择 | 抽屉「设置」分组模型胶囊 | `agent.selectedModel`（Pinia，`multiAgent.ts` L46 已放宽为 `ref<string>`） |
 | `.chat-header` | `.toggle` 向量库检索 | 抽屉「设置」分组开关 | `agent.useVectorDb`（Pinia ref） |
 | `.chat-header` | `.weather-alert-container` 天气预警 | 移动端纯隐藏（组件内 ref `isWeatherEnabled` 无法跨组件共享；插件页可管理） | — |
-| `.chat-header` | `.ws-manager` 工作目录 | 抽屉「设置」分组只读摘要 | `perm.workspaces` / `perm.loadWorkspaces()`（permission store） |
+| `.chat-header` | `.ws-manager` 工作目录 | 已移除（2026-10-27）：会话根固定为后端临时目录；白名单改在桌面「用户设置 → 工作目录白名单」维护 | — |
 | `.chat-footer` | `.btn-danger` 清空会话 | 抽屉「设置」分组清空按钮（二次确认） | `agent.deleteConversation()`（action） |
 
 ### 5.2 交互规范
@@ -128,7 +128,7 @@
 | **入口** | 顶部 NavBar 汉堡 → 左侧抽屉 → 「设置」分组（不新增入口，不侵入聊天框） |
 | **模型选择** | 胶囊式选项（复用 `SUPPORTED_MODELS`，`../config/models` 同源），选中即写 `agent.selectedModel`，即时生效 |
 | **向量库开关** | Vant Switch 视觉，切换即写 `agent.useVectorDb`，即时生效 |
-| **工作目录** | 只读摘要（前 2 个 + 计数省略），点击可刷新 `perm.loadWorkspaces()`；本轮不做增删 UI（缩 scope） |
+| **工作目录** | 已移除（2026-10-27）：移动端不再提供目录输入/摘要；免审目录统一在桌面「用户设置 → 工作目录白名单」维护 |
 | **清空会话** | 红色按钮 + 二次确认（3 秒未确认自动复位），确认后调 `agent.deleteConversation()` |
 | **视觉** | 复用现有 `.drawer-item` / `.drawer-group-label` scoped 样式，分组标题「设置」与「功能导航」同级 |
 

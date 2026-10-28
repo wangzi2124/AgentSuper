@@ -230,8 +230,9 @@ class Settings(BaseSettings):
     ]
 
     # ── 权限 / 工作区（对齐 opencode external_directory 设计）──
-    # 可写工作目录由前端「工作目录」面板配置（运行时生效，持久化到 data/runtime_workspaces.json）。
-    # external 路径（工作区/临时目录之外）的默认策略：ask | allow | deny
+    # 免审范围只有三类：会话默认临时目录、程序内部数据目录、用户「工作目录白名单」
+    # （持久化于 data/runtime_workspaces.json）。其余路径一律人工审批。
+    # [已废止] external 路径默认策略：保留字段仅为兼容旧 .env，决策不再读取。
     external_path_default: str = "ask"
     # 权限审批等待超时（秒），默认 180；超时视为拒绝
     # 60s 对人工审批偏紧（弹窗出现后要留给用户阅读与决策时间），配合前端倒计时自动拒绝

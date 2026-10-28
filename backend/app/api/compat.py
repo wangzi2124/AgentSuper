@@ -74,7 +74,6 @@ class MultiAgentRequest(BaseModel):
     model: str | None = None
     target_model: str | None = None
     use_vector_db: bool = False
-    directory: str | None = None
     client_msg_id: str | None = None
     agent_mode: str | None = None
     files: list[dict] | None = None
@@ -504,7 +503,6 @@ async def multi_agent_stream(
     try:
         sess = ctx.sessions.ensure(
             body.conversation_id,
-            directory=body.directory,
             user_id=user_id,
             model=None if existing else body.model,
         )
@@ -606,7 +604,11 @@ async def multi_agent_stream(
                     binding = await ctx.resolve_context_binding(sess.id)
                     state = initial_state(
                         # `/技能名`：本轮强制加载技能正文（找不到或未启用则原样发送）
-                        apply_slash_skill(turn_question, getattr(ctx, "skill_loader", None))[0],
+                        apply_slash_skill(
+                            turn_question,
+                            getattr(ctx, "skill_loader", None),
+                            getattr(ctx, "plugin_loader", None),
+                        )[0],
                         user_id,
                         files=turn_files if turn_user_msg_id == user_msg_id else None,
                         model=sess.model,
@@ -724,7 +726,6 @@ async def multi_agent(
     try:
         sess = ctx.sessions.ensure(
             body.conversation_id,
-            directory=body.directory,
             user_id=user_id,
             model=None if existing else body.model,
         )

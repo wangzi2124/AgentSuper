@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import os
 import re
 import tempfile
 import time
@@ -218,7 +219,11 @@ def is_sensitive_path(path_str: str) -> bool:
         return True
     if name.endswith((".db", ".sqlite", ".sqlite3")):
         return True
-    return name in ("permissions.json", "command_permissions.json")
+    return name in (
+        "permissions.json",
+        "command_permissions.json",
+        "runtime_workspaces.json",
+    )
 
 
 class NeedsPermission(Exception):
@@ -275,8 +280,8 @@ class PermissionManager:
         self.allow_source_writes = bool(allow_source_writes)
         self.project_worktree = str(Path(project_worktree).resolve()) if project_worktree else ""
         whitelist_dir = Path(whitelist_path) if whitelist_path else self.workspace.parent / "data"
-        self.whitelist_path = whitelist_dir / "permissions.json" if whitelist_dir.is_dir() else whitelist_dir
-        self.runtime_workspaces_path = self.whitelist_path.parent / "runtime_workspaces.json"
+        self.data_dir = whitelist_dir if whitelist_dir.is_dir() else whitelist_dir.parent
+        self.runtime_workspaces_path = self.data_dir / "runtime_workspaces.json"
         self.extra_workspaces: list[Path] = []
         if extra_workspaces:
             for item in extra_workspaces:
@@ -286,43 +291,41 @@ class PermissionManager:
         self._load_runtime_workspaces()
         if external_default not in ("ask", "allow", "deny"):
             external_default = "ask"
+        # 保留字段以兼容旧配置；决策已不再受它影响（外部路径一律人工审批）。
         self.external_default = external_default
         self.approval_timeout = max(1, int(approval_timeout))
         self._requests: dict[str, PermissionRequest] = {}
         # (resolved_path, operation) → request_id：同一路径同一操作并发触发时复用同一 pending 审批
         self._pending_by_key: dict[tuple[str, str], str] = {}
         self._temp_approvals: OrderedDict[str, float] = OrderedDict()
-        # 命令级持久化白名单（独立于路径白名单，便于审计）
-        self.command_whitelist_path = self.whitelist_path.parent / "command_permissions.json"
-        self._command_whitelist: set[str] = set()
         # 命令临时授权（独立命名空间，不与路径临时授权混用）
         self._temp_command_approvals: OrderedDict[str, float] = OrderedDict()
         self._turn_command_approvals: dict[str, set[str]] = {}
-        self._load_whitelist()
-        self._load_command_whitelist()
 
     def _load_runtime_workspaces(self):
-        """从 runtime_workspaces.json 加载前端运行时添加的工作目录。
+        """从 runtime_workspaces.json 加载前端「工作目录白名单」。
 
-        这是可写工作目录的唯一配置入口（替代已移除的 EXTRA_WORKSPACES 环境变量），
-        持久化独立于 .env：重启后仍生效。
+        这是可写白名单目录的唯一配置入口，持久化独立于 .env：重启后仍生效。
         """
         try:
             if self.runtime_workspaces_path.exists():
                 data = json.loads(self.runtime_workspaces_path.read_text("utf-8"))
-                existing = {str(w) for w in self.extra_workspaces}
+                existing = {self._workspace_key(w) for w in self.extra_workspaces}
                 for item in data.get("extra_workspaces", []):
                     item = str(item).strip()
-                    if item and str(Path(item).resolve()) not in existing:
-                        self.extra_workspaces.append(Path(item).resolve())
-                        existing.add(str(Path(item).resolve()))
+                    if not item:
+                        continue
+                    resolved = Path(item).resolve()
+                    if self._workspace_key(resolved) not in existing:
+                        self.extra_workspaces.append(resolved)
+                        existing.add(self._workspace_key(resolved))
                 if data.get("extra_workspaces"):
                     logger.info("Loaded %d runtime workspaces", len(data["extra_workspaces"]))
         except Exception as e:
             logger.warning("Failed to load runtime workspaces: %s", e)
 
     def _save_runtime_workspaces(self):
-        """将当前额外工作区列表持久化到 JSON 文件。"""
+        """将当前白名单目录列表持久化到 JSON 文件。"""
         try:
             self.runtime_workspaces_path.parent.mkdir(parents=True, exist_ok=True)
             self.runtime_workspaces_path.write_text(
@@ -332,57 +335,24 @@ class PermissionManager:
         except Exception as e:
             logger.warning("Failed to save runtime workspaces: %s", e)
 
-    def _load_whitelist(self):
-        """从JSON文件加载已授权的路径白名单。"""
-        self._whitelist: list[str] = []
-        try:
-            if self.whitelist_path.exists():
-                data = json.loads(self.whitelist_path.read_text("utf-8"))
-                self._whitelist = data.get("allowed_paths", [])
-                logger.info("Loaded %d whitelist entries", len(self._whitelist))
-        except Exception as e:
-            logger.warning("Failed to load whitelist: %s", e)
+    @staticmethod
+    def _workspace_key(path: Path | str) -> str:
+        """白名单去重键：Windows 大小写不敏感。"""
+        import os
 
-    def _save_whitelist(self):
-        """将当前白名单持久化保存到JSON文件。"""
-        try:
-            self.whitelist_path.parent.mkdir(parents=True, exist_ok=True)
-            self.whitelist_path.write_text(
-                json.dumps({"allowed_paths": self._whitelist}, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            logger.warning("Failed to save whitelist: %s", e)
-
-    def _load_command_whitelist(self):
-        """从JSON文件加载已授权的命令白名单。"""
-        try:
-            if self.command_whitelist_path.exists():
-                data = json.loads(self.command_whitelist_path.read_text("utf-8"))
-                self._command_whitelist = {c.lower() for c in data.get("allowed_commands", [])}
-                logger.info("Loaded %d command whitelist entries", len(self._command_whitelist))
-        except Exception as e:
-            logger.warning("Failed to load command whitelist: %s", e)
-
-    def _save_command_whitelist(self):
-        """将当前命令白名单持久化保存到JSON文件。"""
-        try:
-            self.command_whitelist_path.parent.mkdir(parents=True, exist_ok=True)
-            self.command_whitelist_path.write_text(
-                json.dumps({"allowed_commands": sorted(self._command_whitelist)}, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            logger.warning("Failed to save command whitelist: %s", e)
+        return os.path.normcase(str(Path(path).resolve()))
 
     def check_command(self, base_cmd: str, session_id: str = "") -> str:
-        """Command-level check; only current-turn approvals are honored."""
+        """Command-level check; only current-turn approvals are honored.
+
+        外部命令一律 ask（`EXTERNAL_PATH_DEFAULT` 不再参与决策）。
+        """
         key = base_cmd.lower()
         if key in current_turn_command_approvals():
             return "allow"
         if session_id and key in self._turn_command_approvals.get(session_id, set()):
             return "allow"
-        return self.external_default
+        return "ask"
 
     def add_session_command_approval(self, session_id: str, base_cmd: str) -> None:
         key = str(base_cmd or "").strip().lower()
@@ -524,38 +494,23 @@ class PermissionManager:
     def check(self, path_str: str, operation: str) -> str:
         """检查指定路径的操作权限，返回allow/deny/ask。
 
-        任意层级含 `.git` 的路径读/写/执行一律 deny（regardless of
-        worktree/workspace membership，密钥/历史文件绝不泄露给模型）；其余
-        .env/.db/permissions.json 的读走 ask → 前端弹审批对话框，用户允许后
-        临时授权（add_temp_approval 后重试）；写/执行仍直接 deny，
-        密钥/数据库文件绝不允许被模型改写（弹窗授权写入会暴露篡改风险）。
-
-        工作目录（workspace / 会话目录 / 额外工作区 / 项目 worktree）之外的路径
-        一律走 `external_default`（默认 ask → 前端弹窗询问是否操作），**不做硬限制**；
-        弹窗「允许本次」按整棵子树生效，「允许并记住」写入持久白名单。
+        免审范围：当前会话工作目录（`set_session_workspace`）与白名单目录
+        （`extra_workspaces`）。程序源码/仓库根不再隐式放行；其余路径一律 ask。
+        任意层级含 `.git` 的路径读/写/执行一律 deny；.env/.db/permissions.json
+        读取走 ask，写/执行直接 deny。
         """
         p = Path(path_str).resolve()
         if self._is_git_path(p):
-            # .git 内部路径：读/写/执行一律直接拒绝（对齐 AGENTS.md "ALWAYS denied"、
-            # "regardless of worktree/workspace membership"，防止白名单/临时/外部路径
-            # 放行后读取 .git/config 等含凭据文件）
             return "deny"
         cls = self.classify_path(path_str)
         if cls == "system":
             return "deny"
         if cls == "workspace":
             if self._is_critical_read(p):
-                # .env/.db/permissions.json：读弹窗审批，写/执行直接拒绝
                 return "ask" if operation == "read" else "deny"
             if operation in ("write", "execute") and self._is_critical_write(p):
                 return "ask"
             return "allow"
-        for allowed in self._whitelist:
-            try:
-                Path(p).relative_to(Path(allowed).resolve())
-                return "allow"
-            except ValueError:
-                pass
         now = time.time()
         # Clean up expired temp approvals
         expired = [k for k, t in self._temp_approvals.items() if now - t > _TEMP_APPROVAL_TTL]
@@ -568,88 +523,63 @@ class PermissionManager:
                     self._temp_approvals.move_to_end(k)
                     break
             return "allow"
-        return self.external_default
+        return "ask"
 
-    def _is_program_source(self, p: Path) -> bool:
-        """路径是否属于本程序源码/仓库目录（backend/ 主工作区或 git worktree）。
+    def add_workspace(self, path_str: str, create: bool = False) -> Path:
+        """把目录加入白名单（免重启生效）。
 
-        这类路径不允许被加为可写工作区——否则即使 ALLOW_SOURCE_WRITES=false，
-        也能绕过源码保护直接改本程序代码。
+        仅接受已存在的绝对目录；`create=True` 时缺失目录会被创建（前端二次确认后）。
+        允许把仓库根加入白名单（源码写保护由审批层 `_is_critical_write` 兜底）。
+        返回解析后的绝对路径；校验失败抛 ValueError。
         """
-        bases = [self.workspace]
-        if self.project_worktree:
-            bases.append(Path(self.project_worktree))
-        rp = Path(p).resolve()
-        for base in bases:
+        raw = str(path_str or "").strip().strip('"').strip("'")
+        if not raw:
+            raise ValueError("path is required")
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            raise ValueError("path must be an absolute path")
+        p = p.resolve()
+        if p.exists():
+            if not p.is_dir():
+                raise ValueError(f"not a directory: {p}")
+        elif create:
             try:
-                rp.relative_to(Path(base).resolve())
-                return True
-            except ValueError:
-                pass
-        return False
-
-    def add_workspace(self, path_str: str) -> Path:
-        """运行时新增可写工作区（免重启生效），目录不存在则自动创建。
-
-        拒绝把本程序源码/仓库路径加为工作区（防止越权改自身代码）。
-        返回解析后的绝对路径；被拒时抛 ValueError。
-        """
-        p = Path(path_str).resolve()
-        if self._is_program_source(p):
-            raise ValueError("不能把本程序源码/仓库路径添加为工作目录")
-        if p in self.extra_workspaces:
-            return p
+                p.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                raise ValueError(f"failed to create directory: {e}") from e
+        else:
+            raise FileNotFoundError(f"directory does not exist: {p}")
+        if not os.access(p, os.R_OK | os.X_OK):
+            raise ValueError(f"directory is not accessible: {p}")
+        key = self._workspace_key(p)
+        for wp in self.extra_workspaces:
+            if self._workspace_key(wp) == key:
+                return wp
         self.extra_workspaces.append(p)
-        try:
-            p.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            logger.warning("Failed to create workspace dir %s: %s", p, e)
         self._save_runtime_workspaces()
         return p
 
     def remove_workspace(self, path_str: str) -> bool:
-        """运行时移除工作区，返回是否移除成功。"""
+        """从白名单移除目录，返回是否移除成功。"""
         p = Path(path_str).resolve()
+        key = self._workspace_key(p)
         for i, wp in enumerate(self.extra_workspaces):
-            if wp == p:
+            if self._workspace_key(wp) == key:
                 del self.extra_workspaces[i]
                 self._save_runtime_workspaces()
                 return True
         return False
 
     def list_workspaces(self) -> list[str]:
-        """返回所有可写工作区（主工作区 + 额外工作区）的绝对路径。"""
+        """返回所有可写工作区（主工作区 + 白名单目录）的绝对路径。"""
         return [str(self.workspace), *(str(w) for w in self.extra_workspaces)]
 
     def list_extra_workspaces(self) -> list[str]:
-        """仅返回用户经「工作目录」面板配置的额外工作区（不含程序主工作区）。
+        """仅返回用户经「工作目录白名单」配置的目录（不含程序主工作区）。
 
-        平台审批的免审范围只用这些目录 + 会话工作目录 + 持久白名单：程序主工作区
-        （backend/ 源码目录）本身不应因为「是主工作区」而自动放行。
+        平台审批的免审范围只用这些目录 + 会话工作目录 + 程序内部数据目录。
         """
         return [str(w) for w in self.extra_workspaces]
-
-    def list_whitelist(self) -> list[str]:
-        """返回持久化路径白名单（「允许并记住」写入的绝对路径）。"""
-        return list(self._whitelist)
-
-    def add_whitelist(self, path_str: str) -> Path:
-        """把路径加入持久化白名单；目录放行整棵子树，文件仅放行自身。"""
-        p = Path(path_str).expanduser().resolve()
-        key = str(p)
-        if key not in self._whitelist:
-            self._whitelist.append(key)
-            self._save_whitelist()
-        return p
-
-    def remove_whitelist(self, path_str: str) -> bool:
-        """从持久化白名单移除路径，返回是否存在并被移除。"""
-        key = str(Path(path_str).expanduser().resolve())
-        if key not in self._whitelist:
-            return False
-        self._whitelist.remove(key)
-        self._save_whitelist()
-        return True
 
     def add_temp_approval(self, path_str: str):
         """临时授权指定路径，TTL 过期后自动失效。
@@ -705,8 +635,8 @@ class PermissionManager:
             self._prune_pending_index(req)
             return "expired"
 
-    def respond(self, request_id: str, decision: str, remember: bool = False) -> bool:
-        """响应权限请求：设置审批决定，可选记住该路径到白名单。"""
+    def respond(self, request_id: str, decision: str) -> bool:
+        """响应权限请求：设置审批决定（仅本回合有效，不写入任何持久白名单）。"""
         req = self._requests.get(request_id)
         if not req or req.status != "pending":
             return False
@@ -714,7 +644,7 @@ class PermissionManager:
         req.response = decision
         req.responded_at = datetime.now()
         req._event.set()
-        # "remember" is intentionally ignored: approvals are turn-scoped.
+        # Approvals are turn-scoped by design: nothing is persisted here.
         self._prune_pending_index(req)
         self.cleanup_expired()
         return True

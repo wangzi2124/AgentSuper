@@ -118,6 +118,10 @@ def make_file_tools(vfs: VirtualFileSystem) -> dict[str, Callable[..., Any]]:
         """删除工作区内文件（可回滚）。"""
         return delete_file(vfs, path)
 
+    def create_directory(path: str) -> str:
+        """在工作区内创建目录（含父目录）。用于新建空文件夹，避免走 shell 审批。"""
+        return vfs.mkdir(path)
+
     return {
         "read_file": read_file,
         "write_file": write_file,
@@ -127,10 +131,13 @@ def make_file_tools(vfs: VirtualFileSystem) -> dict[str, Callable[..., Any]]:
         "glob": glob,
         "append_file": append,
         "delete_file": delete,
+        "create_directory": create_directory,
     }
 
 
-WRITE_TOOLS = frozenset({"write_file", "edit_file", "append_file", "delete_file"})
+WRITE_TOOLS = frozenset({
+    "write_file", "edit_file", "append_file", "delete_file", "create_directory",
+})
 # 读工具同样过审批门控：沙箱/允许根内由 `ctx.request_permission` 自动放行（零弹窗），
 # 越界读取才询问用户。此前读工具 `require_approval=False`，越界直接抛 "路径越界"，
 # 与 PermissionManager `external_default=ask` 的语义不一致（读取无法申请授权）。

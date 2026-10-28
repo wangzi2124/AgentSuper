@@ -113,7 +113,7 @@
 
 | 配置项 | 值 | 对齐对象/语义 | 行号 |
 |---|---|---|---|
-| `external_path_default` | "ask" | 对齐 `external_directory` 设计：工作区外路径默认 ask | allow | deny（可写工作目录由前端配置、运行时持久化 `data/runtime_workspaces.json`） | :166-169 |
+| `external_path_default` | "ask" | **已废止**：字段保留兼容，决策不读取；免审固定为「会话临时目录 + 内部数据目录 + 工作目录白名单（`data/runtime_workspaces.json`）」，其余一律人工审批 | :232-235 |
 | `permission_approval_timeout` | 60 | 审批等待超时（秒），超时视为拒绝 | :171 |
 | `allow_source_writes` | False | 受保护源码路径（app/plugins/skills/config/main.py）硬保护；.git/.env/*.db/permissions.json 恒保护 | :172-176 |
 | `task_permission_rules` | {} | 对齐 `permission.task`（C 波 ①）；空 = 白名单全 allow，零迁移 | :197-199 |

@@ -17,8 +17,8 @@ from typing import Iterable
 MAX_OUTPUT_CHARS = 50_000
 GREP_MAX_RESULTS = 100
 
-# 本回合允许的额外根目录（对齐 opencode `ctx.directory` / 前端「工作目录」面板）。
-# 由 API 层按会话注入（会话目录 + 用户工作目录），随 contextvar 传播到图节点任务；
+# 本回合允许的额外根目录（会话临时目录 + 程序内部数据目录 + 用户「工作目录白名单」）。
+# 由 API 层按会话注入，随 contextvar 传播到图节点任务；
 # 沙箱默认根（`VirtualFileSystem.root`）始终允许。审批通过的外部路径也并入此处。
 _allowed_roots_var: contextvars.ContextVar[tuple[Path, ...]] = contextvars.ContextVar(
     "vfs_allowed_roots", default=()
@@ -139,8 +139,8 @@ class VirtualFileSystem:
     def is_allowed(self, path: str) -> bool:
         """判断路径是否在当前 sandbox/允许根内（供审批门控）。
 
-        会话工作目录（active_root）与前端「工作目录」面板的额外工作区（allowed_roots）
-        均自动放行；持久白名单不再参与自动放行，外部路径一律需人工审批。
+        会话临时目录（active_root）、程序内部数据目录与「工作目录白名单」
+        （allowed_roots）均自动放行；其余路径一律需人工审批。
         """
         try:
             p = (self.active_root / path).resolve()
@@ -156,6 +156,12 @@ class VirtualFileSystem:
             return f"错误：{path} 是目录，请用 ls"
         content = fp.read_text(encoding="utf-8", errors="replace")
         return bounded(content)
+
+    def mkdir(self, path: str) -> str:
+        """在工作区创建目录（含父目录；已存在视为成功）。"""
+        fp = self._resolve(path)
+        fp.mkdir(parents=True, exist_ok=True)
+        return f"已创建目录 {path}"
 
     def write_file(self, path: str, content: str) -> str:
         fp = self._resolve(path)

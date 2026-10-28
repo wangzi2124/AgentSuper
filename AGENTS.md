@@ -43,7 +43,7 @@ backend/
     compression.py          # 压缩计划/摘要/精确值/tail
     switch.py               # SwitchService 状态机
     budget.py               # BudgetLedger
-    schema.py               # ToolSchemaCache + 15 上限
+    schema.py               # ToolSchemaCache + 20 上限
     retry.py                # 可重试错误退避
     errors.py               # HarnessError / classify_error
     security.py             # 密钥脱敏
@@ -203,10 +203,11 @@ npx vitest run tests/integration/
 - **会话存储**：模型视角历史主要来自 graph checkpoint；`session.db` 负责 UI/事件/队列/epoch。不要把两者混为一个真相源。
 - **`session_inputs`**：执行中追加任务走 `/api/sessions/{id}/prompts` 队列；旧单数 `/prompt` 已删除。
 - **权限**：无审批通道时 `require_approval` 工具一律拒绝；`.git` 路径永远拒绝；Shell 重定向目标要过写权限。
-- **工具名**：默认 registry 注册的是 `read_file` / `write_file` / `edit_file` / `ls` / `grep` / `glob` / `append_file` / `delete_file` / `shell_exec` / `task`；插件工具名以加载器注册结果为准，不要硬编码旧前缀。
+- **工具名**：默认 registry 注册的是 `read_file` / `write_file` / `edit_file` / `ls` / `grep` / `glob` / `append_file` / `delete_file` / `create_directory` / `shell_exec` / `task`，以及内置联网/天气 `web_search` / `web_fetch` / `http_request` / `get_weather`；`http_request` 需人工审批。插件工具名以加载器注册结果为准，不要硬编码旧前缀。内置插件（http-client / internet-search / weather / 文档生成器等）已移除，相关能力走内置工具。
 - **压缩**：`cognition/compressor.py` 是 canonical；`harness/compression.py` 是统一门面。不要再新增第三套压缩逻辑。
 - **自动压缩/手动 compact**：`ContextHarness` + `tail_snapshot` 语义；手动 compact 也要写 tail 起点。
 - **模型目录**：`models/catalog.py` 读取能力/窗口；`harness/capabilities.build_profile` 有 60s TTL，人工 override 优先。
+- **Provider 表单**：Label（显示名）与模型前缀（litellm provider 段）**都必填、互不推导**；前缀新增时校验 `^[a-z0-9][a-z0-9_-]*$`、编辑时只读；后端 `upsert_provider` 同样校验（存量条目不做回溯）。
 - **Ollama 窗口**：默认不下发 `num_ctx`，以 Ollama 服务器配置为准；运行时窗口取自 `/api/ps.context_length`（30s 快照 + per-model last-known），未加载时回落 `OLLAMA_NUM_CTX`（默认 4096）。只有「模型管理」显式设置过 `context_length` 才下发覆盖；`/api/models` 的 `runtime_context_length` 是只读展示字段。prompt 适配守卫（`models/context_guard.py`）会按该窗口裁剪；**若 system+工具+当前消息仍装不下，会自动把 `num_ctx` 提升到所需窗口（2 的幂，上限 32768）**，只有超过上限才报错。不要把回落值再当 8192。
 - **上下文窗口**：未知窗口时 `resolve_mode` 保守回退；不要在未知窗口上做原生工具假设。
 - **Ollama**：`ollama/*` / `ollama_chat/*` 已适配；tools 模型走原生路径（流式工具调用由 stream 层转非流式），无 tools 模型走文本回退。本地 CPU 慢，默认不设为默认模型；冒烟用 `HARNESS_OLLAMA_TEST=1` + `HARNESS_OLLAMA_TOOLS_MODEL` / `HARNESS_OLLAMA_TEXT_MODEL`。
@@ -232,9 +233,9 @@ npx vitest run tests/integration/
 ## 7. 新增/修改时的落点
 
 - **新 API**：`backend/app/api/` 加 router → `app/main.py` include；前端 `frontend/src/api/` 加 client → `errors.ts` 统一解包。
-- **新工具**：`execution/tool_registry.py` 注册；函数名 `tool_*`（插件）或 `register_function`；更新工具描述；权限/沙箱/输出边界要一起考虑。
+- **新工具**：`execution/tool_registry.py` 注册；内置工具用 `register_function`；更新工具描述；权限/沙箱/输出边界要一起考虑。
 - **新 Skill**：`backend/skills/` Markdown + frontmatter；需要时更新 `skills` 目录 UI/loader。
-- **新 Plugin**：`backend/plugins/*.py`，`tool_*` 自动注册；`.enabled` 文件控制启用。
+- **自定义工具**：统一走前端「自定义工具」页（`/api/custom-tools`）。脚本型写入 `backend/plugins/custom_*.py`，由 `PluginLoader` 加载后经 `sync_plugin_tools` 注册进 `ToolRegistry`；`.enabled` 文件控制启用。旧的「插件」页/`/api/plugins` 已删除，不要再新增第二套管理入口。
 - **新前端事件**：先加 `harness/events.ts` 类型 + `adapter`/`reducer` 分支 + 单测，再接 store/view。
 - **新提示词**：`prompts/system/*.md`、`prompts/nodes/*.md`；不要把大段规则塞进 Python。
 
@@ -265,13 +266,19 @@ npx vitest run tests/integration/
 - `docs/移动端聊天交互设计要点-ChatGPT范式.md`：移动端聊天
 - `README.md`：人类入口
 
-## 10. 会话工作区与权限（2026-10-25）
+## 10. 会话工作区与权限（2026-10-27）
 
-- **默认工作区**：跨平台系统临时目录 `tempfile.gettempdir()/agentsuper/<session_id>`；Windows 为 `%TEMP%`，macOS 为 `$TMPDIR`，Linux 为 `/tmp`。
-- **会话目录**：每个会话一个，仅当前会话生效；设置后替换 VFS 根；必须是已存在的绝对目录；清空回到 temp。
-- **权限**：只有当前会话目录自动放行；backend/cwd/其他路径一律人工审批；旧 `permissions.json` / `runtime_workspaces.json` 不再自动放行；`EXTERNAL_PATH_DEFAULT=allow` 不能绕过。
-- **审批时长**：仅本回合；目录审批覆盖整棵子树；回合结束失效；不再有“始终允许”。
-- **Shell**：默认 cwd 跟随会话 VFS 根；根内命令仍需审批。
-- **目录变更**：运行中 PATCH 返回 409；删除会话只清理自动 temp，不删用户目录。
-- **测试**：`backend/tests/integration/test_session_workspace_policy.py` 覆盖 temp 默认、替换根、清空、旧白名单忽略。
+- **默认工作区**：跨平台系统临时目录 `tempfile.gettempdir()/agentsuper/<session_id>`；Windows 为 `%TEMP%`，macOS 为 `$TMPDIR`，Linux 为 `/tmp`。**会话根不可修改**（`PATCH /api/sessions/{id}` 不再接受 `directory`），前端也不展示这条默认路径。
+- **免审范围（只有三类）**：
+  1. 会话默认临时目录（隐式，不显示）
+  2. 程序内部数据目录：`data/{truncation,codeact,generated,voice,uploads,snapshots}`（隐式，不显示、不可删）
+  3. 用户「工作目录白名单」：`前端 用户设置 → 工作目录白名单` 手动增删，全局生效，持久化于 `data/runtime_workspaces.json`
+- **其余路径一律人工审批**：含 `backend/` 源码与 git 仓库根；`.git` 永远 deny；`.env*` / `*.db` / `permissions.json` 读需审批、写/执行直接拒绝。
+- **源码保护优先于白名单**：白名单里即使包含仓库根，写 `app/`、`plugins/`、`skills/`、`config/` 等受保护源码仍需逐次审批。
+- **`EXTERNAL_PATH_DEFAULT` 已废止**：仅为兼容旧 `.env` 保留字段，路径与命令决策都不再读取它。
+- **审批时长**：仅本回合；目录审批覆盖整棵子树；回合结束失效；不存在「允许并记住」，长期免审只能靠白名单。
+- **白名单 API**：`GET/POST/DELETE /api/permission/workspaces` 只操作白名单（不含程序主工作区）；添加要求绝对路径且目录已存在（`create=true` 可显式创建）；重复添加幂等；Windows 大小写不敏感去重。
+- **Shell**：默认 cwd 跟随会话 VFS 根；命令一律人工审批（本回合授权后同 base 命令可复用至回合结束）。
+- **目录变更**：不可变更；删除会话只清理自动 temp，不删用户目录。
+- **测试**：`backend/tests/integration/test_session_workspace_policy.py` 覆盖 temp 默认、目录不可改、白名单/内部目录免审、源码不自动放行；`backend/tests/unit/test_permission_whitelist.py` 覆盖白名单增删/校验/大小写去重。
 

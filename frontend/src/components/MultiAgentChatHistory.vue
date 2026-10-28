@@ -2,7 +2,6 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
-import { usePermissionStore } from '../stores/permission'
 import { useAuthStore } from '../stores/auth'
 import { deleteConversation as apiDelete } from '../api/sessions'
 import type { ConversationMeta } from '../api/sessions'
@@ -23,7 +22,6 @@ function fmtTime(s?: string) {
 
 const router = useRouter()
 const agent = useMultiAgentStore()
-const perm = usePermissionStore()
 const auth = useAuthStore()
 const searchQuery = ref('')
 const editingId = ref<string | null>(null)
@@ -92,7 +90,6 @@ onMounted(() => {
   // 双保险：鉴权启用但未登录时不发会话/工作区请求（登录页不会挂载本组件，防止时序异常）
   if (auth.enabled && !auth.isLoggedIn) return
   agent.loadConversations()
-  perm.loadWorkspaces()
 })
 
 // 对话列表（按更新时间倒序；不再按目录分组显示路径地址）
@@ -103,9 +100,9 @@ const sortedConversations = computed(() => {
   return [...filtered].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
 })
 
-// 新建对话（可选绑定工作目录，目录成为会话 cwd）
-function handleNewChat(dir?: string) {
-  agent.newChat(dir)
+// 新建对话（会话根由后端固定为隔离临时目录）
+function handleNewChat() {
+  agent.newChat()
   router.push({ name: 'MultiAgent' })
 }
 

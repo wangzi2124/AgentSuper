@@ -5,7 +5,9 @@ from __future__ import annotations
 import weakref
 from typing import Any, Callable, Iterable
 
-MAX_TOOL_DEFS = 15
+# 15 → 20：内置联网（web_search/web_fetch/http_request）与天气（get_weather）
+# 常驻工具表后，需保留足够的 global 槽位给 task + load_skill_*，避免技能被挤掉。
+MAX_TOOL_DEFS = 20
 
 
 def _signature(definitions: Iterable[Any]) -> tuple[Any, ...]:
@@ -31,11 +33,19 @@ class ToolSchemaCache:
         )
 
     def _select(self, definitions: list[Any]) -> list[Any]:
+        """Select at most ``limit`` definitions for the model.
+
+        Business tools (``scope != "global"``: file/shell/etc.) take priority;
+        global tools (``task`` + one ``load_skill_*`` per enabled skill) fill the
+        remaining slots. Previously globals came first, so a large skill library
+        could crowd out ``write_file``/``shell_exec`` entirely — the model then
+        could not act at all (no tool call → no permission prompt).
+        """
         if len(definitions) <= self.limit:
             return definitions
-        globals_ = [td for td in definitions if getattr(td, "scope", "") == "global"]
         scoped = [td for td in definitions if getattr(td, "scope", "") != "global"]
-        return (globals_ + scoped)[: self.limit]
+        globals_ = [td for td in definitions if getattr(td, "scope", "") == "global"]
+        return (scoped + globals_)[: self.limit]
 
     def build(
         self,

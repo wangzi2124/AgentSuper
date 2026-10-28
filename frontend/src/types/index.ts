@@ -157,6 +157,10 @@ export interface Plugin {
   version: string
   description: string
   enabled: boolean
+  module_path?: string
+  functions?: string[]
+  /** 插件详情页/斜杠面板用的完整说明正文 */
+  content?: string
 }
 
 // 生成的文件信息
@@ -389,8 +393,6 @@ export interface MultiAgentChatRequest {
   conversation_id?: string
   model?: string
   use_vector_db?: boolean
-  /** 会话绑定的工作目录（opencode ctx.directory），首条消息创建会话时生效 */
-  directory?: string
   /** [S2/B4] 客户端消息幂等 id：自动/手动重试复用同一 id，服务端据此去重 */
   client_msg_id?: string
   /** [F8] 多模态附件（拖拽/粘贴/选择），data 为 base64 编码内容 */
@@ -407,6 +409,10 @@ export interface MultiAgentMessage {
   content: string
   agents: AgentStreamData[]
   timestamp: Date
+  /** 本轮实际耗时（ms，前端墙钟；历史回放可能缺失） */
+  duration_ms?: number
+  /** 内部：本轮开始时间戳，收尾时换算成 duration_ms 并删除 */
+  startedAt?: number
   isError?: boolean
   errorInfo?: ChatError
   /** [模型切换] 压缩后的历史占位消息，完整性校验时允许其不在活跃列表 */

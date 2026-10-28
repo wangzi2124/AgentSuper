@@ -180,10 +180,41 @@ def test_upsert_provider_persists_type(monkeypatch):
     monkeypatch.setattr(catalog, "save_config", lambda c: cfg.update(c))
     monkeypatch.setattr(catalog, "reload_catalog", lambda: None)
     entry = catalog.upsert_provider(
-        "ollama-cloud", {"type": "ollama", "api_base": "https://ollama.com", "api_key": "k"}
+        "ollama-cloud",
+        {"label": "Ollama Cloud", "type": "ollama", "api_base": "https://ollama.com", "api_key": "k"},
     )
     assert entry["type"] == "ollama"
+    assert entry["label"] == "Ollama Cloud"
     assert cfg["providers"]["ollama-cloud"]["type"] == "ollama"
+
+
+def test_upsert_provider_requires_label_and_valid_prefix(monkeypatch):
+    monkeypatch.setattr(catalog, "load_config", lambda: {"providers": {}})
+    monkeypatch.setattr(catalog, "save_config", lambda c: None)
+    monkeypatch.setattr(catalog, "reload_catalog", lambda: None)
+
+    with pytest.raises(ValueError, match="Label"):
+        catalog.upsert_provider("vllm", {"api_base": "http://127.0.0.1:8001/v1"})
+    with pytest.raises(ValueError, match="Label"):
+        catalog.upsert_provider("vllm", {"label": "   ", "api_base": "http://127.0.0.1:8001/v1"})
+
+    for bad in ("My-VLLM", "my provider", "my/vllm", "-vllm", "_vllm", "中文"):
+        with pytest.raises(ValueError, match="前缀"):
+            catalog.upsert_provider(bad, {"label": "X", "api_base": "http://x/v1"})
+
+    # 允许下划线/连字符
+    ok = catalog.upsert_provider("ollama_cloud-2", {"label": "Cloud", "type": "ollama"})
+    assert ok["label"] == "Cloud"
+
+
+def test_upsert_provider_keeps_legacy_name_without_slug_check(monkeypatch):
+    cfg = {"providers": {"Legacy.Provider": {"label": "Legacy", "api_base": "http://x/v1"}}}
+    monkeypatch.setattr(catalog, "load_config", lambda: cfg)
+    monkeypatch.setattr(catalog, "save_config", lambda c: cfg.update(c))
+    monkeypatch.setattr(catalog, "reload_catalog", lambda: None)
+    entry = catalog.upsert_provider("Legacy.Provider", {"enabled": False})
+    assert entry["label"] == "Legacy"
+    assert entry["enabled"] is False
 
 
 def test_upsert_provider_rejects_reserved_ollama_prefix(monkeypatch):
@@ -191,7 +222,10 @@ def test_upsert_provider_rejects_reserved_ollama_prefix(monkeypatch):
     monkeypatch.setattr(catalog, "save_config", lambda c: None)
     monkeypatch.setattr(catalog, "reload_catalog", lambda: None)
     with pytest.raises(ValueError):
-        catalog.upsert_provider("ollama_chat", {"type": "ollama", "api_base": "https://ollama.com"})
+        catalog.upsert_provider(
+            "ollama_chat",
+            {"label": "Reserved", "type": "ollama", "api_base": "https://ollama.com"},
+        )
 
 
 def test_probe_ollama_type_provider_uses_tags_with_bearer(monkeypatch):

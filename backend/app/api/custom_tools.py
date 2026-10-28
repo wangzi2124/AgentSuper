@@ -41,17 +41,22 @@ def _store(request: Request):
 
 
 async def _reload(request: Request) -> None:
-    """热加载：重新扫描插件 + 刷新工具表（与插件 toggle 相同链路）。"""
+    """热加载：重新扫描脚本 → 同步进工具表（新增/禁用/删除立即对模型生效）。"""
+    loader = getattr(request.app.state, "plugin_loader", None)
     try:
-        request.app.state.plugin_loader.load_all()
+        if loader is not None:
+            loader.load_all()
     except Exception as e:  # noqa: BLE001
         logger.warning("plugin reload failed: %s", e)
-    agent = getattr(request.app.state, "agent", None)
-    if agent is not None and hasattr(agent, "refresh_tools"):
+    platform = getattr(request.app.state, "platform", None)
+    registry = getattr(platform, "registry", None)
+    if registry is not None and loader is not None:
         try:
-            await agent.refresh_tools()
+            from extensions.plugins import sync_plugin_tools
+
+            sync_plugin_tools(registry, loader)
         except Exception as e:  # noqa: BLE001
-            logger.warning("refresh_tools failed: %s", e)
+            logger.warning("sync_plugin_tools failed: %s", e)
 
 
 @router.get("/")
@@ -63,15 +68,17 @@ async def list_custom_tools(request: Request):
 @router.get("/catalog")
 async def tool_catalog(request: Request):
     """返回当前所有可用工具目录（供前端「固定已有工具」下拉选择）。"""
-    names: list[dict] = []
-    agent = getattr(request.app.state, "agent", None)
-    if agent is not None:
-        for t in getattr(agent, "tools", []):
-            names.append({
-                "name": t.name,
-                "description": (getattr(t, "description", "") or "")[:120],
-            })
-    return names
+    platform = getattr(request.app.state, "platform", None)
+    registry = getattr(platform, "registry", None)
+    if registry is None:
+        return []
+    return [
+        {
+            "name": td.name,
+            "description": (td.description or "")[:120],
+        }
+        for td in registry.definitions()
+    ]
 
 
 @router.post("/script")

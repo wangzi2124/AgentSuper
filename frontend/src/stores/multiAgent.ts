@@ -25,6 +25,7 @@ import {
 import {
   interruptSession, revertSession, deleteSessionMessage, updateSession as apiUpdateSession,
   forkSession as apiForkSession, compactSession as apiCompactSession, getSessionStatus as apiGetSessionStatus,
+  getSessionMessages,
   type SessionStatus,
 } from '../api/sessions'
 import { loadModelCache, saveModelCache } from '../api/model-cache'
@@ -133,9 +134,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   watch(useVectorDb, (v) => {
     try { localStorage.setItem(USE_VECTOR_DB_KEY, v ? '1' : '0') } catch { /* 隐私模式等忽略 */ }
   })
-  // 当前/新建会话绑定的工作目录（opencode ctx.directory）。首条消息发送时
-  // 随请求 directory 创建会话；已有会话在 loadConversation 时同步为服务器值。
-  const sessionDirectory = ref('')
+  // 会话工作目录不可由前端指定：根固定为后端隔离的默认临时目录；
+  // 额外免审目录统一在「用户设置 → 工作目录白名单」维护。
   // Agent 模式选择（对齐 opencode agent modes）：顶层命令只有 default(build)/plan；explore 由委派进入
   const agentMode = ref<'default' | 'plan'>('default')
 
@@ -159,10 +159,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     notice.value = msg
     if (_noticeTimer) { clearTimeout(_noticeTimer); _noticeTimer = null }
     _noticeTimer = setTimeout(() => { notice.value = '' }, 4000)
-  }
-
-  function setSessionDirectory(dir: string) {
-    sessionDirectory.value = dir || ''
   }
 
   function getOrCreateSession(sessionId: string, title?: string): SessionState {
@@ -268,8 +264,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     try {
       const detail = await getConversation(id, 'multi-agent')
       session.conversationTitle = detail.title
-      // 同步会话绑定目录（服务器为准；无论空与非空都覆盖，避免残留上一会话的目录）
-      sessionDirectory.value = detail.directory || ''
       // [模型切换] 打开会话时同步为其模型（opencode 会话默认模型语义）；目录里没有则保持当前选择
       if (detail.model?.id && modelOptions.value.some(m => m.value === detail.model!.id)) {
         selectedModel.value = detail.model!.id
@@ -361,14 +355,9 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
   }
 
-  function newChat(dir?: string) {
+  function newChat() {
     routingStatus.value = ''
     activeSessionId.value = undefined
-    if (dir !== undefined) {
-      sessionDirectory.value = dir
-    } else {
-      sessionDirectory.value = ''
-    }
   }
 
   // --- 错误分类 ---
@@ -529,6 +518,12 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     msg: MultiAgentMessage,
     map: Record<string, AgentStreamData>,
   ): void {
+    // 本轮实际耗时：从占位消息创建到收尾的墙钟时间。
+    // 之前用「工具步骤耗时之和」并在 0 时兜底为 1s，导致纯文本回合恒显示 1s。
+    if (typeof msg.startedAt === 'number') {
+      msg.duration_ms = Math.max(0, Date.now() - msg.startedAt)
+      delete msg.startedAt
+    }
     if (event.title) { session.conversationTitle = event.title; loadConversations() }
     if (event.answer) msg.content = event.answer
     else if (event.content) msg.content = event.content
@@ -625,6 +620,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     let agentsMap: Record<string, AgentStreamData> = {}
     let assistantMsg: MultiAgentMessage = reactive({
       id: assistantMsgId, role: 'assistant', content: '', agents: [], timestamp: new Date(),
+      startedAt: Date.now(),
     })
     session.messages = [...session.messages, assistantMsg]
 
@@ -635,7 +631,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     // [S5] 走防抖（非终态写，done/error 的终态 persistSession 会清 timer 兜底覆盖）
     schedulePersist(sessionId)
 
-    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, directory: sessionDirectory.value || undefined, client_msg_id: messageClientId, files: files && files.length ? files : undefined, voice: voice || undefined, agent_mode: agentMode.value !== 'default' ? agentMode.value : undefined }
+    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, client_msg_id: messageClientId, files: files && files.length ? files : undefined, voice: voice || undefined, agent_mode: agentMode.value !== 'default' ? agentMode.value : undefined }
     const controller = new AbortController()
     session.abortController = controller
     const signal = controller.signal
@@ -647,9 +643,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         onSessionId: (sid) => {
           if (!session.conversationId) {
             session.conversationId = sid
-            import('../api/sessions').then(({ getSession }) => getSession(sid).then((info) => {
-              if (info.directory) sessionDirectory.value = info.directory
-            }).catch(() => {})).catch(() => {})
           }
         },
         onEvent: (event, turnState) => {
@@ -758,6 +751,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           agentsMap = {}
           assistantMsg = reactive({
             id: genId(), role: 'assistant', content: '', agents: [], timestamp: new Date(),
+            startedAt: Date.now(),
           })
           session.messages = [...session.messages, assistantMsg]
           persistSession(sessionId)
@@ -922,8 +916,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         s.queuePosition = null
         s.loading = false
       }
-      // 目标保留消息 = 撤销点前一条；index===0 无保留消息，仅本地清空
-      const target = index > 0 ? s.messages[index - 1] : undefined
+      // `/sessions/{id}/revert` 语义 = 隐藏该消息**及其之后**，所以传撤销点本身。
+      const target = index >= 0 && index < s.messages.length ? s.messages[index] : undefined
       if (s.conversationId && target) {
         try { await revertSession(s.conversationId, target.id) } catch (e) { console.error('Failed to sync undo:', e) }
       }
@@ -1008,31 +1002,40 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
     const sessionId = s.conversationId
     const previous = selectedModel.value
-    const before = new Map(s.messages.map(m => [m.id, m]))
-    const beforeIds = [...before.keys()]
+    // 完整性校验以**服务端切换前后**为准：本地缓存可能因 undo/排队/重试而滞后，
+    // 拿它当基准会把「本地脏数据」误判成切换丢消息并触发回滚。
+    let serverBefore: Awaited<ReturnType<typeof getSessionMessages>> | null = null
+    try {
+      serverBefore = await getSessionMessages(sessionId)
+    } catch {
+      serverBefore = null
+    }
     try {
       setNotice('正在切换模型，历史加载中…')
       const providerID = model.split('/')[0]
       await apiUpdateSession(sessionId, { model: { id: model, providerID } })
-      // §3.1 消息完整性：切换后从服务端核对，未压缩消息不得丢失。
-      try {
-        const detail = await getConversation(sessionId, 'multi-agent')
-        const afterIds = new Set(detail.messages.map(m => m.id))
-        const afterContents = new Set(detail.messages.map(m => m.content))
-        const lost = beforeIds.filter(id => {
-          const old = before.get(id) as any
-          if (!old || old.is_compacted) return false
-          return !afterIds.has(id) && !afterContents.has(old.content)
-        })
-        if (lost.length) {
-          await apiUpdateSession(sessionId, {
-            model: { id: previous, providerID: previous.split('/')[0] },
+      // §3.1 消息完整性：服务端切换前后对比，未压缩消息不得丢失。
+      if (serverBefore) {
+        try {
+          const after = await getSessionMessages(sessionId)
+          const afterIds = new Set(after.map(m => m.id))
+          const afterContents = new Set(after.map(m => m.content || ''))
+          const lost = serverBefore.filter(m => {
+            if (m.is_compacted) return false
+            // 空内容消息（工具占位/摘要占位）不作为丢失依据：内容无法比对
+            if (!m.content) return false
+            return !afterIds.has(m.id) && !afterContents.has(m.content)
           })
-          setNotice('消息丢失，已回滚模型切换')
-          return false
+          if (lost.length) {
+            await apiUpdateSession(sessionId, {
+              model: { id: previous, providerID: previous.split('/')[0] },
+            })
+            setNotice('消息丢失，已回滚模型切换')
+            return false
+          }
+        } catch {
+          // 历史拉取失败不阻断切换；本地列表原地保留。
         }
-      } catch {
-        // 历史拉取失败不阻断切换；本地列表原地保留。
       }
       selectedModel.value = model
       setNotice('')
@@ -1049,7 +1052,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     sessions, activeSessionId, conversations, routingStatus, selectedModel, useVectorDb,
     models, modelOptions, defaultModelId, smallModelId, smallModelInfo, loadModels, persistSelectedModel,
     imageCaptionModelId, imageCaptionModelInfo, voiceModelSize,
-    sessionDirectory, setSessionDirectory, agentMode,
+    agentMode,
     messages, conversationId, conversationTitle, loading, streamPhase, queuePosition,
     pendingPrompts, removeQueuedPrompt,
     retryCountdown, notice, setNotice,

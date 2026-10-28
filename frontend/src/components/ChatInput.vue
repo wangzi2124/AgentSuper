@@ -1,9 +1,10 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { ref, computed, nextTick, onBeforeUnmount, watch } from 'vue'
-import type { FileContent, VoiceMessageData, Skill, Plugin } from '../types'
+import type { FileContent, VoiceMessageData, Skill } from '../types'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { listSkills, getSkill } from '../api/skills'
-import { listPlugins } from '../api/plugins'
+import { listCustomTools } from '../api/customTools'
+import type { CustomToolItem } from '../types/customTools'
 
 // 定义组件事件：发送消息（含可选附件）、取消请求
 const emit = defineEmits<{ send: [text: string, files: FileContent[], voice?: VoiceMessageData]; cancel: [] }>()
@@ -603,7 +604,7 @@ async function loadSlashItems() {
   slashLoading.value = true
   slashError.value = ''
   try {
-    const [skills, plugins] = await Promise.allSettled([listSkills(), listPlugins()])
+    const [skills, tools] = await Promise.allSettled([listSkills(), listCustomTools()])
     const items: SlashItem[] = []
     if (skills.status === 'fulfilled') {
       for (const s of skills.value as Skill[]) {
@@ -613,11 +614,13 @@ async function loadSlashItems() {
         })
       }
     }
-    if (plugins.status === 'fulfilled') {
-      for (const p of plugins.value as Plugin[]) {
+    if (tools.status === 'fulfilled') {
+      for (const t of tools.value as CustomToolItem[]) {
+        // 只有脚本型自定义工具能被 `/名称` 注入（固定型只是 pin schema，不是插件）
+        if (t.type !== 'script') continue
         items.push({
-          key: `plugin:${p.name}`, kind: 'plugin', name: p.name,
-          description: p.description || '', enabled: p.enabled,
+          key: `plugin:${t.name}`, kind: 'plugin', name: t.name,
+          description: t.description || '', enabled: t.enabled,
         })
       }
     }
@@ -627,7 +630,7 @@ async function loadSlashItems() {
     })
     slashItems.value = items
     slashLoaded.value = true
-    if (!items.length) slashError.value = '没有可用的技能或插件'
+    if (!items.length) slashError.value = '没有可用的技能或自定义工具'
   } catch (e) {
     slashError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -657,15 +660,18 @@ function slashUse(item: SlashItem) {
   })
 }
 
-// 点条目看完整详情：技能额外拉取 SKILL.md 正文（列表里只显示截断后的描述）
+// 点条目看完整详情：技能/插件都拉取完整说明正文
 async function slashShowDetail(item: SlashItem) {
   slashDetail.value = item
   slashDetailBody.value = ''
-  if (item.kind !== 'skill') return
   slashDetailLoading.value = true
   try {
-    const detail = await getSkill(item.name)
-    slashDetailBody.value = detail.content || ''
+    if (item.kind === 'skill') {
+      const detail = await getSkill(item.name)
+      slashDetailBody.value = detail.content || ''
+    } else if (item.kind === 'plugin') {
+      slashDetailBody.value = item.description || '（自定义工具，无更多说明）'
+    }
   } catch (e) {
     slashDetailBody.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -1001,11 +1007,11 @@ const textareaRef = ref<HTMLTextAreaElement>()
         </div>
       </div>
     </div>
-    <!-- [/ 命令面板] 输入 `/` 弹出：技能 + 插件列表，可按名字过滤，点条目看完整详情 -->
+    <!-- [/ 命令面板] 输入 `/` 弹出：技能 + 自定义工具列表，可按名字过滤，点条目看完整详情 -->
     <div v-if="slashOpen" class="slash-mask" @click="slashDismissed = true"></div>
     <div v-if="slashOpen" class="slash-panel">
       <div class="slash-head">
-        <span class="slash-title">技能与插件</span>
+        <span class="slash-title">技能与自定义工具</span>
         <span class="slash-tip">输入名字筛选 · ↑↓ 选择 · Enter 填入 · Esc 关闭</span>
         <button class="slash-close" title="关闭" @click="slashDismissed = true">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
@@ -1014,7 +1020,7 @@ const textareaRef = ref<HTMLTextAreaElement>()
 
       <div v-if="slashLoading" class="slash-empty">加载中…</div>
       <div v-else-if="slashError" class="slash-empty">{{ slashError }}</div>
-      <div v-else-if="!slashFiltered.length" class="slash-empty">没有匹配的技能或插件</div>
+      <div v-else-if="!slashFiltered.length" class="slash-empty">没有匹配的技能或自定义工具</div>
       <div v-else class="slash-list">
         <button
           v-for="(it, i) in slashFiltered"
@@ -1025,7 +1031,7 @@ const textareaRef = ref<HTMLTextAreaElement>()
           @mouseenter="slashActive = i"
           @click="slashShowDetail(it)"
         >
-          <span class="slash-badge" :class="it.kind">{{ it.kind === 'skill' ? '技能' : '插件' }}</span>
+          <span class="slash-badge" :class="it.kind">{{ it.kind === 'skill' ? '技能' : '工具' }}</span>
           <span class="slash-main">
             <span class="slash-name">
               {{ it.name }}
@@ -1040,7 +1046,7 @@ const textareaRef = ref<HTMLTextAreaElement>()
       <!-- 详情：覆盖在列表上，展示完整描述 / 技能正文 -->
       <div v-if="slashDetail" class="slash-detail" @click.stop>
         <div class="slash-detail-head">
-          <span class="slash-badge" :class="slashDetail.kind">{{ slashDetail.kind === 'skill' ? '技能' : '插件' }}</span>
+          <span class="slash-badge" :class="slashDetail.kind">{{ slashDetail.kind === 'skill' ? '技能' : '工具' }}</span>
           <span class="slash-detail-name">{{ slashDetail.name }}</span>
           <button class="slash-close" title="返回列表" @click="slashDetail = null">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>

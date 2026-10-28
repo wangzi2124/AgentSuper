@@ -56,6 +56,25 @@ function message(): MultiAgentMessage {
 }
 
 describe('ConversationTimeline', () => {
+  it('shows real wall-clock duration from message.duration_ms', () => {
+    const wrapper = mount(ConversationTimeline, {
+      props: { message: { ...message(), duration_ms: 4200 }, routingStatus: '', isLast: true, running: false },
+    })
+    expect(wrapper.text()).toContain('Completed · 4.2s')
+  })
+
+  it('does not fake 1s when duration is unknown', () => {
+    const m = message()
+    m.agents[0].steps = []
+    m.agents[0].parts = [{ seq: 0, kind: 'text', text: 'hi' }]
+    const wrapper = mount(ConversationTimeline, {
+      props: { message: m, routingStatus: '', isLast: true, running: false },
+    })
+    const text = wrapper.text()
+    expect(text).toContain('Completed')
+    expect(text).not.toContain('Completed · 1s')
+  })
+
   it('hides internal graph nodes and keeps real tools + text', () => {
     const wrapper = mount(ConversationTimeline, {
       props: {

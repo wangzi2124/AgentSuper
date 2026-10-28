@@ -37,6 +37,29 @@ async def list_plugins(request: Request):
     return [p.to_dict() for p in loader.list()]
 
 
+@router.get("/{name}")
+async def get_plugin(name: str, request: Request):
+    """获取单个插件详情（含模块源码/说明，便于前端详情面板展示）。"""
+    loader = request.app.state.plugin_loader
+    plugin = loader.get(name)
+    if not plugin:
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    data = plugin.to_dict()
+    content = ""
+    try:
+        module_path = getattr(plugin, "module_path", None)
+        if module_path:
+            from pathlib import Path
+
+            p = Path(module_path)
+            if p.exists():
+                content = p.read_text(encoding="utf-8")
+    except Exception:
+        content = ""
+    data["content"] = content or plugin.description or ""
+    return data
+
+
 @router.post("/{name}/toggle")
 async def toggle_plugin(name: str, body: TogglePluginRequest, request: Request):
     """启用或禁用指定插件。"""

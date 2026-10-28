@@ -436,8 +436,8 @@ def _authorized_roots_note() -> str:
 
     `file_agent.md`/`code_agent.md` 原先写死「禁止访问工作目录之外」，导致用户
     明确给出白名单路径时模型先拒绝、根本不触发工具审批（权限层已放行但模型不调
-    工具）。这里把 `set_allowed_roots` 注入的会话目录 / 额外工作区 / 持久白名单
-    显式列出，让模型知道哪些外部路径可直接访问。
+    工具）。这里把 `set_allowed_roots` 注入的会话临时目录 / 内部数据目录 /
+    工作目录白名单显式列出，让模型知道哪些外部路径可直接访问。
     """
     try:
         from execution.filesystem import current_allowed_roots

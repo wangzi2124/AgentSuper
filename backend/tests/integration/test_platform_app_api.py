@@ -855,8 +855,8 @@ def test_request_permission_command_requires_approval_then_reuses_temp(client, t
         set_manager(previous)
 
 
-def test_request_permission_read_outside_follows_external_default(client, tmp_path_factory):
-    """读工具越界不再硬失败：ask 时弹审批；deny 时直接拒绝且不弹窗。"""
+def test_request_permission_read_outside_always_asks(client, tmp_path_factory):
+    """`EXTERNAL_PATH_DEFAULT` 已废止：工作目录外读取无论配置都弹审批。"""
     import asyncio
 
     from execution.permission import PermissionManager, get_manager, set_manager
@@ -884,25 +884,23 @@ def test_request_permission_read_outside_follows_external_default(client, tmp_pa
                 session_id="s_read", tool="read_file", args={"path": target}, emit=emit
             )
         )
-        if default == "ask":
-            req = None
-            for _ in range(300):
-                await asyncio.sleep(0.01)
-                pending = mgr.get_pending_requests()
-                if pending:
-                    req = pending[0]
-                    break
-            assert req is not None, "越界读取未触发人工审批"
-            assert req.operation == "read"
-            mgr.respond(req.id, "denied")
+        req = None
+        for _ in range(300):
+            await asyncio.sleep(0.01)
+            pending = mgr.get_pending_requests()
+            if pending:
+                req = pending[0]
+                break
+        assert req is not None, "越界读取未触发人工审批"
+        assert req.operation == "read"
+        mgr.respond(req.id, "denied")
         return await task, emitted
 
     try:
-        denied, _ = asyncio.run(call("deny"))
-        assert denied is False
-        allowed, emitted = asyncio.run(call("ask"))
-        assert allowed is False  # 用户拒绝
-        assert emitted and emitted[0]["operation"] == "read"
+        for default in ("ask", "allow", "deny"):
+            denied, emitted = asyncio.run(call(default))
+            assert denied is False  # 用户拒绝
+            assert emitted and emitted[0]["operation"] == "read"
     finally:
         set_manager(previous)
 

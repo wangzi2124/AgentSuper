@@ -151,3 +151,48 @@ class PluginLoader:
                 f"Function '{func_name}' not found in plugin '{plugin_name}'"
             )
         return func(**kwargs)
+
+
+def sync_plugin_tools(
+    registry: Any,
+    loader: Optional[PluginLoader],
+    *,
+    scope: str = "location",
+    require_approval: bool = True,
+) -> List[str]:
+    """把已启用插件（含用户自定义工具）的 `tool_*` 函数同步进 `ToolRegistry`。
+
+    - 先清空上一次同步的插件工具，避免禁用/删除后仍残留；
+    - 与内置工具重名时保留内置；
+    - 用户脚本可执行任意代码，默认 `require_approval=True`。
+    """
+    if registry is None:
+        return []
+    registry.clear_plugin_tools()
+    if loader is None:
+        return []
+    try:
+        plugins = loader.get_enabled_plugins()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sync_plugin_tools: list failed: %s", exc)
+        return []
+
+    registered: List[str] = []
+    for plugin in plugins:
+        functions = getattr(plugin, "functions", None) or {}
+        meta_all = getattr(plugin, "functions_meta", None) or {}
+        for fn_name, fn in functions.items():
+            meta = meta_all.get(fn_name, {})
+            desc = (meta.get("description") or getattr(fn, "__doc__", "") or "").strip()
+            ok = registry.register_plugin_function(
+                fn,
+                name=fn_name,
+                description=desc,
+                scope=scope,
+                require_approval=require_approval,
+            )
+            if ok:
+                registered.append(fn_name)
+            else:
+                logger.warning("plugin tool name conflict, kept built-in: %s", fn_name)
+    return registered

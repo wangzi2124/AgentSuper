@@ -7,6 +7,8 @@ delete 级联清行。库路径由 conftest 隔离到临时 session.db。
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.deps import SessionStore
 from app.session import repository as repo
 
@@ -15,7 +17,6 @@ def test_create_update_delete_write_through(tmp_path):
     store = SessionStore()
     sess = store.create(
         title="落库测试",
-        directory=str(tmp_path),
         user_id="u_it_store",
         model="ollama_chat/qwen2.5:3b",
     )
@@ -25,6 +26,8 @@ def test_create_update_delete_write_through(tmp_path):
         assert info.title == "落库测试"
         assert info.user_id == "u_it_store"
         assert info.project_id  # FK：resolve_project 已补项目行
+        assert info.directory  # 固定为隔离的默认临时目录
+        assert Path(info.directory).is_dir()
         # str 模型引用读回后归一为 ModelRef（曾是 pydantic ValidationError）
         assert info.model is not None and info.model.id == "ollama_chat/qwen2.5:3b"
 

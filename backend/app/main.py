@@ -50,7 +50,6 @@ def _include_app_routers(app: FastAPI) -> None:
         logs as logs_api,
         models as models_api,
         permission as perm_api,
-        plugins,
         skills,
         vectors,
         voice as voice_api,
@@ -60,7 +59,6 @@ def _include_app_routers(app: FastAPI) -> None:
     app.include_router(auth_api.router, prefix="/api/auth", tags=["Auth"])
     app.include_router(documents.router, prefix="/api/documents", tags=["Documents"])
     app.include_router(skills.router, prefix="/api/skills", tags=["Skills"])
-    app.include_router(plugins.router, prefix="/api/plugins", tags=["Plugins"])
     app.include_router(custom_tools_api.router, prefix="/api/custom-tools", tags=["Custom Tools"])
     app.include_router(vectors.router, prefix="/api/vectors", tags=["Vectors"])
     app.include_router(generated.router, prefix="/api/generated", tags=["Generated"])
@@ -321,6 +319,11 @@ def create_app(
         # 并把 loader 交给 PlatformContext 处理 `/技能名` 强制加载。
         options["skill_loader"] = options.get("skill_loader") or getattr(
             app.state, "skill_loader", None
+        )
+        # 插件接线：把 loader 交给 PlatformContext 处理 `/插件名` 斜杠注入
+        # （含用户自定义工具 custom_*.py）。
+        options["plugin_loader"] = options.get("plugin_loader") or getattr(
+            app.state, "plugin_loader", None
         )
         app.state.platform = build_context(**options, checkpointer=checkpointer)
         try:

@@ -28,6 +28,9 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolDefinition] = {}
+        # 由用户「自定义工具」（plugins/custom_*.py）注册的工具名；
+        # toggle/删除后只清理这一部分，绝不动内置工具。
+        self._plugin_tools: set[str] = set()
 
     def register(self, td: ToolDefinition) -> None:
         if td.name in self._tools:
@@ -53,6 +56,42 @@ class ToolRegistry:
 
     def get(self, name: str) -> ToolDefinition | None:
         return self._tools.get(name)
+
+    def unregister(self, name: str) -> None:
+        """移除一个工具（仅用于插件/自定义工具的重新同步）。"""
+        self._tools.pop(name, None)
+        self._plugin_tools.discard(name)
+
+    def register_plugin_function(
+        self,
+        fn: Callable[..., Any],
+        *,
+        name: str,
+        description: str = "",
+        scope: str = "location",
+        require_approval: bool = True,
+    ) -> bool:
+        """注册插件（自定义工具）函数；与内置工具重名时保留内置并返回 False。"""
+        if name in self._tools:
+            return False
+        self.register_function(
+            fn,
+            name=name,
+            description=description,
+            scope=scope,
+            require_approval=require_approval,
+        )
+        self._plugin_tools.add(name)
+        return True
+
+    def clear_plugin_tools(self) -> None:
+        """清空上一次同步进来的插件工具（不动内置工具）。"""
+        for name in list(self._plugin_tools):
+            self._tools.pop(name, None)
+        self._plugin_tools.clear()
+
+    def plugin_tool_names(self) -> list[str]:
+        return list(self._plugin_tools)
 
     def subset(self, names: "set[str] | list[str] | tuple[str, ...]") -> "ToolRegistry":
         """返回仅含指定工具名的新注册表（用于子 Agent 工具白名单，§5.4）。"""

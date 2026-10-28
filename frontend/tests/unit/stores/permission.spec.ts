@@ -58,7 +58,7 @@ describe('countdown auto-deny', () => {
 
     await vi.advanceTimersByTimeAsync(1500)
     expect(mocks.respondToRequest).toHaveBeenCalledTimes(1)
-    expect(mocks.respondToRequest).toHaveBeenCalledWith('r1', 'denied', false)
+    expect(mocks.respondToRequest).toHaveBeenCalledWith('r1', 'denied')
     expect(store.pendingRequests).toHaveLength(0)
   })
 
@@ -78,8 +78,18 @@ describe('countdown auto-deny', () => {
     mocks.respondToRequest.mockRejectedValueOnce(new Error('404'))
     const store = usePermissionStore()
     store.handleIncoming(req('r3', 3600))
-    await expect(store.respond('r3', 'allowed', false)).resolves.toBeUndefined()
+    await expect(store.respond('r3', 'allowed')).resolves.toBeUndefined()
     expect(store.pendingRequests).toHaveLength(0)
+  })
+
+  it('工作目录白名单：addWorkspace 透传 create 并刷新列表', async () => {
+    mocks.addWorkspace.mockResolvedValueOnce({
+      status: 'ok', path: '/work/new', workspaces: ['/work/new'],
+    })
+    const store = usePermissionStore()
+    await store.addWorkspace('/work/new', true)
+    expect(mocks.addWorkspace).toHaveBeenCalledWith('/work/new', true)
+    expect(store.workspaces).toEqual(['/work/new'])
   })
 
   it('列表清空后倒计时器停止（不再触发重复拒绝）', async () => {

@@ -48,7 +48,15 @@ const items = computed<Item[]>(() => {
   }
   return out
 })
-const thoughtSeconds = computed(() => Math.max(1, Math.round(sumDurationMs(props.message.agents) / 1000)))
+const durationMs = computed(() => {
+  if (typeof props.message.duration_ms === 'number') return props.message.duration_ms
+  return sumDurationMs(props.message.agents)
+})
+const durationLabel = computed(() => {
+  const ms = durationMs.value
+  if (!ms || ms <= 0) return ''
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+})
 const collapsible = computed(() => !props.running && !props.message.isError && items.value.length > 0)
 const isDuplicateOfSingleAgent = computed(() => {
   const list = props.message.agents
@@ -62,7 +70,7 @@ const showFinalAnswer = computed(() =>
 const statusText = computed(() => {
   if (props.message.isError) return 'Failed'
   if (props.running) return 'Working…'
-  return `Completed · ${thoughtSeconds.value}s`
+  return durationLabel.value ? `Completed · ${durationLabel.value}` : 'Completed'
 })
 </script>
 
@@ -81,7 +89,7 @@ const statusText = computed(() => {
       :aria-expanded="showTimeline"
       @click="showTimeline = !showTimeline"
     >
-      <span>{{ showTimeline ? '隐藏执行步骤' : `已执行 ${items.length} 步 · ${thoughtSeconds}s` }}</span>
+      <span>{{ showTimeline ? '隐藏执行步骤' : `已执行 ${items.length} 步${durationLabel ? ` · ${durationLabel}` : ''}` }}</span>
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
     </button>
 

@@ -72,7 +72,6 @@ interface SessionUpdateBody {
   archived?: number
   agent?: string
   model?: SessionModelRef
-  directory?: string
 }
 
 const BASE = '/api/sessions'

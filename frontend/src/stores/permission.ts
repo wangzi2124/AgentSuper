@@ -48,7 +48,7 @@ export const usePermissionStore = defineStore('permission', () => {
         pendingRequests.value = pendingRequests.value.filter(x => x.id !== r.id)
         // 自动取消（拒绝）：尽力把决定回传给后端；
         // 若后端已自行过期（respond → 404），本地移除即可，不再等人工干涉。
-        respondToRequest(r.id, 'denied', false).catch(() => { /* ignore */ })
+        respondToRequest(r.id, 'denied').catch(() => { /* ignore */ })
       }
       syncExpiryTimer()
     }, 500)
@@ -83,12 +83,12 @@ export const usePermissionStore = defineStore('permission', () => {
     }
   }
 
-  async function respond(requestId: string, decision: 'allowed' | 'denied', remember = false) {
+  async function respond(requestId: string, decision: 'allowed' | 'denied') {
     // 乐观移除，避免 stale 请求（后端已过期）导致 404 抛错后列表卡死
     pendingRequests.value = pendingRequests.value.filter(r => r.id !== requestId)
     syncExpiryTimer()
     try {
-      await respondToRequest(requestId, decision, remember)
+      await respondToRequest(requestId, decision)
     } catch { /* 已过期/已处理时后端返回 404，忽略并保持本地已移除 */ }
   }
 
@@ -99,9 +99,10 @@ export const usePermissionStore = defineStore('permission', () => {
     } catch { /* ignore */ }
   }
 
-  async function addWorkspace(path: string) {
-    const data = await apiAddWorkspace(path)
+  async function addWorkspace(path: string, create = false) {
+    const data = await apiAddWorkspace(path, create)
     workspaces.value = data.workspaces
+    return data
   }
 
   async function removeWorkspace(path: string) {

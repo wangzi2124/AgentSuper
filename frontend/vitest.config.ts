@@ -5,6 +5,9 @@ import { fileURLToPath, URL } from 'node:url'
 export default defineConfig({
   plugins: [vue()],
   resolve: {
+    // 与 vite.config.ts 保持一致：仓库内存在历史误编译的 `src/**/*.js`（与 .ts 并存），
+    // 默认扩展顺序会让无扩展名导入命中过期 .js，导致测试跑的不是真实源码。
+    extensions: ['.mts', '.ts', '.tsx', '.mjs', '.js', '.jsx', '.json'],
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },

@@ -180,7 +180,7 @@ cd backend
 | `MAX_CONCURRENT_AGENTS` | 并发 Agent 上限 |
 | `COMPRESS_THRESHOLD` / `KEEP_RECENT_TOKENS` | `cognition/compressor.py` 模块常量；切换模型时按目标窗口绑定覆盖 |
 | `PLAN_PARALLEL_ENABLED` | 并行扇出开关（默认关闭） |
-| `EXTERNAL_PATH_DEFAULT` | 外部路径默认策略 |
+| `EXTERNAL_PATH_DEFAULT` | 已废止（保留兼容）；免审范围固定为会话临时目录 + 内部数据目录 + 工作目录白名单 |
 | `HARNESS_TOOL_MODE` | `native` / `fallback`，排障强制模式 |
 | `HARNESS_SMOKE_MODEL_A/B` | 真实模型验收模型对 |
 

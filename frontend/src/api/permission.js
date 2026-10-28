@@ -8,19 +8,19 @@ export async function fetchPendingRequests() {
         throw new Error('Failed to fetch pending requests');
     return res.json();
 }
-// 回复权限请求（允许/拒绝），可记住决策
-export async function respondToRequest(requestId, decision, remember = false) {
+// 回复权限请求（允许/拒绝）—— 仅本回合有效，不提供「记住」
+export async function respondToRequest(requestId, decision) {
     const res = await fetch(BASE + '/request/' + encodeURIComponent(requestId) + '/respond', {
         method: 'POST',
         headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ decision, remember }),
+        body: JSON.stringify({ decision }),
     });
     if (!res.ok) {
         const err = await res.text();
         throw new Error(`Respond error: ${err || res.statusText}`);
     }
 }
-// 获取所有可写工作区（主工作区 + 额外工作区）
+// 获取「工作目录白名单」：仅用户添加的免审目录
 export async function fetchWorkspaces() {
     const res = await fetch(BASE + '/workspaces', { headers: await addAuthHeaders() });
     if (!res.ok)
@@ -36,12 +36,12 @@ export async function browseDirectories(path) {
     }
     return res.json();
 }
-// 运行时新增可写工作区（免重启生效）
-export async function addWorkspace(path) {
+// 添加白名单目录（create=true 时由后端创建缺失目录）
+export async function addWorkspace(path, create = false) {
     const res = await fetch(BASE + '/workspaces', {
         method: 'POST',
         headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ path }),
+        body: JSON.stringify({ path, create }),
     });
     if (!res.ok) {
         const err = await res.text();

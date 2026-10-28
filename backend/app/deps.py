@@ -55,28 +55,30 @@ logger = logging.getLogger(__name__)
 
 _AUTO_WORKSPACE_ROOT = Path(tempfile.gettempdir()) / "agentsuper"
 
+# 程序内部数据目录：运行时基础设施（截断落盘 / CodeAct 沙箱 / 生成物 / 语音 / 上传 /
+# 快照）。与「会话默认临时目录」同性质——隐式免审，不进入用户「工作目录白名单」，
+# 也不能被用户删除。敏感文件规则（.git / .env* / *.db / *.json 权限文件）仍优先。
+_INTERNAL_DATA_SUBDIRS = (
+    "truncation",
+    "codeact",
+    "generated",
+    "voice",
+    "uploads",
+    "snapshots",
+)
+
+
+def internal_data_roots() -> list[str]:
+    """程序内部数据目录的绝对路径列表（隐式免审，不暴露给前端白名单）。"""
+    base = Path(__file__).resolve().parents[1] / "data"
+    return [str((base / name).resolve()) for name in _INTERNAL_DATA_SUBDIRS]
+
 
 def default_session_directory(session_id: str) -> str:
     """Create and return the cross-platform temp workspace for a session."""
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(session_id or "session"))
     path = (_AUTO_WORKSPACE_ROOT / safe).resolve()
     path.mkdir(parents=True, exist_ok=True)
-    return str(path)
-
-
-def normalize_session_directory(directory: str | None) -> str | None:
-    """Validate a user-selected session directory; empty means default temp."""
-    raw = str(directory or "").strip()
-    if not raw:
-        return None
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        raise ValueError("session directory must be an absolute path")
-    path = path.resolve()
-    if not path.is_dir():
-        raise ValueError(f"session directory does not exist: {path}")
-    if path.name.lower() == ".git" or ".git" in {p.lower() for p in path.parts}:
-        raise ValueError("session directory cannot be inside .git")
     return str(path)
 
 
@@ -530,7 +532,6 @@ class SessionStore:
         self,
         *,
         title: str = "",
-        directory: str | None = None,
         user_id: str = "anonymous",
         session_id: str | None = None,
         kind: str = "multi-agent",
@@ -538,9 +539,8 @@ class SessionStore:
         parent_id: str | None = None,
     ) -> Session:
         sid = session_id or f"ses_{uuid.uuid4().hex[:16]}"
-        resolved_directory = normalize_session_directory(directory)
-        if resolved_directory is None:
-            resolved_directory = default_session_directory(sid)
+        # 会话根固定为隔离的默认临时目录；用户不能替换（白名单只管额外免审目录）。
+        resolved_directory = default_session_directory(sid)
         sess = Session(
             id=sid,
             thread_id=sid,
@@ -572,28 +572,18 @@ class SessionStore:
         self,
         session_id: str | None,
         *,
-        directory: str | None = None,
         user_id: str = "anonymous",
         model: str | None = None,
     ) -> Session:
         if session_id and (sess := self.get(session_id)) is not None:
-            # 会话中途改目录：采纳本次携带的非空值。
+            # 工作目录不可变；仅补全历史会话缺失的默认临时目录。
             # 模型不再由 ensure 静默更新 —— 切换必须走 `switch_model` 门禁/迁移。
-            changed = False
-            if directory is not None or not sess.directory:
-                resolved_directory = normalize_session_directory(directory)
-                if resolved_directory is None:
-                    resolved_directory = default_session_directory(session_id)
-                if resolved_directory != sess.directory:
-                    previous = sess.directory
-                    sess.directory = resolved_directory
-                    cleanup_auto_session_directory(session_id, previous)
-                    changed = True
-            if changed:
+            if not sess.directory:
+                sess.directory = default_session_directory(session_id)
                 sess.updated_at = time.time()
                 self.persist(session_id)
             return sess
-        return self.create(session_id=session_id, directory=directory, user_id=user_id, model=model)
+        return self.create(session_id=session_id, user_id=user_id, model=model)
 
     def list(
         self, *, user_id: str | None = None, kind: str | None = None
@@ -709,6 +699,8 @@ class PlatformContext:
     permission_hook: Callable[..., Any] | None = None
     # 技能加载器（斜杠命令 / `load_skill_*` 工具）；None = 未接线
     skill_loader: Any | None = None
+    # 插件加载器（`/插件名` 斜杠注入；含用户自定义工具）；None = 未接线
+    plugin_loader: Any | None = None
 
     def __post_init__(self) -> None:
         if self.semaphore is None:
@@ -862,7 +854,9 @@ class PlatformContext:
         # `/技能名`：本轮强制加载技能正文（找不到/未启用则原样发送）
         from .skills.slash import apply_slash_skill
 
-        question, _skill = apply_slash_skill(question, self.skill_loader)
+        question, _skill = apply_slash_skill(
+            question, self.skill_loader, getattr(self, "plugin_loader", None)
+        )
         token = set_allowed_roots(self.allowed_roots_for(session_id))
         sess_for_root = self.sessions.get(session_id)
         root_token = set_active_root(sess_for_root.directory if sess_for_root else "")
@@ -933,7 +927,9 @@ class PlatformContext:
         # `/技能名`：本轮强制加载技能正文（找不到/未启用则原样发送）
         from .skills.slash import apply_slash_skill
 
-        question, _skill = apply_slash_skill(question, self.skill_loader)
+        question, _skill = apply_slash_skill(
+            question, self.skill_loader, getattr(self, "plugin_loader", None)
+        )
         model = self.session_model(session_id)
         binding = await self.resolve_context_binding(session_id)
         state = initial_state(
@@ -980,9 +976,10 @@ class PlatformContext:
     def allowed_roots_for(self, session_id: str) -> list[str]:
         """Auto-allowed roots for this session turn.
 
-        Only two sources are auto-allowed:
+        Only three sources are auto-allowed:
         1) Current session workspace directory (always present, defaults to system temp)
-        2) Runtime workspaces added via frontend "工作目录" panel (data/runtime_workspaces.json)
+        2) Program-internal data dirs (truncation/codeact/generated/voice/uploads/snapshots)
+        3) User whitelist added via the frontend "工作目录白名单" panel
 
         Everything else outside these roots requires manual approval.
         """
@@ -990,6 +987,9 @@ class PlatformContext:
         sess = self.sessions.get(session_id)
         if sess and sess.directory:
             d = str(sess.directory).strip()
+            if d and d not in roots:
+                roots.append(d)
+        for d in internal_data_roots():
             if d and d not in roots:
                 roots.append(d)
         try:
@@ -1274,7 +1274,6 @@ class PlatformContext:
         assert src is not None
         forked = self.sessions.create(
             title=f"{src.title} (分支)",
-            directory=src.directory,
             user_id=src.user_id,
             kind=src.kind,
             model=src.model,
@@ -1303,10 +1302,12 @@ class PlatformContext:
     ) -> bool:
         """发起一次工具审批（§9 `execution/approval.py` 高危审批流）。
 
-        严格免审规则（需求：**只有工作目录 workspace 和持久白名单免审**）：
-        - 路径类工具：仅「会话工作目录 / 用户额外工作区 / 持久白名单 / VFS 沙箱根」
-          内的路径直接放行；其余路径**一律人工审批**，不受 `EXTERNAL_PATH_DEFAULT`
-          的 allow/deny 影响。
+        严格免审规则（免审只有三类：会话临时目录 / 内部数据目录 / 工作目录白名单）：
+        - 路径类工具：仅「会话默认临时目录 / 程序内部数据目录 / 用户工作目录白名单 /
+          VFS 沙箱根」内的路径直接放行；其余路径（含 backend 源码与仓库根）**一律人工审批**，
+          `EXTERNAL_PATH_DEFAULT` 已废止、不参与决策。
+        - 源码保护优先于白名单：写/执行 `app/`、`plugins/`、`skills/`、`config/` 等受保护
+          源码即使位于白名单内仍需审批。
         - 敏感路径（`.git` / `.env*` / `*.db` / `permissions.json`）即使位于工作目录
           内也不静默放行：读取需审批，写入/执行直接拒绝。
         - `shell_exec`：base 命令白名单只决定命令本身；命令里引用的绝对路径 / `~` /
@@ -1339,8 +1340,6 @@ class PlatformContext:
         except Exception:  # noqa: BLE001
             legacy = None
 
-        default_decision = getattr(legacy, "external_default", "ask") if legacy else "ask"
-
         operation = "tool"
         approval_path = tool
         keys: list[str] = []
@@ -1354,11 +1353,10 @@ class PlatformContext:
                 decisions = [legacy.check_command(key, session_id=session_id) for key in keys]
                 if any(decision == "deny" for decision in decisions):
                     return False
-                # 命令本身在白名单内，但命令**访问的路径**越界 → 仍须人工审批
+                # 命令本身在本回合已授权，且命令**访问的路径**都在允许根内 → 免审
                 if all(decision == "allow" for decision in decisions) and not outside:
                     return True
-            if default_decision == "deny" and not outside:
-                return False
+            # `EXTERNAL_PATH_DEFAULT` 不再影响决策：未授权的命令一律人工审批。
             operation = "command"
             approval_path = outside[0] if outside else (keys[0] if keys else command[:80])
         else:
@@ -1455,7 +1453,13 @@ class PlatformContext:
             return p
 
     def _path_decision(self, path_str: str, operation: str, legacy: Any) -> str:
-        """单个路径的严格决策：allow（会话目录 + 前端工作目录）/ ask（其他）/ deny（受保护）。"""
+        """单个路径的严格决策：allow（会话目录 / 内部数据目录 / 白名单）/ ask / deny。
+
+        免审只有三类：会话默认临时目录、程序内部数据目录、用户白名单。
+        程序源码目录与仓库根**不再**隐式放行；`EXTERNAL_PATH_DEFAULT` 也不参与决策。
+        源码保护优先于白名单：白名单里的仓库根仍不能在写/执行时改
+        `app/plugins/skills/config` 等受保护源码（`_is_critical_write`）。
+        """
         from execution.permission import is_git_path, is_sensitive_path
 
         resolved = self._abs_for_permission(path_str)
@@ -1471,16 +1475,16 @@ class PlatformContext:
             if operation == "read":
                 return "ask"
             return "deny" if operation in ("write", "execute") else "ask"
-        # 自动放行：仅会话工作目录（active_root）或本回合允许根（会话目录+前端工作目录）
-        if self.vfs.is_allowed(str(resolved)):
-            return "allow"
-        if legacy is not None:
+        # 源码保护优先于白名单：即使仓库根被加入白名单，改本程序源码仍需逐次审批。
+        if operation in ("write", "execute") and legacy is not None:
             try:
-                if legacy.classify_path(str(resolved)) == "workspace":
-                    # 额外工作区已收集进 allowed_roots，但保险起见仍放行
-                    return "allow"
+                if legacy._is_critical_write(Path(resolved)):
+                    return "ask"
             except Exception:  # noqa: BLE001
                 pass
+        # 自动放行：仅会话目录 / 内部数据目录 / 用户白名单（均在 allowed_roots）。
+        if self.vfs.is_allowed(str(resolved)):
+            return "allow"
         return "ask"
 
 
@@ -1533,6 +1537,7 @@ def build_context(
     metrics: MetricsRecorder | None = None,
     checkpointer: Any = None,
     skill_loader: Any | None = None,
+    plugin_loader: Any | None = None,
 ) -> PlatformContext:
     """构建运行时上下文（默认装配 default_registry + 主图）。
 
@@ -1544,23 +1549,38 @@ def build_context(
     elif vfs is None:
         vfs = VirtualFileSystem()
 
+    # 自定义工具（plugins/custom_*.py）→ 真正的 Agent 工具：把已启用插件的
+    # `tool_*` 函数注册进 ToolRegistry（此前只被 PluginLoader 加载，模型根本看不到）。
+    if plugin_loader is not None:
+        from extensions.plugins import sync_plugin_tools
+
+        registered = sync_plugin_tools(registry, plugin_loader)
+        if registered:
+            logger.info("custom tool(s) registered: %s", ", ".join(registered))
+
     # 技能接线（1+2）：已启用技能 → `load_skill_*` 工具（模型自发现）；
     # 技能清单并入 system prompt；`/技能名` 由 ctx.run/stream 在轮次入口强制加载。
     skills_catalog_text = ""
     if skill_loader is not None:
-        from .skills.tools import make_skill_tools, skills_catalog
+        from .skills.tools import skills_catalog
 
-        for fn, name, desc in make_skill_tools(skill_loader):
-            try:
-                registry.register_function(fn, name=name, description=desc, scope="global")
-            except ValueError:  # 与内置工具重名：保留内置
-                logger.warning("skill tool name conflict, skipped: %s", name)
         skills_catalog_text = skills_catalog(skill_loader)
 
     graph = build_main_graph(
         model=model, registry=registry, vfs=vfs, retrieve=retrieve, reranker=reranker,
         checkpointer=checkpointer, skills_catalog=skills_catalog_text,
     )
+    # 技能工具在 `build_main_graph`（注册 `task`）之后再挂载：registry 是同一对象，
+    # 后注册仍对图生效。这样 global 工具顺序为「web/weather → task → load_skill_*」，
+    # 技能库很大时也不会把 task / 联网工具挤出 MAX_TOOL_DEFS。
+    if skill_loader is not None:
+        from .skills.tools import make_skill_tools
+
+        for fn, name, desc in make_skill_tools(skill_loader):
+            try:
+                registry.register_function(fn, name=name, description=desc, scope="global")
+            except ValueError:  # 与内置工具重名：保留内置
+                logger.warning("skill tool name conflict, skipped: %s", name)
     # 并发上限统一读 Settings（与 session.db 连接池 sizing 同源）；
     # 此前直接 os.environ.get("MAX_CONCURRENT_AGENTS") 会造成双真相源漂移。
     from config import settings
@@ -1580,6 +1600,7 @@ def build_context(
         max_concurrent=max_concurrent,
         max_queue_size=max_queue_size,
         skill_loader=skill_loader,
+        plugin_loader=plugin_loader,
     )
 
 

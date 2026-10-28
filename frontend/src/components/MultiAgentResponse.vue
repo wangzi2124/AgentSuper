@@ -34,10 +34,14 @@ const showThinking = computed(
 const showAgents = computed(
   () => hasAgents.value && (!collapsible.value || thoughtOpen.value),
 )
-// 「已思考（用时 X 秒）」：累加各 Agent 步骤耗时（ms → 秒，向上取整，至少 1s）。
-const thoughtSeconds = computed(
-  () => Math.max(1, Math.round(sumDurationMs(props.message.agents) / 1000)),
-)
+// 「已思考（用时 X）」：优先用本轮墙钟 duration_ms；历史消息缺失时退回工具步骤耗时之和。
+const durationLabel = computed(() => {
+  const ms = typeof props.message.duration_ms === 'number'
+    ? props.message.duration_ms
+    : sumDurationMs(props.message.agents)
+  if (!ms || ms <= 0) return ''
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
+})
 
 // 修复：仅当 Agent 面板已展开且内容完全相同时才去重。
 // 折叠态（面板不可见）必须始终展示最终答案，展开态内容不同也仍可见。
@@ -69,7 +73,7 @@ const showFinalAnswer = computed(
       @click="thoughtOpen = !thoughtOpen"
     >
       <span class="tt-label">{{ message.isError ? '执行出错' : '已思考' }}</span>
-      <span class="tt-time" v-if="!message.isError">（用时 {{ thoughtSeconds }} 秒）</span>
+      <span class="tt-time" v-if="!message.isError && durationLabel">（用时 {{ durationLabel }}）</span>
       <svg class="tt-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
     </button>
 
