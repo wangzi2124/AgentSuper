@@ -10,6 +10,7 @@ import ConversationTimeline from '../components/ConversationTimeline.vue'
 import ChatInput from '../components/ChatInput.vue'
 import PermissionInlineCard from '../components/PermissionInlineCard.vue'
 import VoiceBubble from '../components/VoiceBubble.vue'
+import { useStickToBottom } from '../harness/useTimelineStream'
 
 const route = useRoute()
 const router = useRouter()
@@ -17,7 +18,6 @@ const agent = useMultiAgentStore()
 const auth = useAuthStore()
 const parentRef = ref<HTMLElement>()
 const chatInputRef = ref<any>()
-const isNearBottom = ref(true)
 
 function isImgAvatar(v: string): boolean {
   return !!v && (v.startsWith('data:') || v.startsWith('http'))
@@ -28,43 +28,19 @@ const previewImage = ref('')
 const messages = computed(() => agent.messages)
 
 // ── ChatGPT 式滚动交互 ──
+// 只在贴底时跟随流式输出；刷新用 instant，避免每个 delta 启动 smooth 动画。
+const streamSignal = computed(() => {
+  const msgs = messages.value
+  if (!msgs.length) return ''
+  const last = msgs[msgs.length - 1]
+  const steps = last.agents?.reduce((n, a) => n + (a.steps?.length || 0), 0) ?? 0
+  return `${msgs.length}|${last.agents?.length || 0}|${steps}|${last.content?.length || 0}`
+})
+const { isNearBottom, onScroll, scrollToBottom } = useStickToBottom(
+  parentRef,
+  () => streamSignal.value,
+)
 const showScrollBtn = computed(() => !isNearBottom.value && messages.value.length > 0)
-
-function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
-  const el = parentRef.value
-  if (!el) return
-  isNearBottom.value = true
-  el.scrollTo({ top: el.scrollHeight, behavior })
-}
-
-watch(() => messages.value.length, async () => {
-  await nextTick()
-  if (isNearBottom.value && parentRef.value) {
-    parentRef.value.scrollTo({ top: parentRef.value.scrollHeight, behavior: 'smooth' })
-  }
-})
-
-watch(() => {
-  const msgs = messages.value
-  if (msgs.length === 0) return ''
-  return msgs[msgs.length - 1]?.content || ''
-}, async () => {
-  await nextTick()
-  if (isNearBottom.value && parentRef.value) {
-    parentRef.value.scrollTo({ top: parentRef.value.scrollHeight, behavior: 'smooth' })
-  }
-})
-
-watch(() => {
-  const msgs = messages.value
-  if (msgs.length === 0) return 0
-  return msgs[msgs.length - 1]?.agents?.reduce((n, a) => n + (a.steps?.length || 0), 0) ?? 0
-}, async () => {
-  await nextTick()
-  if (isNearBottom.value && parentRef.value) {
-    parentRef.value.scrollTo({ top: parentRef.value.scrollHeight, behavior: 'smooth' })
-  }
-})
 
 // ── [模型目录] 消息头 usage 摘要（model · in→out · cost；hover 看明细）──
 function fmtTokens(n?: number) {
@@ -125,13 +101,6 @@ watch(() => route.params.id, (newId) => {
   if (newId) agent.loadConversation(newId as string)
   else agent.newChat()
 })
-
-function onScroll(e: Event) {
-  if (!e.isTrusted) return
-  const el = parentRef.value
-  if (!el) return
-  isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 100
-}
 
 function handleSend(text: string, files?: FileContent[], voice?: VoiceMessageData) {
   markPendingAutoRead()

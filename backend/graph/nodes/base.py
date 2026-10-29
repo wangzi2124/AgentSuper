@@ -292,10 +292,21 @@ def _describe(result: Any) -> str:
 async def _dispatch(
     td: ToolDefinition, args: dict[str, Any]
 ) -> str:
+    """执行工具；同步工具放进线程池，避免阻塞事件循环。
+
+    内置工具（`shell_exec`/`web_search`/`web_fetch`/`http_request`/文件 IO 等）都是
+    同步阻塞实现，直接在协程里调用会让整个 uvicorn 事件循环停住：聊天期间其他
+    API/SSE 心跳全部排队，表现为「一聊天主进程就卡死，其他功能不能用」。
+    `asyncio.to_thread` 会自动复制 contextvars（权限根目录、当前 turn 等）。
+    """
     try:
-        result = td.fn(**args)
-        if inspect.isawaitable(result):
-            result = await result
+        fn = td.fn
+        if inspect.iscoroutinefunction(fn):
+            result = await fn(**args)
+        else:
+            result = await asyncio.to_thread(fn, **args)
+            if inspect.isawaitable(result):
+                result = await result
         return _describe(result)
     except TypeError as e:
         return f"错误：参数不匹配（{e}）"

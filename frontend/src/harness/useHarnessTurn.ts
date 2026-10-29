@@ -3,6 +3,7 @@ import { sendMultiAgentStream } from '../api/multiAgent'
 import type { MultiAgentChatRequest, MultiAgentSSEEvent } from '../types'
 import { adaptLegacyEvent } from './adapter'
 import { applyHarnessEvent, createTurnState } from './reducer'
+import { createTurnEventCoalescer } from './useTimelineStream'
 import type { HarnessEvent, TurnState } from './events'
 
 export interface HarnessRunOptions {
@@ -46,20 +47,27 @@ export function useHarnessTurn(): HarnessTurn {
       state.value = { ...state.value, sessionId }
       options.onSessionId?.(sessionId)
     }
+    const coalescer = createTurnEventCoalescer({
+      onEvent: (event) => {
+        const next = applyHarnessEvent(state.value, event)
+        if (next === state.value) return
+        state.value = next
+        options.onEvent?.(event, next)
+      },
+    })
     try {
       await sendMultiAgentStream(
         request,
         (raw: MultiAgentSSEEvent) => {
-          const event = adaptLegacyEvent(raw, state.value.turnId)
-          const next = applyHarnessEvent(state.value, event)
-          if (next === state.value) return
-          state.value = next
-          options.onEvent?.(event, next)
+          coalescer.push(adaptLegacyEvent(raw, state.value.turnId))
         },
         signal,
         onSessionId,
       )
     } finally {
+      // 终态/断流前把缓冲区里的最后一段文本落盘，避免答案尾部丢失。
+      coalescer.flush()
+      coalescer.dispose()
       if (controller === active) controller = null
     }
   }

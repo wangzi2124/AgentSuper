@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { MultiAgentMessage, TurnDiff } from '../types'
-import { normalizeAgent, sumDurationMs } from '../utils/agentDisplay'
+import { sumDurationMs } from '../utils/agentDisplay'
+import { useTimelineItems } from '../harness/useTimelineStream'
 import MarkdownContent from './MarkdownContent.vue'
 import TimelineToolRow from './TimelineToolRow.vue'
 import DiffViewer from './DiffViewer.vue'
@@ -21,33 +22,7 @@ watch(() => props.running, (running) => {
   if (running) showTimeline.value = true
 })
 
-type Item = { key: string; kind: 'text' | 'tool' | 'reasoning' | 'notice'; text?: string; step?: any; notice?: any }
-const items = computed<Item[]>(() => {
-  const out: Item[] = []
-  for (const agent of props.message.agents) {
-    const parts = normalizeAgent(agent).parts
-    for (const part of parts) {
-      // 隐藏 Harness 图内节点（无 tool_name），只保留真实工具调用。
-      if (part.kind === 'tool' && part.step?.tool_name) {
-        out.push({ key: `${agent.agent_id}:${part.step.step_id}`, kind: 'tool', step: part.step })
-      } else if (part.kind === 'notice') {
-        out.push({
-          key: `${agent.agent_id}:notice:${part.seq}`,
-          kind: 'notice',
-          text: part.text,
-          notice: part.notice,
-        })
-      } else if ((part.kind === 'text' || part.kind === 'reasoning') && (part.text || '').trim()) {
-        out.push({
-          key: `${agent.agent_id}:${part.seq}`,
-          kind: part.kind === 'reasoning' ? 'reasoning' : 'text',
-          text: part.text,
-        })
-      }
-    }
-  }
-  return out
-})
+const { items, isDuplicateAnswer } = useTimelineItems(() => props.message)
 const durationMs = computed(() => {
   if (typeof props.message.duration_ms === 'number') return props.message.duration_ms
   return sumDurationMs(props.message.agents)
@@ -58,14 +33,8 @@ const durationLabel = computed(() => {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
 })
 const collapsible = computed(() => !props.running && !props.message.isError && items.value.length > 0)
-const isDuplicateOfSingleAgent = computed(() => {
-  const list = props.message.agents
-  if (list.length !== 1) return false
-  const c = props.message.content?.trim()
-  return !!c && list[0].content?.trim() === c
-})
 const showFinalAnswer = computed(() =>
-  !!props.message.content && !(isDuplicateOfSingleAgent.value && showTimeline.value),
+  !!props.message.content && !(isDuplicateAnswer.value && showTimeline.value),
 )
 const statusText = computed(() => {
   if (props.message.isError) return 'Failed'
@@ -95,7 +64,7 @@ const statusText = computed(() => {
 
     <div v-if="showTimeline" class="timeline-items">
       <template v-for="item in items" :key="item.key">
-        <TimelineToolRow v-if="item.kind === 'tool'" :step="item.step" />
+        <TimelineToolRow v-if="item.kind === 'tool' && item.step" :step="item.step" />
         <div v-else-if="item.kind === 'notice'" class="timeline-notice">
           <span class="notice-dot"></span>
           <span>
@@ -105,17 +74,17 @@ const statusText = computed(() => {
         </div>
         <details v-else-if="item.kind === 'reasoning'" class="reasoning-block">
           <summary>思考过程</summary>
-          <MarkdownContent :text="item.text || ''" />
+          <MarkdownContent :text="item.text || ''" :streaming="running" />
         </details>
         <div v-else class="timeline-text">
-          <MarkdownContent :text="item.text || ''" />
+          <MarkdownContent :text="item.text || ''" :streaming="running" />
         </div>
       </template>
       <div v-if="running && !items.length" class="timeline-empty">正在初始化…</div>
     </div>
 
     <div v-if="showFinalAnswer" class="timeline-final">
-      <MarkdownContent :text="message.content" />
+      <MarkdownContent :text="message.content" :streaming="running" />
     </div>
 
     <PlanFileChip v-if="message.plan_path" :path="message.plan_path" />
