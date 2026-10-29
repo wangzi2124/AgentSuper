@@ -3,23 +3,22 @@
 策略：未知模型一律走文本回退（保守），显式能力表优先于目录探测。
 可用环境变量人工覆盖：
 
-- ``HARNESS_TOOL_MODE=native|fallback``：全局强制模式（排障用）
-- ``HARNESS_NATIVE_MODELS=a,b``：额外声明原生支持
-- ``HARNESS_FALLBACK_MODELS=a,b``：额外声明不支持原生
+- ``harness_tool_mode=native|fallback``：全局强制模式（排障用）
+- ``harness_native_models``：额外声明原生支持
+- ``harness_fallback_models``：额外声明不支持原生
 """
 
 from __future__ import annotations
 
-import os
+from config import settings
 
 NATIVE = "native"
 FALLBACK = "fallback"
 MODES = (NATIVE, FALLBACK)
 
 
-def _split_env(name: str) -> set[str]:
-    raw = os.environ.get(name, "") or ""
-    return {part.strip() for part in raw.split(",") if part.strip()}
+def _model_list(values: list[str] | None) -> set[str]:
+    return {str(item).strip() for item in (values or []) if str(item).strip()}
 
 
 def _model_candidates(model_id: str | None) -> list[str]:
@@ -35,12 +34,12 @@ def _model_candidates(model_id: str | None) -> list[str]:
 
 def mode_override(model_id: str | None) -> str | None:
     """人工覆盖：全局强制 > 回退白名单 > 原生白名单。"""
-    force = (os.environ.get("HARNESS_TOOL_MODE") or "").strip().lower()
+    force = (settings.harness_tool_mode or "").strip().lower()
     if force in MODES:
         return force
     candidates = _model_candidates(model_id)
-    fallback = _split_env("HARNESS_FALLBACK_MODELS")
-    native = _split_env("HARNESS_NATIVE_MODELS")
+    fallback = _model_list(settings.harness_fallback_models)
+    native = _model_list(settings.harness_native_models)
     if any(c in fallback for c in candidates):
         return FALLBACK
     if any(c in native for c in candidates):

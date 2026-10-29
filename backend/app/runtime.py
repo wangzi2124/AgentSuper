@@ -3,7 +3,6 @@ import threading
 from pathlib import Path
 
 from config import settings
-from env_boot import load_env_to_os as _load_env_to_os
 from execution.permission import PermissionManager, set_manager as set_perm_manager
 from extensions.plugins import PluginLoader
 from cognition.bm25_index import BM25Index
@@ -72,8 +71,6 @@ def _do_init(app):
                 "Reranker disabled: failed to initialize (%s). "
                 "Set ENABLE_RERANKER=false or pre-download the model.", e,
             )
-
-    _load_env_to_os()
 
     # [DeepSeek 兼容补丁] litellm 的 deepseek provider：(1) 会把 content 列表扁平化、
     # 丢弃 image_url 分块；(2) 思考模式下不回填 assistant 的 reasoning_content（未知
@@ -153,7 +150,6 @@ def _do_init(app):
     perm_mgr = PermissionManager(
         workspace=str(_base_dir),
         whitelist_path=str(_data_dir / "permissions.json"),
-        external_default=settings.external_path_default,
         approval_timeout=settings.permission_approval_timeout,
         allow_source_writes=settings.allow_source_writes,
         project_worktree=project.worktree,

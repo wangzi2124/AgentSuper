@@ -62,9 +62,9 @@ uv sync
 # 或直接用 pip
 # pip install -r requirements.txt
 
-# 配置环境变量（首次需要）
-cp .env.example .env
-# 编辑 .env，填入 LLM_API_KEY
+# 配置（首次需要）
+cp config.example.json config.json
+# 编辑 config.json，填入 llm_api_key
 
 # 模型（首次启动通过 ModelScope 自动下载 Embedding 和 Reranker 模型）
 ```

@@ -70,8 +70,9 @@ class MemoryManager:
         self._store: dict[str, MemoryEntry] = {}
         self._default_ttl = default_ttl
         self._lock = asyncio.Lock()
-        # 持久化：默认使用 settings.memory_persist_path（空串/None 表示不落盘）
-        self._persist_path = persist_path if persist_path is not None else settings.memory_persist_path
+        # 持久化仅由显式 persist_path 开启；settings.memory_persist_path 现指向
+        # LangGraph SQLite Store（app/memory_store.py），不能再被 JSON 写入复用。
+        self._persist_path = persist_path
         # 异步去抖落盘状态
         self._persist_debounce_lock = asyncio.Lock()
         self._last_persist_ts = 0.0

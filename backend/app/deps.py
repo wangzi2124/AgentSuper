@@ -1566,9 +1566,18 @@ def build_context(
 
         skills_catalog_text = skills_catalog(skill_loader)
 
+    # 长期记忆持久化：memory_persist_path 指向 SQLite Store；失败则回落图默认
+    # InMemoryStore（重启即丢），不阻断启动。
+    try:
+        from .memory_store import get_memory_store
+
+        memory_store = get_memory_store()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("persistent memory store unavailable, using in-memory: %s", exc)
+        memory_store = None
     graph = build_main_graph(
         model=model, registry=registry, vfs=vfs, retrieve=retrieve, reranker=reranker,
-        checkpointer=checkpointer, skills_catalog=skills_catalog_text,
+        checkpointer=checkpointer, store=memory_store, skills_catalog=skills_catalog_text,
     )
     # 技能工具在 `build_main_graph`（注册 `task`）之后再挂载：registry 是同一对象，
     # 后注册仍对图生效。这样 global 工具顺序为「web/weather → task → load_skill_*」，
@@ -1586,10 +1595,7 @@ def build_context(
     from config import settings
 
     max_concurrent = max(1, int(settings.max_concurrent_agents))
-    try:
-        max_queue_size = int(os.environ.get("MAX_QUEUE_SIZE", "20"))
-    except ValueError:
-        max_queue_size = 20
+    max_queue_size = max(0, int(settings.max_queue_size or 0))
     return PlatformContext(
         graph=graph,
         registry=registry,

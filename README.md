@@ -91,8 +91,8 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 
 # 配置
-copy .env.example .env
-# 编辑 .env，至少填写 LLM_API_KEY / LLM_API_BASE / LLM_MODEL
+copy config.example.json config.json
+# 编辑 config.json，至少填写 llm_api_key / llm_api_base / llm_model
 
 # 启动（约 30–40s；不要用 --reload）
 .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -173,18 +173,18 @@ cd backend
 
 ## 配置重点
 
-| 变量 | 说明 |
+| 配置项 | 说明 |
 | --- | --- |
-| `LLM_API_KEY` / `LLM_API_BASE` / `LLM_MODEL` | 模型凭证与默认模型 |
-| `SESSION_BUDGET` | 会话预算；`0` 表示不限 |
-| `MAX_CONCURRENT_AGENTS` | 并发 Agent 上限 |
+| `llm_api_key` / `llm_api_base` / `llm_model` | 模型凭证与默认模型 |
+| `session_budget` | 会话预算；`0` 表示不限 |
+| `max_concurrent_agents` | 并发 Agent 上限 |
 | `COMPRESS_THRESHOLD` / `KEEP_RECENT_TOKENS` | `cognition/compressor.py` 模块常量；切换模型时按目标窗口绑定覆盖 |
-| `PLAN_PARALLEL_ENABLED` | 并行扇出开关（默认关闭） |
-| `EXTERNAL_PATH_DEFAULT` | 已废止（保留兼容）；免审范围固定为会话临时目录 + 内部数据目录 + 工作目录白名单 |
-| `HARNESS_TOOL_MODE` | `native` / `fallback`，排障强制模式 |
-| `HARNESS_SMOKE_MODEL_A/B` | 真实模型验收模型对 |
+| `plan_parallel_enabled` | 并行扇出开关（默认关闭） |
+| `harness_tool_mode` | `native` / `fallback`，排障强制模式 |
+| `harness_smoke_model_a/b` | 真实模型验收模型对 |
 
-完整配置见 `backend/config.py` 与 `.env.example`。
+配置来源：`backend/config.example.json`（全部参数与默认值）→ 复制为 `backend/config.json`。
+优先级：操作系统环境变量 > `config.json` > 代码默认值；`.env` 文件不再读取。
 
 ---
 

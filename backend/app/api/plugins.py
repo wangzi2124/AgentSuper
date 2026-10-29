@@ -30,6 +30,7 @@ class CallPluginRequest(BaseModel):
     args: Dict[str, Any] = {}
 
 
+@router.get("")
 @router.get("/")
 async def list_plugins(request: Request):
     """获取所有可用插件的列表。"""

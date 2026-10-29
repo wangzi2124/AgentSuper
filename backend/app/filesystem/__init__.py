@@ -4,8 +4,7 @@ opencode 风格文件系统层(后端 AgentSuper)。
 设计对齐 opencode 的模块:
   - models.FileInfo / FileNode / FileContent   文件模型(core/file.ts)
   - fsutil.FSUtil                               纯路径助手与文件操作(core/fs-util.ts)
-  - filesystem.FileSystem                       文件系统服务(core/filesystem.ts)
-  - search / ripgrep                            搜索层(glob/grep/find)
+  - ripgrep                                     搜索层(grep/find)
   - shell.Shell                                 shell 识别(shell.ts)
   - watcher.FileSystemWatcher                   watcher(core/filesystem/watcher.ts)
   - project.Project                             (project/project.ts,按 projectID 隔离)
@@ -17,7 +16,6 @@ opencode 风格文件系统层(后端 AgentSuper)。
 from __future__ import annotations
 
 from .core import ScanCache, contains, find_up, glob_up, normalize_path, overlaps, up
-from .filesystem import Entry, FileSystem, LocationResolvingError, Match
 from .fsutil import (
     DirEntry,
     FileStat,
@@ -58,20 +56,16 @@ from .watcher import Event as FileSystemEvent, FileSystemWatcher, has_native_bin
 
 __all__ = [
     "DirEntry",
-    "Entry",
     "FileContent",
     "FileInfo",
     "FileNode",
     "FileStat",
     "FileStatus",
-    "FileSystem",
     "FileSystemError",
     "FileSystemEvent",
     "FileSystemWatcher",
     "GitignoreMatcher",
     "InvalidPatternError",
-    "LocationResolvingError",
-    "Match",
     "Project",
     "RawMatch",
     "ScanCache",

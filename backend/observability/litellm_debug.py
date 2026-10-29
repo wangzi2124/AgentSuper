@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from config import settings
 from harness.security import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def configure_litellm_debug() -> None:
     litellm_logger.setLevel(logging.DEBUG)
     litellm_logger.propagate = False
 
-    path = Path(os.environ.get("LITELLM_DEBUG_LOG", _DEFAULT_PATH))
+    path = Path(settings.litellm_debug_log or _DEFAULT_PATH)
     if not path.is_absolute():
         path = Path(__file__).resolve().parents[1] / path
     try:

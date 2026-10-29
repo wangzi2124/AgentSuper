@@ -7,7 +7,7 @@
 - POST /api/auth/account/login       账号登录，签发签名 token
 - GET  /api/auth/account/me          返回当前用户信息（需 X-User-Id + X-Auth-Token）
 
-启用方式：.env 配置 AUTH_TOKEN_SECRET。未启用时这些接口保持可用（幂等返回状态）。
+启用方式：config.json 的 auth_secret（或环境变量 AUTH_TOKEN_SECRET）。未启用时这些接口保持可用（幂等返回状态）。
 """
 
 from fastapi import APIRouter, HTTPException, Request

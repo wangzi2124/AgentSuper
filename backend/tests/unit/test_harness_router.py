@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from config import settings
 from harness.delimiters import ARGS_CLOSE, ARGS_OPEN, NAME_CLOSE, NAME_OPEN
 from models.router import ChatResult, TierModel
 from models.stream import StreamResult
@@ -29,7 +30,7 @@ def _response(content="", tool_calls=None):
 
 
 def _model(monkeypatch, mode, endpoint_model="fake-model"):
-    monkeypatch.setenv("HARNESS_TOOL_MODE", mode)
+    monkeypatch.setattr(settings, "harness_tool_mode", mode)
     m = TierModel(tier="auto")
     monkeypatch.setattr(m, "_endpoint", lambda: {"model": endpoint_model})
     return m

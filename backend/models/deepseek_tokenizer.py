@@ -14,10 +14,11 @@ tokenizer 文件（LlamaTokenizerFast 的 tokenizer.json）位于：
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from pathlib import Path
 from typing import Any, Optional
+
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ _lock = threading.Lock()
 
 def _tokenizer_dir() -> Optional[Path]:
     """定位 tokenizer 目录：env 覆盖 → data/models → 仓库内置。"""
-    env_dir = os.environ.get("DEEPSEEK_TOKENIZER_DIR")
+    env_dir = settings.deepseek_tokenizer_dir
     if env_dir:
         d = Path(env_dir)
         if (d / "tokenizer.json").exists():

@@ -13,6 +13,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
+from config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +35,38 @@ _SPANS: list[TraceSpan] = []
 _MAX_SPANS = 2000
 
 
+def _sync_langfuse_env() -> None:
+    """把 config.json 中的 Langfuse 配置补进进程环境（litellm/langfuse 直接读 env）。"""
+    for env_key, value in (
+        ("LANGFUSE_PUBLIC_KEY", settings.langfuse_public_key),
+        ("LANGFUSE_SECRET_KEY", settings.langfuse_secret_key),
+        ("LANGFUSE_HOST", settings.langfuse_host),
+    ):
+        if value:
+            os.environ.setdefault(env_key, value)
+
+
+def configure_langfuse() -> bool:
+    """按 config.json 的 langfuse_* 启用 litellm 回调（未安装 langfuse 时跳过）。"""
+    if not _langfuse_available():
+        return False
+    try:
+        import litellm
+
+        for attr in ("success_callback", "failure_callback"):
+            current = list(getattr(litellm, attr, None) or [])
+            if "langfuse" not in current:
+                current.append("langfuse")
+            setattr(litellm, attr, current)
+        logger.info("Langfuse callbacks enabled")
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("Langfuse callback setup failed", exc_info=True)
+        return False
+
+
 def _langfuse_available() -> bool:
+    _sync_langfuse_env()
     if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
         return False
     try:

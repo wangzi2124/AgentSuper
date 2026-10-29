@@ -9,24 +9,25 @@ opencode 风格全局存储目录(XDG 分层)。
   log    -> 日志
   bin    -> 下载的二进制/脚本
 
-环境变量可整体覆盖(未设置时默认全部位于 backend/ 下):
-  AGENTSUPER_DATA / AGENTSUPER_CACHE / AGENTSUPER_CONFIG /
-  AGENTSUPER_STATE / AGENTSUPER_LOG / AGENTSUPER_BIN
+配置可整体覆盖(未设置时默认全部位于 backend/ 下):
+  agentsuper_data / agentsuper_cache / agentsuper_config /
+  agentsuper_state / agentsuper_log / agentsuper_bin
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
+
+from config import settings
 
 _BASE = Path(__file__).resolve().parents[1]  # backend/
 
-_ENV_KEYS = {
-    "data": "AGENTSUPER_DATA",
-    "cache": "AGENTSUPER_CACHE",
-    "config": "AGENTSUPER_CONFIG",
-    "state": "AGENTSUPER_STATE",
-    "log": "AGENTSUPER_LOG",
-    "bin": "AGENTSUPER_BIN",
+_SETTING_KEYS = {
+    "data": "agentsuper_data",
+    "cache": "agentsuper_cache",
+    "config": "agentsuper_config",
+    "state": "agentsuper_state",
+    "log": "agentsuper_log",
+    "bin": "agentsuper_bin",
 }
 
 
@@ -45,9 +46,10 @@ def global_paths(base: Path | None = None) -> dict[str, Path]:
     """返回各用途目录并确保存在;环境变量可覆盖默认位置。"""
     root = Path(base) if base is not None else _BASE
     paths = _defaults(root)
-    for key, env_name in _ENV_KEYS.items():
-        if env_name in os.environ and os.environ.get(env_name):
-            paths[key] = Path(os.environ[env_name]).expanduser()
+    for key, setting_name in _SETTING_KEYS.items():
+        value = getattr(settings, setting_name, "") or ""
+        if value:
+            paths[key] = Path(value).expanduser()
     for p in paths.values():
         p.mkdir(parents=True, exist_ok=True)
     return paths

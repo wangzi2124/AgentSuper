@@ -13,6 +13,7 @@ import typing
 from typing import Any, Awaitable, Callable
 
 from cognition.tool_output import bound_tool_output, prune_tool_outputs
+from execution.quota import get_quota
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from harness.adapter import call_argument_error
 from harness.budget import BudgetExceeded, BudgetLedger
@@ -302,6 +303,40 @@ async def _dispatch(
         return f"错误：{e or repr(e)}"
 
 
+def _quota_error(tc: Any, limits: Any) -> str:
+    return (
+        f"错误：工具 {tc.name} 超出配额"
+        f"（rate_limit={limits.rate_limit}/分钟，token_budget={limits.token_budget}）"
+    )
+
+
+async def _execute_with_quota(
+    td: ToolDefinition,
+    tc: Any,
+    args: dict[str, Any],
+    quota: Any,
+) -> str:
+    """配额检查 + 执行 + token 结算，集中在一处。"""
+    from cognition.token_counter import estimate_tokens
+
+    limits = quota.limits(tc.name)
+    reserved = 0
+    if limits.token_budget > 0:
+        reserved = estimate_tokens(json.dumps(args, ensure_ascii=False, default=str))
+    if (limits.rate_limit > 0 or limits.token_budget > 0) and not quota.allow(
+        tc.name, reserved
+    ):
+        return _quota_error(tc, limits)
+
+    with trace_span("tool.call", tool=tc.name):
+        output = await _dispatch(td, args)
+    if limits.token_budget > 0:
+        actual = estimate_tokens(str(output))
+        if not quota.adjust(tc.name, actual - reserved):
+            return _quota_error(tc, limits)
+    return output
+
+
 async def _execute_tool_call(
     tc: Any,
     call_id: str,
@@ -336,11 +371,9 @@ async def _execute_tool_call(
             if not approved:
                 output = f"已拒绝执行工具 {tc.name}（用户未授权）"
             else:
-                with trace_span("tool.call", tool=tc.name):
-                    output = await _dispatch(td, args)
+                output = await _execute_with_quota(td, tc, args, get_quota(registry))
         else:
-            with trace_span("tool.call", tool=tc.name):
-                output = await _dispatch(td, args)
+            output = await _execute_with_quota(td, tc, args, get_quota(registry))
         output = run_post_tool(tc.name, args, output)
 
     output = bound_tool_output(str(output), tool_name=tc.name)

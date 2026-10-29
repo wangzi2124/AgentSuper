@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import ssl
 import urllib.error
@@ -21,6 +20,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
+from config import settings
 from ..filesystem import bounded
 
 logger = logging.getLogger(__name__)
@@ -219,7 +219,7 @@ def _duckduckgo_search(query: str, max_results: int = 5) -> list[dict[str, str]]
 
 
 def _tavily_search(query: str, max_results: int) -> list[dict[str, str]]:
-    api_key = os.environ.get("TAVILY_API_KEY")
+    api_key = settings.tavily_api_key
     if not api_key:
         raise ValueError("TAVILY_API_KEY not set")
     from tavily import TavilyClient  # type: ignore
@@ -236,7 +236,7 @@ def _tavily_search(query: str, max_results: int) -> list[dict[str, str]]:
 
 
 def _bing_search(query: str, max_results: int) -> list[dict[str, str]]:
-    api_key = os.environ.get("BING_API_KEY")
+    api_key = settings.bing_api_key
     if not api_key:
         raise ValueError("BING_API_KEY not set")
     params = urllib.parse.urlencode(
@@ -268,9 +268,9 @@ def _bing_search(query: str, max_results: int) -> list[dict[str, str]]:
 def _default_searcher(query: str, top_k: int) -> str:
     """默认检索后端：Tavily → Bing → DuckDuckGo（按可用密钥择优）。"""
     engines: list[tuple[str, Callable[[str, int], list[dict[str, str]]]]] = []
-    if os.environ.get("TAVILY_API_KEY"):
+    if settings.tavily_api_key:
         engines.append(("tavily", _tavily_search))
-    if os.environ.get("BING_API_KEY"):
+    if settings.bing_api_key:
         engines.append(("bing", _bing_search))
     engines.append(("duckduckgo", _duckduckgo_search))
 

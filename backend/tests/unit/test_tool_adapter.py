@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from config import settings
 from harness.delimiters import ARGS_CLOSE, ARGS_OPEN, NAME_CLOSE, NAME_OPEN
 from harness.tool_adapter import (
     Done,
@@ -204,7 +205,7 @@ async def test_stream_plain_text_flushes_on_done():
 
 
 def test_adapter_infers_model_id_and_mode(monkeypatch):
-    monkeypatch.setenv("HARNESS_FALLBACK_MODELS", "fake-model")
+    monkeypatch.setattr(settings, "harness_fallback_models", ["fake-model"])
     adapter = get_tool_adapter(_RawModel())
     assert adapter.model_id == "fake-model"
     assert adapter.mode == "fallback"

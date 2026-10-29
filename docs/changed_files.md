@@ -38,7 +38,7 @@
     Phase 2 CreateProcessW 备注）、§6（ready 门 + C1 + B5/C6 + B1 超时钳制）、§7（闭包注入 + 硬白名单
     + `_build_tool_ctx` 伪代码 + save_artifact 白名单化）、§8（run 目录落盘 + 脱敏 + memory_limit）、
     §9（新增 `codeact_max_artifact_size_mb`）、§14 checklist（勾选已落地项、标注未接线项）。
-- `backend/.env.example`
+- `backend/config.example.json`
   - 新增 CodeAct 配置段（`CODEACT_ENABLED`~`CODEACT_MAX_ARTIFACT_SIZE_MB` 全部 `codeact_*`）。
 - `AGENTS.md`
   - 新增 CodeAct 条目（核心架构 + 关键约束 + 验证脚本 + 尚未接线风险）。

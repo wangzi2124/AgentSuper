@@ -16,7 +16,6 @@ context_epoch / session_inputs（旧的 conversations.db 已移除，数据全�
   （SQLAlchemy 引擎，参数/事务方言由门面翻译），本模块的 Pool 不参与。
 """
 
-import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -25,13 +24,12 @@ from typing import Optional
 from config import settings
 from storage import backends, schema as storage_schema
 
-# 会话库路径：`SESSION_DB_PATH` 可覆盖（测试隔离 / 自定义部署），缺省 data/session.db
-_raw_db_path = (os.environ.get("SESSION_DB_PATH") or "").strip()
-DB_PATH = (
-    Path(_raw_db_path)
-    if _raw_db_path
-    else Path(__file__).resolve().parents[2] / "data" / "session.db"
-)
+# 会话库路径：settings.session_db_path 可覆盖（测试隔离 / 自定义部署），缺省 data/session.db
+_raw_db_path = (settings.session_db_path or "").strip()
+_db_path = Path(_raw_db_path) if _raw_db_path else Path("data/session.db")
+if not _db_path.is_absolute():
+    _db_path = Path(__file__).resolve().parents[2] / _db_path
+DB_PATH = _db_path
 
 # 由 metadata 表声明编译的 sqlite DDL（建表 + 建索引，全部 IF NOT EXISTS）
 _SESSION_TABLES = storage_schema.SESSION_TABLES

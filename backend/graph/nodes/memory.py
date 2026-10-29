@@ -31,6 +31,26 @@ def _last_user_text(state: dict[str, Any]) -> str:
     return ""
 
 
+def _overlap_score(query: str, text: str) -> float:
+    """字符级重合度：Store 没有向量索引时也能按 query 做轻量相关度排序。"""
+    q = {ch.lower() for ch in query if not ch.isspace()}
+    if not q:
+        return 0.0
+    t = {ch.lower() for ch in text if not ch.isspace()}
+    return len(q & t) / len(q)
+
+
+def _rank_memories(memories: list[Any], query: str, limit: int) -> list[Any]:
+    if not query:
+        return memories[:limit]
+    scored = [
+        (_overlap_score(query, str(getattr(m, "value", {}).get("content", ""))), i, m)
+        for i, m in enumerate(memories)
+    ]
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [m for _, _, m in scored[:limit]]
+
+
 def make_memory_recall_node(
     store: Any | None = None,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
@@ -40,9 +60,11 @@ def make_memory_recall_node(
         user_id = state.get("user_id", "default")
         query = _last_user_text(state)
         try:
-            memories = store.search(_namespace(user_id), query=query, limit=5)
+            # 多取一些再由 _rank_memories 重排；无向量索引时 query 不会丢。
+            memories = store.search(_namespace(user_id), query=query, limit=50)
         except Exception:  # noqa: BLE001
             memories = []
+        memories = _rank_memories(memories, query, 5)
         ctx = "\n".join(
             f"- [{getattr(m, 'value', {}).get('type', '?')}] "
             f"{getattr(m, 'value', {}).get('content', '')}"

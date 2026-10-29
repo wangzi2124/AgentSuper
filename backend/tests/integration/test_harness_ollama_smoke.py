@@ -3,26 +3,20 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.request
 
 import pytest
 
+from config import settings
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from graph.nodes.base import run_tool_loop
 from harness.tool_adapter import ToolAdapter
 from models.router import TierModel, reset_request_model, set_request_model
 
-_ENABLED = os.getenv("HARNESS_OLLAMA_TEST", "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-}
-_TOOLS_MODEL = os.getenv("HARNESS_OLLAMA_TOOLS_MODEL", "ollama/qwen2.5:3b")
-_TEXT_MODEL = os.getenv(
-    "HARNESS_OLLAMA_TEXT_MODEL", "ollama/deepseek-r1:latest"
-)
-_BASE = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+_ENABLED = bool(settings.harness_ollama_test)
+_TOOLS_MODEL = settings.harness_ollama_tools_model or "ollama/qwen2.5:3b"
+_TEXT_MODEL = settings.harness_ollama_text_model or "ollama/deepseek-r1:latest"
+_BASE = settings.ollama_host or "http://127.0.0.1:11434"
 
 
 def _installed() -> set[str]:

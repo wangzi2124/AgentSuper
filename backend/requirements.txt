@@ -48,8 +48,11 @@ pytest
 pytest-asyncio
 pytest-cov
 
+# 可观测性追踪：litellm 的 Langfuse 回调要求 2.x（3.x 改了 SDK 导入路径）。
+# 设置 config.json 的 langfuse_public_key / langfuse_secret_key / langfuse_host 后生效。
+langfuse>=2.60.10,<3
+
 # 以下默认不安装，按需启用：
-# langfuse                # 可观测性追踪；设置 LANGFUSE_PUBLIC_KEY 后生效，未安装时自动跳过
 # 语音合成 TTS / openai-whisper 回退：见 requirements-voice.txt（torch / qwen-tts / openai-whisper）
 # ttsclone 独立 UI（app.py 专用）：gradio / flash_attn（server.py / clone.py 不依赖）
 # 技能脚本按需：defusedxml pdfplumber pdf2image imageio playwright anthropic

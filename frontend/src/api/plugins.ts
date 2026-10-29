@@ -11,7 +11,7 @@ async function unwrapError(res: Response, fallback: string): Promise<Error> {
 
 // 获取所有插件列表
 export async function listPlugins(): Promise<Plugin[]> {
-  const res = await fetchWithTimeout(BASE + '/')
+  const res = await fetchWithTimeout(BASE)
   if (!res.ok) throw await unwrapError(res, 'Failed to list plugins')
   return res.json()
 }

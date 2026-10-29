@@ -16,6 +16,7 @@ import tempfile
 _TEST_DB_DIR = tempfile.mkdtemp(prefix="agentsuper-test-")
 os.environ["SESSION_DB_PATH"] = os.path.join(_TEST_DB_DIR, "session.db")
 os.environ["CHECKPOINT_DB_PATH"] = os.path.join(_TEST_DB_DIR, "checkpoints.db")
+os.environ["MEMORY_PERSIST_PATH"] = os.path.join(_TEST_DB_DIR, "agent_memory.db")
 
 import pytest
 from fastapi.testclient import TestClient

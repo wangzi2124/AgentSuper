@@ -16,7 +16,7 @@ DeepSeek 的 ``deepseek-flash``（旧名 ``deepseek-v4-flash``）自 2026 起支
 但 litellm 1.89.x 的 ``DeepSeekChatConfig._transform_messages`` 会**无条件**把
 ``content`` 列表扁平化成纯文本（``handle_messages_with_content_list_to_str_conversion``
 → ``convert_content_list_to_str`` 只拼接每个分块的 ``.text``），``image_url`` 分块被
-静默丢弃。实测（本仓库 .env 的 deepseek key）：
+静默丢弃。实测（本仓库 config.json 的 deepseek key）：
 
 - ``deepseek/deepseek-v4-flash``（走 litellm 的 deepseek provider）→ 模型收到不到图，
   content 为空、reasoning 里自称「当前没有提供图片」；

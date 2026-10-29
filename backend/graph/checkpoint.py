@@ -23,11 +23,12 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
+
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -39,18 +40,16 @@ _cm: Any = None  # 创建它的 async context manager（关闭时 __aexit__ 释�
 
 
 def checkpoint_db_path() -> Path:
-    """SQLite 检查点文件路径（`CHECKPOINT_DB_PATH` 覆盖，缺省 `data/checkpoints.db`）。"""
-    raw = (os.environ.get("CHECKPOINT_DB_PATH") or "").strip()
-    return Path(raw) if raw else _DEFAULT_DB
+    """SQLite 检查点文件路径（settings.checkpoint_db_path，缺省 `data/checkpoints.db`）。"""
+    raw = (settings.checkpoint_db_path or "").strip()
+    if not raw:
+        return _DEFAULT_DB
+    path = Path(raw)
+    return path if path.is_absolute() else _BACKEND_ROOT / path
 
 
 def _persist_disabled() -> bool:
-    return (os.environ.get("CHECKPOINT_PERSIST", "") or "").strip().lower() in {
-        "0",
-        "false",
-        "off",
-        "no",
-    }
+    return not settings.checkpoint_persist
 
 
 async def get_checkpointer(configured: Any = None) -> Any:
@@ -65,7 +64,7 @@ async def get_checkpointer(configured: Any = None) -> Any:
     if _persist_disabled():
         return MemorySaver()
 
-    url = os.environ.get("POSTGRES_CHECKPOINT_URL") or os.environ.get("DATABASE_URL")
+    url = settings.postgres_checkpoint_url or settings.database_url
     if url and "postgres" in url:
         try:
             from langgraph.checkpoint.postgres import PostgresSaver  # type: ignore

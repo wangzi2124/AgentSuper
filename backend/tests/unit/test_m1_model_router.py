@@ -1,5 +1,6 @@
 """L1 单元测试：模型路由（agent.md §2）。"""
 
+from config import settings
 from models.router import (
     DEFAULT_TIMEOUT,
     LOCAL_OLLAMA_MAX_TOKENS,
@@ -34,15 +35,15 @@ def test_ensure_provider_prefix():
 
 
 def test_endpoint_uses_proxy_when_configured(monkeypatch):
-    monkeypatch.setenv("LITELLM_PROXY_URL", "http://localhost:4000")
-    monkeypatch.setenv("LITELLM_PROXY_KEY", "sk-test")
+    monkeypatch.setattr(settings, "litellm_proxy_url", "http://localhost:4000")
+    monkeypatch.setattr(settings, "litellm_proxy_key", "sk-test")
     ep = get_model("medium")._endpoint()
     assert ep["model"] == "tier-medium"
     assert ep["api_base"] == "http://localhost:4000"
 
 
 def test_endpoint_direct_without_proxy(monkeypatch):
-    monkeypatch.delenv("LITELLM_PROXY_URL", raising=False)
+    monkeypatch.setattr(settings, "litellm_proxy_url", "")
     ep = get_model("medium")._endpoint()
     assert "/" in ep["model"]
 

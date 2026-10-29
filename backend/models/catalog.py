@@ -18,13 +18,13 @@ provider.ts ConfigProvider.Info.models 汇总可用模型，价格走各 provide
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
 
+from config import settings
 from models.builtin_catalog import BUILTIN_CATALOG as _BUILTIN_CATALOG  # noqa: F841 — 供 build_catalog 回退
 from models.builtin_catalog import ZERO_COST as _ZERO_COST            # noqa: F841 — 供 probes / upsert / get_catalog 默认填充
 
@@ -128,7 +128,7 @@ def _cache_key() -> str:
 # ── Ollama 本地模型探测 ───────────────────────────────────────────────────
 # 目录是「声明式」的（内置 + 覆盖文件），但真实环境里 ollama 装了哪些模型是运行时事实。
 # 以 60s TTL 探测 ollama /api/tags，把「本机已装但目录未收录」的模型合并进目录快照，
-# 这样前端下拉框与默认模型（.env LLM_MODEL，如 ollama/qwen2.5:3b）都能对上真环境。
+# 这样前端下拉框与默认模型（config.json LLM_MODEL，如 ollama/qwen2.5:3b）都能对上真环境。
 _OLLAMA_TTL = 60.0
 _ollama_cache: Optional[list[dict[str, Any]]] = None
 _ollama_cache_time: float = 0.0
@@ -315,7 +315,7 @@ def effective_context_length(model_id: Optional[str], fallback: int = 0) -> int:
 
 
 def _ollama_base_url() -> str:
-    host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+    host = settings.ollama_host or "http://localhost:11434"
     if not host.startswith(("http://", "https://")):
         host = "http://" + host
     return host.rstrip("/")
@@ -609,7 +609,7 @@ def reload_catalog() -> None:
 # 启动探测（probe）会把各 enabled provider 的 OpenAI 兼容 /v1/models 里
 # `目录未收录` 的模型自动注册为 "{provider}/{id}" 条目（费用 0，可前端覆盖）。
 # `_llm_call` 经 provider_api() 按模型解析 api_base/api_key——即“前端配置模型，
-# 不再只依赖后端 .env”。
+# 不再只依赖后端 config.json”。
 
 
 def read_providers() -> dict[str, dict[str, Any]]:
@@ -802,7 +802,7 @@ def _strip_unknown_fields(entry: dict) -> dict:
 _PROBE_TTL = 60.0
 # 单个 provider 的 /v1/models 探测超时。探测只用于把「provider 上有但目录未收录」的模型
 # 补进下拉框，属锦上添花，不值得让请求等太久——调小它可降低不可达端点的拖累。
-_PROBE_TIMEOUT = float(os.environ.get("MODEL_PROBE_TIMEOUT", "4") or 4)
+_PROBE_TIMEOUT = float(settings.model_probe_timeout or 4)
 _probe_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _ollama_probe_state: tuple[Optional[list[dict[str, Any]]], float] = (None, 0.0)
 
@@ -1046,8 +1046,8 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
             if _ot in ("enabled", "disabled"):
                 opts["think"] = (_ot == "enabled")
         # 连接凭证**只认前端注册表**（「模型管理」页 providers 表，upsert_provider 写入）；
-        # 后端 .env 不参与 ollama 解析（不回落 LLM_API_BASE/LLM_API_KEY ——
-        # 否则 api_base=None 被 .env 的 DeepSeek 端点顶掉、key 落成占位 "ollama"，
+        # 后端 config.json 不参与 ollama 解析（不回落 LLM_API_BASE/LLM_API_KEY ——
+        # 否则 api_base=None 被 config.json 的 DeepSeek 端点顶掉、key 落成占位 "ollama"，
         # 请求打到 DeepSeek 网关报 "Your api key: ****lama is invalid"）。
         # 注册表未配 api_base → None 交 litellm 原生发现（OLLAMA_HOST 环境变量 → localhost:11434）。
         reg_o = read_providers().get("ollama") or {}
@@ -1057,7 +1057,7 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         # 最稳妥（ChatLiteLLM 某些版本内部探测会忽略构造参数转而读环境变量）。
         # 注册表未配 api_base 时读 OLLAMA_API_BASE（其次 OLLAMA_HOST）兜底。
         if not _ob:
-            _ob = (os.environ.get("OLLAMA_API_BASE") or os.environ.get("OLLAMA_HOST") or "").strip()
+            _ob = (settings.ollama_api_base or settings.ollama_host or "").strip()
         return {"api_base": _ob or None, "api_key": _ok or "ollama", "is_ollama": True,
                 "litellm_model": None, "provider_type": "ollama", "options": opts}
     # DeepSeek 思考模型（V4.1-Flash / V4-Pro 默认开思考）：按「推理模型」能力 + 全局
@@ -1119,7 +1119,7 @@ def provider_config_hint(model_id: Optional[str], *, creds: Optional[dict] = Non
       - 否则走 settings.llm_api_base/api_key 兜底：api_key 为空 AND
         （api_base 为空 或 api_base 是 ollama 本地（localhost/127.0.0.1:11434）或默认
         deepseek 端点）→ 说明用户根本没配服务商，返回提示而非把它当自定义 provider 直连。
-    提示文案面向「模型管理」页配置 Provider（api_base + api_key），也提及 .env 兜底。
+    提示文案面向「模型管理」页配置 Provider（api_base + api_key），也提及 config.json 兜底。
     """
     from config import settings
 
@@ -1204,7 +1204,7 @@ def normalize_llm_exception(exc: BaseException, model_id: Optional[str] = None) 
     if ("api key" in low or "apikey" in low or "401" in low or "403" in low or
             "authentication" in low or "authorization" in low):
         return ("模型服务商鉴权失败：%s。请到「模型管理」页核对当前模型的 api_base 与 api_key，"
-                "或检查 .env 的 LLM_API_BASE / LLM_API_KEY。" % msg.strip()[:200])
+                "或检查 config.json 的 LLM_API_BASE / LLM_API_KEY。" % msg.strip()[:200])
     if ("connect" in low or "connection" in low or "refused" in low or
             "timeout" in low or "unreachable" in low or "network" in low):
         return ("无法连接到模型服务商：%s。请确认服务地址（api_base）可达、网络已放行，"
@@ -1285,12 +1285,12 @@ def read_limits(model_id: Optional[str]) -> dict[str, int]:
 
 
 def resolve_context_length(model_id: Optional[str], fallback: int) -> int:
-    """模型的上下文窗口（**模型条目声明优先**，否则用全局 `.env` 值）。
+    """模型的上下文窗口（**模型条目声明优先**，否则用全局 `config.json` 值）。
 
     B5：`context_length` 声明值小于全局值时生效 —— 目录/覆盖文件里写小窗口（如本地
-    32768 的 ollama 模型）是用户/维护者的明确约束，不能被 `.env MAX_CONTEXT_TOKENS=160000`
+    32768 的 ollama 模型）是用户/维护者的明确约束，不能被 `config.json MAX_CONTEXT_TOKENS=160000`
     这种为云端大窗模型设的全局值反向撑大（否则压缩阈值、truncation 预算全按错的窗口算）。
-    声明值更大时不放大全局值：`.env` 仍是全局权威，避免用户漏改条目时静默改变行为。
+    声明值更大时不放大全局值：`config.json` 仍是全局权威，避免用户漏改条目时静默改变行为。
     """
     global_ctx = max(0, int(fallback or 0))
     declared = read_limits(model_id)["context_length"]
@@ -1305,7 +1305,7 @@ def resolve_max_output_tokens(model_id: Optional[str], fallback: int) -> int:
     """每次调用的输出上限（**模型条目声明与全局值取小**，绝不放大）。
 
     B6：`limits.max_output_tokens` 现在真的被 `_llm_call` 消费。取 `min` 而非「条目覆盖」
-    是刻意的 —— 模型自身输出上限（目录值）永远不能超过 `.env LLM_MAX_TOKENS` 这个全局
+    是刻意的 —— 模型自身输出上限（目录值）永远不能超过 `config.json LLM_MAX_TOKENS` 这个全局
     成本/延迟预算；条目只起到「这个模型更小 → 收窄」的上限作用，未声明 → 用全局值。
     """
     global_mx = max(0, int(fallback or 0))

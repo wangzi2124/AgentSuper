@@ -121,6 +121,10 @@ cd backend
 # 不要依赖 --reload（E: 盘热重载不可靠）；改代码后杀进程树再起。
 ```
 
+- **配置来源**：`backend/config.example.json` → 复制为 `backend/config.json`（JSONC，已被 gitignore）。
+  优先级：操作系统环境变量 > `config.json` > `config.py` 字段默认值；`.env` 文件不再读取。
+- 新增配置项必须同时更新 `config.example.json` 与 `tests/unit/test_config_example.py`（完整性测试会失败）。
+
 ```powershell
 # 全量
 .venv\Scripts\python.exe -m pytest
@@ -203,7 +207,7 @@ npx vitest run tests/integration/
 - **会话存储**：模型视角历史主要来自 graph checkpoint；`session.db` 负责 UI/事件/队列/epoch。不要把两者混为一个真相源。
 - **`session_inputs`**：执行中追加任务走 `/api/sessions/{id}/prompts` 队列；旧单数 `/prompt` 已删除。
 - **权限**：无审批通道时 `require_approval` 工具一律拒绝；`.git` 路径永远拒绝；Shell 重定向目标要过写权限。
-- **工具名**：默认 registry 注册的是 `read_file` / `write_file` / `edit_file` / `ls` / `grep` / `glob` / `append_file` / `delete_file` / `create_directory` / `shell_exec` / `task`，以及内置联网/天气 `web_search` / `web_fetch` / `http_request` / `get_weather`；`http_request` 需人工审批。插件工具名以加载器注册结果为准，不要硬编码旧前缀。内置插件（http-client / internet-search / weather / 文档生成器等）已移除，相关能力走内置工具。
+- **工具名**：默认 registry 注册的是 `read_file` / `write_file` / `edit_file` / `ls` / `grep` / `glob` / `append_file` / `delete_file` / `create_directory` / `shell_exec` / `task`，以及内置联网/天气 `web_search` / `web_fetch` / `http_request` / `get_weather`；`http_request` 需人工审批。插件工具名以加载器注册结果为准，不要硬编码旧前缀。`backend/plugins` 下的内置插件仍存在，按同名 `.enabled` 文件启用（当前 11 个启用）；与内置工具同名时保留内置工具。`/api/plugins` 路由已挂载，前端「插件管理」页可启停。
 - **压缩**：`cognition/compressor.py` 是 canonical；`harness/compression.py` 是统一门面。不要再新增第三套压缩逻辑。
 - **自动压缩/手动 compact**：`ContextHarness` + `tail_snapshot` 语义；手动 compact 也要写 tail 起点。
 - **模型目录**：`models/catalog.py` 读取能力/窗口；`harness/capabilities.build_profile` 有 60s TTL，人工 override 优先。
@@ -275,7 +279,7 @@ npx vitest run tests/integration/
   3. 用户「工作目录白名单」：`前端 用户设置 → 工作目录白名单` 手动增删，全局生效，持久化于 `data/runtime_workspaces.json`
 - **其余路径一律人工审批**：含 `backend/` 源码与 git 仓库根；`.git` 永远 deny；`.env*` / `*.db` / `permissions.json` 读需审批、写/执行直接拒绝。
 - **源码保护优先于白名单**：白名单里即使包含仓库根，写 `app/`、`plugins/`、`skills/`、`config/` 等受保护源码仍需逐次审批。
-- **`EXTERNAL_PATH_DEFAULT` 已废止**：仅为兼容旧 `.env` 保留字段，路径与命令决策都不再读取它。
+- **`external_path_default` 已删除**：路径与命令决策不再读取它；免审只认上述三类。
 - **审批时长**：仅本回合；目录审批覆盖整棵子树；回合结束失效；不存在「允许并记住」，长期免审只能靠白名单。
 - **白名单 API**：`GET/POST/DELETE /api/permission/workspaces` 只操作白名单（不含程序主工作区）；添加要求绝对路径且目录已存在（`create=true` 可显式创建）；重复添加幂等；Windows 大小写不敏感去重。
 - **Shell**：默认 cwd 跟随会话 VFS 根；命令一律人工审批（本回合授权后同 base 命令可复用至回合结束）。

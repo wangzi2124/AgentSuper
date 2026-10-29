@@ -13,6 +13,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.store.memory import InMemoryStore
 
+from config import settings
 from execution.filesystem import VirtualFileSystem
 from execution.sandbox import shell_exec
 from execution.tool_registry import ToolRegistry
@@ -117,6 +118,7 @@ def build_main_graph(
 ) -> Any:
     """构建并编译主图（开发用 MemorySaver；生产换 PostgresSaver）。"""
     _injected_model = model is not None
+    _compress_injected = compress_model is not None
     model = model or get_model("medium")
     if registry is None:
         registry, _ = default_registry(vfs)
@@ -130,14 +132,18 @@ def build_main_graph(
     # `compress_max_tokens`（默认 800）；可用 COMPRESS_MODEL 独立别名隔离成本（§1.3）。
     # 关闭压缩模型时不注入 → compress 节点仅按规则截断（不调模型）。
     if compress_model is None:
-        from config import settings
-
         if getattr(settings, "compress_model_enabled", True):
             try:
                 from models.router import get_compress_model
 
+                # compress_model 优先；未配时用 summarization_model（历史摘要模型）
+                configured_compress = (
+                    getattr(settings, "compress_model", None)
+                    or getattr(settings, "summarization_model", None)
+                )
                 compress_model = get_compress_model(
                     max_tokens=getattr(settings, "compress_max_tokens", 800),
+                    model=configured_compress,
                 )
             except Exception as exc:  # noqa: BLE001 - 构造失败降级为规则截断
                 logger.warning("compress model build failed, rule-only compression: %s", exc)
@@ -149,8 +155,6 @@ def build_main_graph(
     # ⚠ 仅在**未注入测试模型**时自动构造 —— 否则脚本化 FakeModel 的图会意外
     # 调真实网络模型（集成测试 test_m1_graph_flow 依赖图内无隐藏调用）。
     if plan_model is None and not _injected_model:
-        from config import settings
-
         if getattr(settings, "plan_model_enabled", True):
             try:
                 plan_model = get_model("medium")
@@ -191,7 +195,28 @@ def build_main_graph(
     builder.add_node("grade_docs", make_grade_node(grade_model))
     builder.add_node("rewrite", make_rewrite_node(rewrite_model))
     builder.add_node("memory_recall", make_memory_recall_node(store))
-    builder.add_node("context_compress", make_compress_node(compress_model, compressor=compressor))
+    # summarization_model 启用时，用 summarization_keep_messages 作为保留条数；
+    def _resolve_compress_model() -> Any | None:
+        if not getattr(settings, "compress_model_enabled", True):
+            return None
+        from models.router import get_compress_model
+
+        return get_compress_model(
+            max_tokens=getattr(settings, "compress_max_tokens", 800),
+            model=settings.compress_model or settings.summarization_model,
+        )
+
+    # 未注入压缩模型时，节点每次调用重新解析配置：/api/config/summarization
+    # 修改 summarization_model / keep_messages 后无需重启即生效。
+    builder.add_node(
+        "context_compress",
+        make_compress_node(
+            compress_model,
+            keep_recent=None,
+            compressor=compressor,
+            model_factory=None if _compress_injected else _resolve_compress_model,
+        ),
+    )
     builder.add_node(
         "execute_subagent",
         make_execute_node(model, registry, system_prompt, scope=DEFAULT_TOOL_SCOPE),

@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage
 
 import app.deps as deps
 from app.deps import PlatformContext
+from config import settings
 from execution.filesystem import VirtualFileSystem
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from graph.main_graph import build_main_graph
@@ -106,9 +107,9 @@ def _tool_call() -> ChatResult:
 
 async def _run_case(tmp_path, monkeypatch, *, keep_tool_history: bool):
     (tmp_path / "secret.txt").write_text("project code ORION-42", encoding="utf-8")
-    monkeypatch.delenv("HARNESS_TOOL_MODE", raising=False)
-    monkeypatch.setenv("HARNESS_NATIVE_MODELS", "model/a")
-    monkeypatch.setenv("HARNESS_FALLBACK_MODELS", "model/b")
+    monkeypatch.setattr(settings, "harness_tool_mode", "")
+    monkeypatch.setattr(settings, "harness_native_models", ["model/a"])
+    monkeypatch.setattr(settings, "harness_fallback_models", ["model/b"])
 
     model_a = _ScriptedModel(
         "model/a",

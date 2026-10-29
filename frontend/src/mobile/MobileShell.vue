@@ -13,6 +13,7 @@ const MobileVectors = defineAsyncComponent(() => import('./views/MobileVectors.v
 const MobileGenerated = defineAsyncComponent(() => import('./views/MobileGenerated.vue'))
 const MobileMonitoring = defineAsyncComponent(() => import('./views/MobileMonitoring.vue'))
 const MobileCustomTools = defineAsyncComponent(() => import('./views/MobileCustomTools.vue'))
+const MobilePlugins = defineAsyncComponent(() => import('./views/MobilePlugins.vue'))
 
 const route = useRoute()
 const router = useRouter()
@@ -29,6 +30,7 @@ const menu = [
   { name: 'MultiAgent', path: '/multi-agent', title: '多智能体', vanIcon: 'chat-o', color: '#6d5ef1', soft: 'rgba(109,94,241,.12)' },
   { name: 'Documents', path: '/documents', title: '文档管理', vanIcon: 'description', color: '#3b82f6', soft: 'rgba(59,130,246,.12)' },
   { name: 'CustomTools', path: '/custom-tools', title: '自定义工具', vanIcon: 'setting-o', color: '#ec4899', soft: 'rgba(236,72,153,.12)' },
+  { name: 'Plugins', path: '/plugins', title: '插件管理', vanIcon: 'apps-o', color: '#8b5cf6', soft: 'rgba(139,92,246,.12)' },
   { name: 'Skills', path: '/skills', title: '技能', vanIcon: 'fire-o', color: '#eab308', soft: 'rgba(234,179,8,.12)' },
   { name: 'Vectors', path: '/vectors', title: '向量库', vanIcon: 'cluster-o', color: '#10b981', soft: 'rgba(16,185,129,.12)' },
   { name: 'Generated', path: '/generated', title: '生成文件', vanIcon: 'file-o', color: '#f97316', soft: 'rgba(249,115,22,.12)' },
@@ -58,6 +60,7 @@ const mobileViews: Record<string, unknown> = {
   Generated: MobileGenerated,
   Monitoring: MobileMonitoring,
   CustomTools: MobileCustomTools,
+  Plugins: MobilePlugins,
 }
   /* @@CHAT_PANEL_SCRIPT@@ */
   // ── 设置分组（移动端聊天对齐 ChatGPT：头部控件收纳进左侧抽屉） ──

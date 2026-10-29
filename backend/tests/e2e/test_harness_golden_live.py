@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from config import settings
@@ -12,12 +10,12 @@ from execution.tool_registry import ToolDefinition, ToolRegistry
 from graph.main_graph import build_main_graph, run_agent
 from models.router import TierModel, reset_request_model, set_request_model
 
-_MODEL = (os.getenv("HARNESS_SMOKE_MODEL_A") or "").strip()
-_ENABLED = bool(_MODEL and getattr(settings, "llm_api_key", ""))
+_MODEL = (settings.harness_smoke_model_a or "").strip()
+_ENABLED = bool(_MODEL and settings.llm_api_key)
 
 pytestmark = pytest.mark.skipif(
     not _ENABLED,
-    reason="set HARNESS_SMOKE_MODEL_A + LLM_API_KEY to run live E2E",
+    reason="set harness_smoke_model_a + llm_api_key to run live E2E",
 )
 
 

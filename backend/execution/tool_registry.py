@@ -1,7 +1,8 @@
 """工具注册表（对齐 agent.md §5.3）。
 
 统一管理工具的作用域、权限与配额。scope ∈ {global, subagent, location}；
-require_approval 表示高危操作需人工审批（M4 接入审批流）。
+require_approval 表示高危操作需人工审批（已接入审批流）。
+token_budget / rate_limit 由 ToolRegistryQuota 在工具执行入口强制执行（0 = 不限）。
 """
 
 from __future__ import annotations
@@ -18,7 +19,8 @@ class ToolDefinition:
     fn: Callable[..., Any]
     scope: str = "global"
     require_approval: bool = False
-    token_budget: int = 5000
+    # 配额（0 = 不限制）；显式声明后才由 ToolRegistryQuota 执行。
+    token_budget: int = 0
     rate_limit: int = 0
     parameters: dict[str, Any] = field(default_factory=dict)
 

@@ -73,7 +73,7 @@ class CrossEncoderReranker:
                 "Failed to download reranker model. Download it manually via "
                 "`modelscope download --model cross-encoder/ms-marco-MiniLM-L6-v2 "
                 f"--local_dir data/models/cross-encoder/ms-marco-MiniLM-L6-v2`, "
-                "or set ENABLE_RERANKER=false in .env"
+                "or set enable_reranker=false in config.json"
             ) from exc
 
     def rerank(

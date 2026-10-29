@@ -46,7 +46,7 @@ npm test           # vitest run
 
 ### 方案 B：跨域（前端域名 ≠ 后端域名）
 
-设置两个构建期环境变量（见下），并在后端 `.env` 配 CORS：
+设置两个构建期环境变量（见下），并在后端 `config.json` 配 CORS：
 
 ```bash
 # frontend/.env.production
@@ -54,14 +54,14 @@ VITE_API_BASE=https://api.example.com        # 后端地址（去掉尾部斜杠
 VITE_ADMIN_TOKEN=<和后端 ADMIN_TOKEN 一致>    # 仅后端配了 ADMIN_TOKEN 时需要
 ```
 
-```ini
-# backend/.env
-CORS_ORIGINS=["https://app.example.com"]     # 允许的前端源（JSON 数组）
-ADMIN_TOKEN=<强随机>                          # 管理接口鉴权；不配则仅 localhost 可管理
+```json
+// backend/config.json
+"cors_origins": ["https://app.example.com"]   // 允许的前端源（JSON 数组）
+"admin_token": "<强随机>"                      // 管理接口鉴权；不配则仅 localhost 可管理
 ```
 
 - 前端 HTTPS → 后端也必须 HTTPS（否则浏览器拦截混合内容）。
-- 不配 `VITE_ADMIN_TOKEN` 而后端配了 `ADMIN_TOKEN` → 前端管理操作（工作目录/插件/配置）会 **403**。
+- 不配 `VITE_ADMIN_TOKEN` 而后端配了 `admin_token` → 前端管理操作（工作目录/插件/配置）会 **403**。
 
 ### 环境变量（构建期注入）
 

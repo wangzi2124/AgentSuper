@@ -36,7 +36,7 @@ MODEL_SIZES = ("0.6B", "1.7B")
 
 def _normalize_model_size(raw: "str | None") -> str:
     """宽松归一化 TTS 模型规格：允许 `0.6`/`0.6B`/`0.6b`、`1.7`/`1.7B`/`1.7b`，
-    非法值（含 None/空）兜底 1.7B。避免 `.env` 少写 B 后缀就静默跳大模型 ——
+    非法值（含 None/空）兜底 1.7B。避免 `config.json 少写 B 后缀就静默跳大模型 ——
     0.6B 实测 ~2.4GB 常驻 / 1.7B ~4.3GB 常驻。
     """
     s = (raw or "").strip().upper()
@@ -314,13 +314,13 @@ class VoiceService:
         base = Path(__file__).resolve().parents[2]  # backend/
         # 目录固定为 backend/ttsclone，不配置路径（测试可显式传入临时目录）
         self.tts_dir = Path(tts_dir) if tts_dir else (base / "ttsclone")
-        # 未显式传入时取 Settings（.env：VOICE_TTS_SPEAKER / VOICE_TTS_MODEL_SIZE /
+        # 未显式传入时取 Settings（config.json：VOICE_TTS_SPEAKER / VOICE_TTS_MODEL_SIZE /
         # VOICE_TTS_TIMEOUT），避免创建方随手 new VoiceService() 而错过配置。
         self.speaker = (speaker or settings.voice_tts_speaker)
         if self.speaker not in SPEAKERS:
             self.speaker = "Vivian"
         # [模型管理] 语音模型规格在 model_catalog.json 配置（0.6B/1.7B）；未配置回落
-        # VOICE_TTS_MODEL_SIZE（.env）。运行时改 catalog 也即时生效（synthesize 每次读取）。
+        # VOICE_TTS_MODEL_SIZE（config.json）。运行时改 catalog 也即时生效（synthesize 每次读取）。
         # 用 _normalize_model_size 宽松归一化（`0.6`/`0.6B` 均识别），避免配置少写
         # B 后缀就静默跳 1.7B 兜底 —— 0.6B 实测 ~2.4GB 常驻 / 1.7B ~4.3GB 常驻。
         self.model_size = _normalize_model_size(

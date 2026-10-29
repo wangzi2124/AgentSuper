@@ -3,14 +3,15 @@
 - 仅允许 http/https 协议
 - 拒绝私有 / 环回 / 链路本地 / 保留地址及云元数据地址（169.254.169.254 等）
 - 主机名先经 DNS 解析再逐 IP 校验，避免裸 IP / 指向内网的域名绕过
-- 默认严格拦截；设置环境变量 SSRF_ALLOW_INTERNAL=true 可放行（用于本地调试场景）
+- 默认严格拦截；设置 ssrf_allow_internal=true 可放行（用于本地调试场景）
 """
 
 import ipaddress
 import logging
-import os
 import socket
 import urllib.parse
+
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +25,9 @@ _METADATA_HOSTS = (
     "100.100.100.204",
 )
 
-_TRUE_VALUES = ("1", "true", "yes", "on")
-
-
 def allow_internal() -> bool:
     """是否放行内网地址（默认不放行）。"""
-    return os.environ.get("SSRF_ALLOW_INTERNAL", "").strip().lower() in _TRUE_VALUES
+    return bool(settings.ssrf_allow_internal)
 
 
 def is_internal_ip(ip: str) -> bool:

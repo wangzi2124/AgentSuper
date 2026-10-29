@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from langgraph.checkpoint.memory import MemorySaver
 
+from config import settings
 from graph.checkpoint import (
     aclose_checkpointer,
     checkpoint_db_path,
@@ -29,8 +30,8 @@ def _ckpt(cid: str = "c1") -> dict:
 
 async def test_sqlite_checkpointer_persists_across_instances(tmp_path, monkeypatch):
     db = tmp_path / "ckpt.db"
-    monkeypatch.setenv("CHECKPOINT_DB_PATH", str(db))
-    monkeypatch.delenv("CHECKPOINT_PERSIST", raising=False)
+    monkeypatch.setattr(settings, "checkpoint_db_path", str(db))
+    monkeypatch.setattr(settings, "checkpoint_persist", True)
 
     await aclose_checkpointer()  # 清掉套件内可能残留的单例
     try:
@@ -58,14 +59,14 @@ async def test_configured_passthrough():
 
 
 async def test_persist_disabled_returns_memory(monkeypatch):
-    monkeypatch.setenv("CHECKPOINT_PERSIST", "false")
+    monkeypatch.setattr(settings, "checkpoint_persist", False)
     saver = await get_checkpointer()
     assert isinstance(saver, MemorySaver)
 
 
 async def test_singleton_reuses_instance(tmp_path, monkeypatch):
-    monkeypatch.setenv("CHECKPOINT_DB_PATH", str(tmp_path / "s.db"))
-    monkeypatch.delenv("CHECKPOINT_PERSIST", raising=False)
+    monkeypatch.setattr(settings, "checkpoint_db_path", str(tmp_path / "s.db"))
+    monkeypatch.setattr(settings, "checkpoint_persist", True)
     await aclose_checkpointer()
     try:
         a = await get_checkpointer()

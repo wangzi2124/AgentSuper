@@ -84,18 +84,20 @@ DEFAULT_MAX_RETRIES = 2
 COMPRESS_MODEL = "compress-model"
 
 
-def get_compress_model(max_tokens: int | None = 800):
+def get_compress_model(max_tokens: int | None = 800, model: str | None = None):
     """压缩专用模型（agent-1 §1.3）——独立 model_name 隔离成本，不走 smart-router。
 
     代理模式（LITELLM_PROXY_URL）用别名 `compress-model` 由代理路由并计费；
-    直连模式回落 tier-simple（与既有行为一致），并可用 COMPRESS_MODEL 环境变量覆盖。
+    直连模式优先使用显式传入的 ``model``，其次 ``settings.compress_model``，
+    都没有时回落 tier-simple。
     """
-    proxy = os.environ.get("LITELLM_PROXY_URL")
+    chosen = (model or settings.compress_model or "").strip()
+    proxy = settings.litellm_proxy_url
     if proxy:
-        return TierModel(tier="auto", max_tokens=max_tokens)
-    env = os.environ.get("COMPRESS_MODEL")
-    if env:
-        return TierModel(tier="auto", max_tokens=max_tokens)
+        # 代理模式：显式压缩模型直接作为代理 model 名；未配置时保持 smart-router。
+        return TierModel(tier="auto", max_tokens=max_tokens, model_override=chosen or None)
+    if chosen:
+        return TierModel(tier="auto", max_tokens=max_tokens, model_override=chosen)
     return get_model("simple", max_tokens=max_tokens)
 
 
@@ -220,6 +222,7 @@ class TierModel:
         max_retries: int = DEFAULT_MAX_RETRIES,
         timeout: int = DEFAULT_TIMEOUT,
         max_tokens: int | None = None,
+        model_override: str | None = None,
         **extra: Any,
     ) -> None:
         self.tier = tier if tier in TIER_MAP else "auto"
@@ -227,15 +230,18 @@ class TierModel:
         self.max_retries = max_retries
         self.timeout = timeout
         self.max_tokens = max_tokens if max_tokens is not None else settings.llm_max_tokens
+        self.model_override = (model_override or "").strip() or None
         self.extra = extra
 
     def _direct_model(self) -> str:
-        """直连模式下的模型 id：请求选中 > `TIER_{tier}_MODEL` > `settings.llm_model`。
+        """直连模式下的模型 id：显式 override > 请求选中 > `TIER_{tier}_MODEL` > `settings.llm_model`。
 
-        请求选中（前端模型选择器）/ `TIER_*_MODEL` 优先于 `.env` 的 `LLM_MODEL`，
-        使用户在「模型管理」里选的模型真正生效；无请求模型时（后台任务、子 Agent）
-        回落到 tier 环境变量或全局默认。
+        ``model_override`` 用于后台固定模型（如压缩模型）；请求选中（前端模型选择器）/
+        `TIER_*_MODEL` 优先于 `config.json` 的 `llm_model`。无请求模型时（后台任务、
+        子 Agent）回落到 tier 环境变量或全局默认。
         """
+        if self.model_override:
+            return self.model_override
         model = _request_model_var.get()
         if model:
             return model
@@ -253,21 +259,21 @@ class TierModel:
         """解析本次调用的模型 / 端点 / 凭证（对齐 `models/catalog.provider_api`）。
 
         优先级：`LITELLM_PROXY_URL` 代理 > 模型目录 Provider 注册（模型管理页保存的
-        `api_base`/`api_key`）> `.env` 的 `LLM_API_BASE`/`LLM_API_KEY`。此前这里直取
-        `.env`，导致用户在「模型管理」里改的密钥/端点不参与聊天调用（只在连通性自检
+        `api_base`/`api_key`）> `config.json` 的 `LLM_API_BASE`/`LLM_API_KEY`。此前这里直取
+        `config.json`，导致用户在「模型管理」里改的密钥/端点不参与聊天调用（只在连通性自检
         生效）——这就是「改了 key 聊天仍报旧 key 无效」的根因。
-        **Ollama 例外**：`ollama/*` 模型只认前端注册的 Provider，`.env` 不兜底
-        （否则 .env 的 DeepSeek 端点顶掉 localhost、占位 key "ollama" 被网关拒绝）。
+        **Ollama 例外**：`ollama/*` 模型只认前端注册的 Provider，`config.json` 不兜底
+        （否则 config.json 的 DeepSeek 端点顶掉 localhost、占位 key "ollama" 被网关拒绝）。
 
         `options`（Ollama `num_ctx`/`think`、DeepSeek `thinking`）由
         `_kwargs`/`astream` 经 `litellm_extra_kwargs()` 展开，不直接透传给 litellm。
         """
-        proxy = os.environ.get("LITELLM_PROXY_URL")
+        proxy = settings.litellm_proxy_url
         if proxy:
             return {
-                "model": TIER_MAP.get(self.tier, "smart-router"),
+                "model": self.model_override or TIER_MAP.get(self.tier, "smart-router"),
                 "api_base": proxy,
-                "api_key": os.environ.get("LITELLM_PROXY_KEY", "sk-litellm-proxy"),
+                "api_key": settings.litellm_proxy_key or "sk-litellm-proxy",
             }
         mid = ensure_provider(self._direct_model(), settings.llm_api_base)
         try:
@@ -275,11 +281,11 @@ class TierModel:
 
             creds = provider_api(mid)
         except Exception as exc:  # noqa: BLE001 - 目录/DB 异常不得中断 LLM 调用
-            logger.warning("provider_api(%s) 解析失败，回退 .env 凭证：%s", mid, exc)
+            logger.warning("provider_api(%s) 解析失败，回退 config.json 凭证：%s", mid, exc)
             creds = {}
         if _is_ollama_model(mid) or creds.get("is_ollama"):
-            # Ollama 只认前端「模型管理」注册的 Provider，后端 .env 不兜底：
-            # 此前 `api_base=None or settings.llm_api_base` 被 .env 的 DeepSeek 端点
+            # Ollama 只认前端「模型管理」注册的 Provider，后端 config.json 不兜底：
+            # 此前 `api_base=None or settings.llm_api_base` 被 config.json 的 DeepSeek 端点
             # 顶掉、key 落成占位 "ollama" → 请求打 DeepSeek 报 ****lama is invalid。
             # None → litellm 原生发现（OLLAMA_HOST 环境变量 → localhost:11434）。
             return {
@@ -580,7 +586,7 @@ def resolve_model(state: dict[str, Any] | None = None, default_tier: str = "medi
     if state and isinstance(state.get("model_binding"), dict):
         binding = state["model_binding"]
         tier = binding.get("tier") or default_tier
-        proxy = os.environ.get("LITELLM_PROXY_URL")
+        proxy = settings.litellm_proxy_url
         if proxy:
             return TierModel(tier="auto")
         if tier in TIER_MAP or tier in ("auto",):

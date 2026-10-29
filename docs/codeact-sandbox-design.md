@@ -30,7 +30,7 @@
 > 8. stdout 落盘改走 `data/truncation/`（复用 `bound_tool_output` + 7 天清理），产物目录独立 `data/codeact/`（避免污染「生成文件」页）（§8/§9）。
 > 9. Job Object 补 `CREATE_SUSPENDED` 分配 + 嵌套/breakaway 失败 fallback（§5.1）。
 > 10. `codeact_max_retries` 由 `graphmod/generate.py` 强制（连续失败计数），非纯提示词（§10）。
-> 11. 配置并入 `app/config.py`（`app/codeact/config.py` 读不到 `.env`）（§2/§9）。
+> 11. 配置并入 `app/config.py`（`app/codeact/config.py` 读不到 `config.json`）（§2/§9）。
 > 12. RPC 分发表复用 `sub_tools.run_tool` + 工具注册表（免费拿到 SSRF 检查、`bound_tool_output`、轮次快照）（§7）。
 
 ---
@@ -74,8 +74,8 @@ backend/app/codeact/
 └── result.py          # 结构化结果
 ```
 
-> **配置不单独成文件**：`backend/.env` 只由 `app/config.py`（pydantic-settings）读入并注入
-> `os.environ`；独立的 `app/codeact/config.py` 读不到 `.env`。因此所有 `codeact_*` 配置项并入 `app/config.py`。
+> **配置不单独成文件**：`backend/config.json` 由 `app/config.py`（pydantic-settings）读入；
+> 独立的 `app/codeact/config.py` 读不到它。因此所有 `codeact_*` 配置项并入 `app/config.py`。
 
 ## 3. 通道设计
 
@@ -525,6 +525,6 @@ codeact_max_artifact_size_mb: int = 10 # 【v2.2】save_artifact 单产物上限
 - [x] RPC 分发复用 `run_tool`（SSRF + `bound_tool_output` + 轮次快照自动生效）+ **硬编码白名单**（B2）。
 - [x] api 函数闭包注入 `make_api(rpc, b64)`，分发原语不进 `__globals__`（B3）；`save_artifact` sanitize+上限（B6）。
 - [x] 崩溃 stderr 尾部脱敏回灌 + `0xC000012D→memory_limit`（B5/C6）。
-- [x] **文档同步**：`.env.example` 增补 `codeact_*`；`AGENTS.md` 增补条目；`changed_files.md` 记录。
+- [x] **文档同步**：`config.example.json` 增补 `codeact_*`；`AGENTS.md` 增补条目；`changed_files.md` 记录。
 - [x] 测试用例并入 pytest：`backend/tests/test_codeact.py`（34 项：ast_guard/frame/result/session/
      execv §4.0/提示词/job_object/§10 停用），独立检查脚本 `codeact_check.py`/`codeact_p0_check.py` 已删除。

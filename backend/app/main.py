@@ -19,11 +19,6 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, Callable
 
-# 先在 import 任何 app 模块之前注入 .env 到 os.environ（对齐既有 runtime 约定）
-from env_boot import load_env_to_os  # noqa: E402
-
-load_env_to_os()
-
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
@@ -50,6 +45,7 @@ def _include_app_routers(app: FastAPI) -> None:
         logs as logs_api,
         models as models_api,
         permission as perm_api,
+        plugins as plugins_api,
         skills,
         vectors,
         voice as voice_api,
@@ -67,6 +63,7 @@ def _include_app_routers(app: FastAPI) -> None:
     app.include_router(weather.router, prefix="/api", tags=["Weather"])
     app.include_router(models_api.router, prefix="/api", tags=["Models"])
     app.include_router(voice_api.router, prefix="/api/voice", tags=["Voice"])
+    app.include_router(plugins_api.router, prefix="/api/plugins", tags=["Plugins"])
     app.include_router(logs_api.router)
 
 
@@ -76,7 +73,10 @@ async def _init_app_runtime(app: FastAPI) -> None:
     from app.runtime import ensure_runtime_state
     from app.session import SessionService, init_db
     from observability.litellm_debug import configure_litellm_debug
+    from observability.tracing import _sync_langfuse_env, configure_langfuse
 
+    _sync_langfuse_env()
+    configure_langfuse()
     configure_litellm_debug()
     await asyncio.to_thread(ensure_runtime_state, app)
 
@@ -413,6 +413,21 @@ def create_app(
             "requests": sum(len(s.prompts) for s in sessions),
             "tokens_input": sum(int((s.tokens or {}).get("input", 0)) for s in sessions),
             "tokens_output": sum(int((s.tokens or {}).get("output", 0)) for s in sessions),
+        }
+
+    @app.get("/api/monitor/traces", tags=["Monitor"])
+    async def monitor_traces(limit: int = 100) -> dict:
+        from observability.tracing import recent_spans
+
+        return {
+            "spans": [
+                {
+                    "name": span.name,
+                    "duration_ms": round(span.duration_ms, 3),
+                    "metadata": span.metadata,
+                }
+                for span in recent_spans(max(1, min(limit, 2000)))
+            ]
         }
 
     return app

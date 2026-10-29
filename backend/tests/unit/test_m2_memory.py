@@ -41,3 +41,25 @@ def test_format_empty_returns_blank():
 
 def test_memory_manager_reexported():
     assert MemoryManager is not None
+
+def test_recall_ranks_by_query_when_store_has_no_index():
+    from types import SimpleNamespace
+
+    from graph.nodes.memory import make_memory_recall_node
+
+    class _Store:
+        def search(self, namespace, query=None, limit=10):
+            return [
+                SimpleNamespace(value={"type": "fact", "content": "香蕉很甜"}),
+                SimpleNamespace(value={"type": "fact", "content": "苹果是红色的"}),
+            ]
+
+    node = make_memory_recall_node(_Store())
+    out = node(
+        {
+            "user_id": "u1",
+            "messages": [SimpleNamespace(type="human", content="苹果")],
+        }
+    )
+    assert "苹果" in out["memory_context"]
+    assert out["memory_context"].lstrip().startswith("- [fact] 苹果")

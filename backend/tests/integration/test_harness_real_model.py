@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from config import settings
@@ -18,22 +16,14 @@ from harness.delimiters import NAME_OPEN
 from harness.tool_adapter import ToolAdapter
 from models.router import TierModel
 
-_REAL_ENABLED = str(
-    os.environ.get("HARNESS_REAL_TEST")
-    or getattr(settings, "harness_real_test", "")
-    or ""
-).strip().lower() in {"1", "true", "yes"}
+_REAL_ENABLED = bool(settings.harness_real_test)
 
 pytestmark = pytest.mark.skipif(
     not _REAL_ENABLED,
     reason="真实模型测试默认跳过（设置 HARNESS_REAL_TEST=1 开启）",
 )
 
-MODEL = (
-    os.environ.get("HARNESS_REAL_MODEL")
-    or str(getattr(settings, "harness_real_model", "") or "")
-    or "deepseek/deepseek-v4-flash"
-)
+MODEL = settings.harness_real_model or "deepseek/deepseek-v4-flash"
 TOKEN = "REAL-HARNESS-7788"
 
 
@@ -65,7 +55,7 @@ def _registry():
 @pytest.mark.asyncio
 async def test_real_native_tool_call(monkeypatch):
     _skip_without_key()
-    monkeypatch.delenv("HARNESS_TOOL_MODE", raising=False)
+    monkeypatch.setattr(settings, "harness_tool_mode", "")
     model = TierModel(tier="auto", timeout=120)
     monkeypatch.setattr(model, "_direct_model", lambda: MODEL)
     result = await ToolAdapter(model).complete(
@@ -100,7 +90,7 @@ async def test_real_native_tool_call(monkeypatch):
 async def test_real_fallback_tool_loop(monkeypatch):
     """强制文本回退：验证提示词注入 → 定界符解析 → 执行 → 回灌 → 最终回答。"""
     _skip_without_key()
-    monkeypatch.setenv("HARNESS_TOOL_MODE", "fallback")
+    monkeypatch.setattr(settings, "harness_tool_mode", "fallback")
     model = TierModel(tier="auto", timeout=120)
     monkeypatch.setattr(model, "_direct_model", lambda: MODEL)
 

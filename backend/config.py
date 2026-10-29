@@ -1,12 +1,81 @@
+"""应用配置。
+
+配置来源（从高到低）：
+1. ``Settings(...)`` 显式参数（测试）
+2. 操作系统环境变量（``export LLM_MODEL=...`` / Docker env / CI）
+3. ``backend/config.json``（JSONC：支持 //、/* */ 注释与尾逗号）
+4. 字段默认值（本文件）
+
+注意：``.env`` 文件不再读取；需要持久化配置请复制 ``config.example.json`` 为
+``config.json`` 后编辑。``config.json`` 已被 gitignore，可安全写入密钥。
+"""
+
+import json
+import re
 from pathlib import Path
-from pydantic import Field
+from typing import Any, Optional
+
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import PydanticBaseSettingsSource
-import json
-from typing import Optional
+
+
+def _strip_jsonc(text: str) -> str:
+    """单次扫描：去掉 //、/* */ 注释与对象/数组尾逗号（字符串内不改）。"""
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_string = False
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n:
+            nxt = text[i + 1]
+            if nxt == "/":
+                i += 2
+                while i < n and text[i] not in "\r\n":
+                    i += 1
+                continue
+            if nxt == "*":
+                i += 2
+                while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                    i += 1
+                i += 2
+                continue
+        if ch == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "]}":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def parse_jsonc(text: str) -> Any:
+    """解析 JSONC 文本（标准 JSON + 注释 + 尾逗号）。"""
+    return json.loads(_strip_jsonc(text.lstrip("\ufeff")))
 
 
 class JsonConfigSettingsSource(PydanticBaseSettingsSource):
+    """读取 backend/config.json（JSONC）。文件缺失/损坏时返回空字典。"""
+
     def __init__(self, settings_cls):
         super().__init__(settings_cls)
         self._path = Path(__file__).parent / "config.json"
@@ -18,41 +87,54 @@ class JsonConfigSettingsSource(PydanticBaseSettingsSource):
         if not self._path.exists():
             return {}
         try:
-            with open(self._path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            return raw if isinstance(raw, dict) else {}
+            raw = parse_jsonc(self._path.read_text(encoding="utf-8-sig"))
         except Exception:
             return {}
+        return raw if isinstance(raw, dict) else {}
 
+
+def _as_str_list(value: Any) -> list[str]:
+    """把 JSON 数组或逗号分隔字符串归一为字符串列表。"""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        return [part.strip() for part in raw.split(",") if part.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
 
 
 class Settings(BaseSettings):
-    """应用配置，从 .env 文件读取环境变量。"""
+    """应用配置：环境变量 > config.json（JSONC）> 字段默认值。"""
 
     model_config = SettingsConfigDict(
-        env_file=Path(__file__).resolve().parent / ".env",
-        env_file_encoding="utf-8",
         extra="allow",
+        case_sensitive=False,
+        enable_decoding=False,
     )
 
-    # ── LLM 基础连接（.env 兜底凭证）──
-    # 请求未指定模型时的默认对话模型（models/router.py:TierModel._direct_model 的
-    # 最低优先级兜底，优先级：请求选中 > TIER_{tier}_MODEL > 本字段）；无 "/" 前缀时
-    # 按 api_base 自动补 deepseek/ 或 openai/ 前缀。后台任务/无请求上下文的调用也落这里。
-    llm_model: str = "deepseek-chat"
-    # 直连（无 LITELLM_PROXY_URL）时的 API key 兜底：模型目录 Provider 注册的凭证
-    # （「模型管理」页保存）优先，目录未配时回落本字段。
+    # ── LLM 基础连接 ──
+    # 请求未指定模型时的默认对话模型（TierModel 的最低优先级兜底）。
+    llm_model: str = "deepseek/deepseek-v4-flash"
+    # 直连（无代理）时的 API key 兜底；模型目录 Provider 注册的凭证优先。
     llm_api_key: Optional[str] = None
-    # 同上的直连端点兜底（litellm base_url）；同样目录 Provider 优先。
+    # 直连端点兜底（litellm base_url）；同样目录 Provider 优先。
     llm_api_base: Optional[str] = "https://api.deepseek.com"
 
-    # ── 持久化后端（session.db / model_catalog.db / chapter_store.db / tasks.db 的统一后端）──
-    # DB_TYPE: sqlite | mysql | postgresql
-    # - sqlite（默认）：各子系统沿用各自 data/*.db 文件（建表零回归，测试/迁移工具不变）。
-    # - mysql / postgresql：四个子系统的表统一落在同一个 DB_URL 数据库内，schema 由
-    #   Alembic 迁移链管理（backend/alembic，`upgrade head` 在启动时执行）。
-    # DB_URL 优先；未提供时按 DB_HOST/DB_PORT/DB_USERNAME/DB_PASSWORD/DB_NAME 拼装。
+    # ── 持久化后端（session / model_catalog / chapter_store / tasks 的统一后端）──
+    # sqlite | mysql | postgresql；sqlite 时各子系统沿用各自 data/*.db。
     db_type: str = "sqlite"
+    # 完整 SQLAlchemy URL；非空时优先于下方组件拼装。
     db_url: Optional[str] = None
     db_host: str = "127.0.0.1"
     db_port: int = 0  # 0 = 按类型取默认（mysql 3306 / postgresql 5432）
@@ -60,168 +142,98 @@ class Settings(BaseSettings):
     db_password: str = ""
     db_name: str = "agentsuper"
 
-    # ChromaDB 持久化目录（相对 backend/，runtime.py:VectorStore.load 加载）；
-    # 结构化清理（清空/过期/单文档删除）见 app/services/kb_cleanup.py。
-    vector_store_path: str = "data/vector_store"
+    # ── 会话与检查点持久化 ──
+    # 会话元数据/逻辑删除/压缩基线库路径（相对 backend/）。
+    session_db_path: str = "data/session.db"
+    # LangGraph 图检查点库路径（相对 backend/）；跨重启保留会话上下文。
+    checkpoint_db_path: str = "data/checkpoints.db"
+    # false 时退回进程内 MemorySaver（重启即丢，仅调试用）。
+    checkpoint_persist: bool = True
+    # 可选 PostgresSaver 连接串（需 psycopg）；为空则用 SQLite。
+    postgres_checkpoint_url: str = ""
+    # Postgres checkpointer 的通用兜底连接串（POSTGRES_CHECKPOINT_URL 为空时读取）。
+    database_url: str = ""
 
-    # 文档入库分块参数（runtime.py:DocumentProcessor）：块字符数与重叠字符数。
-    # 章节感知切分：按「第X章/Chapter X」边界优先断开，chapter_title/number 入元数据
-    # （cognition/document_processor.py）。
+    # ── 向量库 / 文档入库 ──
+    # ChromaDB 持久化目录（相对 backend/）。
+    vector_store_path: str = "data/vector_store"
     chunk_size: int = 500
     chunk_overlap: int = 200
-
-    # §13.2.1 强制 metadata 字段 department（部门/租户，权限过滤用）。
-    # 单租户部署保持默认；多租户可在入库时按请求覆盖。
+    # 强制 metadata 字段 department（部门/租户，权限过滤用）。
     kb_department: str = "default"
-
-    # 本地 embedding 模型（cognition/embeddings.py:LocalEmbeddings）。
-    # ModelScope 优先下载（HF 兜底）；英文回退 all-MiniLM-L6-v2。
+    # 本地 embedding 模型（ModelScope 优先，HF 兜底）。
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
-
-    # 重排序开关与模型（cognition/reranker.py）。构造/rerank 失败时管道自动降级
-    # （不重排、保持向量+BM25 RRF 融合顺序），不会崩启动或查询。
+    # 重排序开关与模型；失败时自动降级为不重排。
     enable_reranker: bool = True
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-
-    # ── 模型下载容错（C3）──
-    # 单次 snapshot_download 调用超时（秒）；0 = 不设整体超时（依赖底层库自身重试/续传）
+    # 模型下载容错：单次 snapshot_download 超时（秒，0 = 不设整体超时）。
     model_download_timeout: int = 600
-    # 单个下载源（ModelScope / HuggingFace）内的重试次数（不含首次尝试）
+    # 单个下载源内的重试次数（不含首次）。
     model_download_retries: int = 2
 
-    # 插件发现目录（相对 backend/，extensions/plugins.py:PluginLoader 扫描 *.py，
-    # tool_* 函数自动注册；启用状态看同名 .enabled 文件）。
+    # 插件发现目录（相对 backend/）。
     plugins_dir: str = "plugins"
 
-    # ── 历史摘要配置（app/api/config.py 的 GET/POST /api/config/summarization，require_admin）──
-    # ⚠ 接线现状：仅被该管理 API 读写（前端集成测试 api-live.spec.ts 覆盖），实际压缩
-    # 路径（graph/nodes/compress.py + cognition/compressor.py）**不读取本字段** ——
-    # 压缩节点的模型经 models/router.get_model("simple") 取 tier 模型，阈值/保留量是
-    # compressor.py 模块常量。改这里只改 API 回显，不改压缩行为；要生效需改 compress 节点。
-    # 非空语义（API 层）：model 非空视为 enabled=true。
+    # ── 历史摘要 / 压缩模型 ──
+    # 历史摘要模型；compress_model 为空时作为压缩模型回退。
     summarization_model: Optional[str] = None
-    # 历史摘要保留消息条数（POST 时强制 ≥1；当前仅 API 回显，见上方接线现状说明）。
-    summarization_keep_messages: int = 20
-
-    # ── 压缩模型（agent-1.md §1，对齐 agent.md §4.3 九段式摘要）──
-    # 压缩是「信息压缩」而非推理任务 → 固定用 simple tier（禁用 complex）。
-    # 生产可用 LITELLM_PROXY_URL + COMPRESS_MODEL 独立别名隔离成本（§1.3）；
-    # 直连环境不设 proxy 时，别名会落到 provider_api；故默认留空 → 走 tier-simple。
+    # 压缩时保留的最近消息条数（每次压缩实时读取，支持 API 热更新）。
+    summarization_keep_messages: int = 6
+    # 压缩专用模型；优先于 summarization_model，空 = tier-simple。
     compress_model: Optional[str] = None
-    # 是否启用 LLM 摘要压缩（默认 true：压缩=低成本高收益，可积极启用，§核心结论）。
-    # 关闭时压缩节点仅按规则截断（缩消息数，不调模型），与旧行为一致。
+    # 是否启用 LLM 摘要压缩（false = 仅规则截断）。
     compress_model_enabled: bool = True
-    # 单次摘要输出硬上限，防摘要啰嗦（§1.3 max_tokens=800）。
+    # 单次摘要输出硬上限。
     compress_max_tokens: int = 800
-    # 触发 LLM 摘要的最小被压缩内容 token（太少不划算，§1.4 C1）。
-    compress_min_tokens: int = 5_000
-    # 单会话内允许的 LLM 摘要次数上限；超出后改用规则截断（§1.4 C3）。
-    compress_max_llm_calls: int = 3
 
-    # ── 计划模型 / 多 Agent 扇出（agent-1.md §2，对齐 agent.md §6.2）──
-    # 计划分解用 medium tier（§2.2 / §2.6）；单任务快速路径不调模型。
-    # 默认 true：串行分解是默认路径之一（§四「默认路径必须是串行或单任务」）。
+    # ── 计划模型 / 多 Agent 扇出 ──
     plan_model_enabled: bool = True
-    # 并行扇出（高成本高收益）：**默认关闭**（§四【不要做】），需显式开启且过
-    # should_plan_parallel 预算守卫（剩余预算 / fanout_count / 任务特征）。
+    # 并行扇出默认关闭；开启后仍需通过预算守卫。
     plan_parallel_enabled: bool = False
-    # 单会话允许的并行扇出次数上限（§2.4 C2：防连续扇出烧钱）。
+    # 单会话并行扇出次数上限。
     plan_max_fanout_calls: int = 2
-    # 扇出前要求的本会话剩余预算（¥，§2.4 C1）。
+    # 扇出前要求的本会话剩余预算（¥）。
     plan_fanout_min_budget: float = 0.20
-    # 本会话总预算（¥，§2.4 C1）——剩余预算 = 本值 − 累计 `token_usage.cost`。
-    # 之前 production 路径从不设置 `budget_total`，`_remaining_budget` 恒返回 0，
-    # 扇出门禁 C1 永久为假 → 并行扇出在生产不可达（仅测试能触发）。
-    # 0（默认）表示不设会话预算：此时门禁按「未知预算」保守拒绝扇出。
+    # 本会话总预算（¥）；0 = 不设预算（扇出门禁按未知预算保守拒绝）。
     session_budget: float = 0.0
 
-    # ── 语音 / TTS（本地 Qwen3-TTS 子进程，无外部 HTTP 接口调用）──
-    # 目录固定为 backend/ttsclone（不配置路径）；模型不自动下载，
-    # 先用 scripts/download_tts_model.py 预下载到 backend/ttsclone/models
+    # ── 语音 / TTS（本地 Qwen3-TTS 子进程）──
     voice_tts_enabled: bool = False
     voice_tts_speaker: str = "Vivian"
-    # 交互默认 0.6B（本机 CPU 单句 ~5s，1.7B ~38s 太慢，仅离线批量质检用大模型）
     voice_tts_model_size: str = "0.6B"
     voice_tts_timeout: int = 600
 
-    # 每次 LLM 调用的输出 token 上限（对齐 opencode transform.ts:maxOutputTokens 的"默认给足"设计）。
-    # 默认 16_384 ≈ 模型原生上限的常用值；长任务配合系统提示"长内容写文件"规则避免截断。
-    # [token 优化 v9] 16_384 → 8_192：普通问答用不到那么大输出，压低超长输出兜底成本。
-    # [输出上限 2026-10-03] 8_192 → 16_384：实测写俄罗斯方块时整份代码塞进单次
-    # tool_write_file 参数（24,528 字符）正好撞 8K 被腰斩。注意这只在**模型目录也放开**
-    # 时才有效 —— resolve_max_output_tokens 取 min(模型声明, 本值) 且绝不放大，
-    # 故 builtin_catalog.py 里 deepseek 的 limits.max_output_tokens 同步提到 16_384。
-    # [思考预算 2026-10-09] 16_384 → 32_000：deepseek-v4-flash 默认开思考，且思考 token
-    # 计入 max_tokens（实测 ct==reasoning==16_384、finish=length、content=0），16K 上限被
-    # 思考吃光 → 正文与工具调用皆空、任务失败。对齐 opencode `OUTPUT_TOKEN_MAX=32000`，
-    # 给「思考 + 正文」留总预算。⚠ 输出预留必须 ≥ 输出上限，
-    # 并同步 builtin_catalog deepseek 条目的 limits.max_output_tokens（resolve 取 min）。
+    # ── 输出 token ──
+    # 每次 LLM 调用的输出上限；实际取 min(模型目录声明, 本值)。
     llm_max_tokens: int = 32_000
-
-    # ── 已删配置（2026-10-18 审计）──
-    # max_context_tokens / context_reserve_tokens：曾用于 opencode overflow.ts 的
-    # usable = max − reserve 预算封顶（原 app/context/budget.py），随目录重构删除后
-    # 全库已无读者（含 os.environ 读取），本轮从 Settings 移除。
-    # 当前上下文压缩阈值是 cognition/compressor.py 的模块常量（非配置项）：
-    # COMPRESS_THRESHOLD=80_000、KEEP_RECENT_TOKENS=20_000、TOOL_OUTPUT_MAX_CHARS=2000。
-    # tool_execute_enabled（2026-10-19 删）：曾与 ALLOW_SOURCE_WRITES 共同作为
-    # tool_execute 的双开关（helper tool_execute_available()），但新图里读取该
-    # helper 的 tools/fstools 包已随目录重构删除，helper 与字段双双成为死代码，移除。
-    # [token 优化 P8] cl100k_base 对 DeepSeek tokenizer 系统性低估（实测 +13.2%：
-    # round8 估算 20,851 vs 实际 23,599）。用于 token_counter 估算校正，避免
-    # 截断/压缩判断"以为没超、实际已超"（实测 round9 实际 25,779 超 usable 23,808）
+    # token 估算校正系数（cognition/token_counter.py）。
     token_estimate_correction: float = 1.13
-    # 压缩时尾部保留的最近轮次（对齐 opencode tail_turns，默认 2）
+
+    # ── 上下文压缩 ──
+    # 压缩时尾部保留的最近轮次。
     context_tail_turns: int = 2
-    # 自动压缩时保留的最近消息条数（0 = 按 context_tail_turns × 2 折算）。
-    # ⚠ 此前只在 .env.example 里文档化、未声明为字段：extra="allow" 下 .env 里没这行时
-    # settings.compaction_tail_messages 直接 AttributeError，service._auto_tail_limit()
-    # 在 compact 路径必炸。现补为正式字段（默认 0 = 用轮次折算）。
+    # 自动压缩保留的最近消息条数（0 = 按 context_tail_turns × 2 折算）。
     compaction_tail_messages: int = 0
-    # [C5] 单条工具输出 token 上限（对齐 opencode 按 token 截断语义）：中文场景
-    # 32KB 字符 ≈ 48K token 单条过大，bound_tool_output 在字符/行限之外再按 token
-    # 封顶，超限写盘 + 续读提示。0 = 不启用 token 封顶。
-    # ⚠ 现状：仅被 cognition/tool_output.py:bound_tool_output 读取，而新工具循环
-    # graph/nodes/base.py:run_tool_loop **未调用** bound_tool_output（工具输出原样入 convo），
-    # 故本项当前为「库函数可配、生产未接线」。
+    # 单条工具输出 token 上限（bound_tool_output 使用）。
     tool_output_max_tokens: int = 8_000
-    # ── [F8/F9] 图片上传解析给模型（多模态附件管线）──
-    # 回显/缓存缩略图边长（px）
+
+    # ── 图片 / OCR / 视觉描述桥 ──
     image_thumbnail_px: int = 256
-    image_use_ocr: bool = False              # 图片 OCR 提取文本（截图/文档图，需 OCR 库）
-    # OCR 引擎：tesseract 可执行文件与语言包目录（留空则依赖系统 PATH / 默认 tessdata）。
-    # 典型场景：tesseract 装在受保护目录（C:\Program Files\Tesseract-OCR）且无权写入
-    # 其 tessdata 时，把 chi_sim.traineddata 放到自建目录并用 tessdata_dir 指向它。
+    image_use_ocr: bool = False
     tesseract_cmd: str = ""
     tessdata_dir: str = ""
-    ocr_languages: str = "chi_sim+eng"       # OCR 语言；chi_sim 缺失时自动回退 eng
-    image_vlm_caption: bool = True           # 图片描述桥：视觉 LLM 生成 caption 注入文本
-    image_caption_model: str = "openai/gpt-4o-mini"  # caption VLM（litellm 前缀；内网改 ollama_chat/llava）
+    ocr_languages: str = "chi_sim+eng"
+    image_vlm_caption: bool = True
+    image_caption_model: str = "openai/gpt-4o-mini"
     image_caption_api_base: str = ""
     image_caption_api_key: str = ""
-    image_caption_prompt: str = ""           # 空用默认「用中文简洁描述图片内容与关键细节」
-    image_caption_timeout: int = 15          # caption 调用超时（秒），失败快速降级
+    image_caption_prompt: str = ""
+    image_caption_timeout: int = 15
 
-    # 可选：管理端鉴权 token。设置后插件 toggle/call、权限审批等敏感接口需携带
-    # Authorization: Bearer <token>；不设置时这些接口仅允许本机来源（deps.require_admin）。
+    # ── 管理端 / CORS ──
+    # 设置后管理接口要求 Authorization: Bearer <token>；为空时仅本机可管理。
     admin_token: Optional[str] = None
-
-    # ── 向量库 / 章节库清理 ──
-    # 启动时清空全部向量库 + 章节库 + BM25 + 上传文件（默认 false，谨慎开启）
-    vector_store_auto_clear: bool = False
-    # 数据保留天数（TTL）：>0 时按文档创建时间定期清理过期数据；0 = 不启用
-    vector_store_ttl_days: int = 0
-    # 定时清理检查间隔（小时），配合 VECTOR_STORE_TTL_DAYS 使用
-    vector_store_cleanup_interval_hours: int = 24
-
-    # ── 并发控制 ──
-    # 全局同时执行的 Agent 任务上限（chat.py `_agent_semaphore`，多 Agent 请求排队）。
-    # 默认 4：RAG Agent 单次执行主要耗时在 LLM 调用（I/O 等待），提高并发不会打满 CPU，
-    # 但 SQLite 连接与 ChromaDB 会有锁竞争，需配合 session.db 连接池（app/session/db.py）。
-    max_concurrent_agents: int = 4
-
-    # CORS 允许的源（JSON 数组，环境变量 CORS_ORIGINS）。默认仅本机前端
-    # （vite dev 5173 / preview 4173），避免局域网/公网页面调用本服务接口。
+    # 允许的前端来源（JSON 数组或逗号分隔字符串）。
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
@@ -229,91 +241,130 @@ class Settings(BaseSettings):
         "http://127.0.0.1:4173",
     ]
 
-    # ── 权限 / 工作区（对齐 opencode external_directory 设计）──
-    # 免审范围只有三类：会话默认临时目录、程序内部数据目录、用户「工作目录白名单」
-    # （持久化于 data/runtime_workspaces.json）。其余路径一律人工审批。
-    # [已废止] external 路径默认策略：保留字段仅为兼容旧 .env，决策不再读取。
-    external_path_default: str = "ask"
-    # 权限审批等待超时（秒），默认 180；超时视为拒绝
-    # 60s 对人工审批偏紧（弹窗出现后要留给用户阅读与决策时间），配合前端倒计时自动拒绝
+    # ── 知识库清理 ──
+    vector_store_auto_clear: bool = False
+    vector_store_ttl_days: int = 0
+    vector_store_cleanup_interval_hours: int = 24
+
+    # ── 并发 ──
+    max_concurrent_agents: int = 4
+    # 超出并发上限后的排队长度上限。
+    max_queue_size: int = 20
+    # 工具默认限流（0 = 不限）：仅对未显式声明 rate_limit / token_budget 的工具生效。
+    tool_default_rate_limit: int = 0
+    tool_default_token_budget: int = 0
+
+    # ── 权限 / 工作区 ──
     permission_approval_timeout: int = 180
-    # 是否放行主工作区内受保护源码路径（app/、plugins/、skills/、config/、main.py 等）的写/执行。
-    # 默认 false：这些路径硬保护，添加再多工作区也不能改；
-    # 设为 true 后（如开发本系统自身时）允许 Agent 修改 backend 源码。
-    # .git、.env、*.db、permissions.json 始终保护，不受此开关影响。
     allow_source_writes: bool = False
 
-    # [思考模式 2026-10-09] DeepSeek V4 思考开关：enabled / disabled / adaptive。
-    # 默认 disabled —— 实测 agentic 工具循环里思考会吃光 max_tokens 预算
-    # （reasoning == ct == 上限，finish=length，零工具 / 零正文），且思考轮要求把
-    # reasoning_content 回传（依赖 litellm 补丁）。关闭后 finish=stop、正常产出。
-    # adaptive = 不显式下发，交服务端默认（DeepSeek V4 默认 enabled）；
-    # enabled 时经 extra_body 下发 thinking={"type":"enabled"}（litellm 顶层 kwarg 会被丢弃）。
+    # ── 思考模式 / Ollama ──
     deepseek_thinking: str = "disabled"
-    # [思考模式 2026-10-11] Ollama 思考开关（全局兜底默认）：enabled / disabled / adaptive。
-    # 现已优先使用每模型 `thinking` 字段（前端「模型管理 → 思考模式」）；仅当模型条目未设
-    # `thinking` 时才回落到此处。默认 disabled —— 实测（qwen3.5:4b）litellm+ollama 下
-    # think=True 会把**最终回答**全部塞进 reasoning_content、content 恒空（工具调用也进
-    # reasoning，工具循环报废），与 DeepSeek 同理。关闭后 finish=stop、content 正常产出
-    # （含标准 tool_calls）。adaptive = 不显式下发，交推理服务默认；enabled 时顶层传 think=True。
     ollama_thinking: str = "disabled"
-
-    # Ollama 上下文窗口**回落值**（仅在 `/api/ps` 读不到运行窗口时用于预算/压缩）。
-    # 实际窗口以 Ollama 服务器配置为准（OLLAMA_CONTEXT_LENGTH / 启动参数），
-    # 只有「模型管理」里显式设置了上下文长度才会下发 num_ctx 覆盖服务器。
-    # 未知窗口时按最保守的 4096 估（Ollama 默认 n_ctx），否则按 8192 估会在 4096
-    # 服务器上直接 400；模型加载后用 `/api/ps` 的真实值覆盖。
+    # 读不到运行窗口时的回落值（实际以 Ollama /api/ps 为准）。
     ollama_num_ctx: int = 4096
-    # [上下文守卫] 传输层在每次 Ollama 调用前把 prompt 适配到真实窗口（默认开）。
-    # OLLAMA_CONTEXT_GUARD=0 可关闭，回滚到旧行为。
     ollama_context_guard: bool = True
-    # [LiteLLM 调试] 默认开启 litellm debug，落盘到 data/logs/litellm-debug.log
-    # （脱敏 + 20MB×3 轮转）；LITELLM_DEBUG=0 可关闭。
+    # Ollama 服务地址（目录未注册时兜底）。
+    ollama_host: str = "http://localhost:11434"
+    # 显式 Ollama API base（优先级高于 ollama_host；为空则用 ollama_host）。
+    ollama_api_base: str = ""
+
+    # ── LiteLLM / 可观测性 ──
     litellm_debug: bool = True
+    # LiteLLM 代理模式地址与 key；为空则直连 Provider。
+    litellm_proxy_url: str = ""
+    litellm_proxy_key: str = "sk-litellm-proxy"
+    # LiteLLM debug 日志路径（相对 backend/）。
+    litellm_debug_log: str = "data/logs/litellm-debug.log"
+    # token trace 等运行日志目录。
+    agentsuper_log_dir: str = "logs"
+    # 全局存储目录覆盖（空 = backend/ 下的默认位置）。
+    agentsuper_data: str = ""
+    agentsuper_cache: str = ""
+    agentsuper_config: str = ""
+    agentsuper_state: str = ""
+    agentsuper_log: str = ""
+    agentsuper_bin: str = ""
+    # 自定义 Provider 模型探测超时（秒）。
+    model_probe_timeout: float = 4.0
+    # DeepSeek tokenizer 目录（为空则用 data/models 或仓库内置）。
+    deepseek_tokenizer_dir: str = ""
+    # Langfuse 链路追踪；非空时启用，并导出到进程环境供 litellm/langfuse 读取。
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = ""
 
-    # ── 共享记忆持久化 ──
-    # 非空时 MemoryManager 将未过期记忆落盘到该文件，重启不丢失
-    memory_persist_path: str = "data/agent_memory.json"
+    # ── 共享记忆 ──
+    memory_persist_path: str = "data/agent_memory.db"
 
-    # ── 用户身份签名（可选，默认关闭）──
-    # 设置 AUTH_TOKEN_SECRET 后启用：X-User-Id 必须携带对应的签名 token
-    # （前端通过 /login 页面注册账号/登录后换取 token），
-    # 防止仅伪造 X-User-Id 头越权读取他人会话。默认（本地部署）不校验。
-    # validation_alias 保证 .env 中的 AUTH_TOKEN_SECRET 正确映射到该字段。
-    auth_secret: Optional[str] = Field(default=None, validation_alias="AUTH_TOKEN_SECRET")
-    # token 有效期（秒），默认 30 天
+    # ── 用户身份签名（可选）──
+    # 设置后启用登录；字段同时接受环境变量 AUTH_TOKEN_SECRET。
+    auth_secret: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("AUTH_TOKEN_SECRET", "auth_secret"),
+    )
     auth_token_ttl: int = 2592000
-    # 已注册用户（user_id → 设备密钥哈希）的持久化文件
     auth_users_path: str = "data/auth_users.json"
 
-    # ── 全链路日志（app/chainlog/，落库 data/chain_logs.db 或统一 DB）──
-    # 总开关：关闭后所有埋点为 no-op（仅一次 settings 读取，无额外开销）
+    # ── 全链路日志（chainlog）──
     chain_log_enabled: bool = True
-    # 内存缓冲队列长度（条）。写入是异步批量落库，队列满时丢弃最旧的非关键节点
-    # （http.request / agent.start 等关键节点走同步直写，见 app/chainlog/store.py）
     chain_log_queue_size: int = 5000
-    # 批量落盘间隔（秒）与单批最大条数
     chain_log_flush_interval: float = 1.0
     chain_log_flush_batch: int = 200
-    # 保留天数（TTL）：>0 时按 ts 定期/启动时清理过期链路日志；0 = 永久保留
     chain_log_retention_days: int = 7
-    # 行数上限（防爆）：>0 时每批落盘后按 ts 裁剪到该行数
     chain_log_max_rows: int = 200000
-    # 单条 data（JSON 负载）的最大字符数，超出截断并标记
     chain_log_max_data_chars: int = 4000
-    # 记录链路上的工具调用明细（tool_start/tool_end）。关闭可显著降低写入量
     chain_log_tool_calls: bool = True
 
+    # ── 联网工具 / SSRF ──
+    tavily_api_key: str = ""
+    bing_api_key: str = ""
+    # true 时放行内网地址（仅本地调试；协议/格式校验仍生效）。
+    ssrf_allow_internal: bool = False
+
+    # ── 跨模型工具调用 Harness ──
+    # 全局强制工具调用路径：native | fallback；空 = 按模型目录能力探测。
+    harness_tool_mode: str = ""
+    # 额外声明原生支持 / 不支持原生的模型（JSON 数组或逗号分隔）。
+    harness_native_models: list[str] = []
+    harness_fallback_models: list[str] = []
+
+    # ── 真实模型验收测试（pytest 专用，默认关闭）──
+    harness_real_test: bool = False
+    harness_real_model: str = ""
+    l4_model_switch: bool = False
+    l4_model_a: str = ""
+    l4_model_b: str = ""
+    # 分号分隔的 A:B 模型对（设置后覆盖 l4_model_a/b）。
+    l4_model_pairs: str = ""
+    harness_smoke_model_a: str = ""
+    harness_smoke_model_b: str = ""
+    harness_ollama_test: bool = False
+    harness_ollama_tools_model: str = "ollama/qwen2.5:3b"
+    harness_ollama_text_model: str = "ollama/deepseek-r1:latest"
+
+    @field_validator("cors_origins", "harness_native_models", "harness_fallback_models", mode="before")
     @classmethod
-    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
+    def _coerce_str_list(cls, value: Any) -> list[str]:
+        return _as_str_list(value)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        # 优先级：显式参数 > 系统环境变量 > config.json > secrets。
+        # 不再注册 dotenv_settings：.env 文件不再读取。
         return (
             init_settings,
-            JsonConfigSettingsSource(settings_cls),
-            dotenv_settings,
             env_settings,
+            JsonConfigSettingsSource(settings_cls),
             file_secret_settings,
         )
-
 
 
 settings = Settings()

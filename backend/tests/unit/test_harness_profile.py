@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
+from config import settings
 from harness.capabilities import build_profile, clear_profile_cache
 
 
@@ -32,7 +33,7 @@ def test_profile_uses_catalog_capabilities_and_limits(monkeypatch):
 
 def test_profile_env_override_and_cache(monkeypatch):
     clear_profile_cache()
-    monkeypatch.setenv("HARNESS_FALLBACK_MODELS", "profile-model")
+    monkeypatch.setattr(settings, "harness_fallback_models", ["profile-model"])
     monkeypatch.setattr(
         "models.catalog.read_capabilities",
         lambda _mid: {"tool_use": True, "vision": False, "reasoning": False},
@@ -59,7 +60,8 @@ def test_tool_adapter_exposes_profile(monkeypatch):
     from harness.tool_adapter import ToolAdapter
 
     clear_profile_cache()
-    monkeypatch.setenv("HARNESS_FALLBACK_MODELS", "profile-model")
+    monkeypatch.setattr(settings, "harness_fallback_models", ["profile-model"])
     adapter = ToolAdapter(_Model())
     assert adapter.profile.model_id == "profile-model"
     assert adapter.mode == "fallback"
+

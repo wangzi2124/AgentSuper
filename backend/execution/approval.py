@@ -1,7 +1,7 @@
-"""审批队列（M4 · 生产加固占位）。
+"""审批队列（内存实现，已接入高危工具审批链路）。
 
-简单的内存审批队列，用于高危工具审批请求（require_approval=True）。
-实际审批流（Web/UI/回调）在 M4 后续接入。
+用于 `require_approval=True` 的工具审批：`PlatformContext` 请求审批，
+前端/管理端通过 `/api/admin/approvals` 查询与决策。
 """
 
 from __future__ import annotations

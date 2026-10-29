@@ -1,13 +1,13 @@
-"""Harness performance gates (design §11.7)."""
+﻿"""Harness performance gates (design 搂11.7)."""
 
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 
 import pytest
 
+from config import settings
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from graph.nodes.base import run_tool_loop
 from harness.delimiters import render_tool_call
@@ -15,7 +15,7 @@ from harness.tool_adapter import TextDelta, ToolAdapter
 from models.router import ChatResult, TierModel, reset_request_model, set_request_model
 from models.stream import StreamResult
 
-_MODEL = (os.getenv("HARNESS_SMOKE_MODEL_A") or "").strip()
+_MODEL = (settings.harness_smoke_model_a or "").strip()
 
 
 class _FakeModel:
@@ -165,7 +165,7 @@ async def test_pf07_switch_latency_fake(tmp_path, monkeypatch):
     from harness.switch import SwitchDeps, SwitchService
 
     messages = [HumanMessage(content="small", id=f"m{i}") for i in range(20)]
-    target = (os.getenv("HARNESS_SMOKE_MODEL_B") or _MODEL).strip()
+    target = (settings.harness_smoke_model_b or _MODEL).strip()
     sess = SimpleNamespace(model=_MODEL, status="idle", updated_at=0.0)
     deps = SwitchDeps(
         get_session=lambda _sid: sess,
@@ -221,7 +221,7 @@ async def test_pf07_real_switch_latency(tmp_path):
     messages = []
     for i in range(30):
         messages.append(HumanMessage(content=("filler " * 120) + f" step {i} /work/app.py", id=f"m{i}"))
-    target = (os.getenv("HARNESS_SMOKE_MODEL_B") or _MODEL).strip()
+    target = (settings.harness_smoke_model_b or _MODEL).strip()
     sess = SimpleNamespace(model=_MODEL, status="idle", updated_at=0.0)
 
     async def read_messages(_sid):
@@ -249,3 +249,4 @@ async def test_pf07_real_switch_latency(tmp_path):
     elapsed = time.perf_counter() - start
     assert out["switched"] is True
     assert elapsed < 15.0
+

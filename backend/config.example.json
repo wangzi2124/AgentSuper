@@ -1,25 +1,597 @@
-﻿{
-  "llm_model": "deepseek-chat",
+﻿// ============================================================================
+// AgentSuper 后端配置示例
+// ----------------------------------------------------------------------------
+// 本文件是 JSONC：支持 // 行注释、/* 块注释 */、以及对象/数组末尾的尾逗号。
+//
+// 用法：
+//   1) 复制本文件为同目录的 config.json（config.json 已被 gitignore）。
+//   2) 按下面的注释修改；不写的键会使用本文件里的默认值。
+//
+// 优先级：操作系统环境变量 > config.json > 代码默认值。
+// 环境变量名 = 键名转大写，例如：
+//   llm_model        <- LLM_MODEL
+//   harness_tool_mode <- HARNESS_TOOL_MODE
+//   auth_secret      <- AUTH_TOKEN_SECRET（特例）
+//
+// 快速示例 A（DeepSeek 云端）：
+//   "llm_model": "deepseek/deepseek-v4-flash",
+//   "llm_api_key": "sk-your-deepseek-key",
+//   "llm_api_base": "https://api.deepseek.com"
+//
+// 快速示例 B（本地 Ollama，无需 API Key）：
+//   "llm_model": "ollama_chat/qwen2.5:7b",
+//   "llm_api_key": "",
+//   "llm_api_base": "http://localhost:11434",
+//   "ollama_host": "http://localhost:11434"
+//
+// 快速示例 C（MySQL）：
+//   "db_type": "mysql",
+//   "db_host": "127.0.0.1",
+//   "db_port": 3306,
+//   "db_username": "root",
+//   "db_password": "your-password",
+//   "db_name": "agentsuper"
+// ============================================================================
+{
+  // ══════════════════════════════════════════════════════════════════════════
+  // 一、LLM 基础连接
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 默认对话模型。
+  // 作用：请求没有选中模型、也没有设置 TIER_*_MODEL 时的最终兜底。
+  // 示例：deepseek/deepseek-v4-flash（DeepSeek 云端）
+  //       gpt-4o-mini（OpenAI）
+  //       ollama_chat/qwen2.5:7b（本地 Ollama，工具调用兼容性更好）
+  "llm_model": "deepseek/deepseek-v4-flash",
+
+  // 直连模式的 API Key。
+  // 空字符串 = 未配置；「模型管理」里给 Provider 配的 Key 优先。
+  // 示例：sk-1234567890abcdef
   "llm_api_key": "",
+
+  // 直连模式的 API 端点（litellm 的 base_url）。
+  // 示例：https://api.deepseek.com
+  //       https://api.openai.com/v1
+  //       http://localhost:11434（Ollama）
   "llm_api_base": "https://api.deepseek.com",
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 二、数据库后端（session / model_catalog / chapter_store / tasks 共用）
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 数据库类型。
+  // 取值：sqlite | mysql | postgresql
+  // 示例：生产多实例用 "mysql"；本地默认 "sqlite" 即可。
   "db_type": "sqlite",
+
+  // 完整 SQLAlchemy 连接串；填了它就不再使用下面的 db_host/db_port 等拼装。
+  // null = 不覆盖，按下方组件拼装。
+  // 示例：mysql+pymysql://root:pass@127.0.0.1:3306/agentsuper?charset=utf8mb4
+  "db_url": null,
+
+  // 数据库主机。示例：127.0.0.1 / db.internal / localhost
+  "db_host": "127.0.0.1",
+
+  // 数据库端口；0 = 按 db_type 取默认（MySQL 3306 / PostgreSQL 5432）。
+  // 示例：3306
+  "db_port": 0,
+
+  // 数据库用户名。示例：root
+  "db_username": "root",
+
+  // 数据库密码。空字符串 = 无密码。示例：your-password
+  "db_password": "",
+
+  // 数据库名。示例：agentsuper
+  "db_name": "agentsuper",
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 三、会话与 LangGraph 检查点
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 会话元数据库路径（相对 backend/，也可写绝对路径）。
+  // 示例：data/session.db 或 D:/agentsuper/session.db
+  "session_db_path": "data/session.db",
+
+  // LangGraph 图检查点库路径（相对 backend/，也可写绝对路径）。
+  // 作用：保存会话消息与上下文，跨重启不丢。
+  // 示例：data/checkpoints.db
+  "checkpoint_db_path": "data/checkpoints.db",
+
+  // 是否持久化检查点。
+  // true = SQLite/Postgres 持久化；false = 进程内 MemorySaver（重启即丢，仅调试）。
+  // 示例：调试时设 false；生产保持 true。
+  "checkpoint_persist": true,
+
+  // Postgres 检查点连接串；空 = 使用上面的 SQLite。
+  // 示例：postgresql://user:pass@127.0.0.1:5432/agentsuper
+  "postgres_checkpoint_url": "",
+
+  // Postgres 检查点的通用兜底连接串（上面为空时读取）；通常留空。
+  // 示例：postgresql://user:pass@127.0.0.1:5432/agentsuper
+  "database_url": "",
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 四、向量库 / 文档入库 / 模型下载
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ChromaDB 向量库目录（相对 backend/）。
+  // 示例：data/vector_store
   "vector_store_path": "data/vector_store",
+
+  // 文档分块大小（字符数）。示例：500；长文档可调到 800~1000。
+  "chunk_size": 500,
+
+  // 相邻分块重叠字符数。示例：200；一般取 chunk_size 的 20%~40%。
+  "chunk_overlap": 200,
+
+  // 写入向量库时强制附加的部门/租户字段 department，用于权限过滤。
+  // 示例：default / hr / finance
+  "kb_department": "default",
+
+  // 本地 embedding 模型。
+  // 示例：BAAI/bge-small-zh-v1.5（中文推荐）
+  //       all-MiniLM-L6-v2（英文）
+  //       若已下载到本地，也可填目录：data/models/BAAI/bge-small-zh-v1___5
+  "embedding_model": "BAAI/bge-small-zh-v1.5",
+
+  // 是否启用重排序（cross-encoder）。失败会自动降级，不影响启动。
+  // 示例：true 开启；false 关闭并省内存。
+  "enable_reranker": true,
+
+  // 重排序模型。
+  // 示例：cross-encoder/ms-marco-MiniLM-L-6-v2
+  "reranker_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+
+  // 单次模型下载超时（秒）；0 = 不设整体超时。
+  // 示例：600（10 分钟）；网络慢可设 1800。
+  "model_download_timeout": 600,
+
+  // 单个下载源的重试次数（不含首次）。
+  // 示例：2 表示最多尝试 3 次。
+  "model_download_retries": 2,
+
+  // 插件目录（相对 backend/），加载 *.py 中的 tool_* 函数。
+  // 示例：plugins
   "plugins_dir": "plugins",
-  "max_concurrent_agents": 4,
-  "cors_origins": ["http://localhost:5173", "http://127.0.0.1:5173"],
-  "external_path_default": "ask",
-  "permission_approval_timeout": 180,
-  "allow_source_writes": false,
-  "deepseek_thinking": "disabled",
-  "ollama_thinking": "disabled",
-  "ollama_num_ctx": 4096,
-  "ollama_context_guard": true,
-  "litellm_debug": true,
-  "llm_max_tokens": 32000,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 五、摘要 / 压缩模型
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 历史摘要模型；compress_model 为空时作为压缩模型的回退。
+  // null = 未设置（压缩走 tier-simple 或 compress_model）。
+  // 示例：ollama_chat/qwen2.5:3b
+  "summarization_model": null,
+
+  // 压缩时保留的最近消息条数（summarization_model 不要求非空）。
+  // 示例：6；调大保留更多原文，调小更省上下文。
+  "summarization_keep_messages": 6,
+
+  // 压缩专用模型；优先于 summarization_model。
+  // null = 未设置（走 summarization_model 或 tier-simple）。
+  // 示例：deepseek/deepseek-v4-flash
+  "compress_model": null,
+
+  // 是否启用 LLM 摘要压缩。
+  // true = 用模型生成摘要；false = 只做规则截断，不调模型。
+  // 示例：想省 token 可设 false。
   "compress_model_enabled": true,
-  "chain_log_enabled": true,
-  "voice_tts_enabled": false,
-  "session_budget": 0.0,
+
+  // 单次摘要输出的硬上限（token）。
+  // 示例：800
+  "compress_max_tokens": 800,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 六、计划 / 并行扇出
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 是否启用计划模型（复杂任务先拆步骤）。
+  // 示例：true 开启；false 只走单任务快速路径。
   "plan_model_enabled": true,
-  "plan_parallel_enabled": false
+
+  // 是否允许并行扇出（同时跑多个子任务，成本更高）。
+  // 示例：默认 false；确认预算充足再设 true。
+  "plan_parallel_enabled": false,
+
+  // 单会话允许的并行扇出次数上限。
+  // 示例：2
+  "plan_max_fanout_calls": 2,
+
+  // 扇出前要求的最小剩余预算（元）。
+  // 示例：0.20 表示至少剩 0.2 元才允许扇出。
+  "plan_fanout_min_budget": 0.2,
+
+  // 单会话总预算（元）；0 = 不设预算（扇出门禁会保守拒绝）。
+  // 示例：5.0 表示本会话最多花 5 元。
+  "session_budget": 0.0,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 七、语音 / TTS（本地 Qwen3-TTS 子进程）
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 是否启用语音合成/转写（会注册语音工具与 /api/voice 接口）。
+  // 示例：false 关闭；true 开启（首次需预下载模型）。
+  "voice_tts_enabled": false,
+
+  // 默认音色。
+  // 示例：Vivian
+  "voice_tts_speaker": "Vivian",
+
+  // 模型规格：0.6B（交互更快）| 1.7B（更慢，适合离线批量）。
+  // 示例：0.6B
+  "voice_tts_model_size": "0.6B",
+
+  // 单次合成超时（秒）。
+  // 示例：600
+  "voice_tts_timeout": 600,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 八、输出 token / token 估算
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 每次 LLM 调用的输出上限（token）。
+  // 实际生效值 = min(模型目录声明, 本值)，不会放大。
+  // 示例：32000；写长代码可设 64000（前提是模型支持）。
+  "llm_max_tokens": 32000,
+
+  // token 估算校正系数（补偿 tokenizer 低估）。
+  // 示例：1.13 表示估算值 ×1.13；若经常“以为没超实际超了”，可调到 1.2。
+  "token_estimate_correction": 1.13,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 九、上下文压缩
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 压缩时尾部保留的最近轮次。
+  // 示例：2 表示保留最近 2 轮原文。
+  "context_tail_turns": 2,
+
+  // 自动压缩保留的最近消息条数；0 = 按 context_tail_turns × 2 折算。
+  // 示例：0（推荐）或 10。
+  "compaction_tail_messages": 0,
+
+  // 单条工具输出的 token 上限。
+  // 示例：8000；想压低上下文可设 4000。
+  "tool_output_max_tokens": 8000,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十、图片 / OCR / 视觉描述桥
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 回显/缓存缩略图边长（像素）。
+  // 示例：256
+  "image_thumbnail_px": 256,
+
+  // 是否对图片做 OCR 提取文字（截图/文档图）。
+  // 示例：false 关闭；true 开启（需要 tesseract）。
+  "image_use_ocr": false,
+
+  // tesseract 可执行文件路径；空 = 用系统 PATH 中的 tesseract。
+  // 示例：C:\Program Files\Tesseract-OCR\tesseract.exe
+  "tesseract_cmd": "",
+
+  // tessdata 目录（含 eng/chi_sim.traineddata）；空 = 用 tesseract 默认目录。
+  // 示例：C:\tessdata
+  "tessdata_dir": "",
+
+  // OCR 语言。示例：chi_sim+eng（简体中文 + 英文）
+  "ocr_languages": "chi_sim+eng",
+
+  // 是否用视觉 LLM 为图片生成描述（caption）后注入文本模型。
+  // 示例：主模型是纯文本 DeepSeek 时保持 true。
+  "image_vlm_caption": true,
+
+  // 视觉描述模型。
+  // 示例：openai/gpt-4o-mini（需 OPENAI_API_KEY）
+  //       ollama_chat/llava（本地，需先 ollama pull llava）
+  "image_caption_model": "openai/gpt-4o-mini",
+
+  // 视觉描述模型的端点；空 = 用模型默认。
+  // 示例：http://localhost:11434
+  "image_caption_api_base": "",
+
+  // 视觉描述模型的 API Key；空 = 未配置。
+  // 示例：sk-your-openai-key
+  "image_caption_api_key": "",
+
+  // 自定义图片描述提示词；空 = 用默认「用中文简洁描述图片内容与关键细节」。
+  // 示例：请描述这张图里的报错信息和代码行号。
+  "image_caption_prompt": "",
+
+  // 图片描述调用超时（秒），失败会快速降级。
+  // 示例：15
+  "image_caption_timeout": 15,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十一、管理端 / CORS
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 管理接口鉴权令牌；空 = 仅本机可调用管理接口。
+  // 示例：一个足够长的随机串，例如 my-admin-token-2026
+  "admin_token": "",
+
+  // 允许访问后端的前端来源（JSON 数组，也可写逗号分隔字符串）。
+  // 示例：前端部署在 https://app.example.com 时追加该地址。
+  "cors_origins": [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173"
+  ],
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十二、知识库清理
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 启动时是否清空全部知识库数据（向量库 + 章节库 + BM25 + 上传文件）。
+  // 示例：false（默认）；仅在需要重置演示数据时设 true。
+  "vector_store_auto_clear": false,
+
+  // 数据保留天数；0 = 不启用定时清理。
+  // 示例：30 表示只保留最近 30 天文档。
+  "vector_store_ttl_days": 0,
+
+  // 定时清理检查间隔（小时）。
+  // 示例：24（每天检查一次）
+  "vector_store_cleanup_interval_hours": 24,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十三、并发
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 全局同时执行的 Agent 任务上限。
+  // 示例：4；机器弱/用 SQLite 时建议 2~4。
+  "max_concurrent_agents": 4,
+
+  // 超出并发上限后的排队长度上限。
+  // 示例：20；0 表示不排队（超出直接拒绝）。
+  "max_queue_size": 20,
+
+  // 工具默认限流（每分钟调用次数）；0 = 不限。
+  // 只对未显式声明 rate_limit 的工具生效；示例：60。
+  "tool_default_rate_limit": 0,
+
+  // 工具默认 token 预算（累计输出 token）；0 = 不限。
+  // 只对未显式声明 token_budget 的工具生效；示例：100000。
+  "tool_default_token_budget": 0,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十四、权限 / 工作区
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 权限审批等待超时（秒），超时视为拒绝。
+  // 示例：180（前端倒计时会据此调整）。
+  "permission_approval_timeout": 180,
+
+  // 是否允许 Agent 写受保护源码路径（app/、plugins/、skills/、config/ 等）。
+  // 示例：日常 false；开发本系统自身时设 true。
+  "allow_source_writes": false,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十五、思考模式 / Ollama
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // DeepSeek V4 思考开关。
+  // 取值：enabled | disabled | adaptive
+  // 示例：disabled（工具循环里思考会吃光输出预算）；adaptive = 交给服务端默认。
+  "deepseek_thinking": "disabled",
+
+  // Ollama 思考开关（全局兜底，模型条目里的设置优先）。
+  // 取值：enabled | disabled | adaptive
+  // 示例：disabled（litellm+ollama 下开启可能导致 content 为空）。
+  "ollama_thinking": "disabled",
+
+  // Ollama 上下文窗口回落值（读不到 /api/ps 时使用）。
+  // 示例：4096；显存足够可设 32768。
+  "ollama_num_ctx": 4096,
+
+  // 是否在传输层自动裁剪 prompt 以适配 Ollama 窗口。
+  // 示例：true 开启；false 回退旧行为。
+  "ollama_context_guard": true,
+
+  // Ollama 服务地址。
+  // 示例：http://localhost:11434
+  "ollama_host": "http://localhost:11434",
+
+  // 显式 Ollama API base；空 = 使用 ollama_host。
+  // 示例：http://192.168.1.10:11434
+  "ollama_api_base": "",
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十六、LiteLLM / 可观测性 / 存储目录
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 是否开启 LiteLLM debug 日志（写入下面的 litellm_debug_log）。
+  // 示例：true 排障；false 关闭。
+  "litellm_debug": true,
+
+  // LiteLLM Proxy 地址；空 = 直连各 Provider。
+  // 示例：http://localhost:4000
+  "litellm_proxy_url": "",
+
+  // LiteLLM Proxy 的 Key（仅代理模式使用）。
+  // 示例：sk-litellm-proxy
+  "litellm_proxy_key": "sk-litellm-proxy",
+
+  // LiteLLM debug 日志路径（相对 backend/）。
+  // 示例：data/logs/litellm-debug.log
+  "litellm_debug_log": "data/logs/litellm-debug.log",
+
+  // token trace 等运行日志目录。
+  // 示例：logs 或 D:/agentsuper/logs
+  "agentsuper_log_dir": "logs",
+
+  // 全局存储目录覆盖；空 = 使用 backend/ 下的默认位置。
+  // 注意：这 6 项与 AGENTSUPER_* 同义，适合把数据放到独立磁盘。
+  // 示例：agentsuper_data = "D:/agentsuper/data"
+  "agentsuper_data": "",
+  // 示例：D:/agentsuper/cache
+  "agentsuper_cache": "",
+  // 示例：D:/agentsuper/config
+  "agentsuper_config": "",
+  // 示例：D:/agentsuper/state
+  "agentsuper_state": "",
+  // 示例：D:/agentsuper/logs
+  "agentsuper_log": "",
+  // 示例：D:/agentsuper/bin
+  "agentsuper_bin": "",
+
+  // 自定义 Provider 模型探测超时（秒）。
+  // 示例：4；端点慢可设 10。
+  "model_probe_timeout": 4.0,
+
+  // DeepSeek tokenizer 目录；空 = 用 data/models 或仓库内置。
+  // 示例：data/models/deepseek-v4-tokenizer
+  "deepseek_tokenizer_dir": "",
+
+  // Langfuse 链路追踪（非空时启用）。
+  // 示例：langfuse_public_key = "pk-lf-xxxx"
+  //       langfuse_secret_key = "sk-lf-xxxx"
+  //       langfuse_host = "https://cloud.langfuse.com"
+  "langfuse_public_key": "",
+  "langfuse_secret_key": "",
+  "langfuse_host": "",
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十七、共享记忆
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 长期记忆 SQLite 文件；memory_recall / memory_store 重启后仍可召回。
+  // 示例：data/agent_memory.db
+  "memory_persist_path": "data/agent_memory.db",
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十八、用户身份签名（可选）
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 用户登录签名密钥；空 = 匿名模式（不需要登录）。
+  // 也可用环境变量 AUTH_TOKEN_SECRET 设置。
+  // 示例：一个足够长的随机串，例如 9f3c...（不要提交到 git）
+  "auth_secret": "",
+
+  // 登录 token 有效期（秒）。默认 2592000 = 30 天。
+  // 示例：604800（7 天）
+  "auth_token_ttl": 2592000,
+
+  // 用户账号/设备密钥哈希的持久化文件。
+  // 示例：data/auth_users.json
+  "auth_users_path": "data/auth_users.json",
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十九、全链路日志（chainlog）
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 总开关；false 时所有链路埋点变为 no-op。
+  // 示例：true 排障；false 降低写入量。
+  "chain_log_enabled": true,
+
+  // 内存缓冲队列长度（条）；满了丢弃最旧的非关键节点。
+  // 示例：5000
+  "chain_log_queue_size": 5000,
+
+  // 批量落盘间隔（秒）。
+  // 示例：1.0
+  "chain_log_flush_interval": 1.0,
+
+  // 单批最大条数。
+  // 示例：200
+  "chain_log_flush_batch": 200,
+
+  // 日志保留天数；0 = 永久保留。
+  // 示例：7
+  "chain_log_retention_days": 7,
+
+  // 行数上限，超出后按时间裁剪。
+  // 示例：200000
+  "chain_log_max_rows": 200000,
+
+  // 单条 data（JSON 负载）最大字符数，超出截断。
+  // 示例：4000
+  "chain_log_max_data_chars": 4000,
+
+  // 是否记录工具调用明细；关闭可显著降低写入量。
+  // 示例：true
+  "chain_log_tool_calls": true,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 二十、联网工具 / SSRF
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // Tavily 搜索 API Key；空 = 不启用 Tavily。
+  // 示例：tvly-xxxxxxxx
+  "tavily_api_key": "",
+
+  // Bing 搜索 API Key；空 = 不启用 Bing。
+  // 示例：0123456789abcdef0123456789abcdef
+  "bing_api_key": "",
+
+  // 是否允许出站请求访问内网/环回地址。
+  // 示例：false（默认拦截）；仅本地调试设 true。
+  "ssrf_allow_internal": false,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 二十一、跨模型工具调用 Harness
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 全局强制工具调用路径。
+  // 取值：native | fallback | 空（按模型目录自动探测）
+  // 示例：排障时设 "fallback" 强制文本回退；日常留空。
+  "harness_tool_mode": "",
+
+  // 额外声明「支持原生 tool_calls」的模型（JSON 数组，也接受逗号分隔）。
+  // 示例：["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"]
+  "harness_native_models": [],
+
+  // 额外声明「不支持原生 tool_calls」的模型（JSON 数组，也接受逗号分隔）。
+  // 示例：["ollama_chat/qwen3.5:4b"]
+  "harness_fallback_models": [],
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 二十二、真实模型验收测试（pytest 专用，默认关闭）
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 是否开启单模型真实调用验收。
+  // 示例：false（默认）；本地手动验收设 true。
+  "harness_real_test": false,
+
+  // 验收使用的模型。
+  // 示例：deepseek/deepseek-v4-flash
+  "harness_real_model": "",
+
+  // 是否开启 L4 双模型切换验收。
+  // 示例：false（默认）；验收摘要迁移时设 true。
+  "l4_model_switch": false,
+
+  // L4 模型 A（记录事实）。
+  // 示例：deepseek/deepseek-v4-flash
+  "l4_model_a": "",
+
+  // L4 模型 B（切换后必须能召回事实）。
+  // 示例：deepseek/deepseek-v4-pro
+  "l4_model_b": "",
+
+  // L4 多组模型对（分号分隔，格式 A:B）；设置后覆盖 l4_model_a/b。
+  // 示例：deepseek/deepseek-v4-flash:deepseek/deepseek-v4-pro
+  "l4_model_pairs": "",
+
+  // 真实 E2E / 性能测试的模型 A。
+  // 示例：deepseek/deepseek-v4-flash
+  "harness_smoke_model_a": "",
+
+  // 真实 E2E / 性能测试的模型 B（切换目标）。
+  // 示例：deepseek/deepseek-v4-pro
+  "harness_smoke_model_b": "",
+
+  // 是否开启 Ollama 真实模型冒烟测试。
+  // 示例：false（默认）；本机装了 Ollama 时设 true。
+  "harness_ollama_test": false,
+
+  // Ollama 工具模型。
+  // 示例：ollama_chat/qwen2.5:7b
+  "harness_ollama_tools_model": "ollama/qwen2.5:3b",
+
+  // Ollama 纯文本（无工具）模型。
+  // 示例：ollama/deepseek-r1:latest
+  "harness_ollama_text_model": "ollama/deepseek-r1:latest"
 }

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from config import settings
 from harness.delimiters import NAME_OPEN, parse_tool_calls
 from harness.tool_adapter import ToolAdapter
 from models.router import TierModel, reset_request_model, set_request_model
@@ -47,9 +48,9 @@ def _text_response(text):
 
 @pytest.mark.asyncio
 async def test_native_history_works_after_switch_to_fallback_model(monkeypatch):
-    monkeypatch.delenv("HARNESS_TOOL_MODE", raising=False)
-    monkeypatch.setenv("HARNESS_NATIVE_MODELS", "native-model")
-    monkeypatch.setenv("HARNESS_FALLBACK_MODELS", "fallback-model")
+    monkeypatch.setattr(settings, "harness_tool_mode", "")
+    monkeypatch.setattr(settings, "harness_native_models", ["native-model"])
+    monkeypatch.setattr(settings, "harness_fallback_models", ["fallback-model"])
     monkeypatch.setattr(
         TierModel, "_endpoint", lambda self: {"model": self._direct_model()}
     )

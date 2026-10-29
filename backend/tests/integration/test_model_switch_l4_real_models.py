@@ -33,7 +33,7 @@ from models.router import get_model
 
 
 def _setting(name: str, default: str = "") -> str:
-    """优先 shell 环境变量，其次 backend/.env（Settings extra="allow"）。"""
+    """优先 shell 环境变量，其次 backend/config.json（Settings extra="allow"）。"""
     value = os.environ.get(name)
     if value is None or not value.strip():
         extra = getattr(settings, name.lower(), None)

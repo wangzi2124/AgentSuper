@@ -16,10 +16,11 @@ logs/token_trace_YYYYMMDD.jsonl，供 token_patch/analyze_token_trace.py 分析�
 batch 字段：每次 entry_ready 视为新请求批次，自动 +1，便于按请求分组分析。
 """
 import json
-import os
 import threading
 import time
 from pathlib import Path
+
+from config import settings
 
 _lock = threading.Lock()
 _batch = {"n": 0}
@@ -29,7 +30,7 @@ _path: Path | None = None
 def _log_path() -> Path:
     global _path
     if _path is None:
-        base = os.environ.get("AGENTSUPER_LOG_DIR", "logs")
+        base = settings.agentsuper_log_dir or "logs"
         d = Path(base)
         d.mkdir(parents=True, exist_ok=True)
         _path = d / f"token_trace_{time.strftime('%Y%m%d')}.jsonl"

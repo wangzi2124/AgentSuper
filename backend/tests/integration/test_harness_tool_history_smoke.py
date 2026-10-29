@@ -1,8 +1,8 @@
 """Env-gated real-model smoke for the Harness tool path.
 
 Disabled by default. Run manually with:
-  HARNESS_SMOKE_MODEL_A=<native-model> \
-  HARNESS_SMOKE_MODEL_B=<fallback-model> \
+  harness_smoke_model_a=<native-model> \
+  harness_smoke_model_b=<fallback-model> \
   pytest tests/integration/test_harness_tool_history_smoke.py -q
 
 This intentionally stays at Adapter + Loop level: the deterministic integration
@@ -12,21 +12,20 @@ behavior without depending on session storage or a compression model.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
+from config import settings
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from graph.nodes.base import run_tool_loop
 from harness.tool_adapter import ToolAdapter
 from models.router import TierModel, reset_request_model, set_request_model
 
-_MODEL_A = os.getenv("HARNESS_SMOKE_MODEL_A", "").strip()
-_MODEL_B = os.getenv("HARNESS_SMOKE_MODEL_B", "").strip()
+_MODEL_A = (settings.harness_smoke_model_a or "").strip()
+_MODEL_B = (settings.harness_smoke_model_b or "").strip()
 
 pytestmark = pytest.mark.skipif(
     not (_MODEL_A and _MODEL_B),
-    reason="set HARNESS_SMOKE_MODEL_A / HARNESS_SMOKE_MODEL_B to run",
+    reason="set harness_smoke_model_a / harness_smoke_model_b to run",
 )
 
 PROMPT = (

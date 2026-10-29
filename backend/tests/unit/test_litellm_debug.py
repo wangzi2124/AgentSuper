@@ -23,7 +23,7 @@ def test_redact_filter_masks_secrets():
 
 def test_configure_writes_redacted_file(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "litellm_debug", True)
-    monkeypatch.setenv("LITELLM_DEBUG_LOG", str(tmp_path / "litellm.log"))
+    monkeypatch.setattr(settings, "litellm_debug_log", str(tmp_path / "litellm.log"))
     litellm_debug.reset_for_tests()
     litellm_debug.configure_litellm_debug()
 
@@ -45,7 +45,7 @@ def test_configure_writes_redacted_file(tmp_path, monkeypatch):
 
 def test_configure_respects_switch(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "litellm_debug", False)
-    monkeypatch.setenv("LITELLM_DEBUG_LOG", str(tmp_path / "off.log"))
+    monkeypatch.setattr(settings, "litellm_debug_log", str(tmp_path / "off.log"))
     litellm_debug.reset_for_tests()
     litellm_debug.configure_litellm_debug()
     assert not (tmp_path / "off.log").exists()
