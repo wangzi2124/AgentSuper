@@ -327,7 +327,12 @@ class VoiceService:
             model_size or _catalog_voice_size() or settings.voice_tts_model_size
         )
         self.timeout = timeout or settings.voice_tts_timeout
-        self.output_dir = Path(output_dir or (base / "data" / "generated"))
+        if output_dir:
+            self.output_dir = Path(output_dir)
+        else:
+            from storage.paths import data_path
+
+            self.output_dir = data_path(None, "generated")
         self._whisper_worker: _WhisperWorker | None = None
         self._whisper_ready_val: bool | None = None
         # 常驻 TTS 合成 worker（clone.py tts-serve）：启动下载模型后加载一次并常驻复用

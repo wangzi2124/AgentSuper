@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_BYTES = 20 * 1024 * 1024
 _BACKUP_COUNT = 3
-_DEFAULT_PATH = "data/logs/litellm-debug.log"
+_DEFAULT_NAME = "litellm-debug.log"
 
 _configured = False
 
@@ -51,9 +51,14 @@ def configure_litellm_debug() -> None:
     litellm_logger.setLevel(logging.DEBUG)
     litellm_logger.propagate = False
 
-    path = Path(settings.litellm_debug_log or _DEFAULT_PATH)
-    if not path.is_absolute():
-        path = Path(__file__).resolve().parents[1] / path
+    from storage.paths import data_path, global_paths
+
+    override = (settings.litellm_debug_log or "").strip()
+    path = (
+        data_path(override, _DEFAULT_NAME)
+        if override
+        else global_paths()["log"] / _DEFAULT_NAME
+    )
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handler = RotatingFileHandler(

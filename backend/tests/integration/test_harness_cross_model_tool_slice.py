@@ -221,7 +221,7 @@ async def _run_case(tmp_path, monkeypatch, *, keep_tool_history: bool):
 
     monkeypatch.setattr("app.session.repository.upsert_epoch", _upsert)
     monkeypatch.setattr(
-        deps, "__file__", str(tmp_path / "backend" / "app" / "deps.py")
+        settings, "agentsuper_data", str(tmp_path / "backend" / "data")
     )
 
     switched = await ctx.switch_model("ses_cross", "model/b")

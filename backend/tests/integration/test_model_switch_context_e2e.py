@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage
 
 import app.deps as deps
 from app.deps import PlatformContext
+from config import settings
 from execution.filesystem import VirtualFileSystem
 from graph.main_graph import build_main_graph
 from models.router import ChatResult
@@ -153,7 +154,7 @@ async def test_switch_model_preserves_fact_in_next_turn(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr("app.session.repository.upsert_epoch", _upsert)
-    monkeypatch.setattr(deps, "__file__", str(tmp_path / "backend" / "app" / "deps.py"))
+    monkeypatch.setattr(settings, "agentsuper_data", str(tmp_path / "backend" / "data"))
 
     switched = await ctx.switch_model("ses_e2e", "model/b")
     assert switched["switched"] is True

@@ -32,7 +32,8 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
-_users_cache: dict[str, dict] | None = None  # user_id -> 身份记录
+_legacy_import_lock = threading.Lock()
+_legacy_import_checked = False
 
 # PBKDF2 迭代次数（密码哈希）
 _PBKDF2_ITERATIONS = 200_000
@@ -47,10 +48,11 @@ def enabled() -> bool:
     return bool(settings.auth_secret)
 
 
-def _users_path() -> Path:
-    p = settings.auth_users_path or "data/auth_users.json"
-    path = Path(p)
-    return path if path.is_absolute() else Path(__file__).resolve().parents[1] / p
+def _legacy_users_path() -> Path:
+    """旧 JSON 用户文件路径（仅用于一次性导入，导入成功后删除）。"""
+    from storage.paths import data_path
+
+    return data_path(settings.auth_users_path, "auth_users.json")
 
 
 def _secret_hash(device_secret: str) -> str:
@@ -134,46 +136,116 @@ def verify_token(user_id: str, token: str) -> bool:
         return False
 
 
-def _load_users() -> dict[str, dict]:
-    """加载全部用户记录，并迁移历史明文格式（user_id -> 设备密钥哈希串）。"""
-    global _users_cache
-    if _users_cache is not None:
-        return _users_cache
-    path = _users_path()
-    if not path.exists():
-        _users_cache = {}
-        return _users_cache
-    migrated = False
-    raw: dict = {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("auth users load failed: %s", e)
-        raw = {}
+def _db():
+    """会话库连接（auth_users 表与 session.db 同库，支持 sqlite/mysql/postgresql）。"""
+    from app.session.db import _get_db
+
+    return _get_db()
+
+
+def _row_to_record(row) -> dict:
+    rec: dict = {"type": str(row["type"] or "device"), "created_at": int(row["created_at"] or 0)}
+    for key in ("username", "device_hash", "pw_salt", "pw_hash", "token_seed"):
+        value = row[key]
+        if value is not None:
+            rec[key] = value
+    return rec
+
+
+def _normalize_legacy(raw: dict) -> dict[str, dict]:
     users: dict[str, dict] = {}
     for k, v in raw.items():
         if isinstance(v, dict):
             users[str(k)] = v
         elif isinstance(v, str):
             users[str(k)] = {"type": "device", "device_hash": v, "created_at": 0}
-            migrated = True
-    if migrated:
-        _save_users(users)
-    _users_cache = users
-    return _users_cache
+    return users
 
 
-def _save_users(users: dict[str, dict]) -> None:
-    path = _users_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("auth users save failed: %s", e)
+def _ensure_legacy_imported() -> None:
+    """把旧 auth_users.json 一次性导入 DB；成功后删除 JSON，之后只读写数据库。"""
+    global _legacy_import_checked
+    if _legacy_import_checked:
+        return
+    with _legacy_import_lock:
+        if _legacy_import_checked:
+            return
+        _legacy_import_checked = True
+        path = _legacy_users_path()
+        if not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("legacy auth users load failed: %s", e)
+            return
+        if not isinstance(raw, dict):
+            return
+        users = _normalize_legacy(raw)
+        if not users:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+        conn = _db()
+        try:
+            rows = conn.execute("SELECT id, username_lower FROM auth_users").fetchall()
+            existing_ids = {str(r["id"]) for r in rows}
+            existing_names = {
+                str(r["username_lower"]) for r in rows if r["username_lower"]
+            }
+            for uid, rec in users.items():
+                if uid in existing_ids:
+                    continue
+                username = rec.get("username")
+                lower = str(username).lower() if username else None
+                if lower and lower in existing_names:
+                    continue
+                conn.execute(
+                    "INSERT INTO auth_users"
+                    " (id, type, username, username_lower, device_hash, pw_salt,"
+                    " pw_hash, token_seed, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        uid,
+                        str(rec.get("type") or "device"),
+                        username,
+                        lower,
+                        rec.get("device_hash"),
+                        rec.get("pw_salt"),
+                        rec.get("pw_hash"),
+                        rec.get("token_seed"),
+                        int(rec.get("created_at") or 0),
+                    ),
+                )
+                if lower:
+                    existing_names.add(lower)
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("legacy auth users import failed: %s", e)
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        finally:
+            conn.close()
+        try:
+            path.unlink()
+            logger.info("auth users migrated to database, removed %s", path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("legacy auth users cleanup failed: %s", e)
 
 
 def _record(user_id: str) -> dict | None:
-    return _load_users().get(user_id)
+    _ensure_legacy_imported()
+    conn = _db()
+    try:
+        row = conn.execute("SELECT * FROM auth_users WHERE id = ?", (user_id,)).fetchone()
+        return _row_to_record(row) if row is not None else None
+    finally:
+        conn.close()
 
 
 def register(user_id: str, device_secret: str) -> tuple[bool, str]:
@@ -186,19 +258,39 @@ def register(user_id: str, device_secret: str) -> tuple[bool, str]:
     if not enabled():
         return False, "身份签名未启用（未配置 AUTH_TOKEN_SECRET）"
     new_hash = _secret_hash(device_secret)
-    global _users_cache
+    _ensure_legacy_imported()
     with _lock:
-        users = dict(_load_users())
-        existing = users.get(user_id)
+        existing = _record(user_id)
         if existing is not None:
-            existing_hash = (
-                existing.get("device_hash") if isinstance(existing, dict) else existing
-            )
+            if existing.get("type") == "account":
+                return False, "user_id 已被账号注册"
+            existing_hash = existing.get("device_hash")
             if existing_hash and not hmac.compare_digest(existing_hash, new_hash):
                 return False, "user_id 已被其他设备注册"
-        users[user_id] = {"type": "device", "device_hash": new_hash, "created_at": int(time.time())}
-        _save_users(users)
-        _users_cache = users
+        conn = _db()
+        try:
+            if existing is None:
+                conn.execute(
+                    "INSERT INTO auth_users (id, type, device_hash, created_at)"
+                    " VALUES (?,?,?,?)",
+                    (user_id, "device", new_hash, int(time.time())),
+                )
+            else:
+                conn.execute(
+                    "UPDATE auth_users SET type = 'device', device_hash = ?,"
+                    " created_at = ? WHERE id = ?",
+                    (new_hash, int(time.time()), user_id),
+                )
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("auth device register failed: %s", e)
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            return False, "user_id 已被其他设备注册"
+        finally:
+            conn.close()
     return True, ""
 
 
@@ -226,54 +318,70 @@ def register_account(username: str, password: str) -> tuple[bool, str, str]:
         return False, "用户名只能包含字母、数字、下划线或连字符", ""
     if len(password) < 6:
         return False, "密码至少 6 位", ""
-    global _users_cache
+    lower = username.lower()
+    uid = _new_uid()
+    salt = _new_salt()
+    _ensure_legacy_imported()
     with _lock:
-        users = dict(_load_users())
-        if _username_index(users).get(username.lower()):
+        conn = _db()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM auth_users WHERE username_lower = ?", (lower,)
+            ).fetchone()
+            if existing is not None:
+                return False, "用户名已被注册", ""
+            conn.execute(
+                "INSERT INTO auth_users"
+                " (id, type, username, username_lower, pw_salt, pw_hash,"
+                " token_seed, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    uid,
+                    "account",
+                    username,
+                    lower,
+                    salt,
+                    _pbkdf2(password, salt),
+                    os.urandom(24).hex(),
+                    int(time.time()),
+                ),
+            )
+            conn.commit()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("auth account register failed: %s", e)
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
             return False, "用户名已被注册", ""
-        uid = _new_uid()
-        salt = _new_salt()
-        users[uid] = {
-            "type": "account",
-            "username": username,
-            "pw_salt": salt,
-            "pw_hash": _pbkdf2(password, salt),
-            "token_seed": os.urandom(24).hex(),
-            "created_at": int(time.time()),
-        }
-        _save_users(users)
-        _users_cache = users
+        finally:
+            conn.close()
     return True, "", uid
-
-
-def _username_index(users: dict[str, dict]) -> dict[str, str]:
-    """username(小写) -> user_id 索引，用于登录与唯一性检查。"""
-    idx: dict[str, str] = {}
-    for uid, rec in users.items():
-        if isinstance(rec, dict) and rec.get("type") == "account":
-            name = str(rec.get("username", "")).lower()
-            if name:
-                idx[name] = uid
-    return idx
 
 
 def authenticate_account(username: str, password: str) -> str:
     """校验用户名密码，成功返回 user_id，失败返回空串。"""
     if not enabled() or not username or not password:
         return ""
-    users = _load_users()
-    uid = _username_index(users).get(str(username).strip().lower(), "")
-    if not uid:
+    _ensure_legacy_imported()
+    conn = _db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM auth_users WHERE username_lower = ?",
+            (str(username).strip().lower(),),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
         return ""
-    rec = users.get(uid)
-    if not isinstance(rec, dict) or rec.get("type") != "account":
+    rec = _row_to_record(row)
+    if rec.get("type") != "account":
         return ""
     stored = rec.get("pw_hash", "")
     salt = rec.get("pw_salt", "")
     if not stored or not salt:
         return ""
     if hmac.compare_digest(stored, _pbkdf2(password, salt)):
-        return uid
+        return str(row["id"])
     return ""
 
 

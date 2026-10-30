@@ -97,7 +97,7 @@ def test_allowed_roots_are_session_plus_internal_plus_whitelist(client, tmp_path
         assert ctx.sessions.get(sid).directory in roots
         assert str(whitelisted.resolve()) in roots
         # 程序内部数据目录隐式免审
-        assert any(p.endswith(str(Path("data") / "truncation")) for p in roots)
+        assert any(p.endswith("truncation") for p in roots)
         # 程序源码/仓库根不在免审范围
         assert str(ctx.vfs.root.resolve()) not in roots
     finally:

@@ -30,8 +30,10 @@ _path: Path | None = None
 def _log_path() -> Path:
     global _path
     if _path is None:
-        base = settings.agentsuper_log_dir or "logs"
-        d = Path(base)
+        from storage.paths import data_path, global_paths
+
+        override = (settings.agentsuper_log_dir or "").strip()
+        d = data_path(override, "logs") if override else global_paths()["log"]
         d.mkdir(parents=True, exist_ok=True)
         _path = d / f"token_trace_{time.strftime('%Y%m%d')}.jsonl"
     return _path

@@ -118,8 +118,9 @@ def tool_create_docx(title: str = "Document", sections: str = "[]", output_path:
                 p = doc.add_paragraph(item, style="List Bullet")
                 p.paragraph_format.space_after = Pt(2)
 
-    base_dir = Path(__file__).resolve().parents[1]
-    output_dir = base_dir / "data" / "generated"
+    from storage.paths import data_path
+
+    output_dir = data_path(None, "generated")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path:

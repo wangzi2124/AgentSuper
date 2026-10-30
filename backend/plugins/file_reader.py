@@ -5,7 +5,6 @@ Reads files from the uploads/generated directories.
 Images are returned as base64 for multimodal LLM support.
 """
 import base64
-import os
 from pathlib import Path
 
 PLUGIN_NAME = "file-reader"
@@ -14,8 +13,10 @@ PLUGIN_DESCRIPTION = "Read files from the knowledge base (uploads/generated dire
 
 
 def _resolve_path(filename: str) -> str | None:
-    for base in ["data/uploads", "data/generated", "data"]:
-        p = Path(os.getcwd()) / base / filename
+    from storage.paths import data_path
+
+    for base in (data_path(None, "uploads"), data_path(None, "generated"), data_path(None)):
+        p = base / filename
         if p.exists() and p.is_file():
             return str(p)
     return None

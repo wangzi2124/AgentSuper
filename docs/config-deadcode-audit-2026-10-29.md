@@ -239,12 +239,12 @@
 | `db_username` | `"root"` | 已接线 | storage/backends.py |
 | `db_password` | `""` | 已接线 | storage/backends.py |
 | `db_name` | `"agentsuper"` | 已接线 | storage/backends.py |
-| `session_db_path` | `"data/session.db"` | 已接线 | app/session/db.py |
-| `checkpoint_db_path` | `"data/checkpoints.db"` | 已接线 | graph/checkpoint.py |
+| `session_db_path` | `"session.db"` | 已接线（统一数据根；含 auth_users） | app/session/db.py |
+| `checkpoint_db_path` | `"checkpoints.db"` | 已接线（统一数据根） | graph/checkpoint.py |
 | `checkpoint_persist` | `true` | 已接线 | graph/checkpoint.py |
 | `postgres_checkpoint_url` | `""` | 已接线 | graph/checkpoint.py |
 | `database_url` | `""` | 已接线 | graph/checkpoint.py |
-| `vector_store_path` | `"data/vector_store"` | 已接线 | app/runtime.py |
+| `vector_store_path` | `"vector_store"` | 已接线（统一数据根） | app/runtime.py |
 | `chunk_size` | `500` | 已接线 | app/runtime.py |
 | `chunk_overlap` | `200` | 已接线 | app/runtime.py |
 | `kb_department` | `"default"` | 已接线 | app/runtime.py |
@@ -302,23 +302,24 @@
 | `litellm_debug` | `true` | 已接线 | observability/litellm_debug.py |
 | `litellm_proxy_url` | `""` | 已接线 | models/router.py |
 | `litellm_proxy_key` | `"sk-litellm-proxy"` | 已接线 | models/router.py |
-| `litellm_debug_log` | `"data/logs/litellm-debug.log"` | 已接线 | observability/litellm_debug.py |
-| `agentsuper_log_dir` | `"logs"` | 已接线 | observability/trace_log.py |
-| `agentsuper_data` | `""` | 动态读取（storage/paths.py） | storage/paths.py |
-| `agentsuper_cache` | `""` | 动态读取（storage/paths.py） | storage/paths.py |
-| `agentsuper_config` | `""` | 动态读取（storage/paths.py） | storage/paths.py |
-| `agentsuper_state` | `""` | 动态读取（storage/paths.py） | storage/paths.py |
-| `agentsuper_log` | `""` | 动态读取（storage/paths.py） | storage/paths.py |
-| `agentsuper_bin` | `""` | 动态读取（storage/paths.py） | storage/paths.py |
+| `litellm_debug_log` | `""` | 已接线（空 = log 根） | observability/litellm_debug.py |
+| `agentsuper_log_dir` | `""` | 已接线（空 = log 根） | observability/trace_log.py |
+| `agentsuper_data` | `""` | 动态读取（空 = OS 用户目录） | storage/paths.py |
+| `agentsuper_cache` | `""` | 动态读取（空 = 跟随数据根） | storage/paths.py |
+| `agentsuper_config` | `""` | 动态读取（空 = 跟随数据根） | storage/paths.py |
+| `agentsuper_state` | `""` | 动态读取（空 = 跟随数据根） | storage/paths.py |
+| `agentsuper_log` | `""` | 动态读取（空 = 跟随数据根） | storage/paths.py |
+| `agentsuper_bin` | `""` | 动态读取（空 = 跟随数据根） | storage/paths.py |
+| `agentsuper_migrate_legacy` | `true` | 已接线（首次启动迁移） | storage/paths.py |
 | `model_probe_timeout` | `4.0` | 已接线 | models/catalog.py |
 | `deepseek_tokenizer_dir` | `""` | 已接线 | models/deepseek_tokenizer.py |
 | `langfuse_public_key` | `""` | 已接线（litellm 回调） | observability/tracing.py |
 | `langfuse_secret_key` | `""` | 已接线（litellm 回调） | observability/tracing.py |
 | `langfuse_host` | `""` | 已接线（litellm 回调） | observability/tracing.py |
-| `memory_persist_path` | `"data/agent_memory.db"` | 已接线（SqliteStore） | app/memory_store.py |
+| `memory_persist_path` | `"agent_memory.db"` | 已接线（统一数据根） | app/memory_store.py |
 | `auth_secret` | `null` | 已接线 | app/auth.py |
 | `auth_token_ttl` | `2592000` | 已接线 | app/auth.py |
-| `auth_users_path` | `"data/auth_users.json"` | 已接线 | app/auth.py |
+| `auth_users_path` | `"auth_users.json"` | 仅旧 JSON 一次性导入 | app/auth.py |
 | `chain_log_enabled` | `true` | 已接线 | app/main.py |
 | `chain_log_queue_size` | `5000` | 已接线 | observability/chainlog/store.py |
 | `chain_log_flush_interval` | `1.0` | 已接线 | observability/chainlog/store.py |
@@ -384,7 +385,7 @@
 
 | 候选 | 为什么不是死代码 |
 | --- | --- |
-| `agentsuper_data/cache/config/state/log/bin` | `storage/paths.py:48-50` 通过 `getattr(settings, name)` 动态读取 |
+| `agentsuper_data/cache/config/state/log/bin` | `storage/paths.py` 通过 `getattr(settings, name)` / `data_path()` 动态读取；子目录默认跟随数据根 |
 | `backend/plugins/*.py` | `PluginLoader` 扫描目录并按 `.enabled` 加载；当前 11 个启用 |
 | `backend/ttsclone/*.py` | 由 `app/services/voice.py` 作为子进程调用 |
 | `backend/storage/schema.py` | 通过 `from storage import backends, schema as storage_schema` 分组导入 |

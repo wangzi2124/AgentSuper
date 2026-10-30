@@ -1,4 +1,4 @@
-"""检查点工厂：AsyncSqliteSaver 持久化默认（data/checkpoints.db），内存/Postgres 可选。
+"""检查点工厂：AsyncSqliteSaver 持久化默认（checkpoints.db），内存/Postgres 可选。
 
 历史问题：本文件（及 `build_main_graph` 默认的 MemorySaver）曾是零调用方的死代码，
 图 checkpointer 实为进程内 MemorySaver → **后端一重启，会话消息/对话上下文全丢**
@@ -6,7 +6,7 @@
 
 现在：
 - 默认 `AsyncSqliteSaver`：会话消息与图状态跨重启存活——历史回放、追问上下文、
-  revert/fork 都读写 `<backend>/data/checkpoints.db`（路径由 `CHECKPOINT_DB_PATH` 覆盖）。
+  revert/fork 都读写统一数据根下的 `checkpoints.db`（路径由 `CHECKPOINT_DB_PATH` 覆盖）。
 - `CHECKPOINT_PERSIST=false|0|off|no` → 回落 MemorySaver（一次性调试）。
 - `POSTGRES_CHECKPOINT_URL` / `DATABASE_URL`（postgres://）→ PostgresSaver（需 psycopg，
   未安装或初始化失败时自动回落 SQLite）。
@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -32,20 +31,15 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-_BACKEND_ROOT = Path(__file__).resolve().parent.parent  # backend/
-_DEFAULT_DB = _BACKEND_ROOT / "data" / "checkpoints.db"
-
 _instance: Any = None  # 当前持久化 saver 单例（进程内共享）
 _cm: Any = None  # 创建它的 async context manager（关闭时 __aexit__ 释放连接）
 
 
 def checkpoint_db_path() -> Path:
-    """SQLite 检查点文件路径（settings.checkpoint_db_path，缺省 `data/checkpoints.db`）。"""
-    raw = (settings.checkpoint_db_path or "").strip()
-    if not raw:
-        return _DEFAULT_DB
-    path = Path(raw)
-    return path if path.is_absolute() else _BACKEND_ROOT / path
+    """SQLite 检查点文件路径（settings.checkpoint_db_path，缺省 `checkpoints.db`）。"""
+    from storage.paths import data_path
+
+    return data_path(settings.checkpoint_db_path, "checkpoints.db")
 
 
 def _persist_disabled() -> bool:

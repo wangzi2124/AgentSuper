@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from storage.paths import data_path
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_COLLECTION = "knowledge_base"
@@ -20,7 +22,7 @@ DEFAULT_TOP_K = 5
 BATCH_SIZE = 5000
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_PERSIST_DIR = BACKEND_DIR / "data" / "rag"
+DEFAULT_PERSIST_DIR = data_path(None, "rag")
 
 
 def _default_embed(texts: list[str]) -> list[list[float]]:

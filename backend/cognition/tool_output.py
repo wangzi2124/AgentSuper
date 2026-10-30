@@ -42,7 +42,7 @@ _DEFAULT_LIMITS = ToolOutputLimits()
 
 
 def _truncation_dir() -> Path:
-    """截断文件保存目录（默认 data/truncation，可用 AGENTSUPER_DATA 覆盖）。"""
+    """截断文件保存目录（默认 <data>/truncation，可用 AGENTSUPER_DATA 覆盖）。"""
     try:
         from storage.paths import global_paths
         return global_paths()["data"] / "truncation"

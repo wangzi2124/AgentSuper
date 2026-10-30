@@ -10,10 +10,13 @@ from __future__ import annotations
 import os
 import tempfile
 
-# 会话库/检查点库与真实 data/ 隔离 —— 必须在导入 app.* 之前设置：
-# - SESSION_DB_PATH：app.session.db.DB_PATH 模块级求值（SessionStore 落库写测试库）
-# - CHECKPOINT_DB_PATH：图持久化检查点（AsyncSqliteSaver）写测试库
+# 数据目录与真实用户目录隔离 —— 必须在导入 app.* 之前设置：
+# - AGENTSUPER_DATA：统一数据根（session/checkpoint/vector/日志等全部落测试目录）
+# - AGENTSUPER_MIGRATE_LEGACY=0：禁止把 backend/data 自动拷贝进临时目录
+# - SESSION_DB_PATH / CHECKPOINT_DB_PATH / MEMORY_PERSIST_PATH：显式覆盖（沿用旧语义）
 _TEST_DB_DIR = tempfile.mkdtemp(prefix="agentsuper-test-")
+os.environ["AGENTSUPER_DATA"] = _TEST_DB_DIR
+os.environ["AGENTSUPER_MIGRATE_LEGACY"] = "0"
 os.environ["SESSION_DB_PATH"] = os.path.join(_TEST_DB_DIR, "session.db")
 os.environ["CHECKPOINT_DB_PATH"] = os.path.join(_TEST_DB_DIR, "checkpoints.db")
 os.environ["MEMORY_PERSIST_PATH"] = os.path.join(_TEST_DB_DIR, "agent_memory.db")

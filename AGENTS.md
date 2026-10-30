@@ -123,6 +123,7 @@ cd backend
 
 - **配置来源**：`backend/config.example.json` → 复制为 `backend/config.json`（JSONC，已被 gitignore）。
   优先级：操作系统环境变量 > `config.json` > `config.py` 字段默认值；`.env` 文件不再读取。
+- **统一数据根**：所有运行数据走 `storage/paths.py`；`agentsuper_data` 空 = 平台用户目录（Windows `%LOCALAPPDATA%/agentsuper`、macOS `~/Library/Application Support/agentsuper`、Linux `~/.local/share/agentsuper`）。`cache/config/state/logs/bin` 默认跟随数据根；相对路径基于数据根，旧的 `data/` 前缀自动去除。首次启动若新根为空，会自动全量拷贝旧 `backend/data`（源保留，`agentsuper_migrate_legacy=false` 关闭）。
 - 新增配置项必须同时更新 `config.example.json` 与 `tests/unit/test_config_example.py`（完整性测试会失败）。
 
 ```powershell
@@ -205,6 +206,7 @@ npx vitest run tests/integration/
 - **启动慢**：embedding 模型、技能播种、语音预热；不要几秒没响应就判定死。
 - **uvicorn --reload**：E: 盘不可靠，且可能残留幽灵 8000；改代码后 `taskkill /PID <pid> /T /F`。
 - **会话存储**：模型视角历史主要来自 graph checkpoint；`session.db` 负责 UI/事件/队列/epoch。不要把两者混为一个真相源。
+- **用户身份**：账号/设备密钥哈希存 `session.db` 的 `auth_users` 表（`storage/schema.py`），不再写 JSON；旧 `auth_users.json` 仅首次访问时一次性导入并删除。
 - **`session_inputs`**：执行中追加任务走 `/api/sessions/{id}/prompts` 队列；旧单数 `/prompt` 已删除。
 - **权限**：无审批通道时 `require_approval` 工具一律拒绝；`.git` 路径永远拒绝；Shell 重定向目标要过写权限。
 - **工具名**：默认 registry 注册的是 `read_file` / `write_file` / `edit_file` / `ls` / `grep` / `glob` / `append_file` / `delete_file` / `create_directory` / `shell_exec` / `task`，以及内置联网/天气 `web_search` / `web_fetch` / `http_request` / `get_weather`；`http_request` 需人工审批。插件工具名以加载器注册结果为准，不要硬编码旧前缀。`backend/plugins` 下的内置插件仍存在，按同名 `.enabled` 文件启用（当前 11 个启用）；与内置工具同名时保留内置工具。`/api/plugins` 路由已挂载，前端「插件管理」页可启停。

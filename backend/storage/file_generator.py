@@ -7,8 +7,10 @@ Other modules import and call save_file() to persist their output.
 from datetime import datetime
 from pathlib import Path
 
+from storage.paths import data_path
 
-GENERATED_DIR = Path(__file__).resolve().parents[1] / "data" / "generated"
+
+GENERATED_DIR = data_path(None, "generated")
 
 
 def save_file(content: str | bytes, filename: str = "") -> str:

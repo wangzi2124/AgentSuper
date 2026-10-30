@@ -11,7 +11,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 
-GENERATED_DIR = Path(__file__).resolve().parents[2] / "data" / "generated"
+from storage.paths import data_path
+
+GENERATED_DIR = data_path(None, "generated")
 
 router = APIRouter()
 

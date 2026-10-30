@@ -2,7 +2,7 @@
 
 五个 SQLite 子系统的表全部在此以 SQLAlchemy Core Table 声明，作为单一事实来源：
 - `session.db`   → projects / workspaces / sessions / session_messages / message_parts /
-                    session_context_epoch / session_inputs / session_tasks
+                    session_context_epoch / session_inputs / session_tasks / auth_users
 - `model_catalog.db` → catalog_settings / providers / catalog_entries
 - `chapter_store.db` → chapters
 - `tasks.db`     → tasks
@@ -163,6 +163,22 @@ session_tasks = Table(
     Index("idx_tasks_session", "session_id"),
 )
 
+# 用户身份（设备 trust-on-first-use + 用户名/密码账号）；不再落 JSON 文件。
+# username_lower 唯一索引用于账号唯一性/登录；device_hash / pw_hash 只存哈希。
+auth_users = Table(
+    "auth_users", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("type", String(16), nullable=False, server_default="device"),
+    Column("username", String(64), nullable=True),
+    Column("username_lower", String(64), nullable=True),
+    Column("device_hash", String(128), nullable=True),
+    Column("pw_salt", String(64), nullable=True),
+    Column("pw_hash", String(128), nullable=True),
+    Column("token_seed", String(64), nullable=True),
+    Column("created_at", BigInteger, nullable=False, server_default=text("0")),
+    Index("idx_auth_users_username", "username_lower", unique=True),
+)
+
 # ── model_catalog.db ────────────────────────────────────────────────────────
 
 catalog_settings = Table(
@@ -260,7 +276,7 @@ chain_logs = Table(
 SESSION_TABLES = (
     projects.name, workspaces.name, sessions.name, session_messages.name,
     message_parts.name, session_context_epoch.name, session_inputs.name,
-    session_tasks.name,
+    session_tasks.name, auth_users.name,
 )
 CATALOG_TABLES = (catalog_settings.name, providers.name, catalog_entries.name)
 CHAPTER_TABLES = (chapters.name,)

@@ -20,8 +20,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from storage import backends, schema as storage_schema
+from storage.paths import data_path
 
-DB_PATH = Path(__file__).resolve().parents[2] / "data" / "chain_logs.db"
+DB_PATH = data_path(None, "chain_logs.db")
 
 _SCHEMA = storage_schema.derive_sqlite_ddl(storage_schema.CHAIN_LOG_TABLES)
 

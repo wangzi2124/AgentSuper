@@ -77,7 +77,7 @@ def _sha1(data: bytes | str) -> str:
 
 
 def _default_data_dir() -> Path:
-    """默认 <data> 目录 = backend/data(对齐 runtime 的 AGENTSUPER_DATA,缺省同址)。"""
+    """默认 <data> 目录（对齐 runtime 的 AGENTSUPER_DATA / 平台用户数据目录）。"""
     try:
         from storage.paths import global_paths
 

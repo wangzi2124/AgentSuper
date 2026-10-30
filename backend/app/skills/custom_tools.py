@@ -34,9 +34,13 @@ PLUGIN_DESCRIPTION = "{description}"
 class CustomToolStore:
     """自定义工具存储：管理脚本型（插件文件）与固定型（pin 列表）。"""
 
-    def __init__(self, plugins_dir: str = "plugins", pinned_path: str = "data/pinned_tools.json"):
+    def __init__(self, plugins_dir: str = "plugins", pinned_path: str | None = None):
         self.plugins_dir = Path(plugins_dir)
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
+        if pinned_path is None:
+            from storage.paths import data_path
+
+            pinned_path = str(data_path(None, "pinned_tools.json"))
         self.pinned_path = Path(pinned_path)
         self.pinned_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -5,7 +5,9 @@
 
 from pathlib import Path
 
-GENERATED_DIR = Path(__file__).resolve().parents[1] / "data" / "generated"
+from storage.paths import data_path
+
+GENERATED_DIR = data_path(None, "generated")
 
 
 def resolve_output_path(output_path: str, extension: str) -> Path:

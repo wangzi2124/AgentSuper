@@ -30,7 +30,9 @@ class CrossEncoderReranker:
     def __init__(self, model_name: str = DEFAULT_MODEL, cache_dir: Optional[Path] = None) -> None:
         self.model_name = model_name
         self.backend_dir = Path(__file__).resolve().parents[1]
-        self.cache_dir = Path(cache_dir) if cache_dir else (self.backend_dir / "data" / "models")
+        from storage.paths import data_path
+
+        self.cache_dir = Path(cache_dir) if cache_dir else data_path(None, "models")
         self.model = self._load_model(model_name)
 
     def _resolve_local_model(self, model_name: str) -> Optional[Path]:

@@ -15,6 +15,7 @@ from cognition.vector_store import VectorStore
 from app.services.task_manager import TaskManager
 from app.services.voice import VoiceService
 from storage.file_store import FileStore
+from storage.paths import data_path, global_paths, project_scoped
 from app.snapshot import Snapshot  # [snapshot 快照层] 规格模块 B
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,22 @@ def ensure_runtime_state(app) -> object:
 
 def _do_init(app):
     """执行完整的运行时初始化：加载向量库、嵌入模型、检索器、技能、插件、Agent 等。"""
-    vs = VectorStore.load(settings.vector_store_path)
+    # 先解析统一数据根（可能触发一次性旧数据迁移），再打开任何数据库/目录。
+    _storage_paths = global_paths()
+    _data_dir = _storage_paths["data"]
+    logger.info(
+        "data root: %s (cache=%s config=%s state=%s log=%s bin=%s)",
+        _data_dir,
+        _storage_paths["cache"],
+        _storage_paths["config"],
+        _storage_paths["state"],
+        _storage_paths["log"],
+        _storage_paths["bin"],
+    )
+    vs = VectorStore.load(str(data_path(settings.vector_store_path, "vector_store")))
     emb = LocalEmbeddings(settings.embedding_model)
     bm25 = _build_bm25_index(vs)
-    chapter_store = ChapterStore("data/chapter_store.db")
+    chapter_store = ChapterStore(str(data_path(None, "chapter_store.db")))
     retriever = Retriever(vs, emb, bm25_index=bm25, chapter_store=chapter_store)
 
     from cognition.plugin_bridge import set_retriever as _bridge_set_retriever
@@ -86,10 +99,9 @@ def _do_init(app):
     plugin_loader.load_all()
 
     _base_dir = Path(__file__).resolve().parents[1]
-    _data_dir = _base_dir / "data"
 
-    # 技能源：受管库 data/skills（自动创建）+ 用户追加的外部源（持久化于
-    # data/skills_sources.json）+ 随包发布的内置技能（app/skills/bundled/）。
+    # 技能源：受管库 <data>/skills（自动创建）+ 用户追加的外部源（持久化于
+    # <data>/skills_sources.json）+ 随包发布的内置技能（app/skills/bundled/）。
     # 开箱即有可用空库，不再出现「目录不存在」WARNING。
     from app.skills.loader import SkillLoader
     from app.skills import registry as skills_registry
@@ -112,7 +124,7 @@ def _do_init(app):
         logger.info("Seeded bundled skills: %s", ", ".join(_seeded[:10]) + ("…" if len(_seeded) > 10 else ""))
 
     # 免审目录只有三类：会话默认临时目录、程序内部数据目录、用户「工作目录白名单」
-    # （持久化于 data/runtime_workspaces.json，前端「用户设置」维护）。
+    # （持久化于 <data>/runtime_workspaces.json，前端「用户设置」维护）。
     # 文件工具的相对路径基准 = 项目 worktree（git 仓库根）；
     # 源码保护（app/plugins/skills/config/main.py 等）仍以 backend/ 为基准判定。⚠️ 仓库根
     # 不再自动免审，且白名单也压不过源码保护（写源码仍需逐次审批）。
@@ -120,11 +132,9 @@ def _do_init(app):
     # ── opencode 风格文件系统:项目模型 + 分层存储 + 目录扫描缓存 ──
     # 项目:优先 git rev-parse 定位 worktree,ID 取 git 根哈希(持久化到 .git/opencode)
     from app.filesystem import Project, ScanCache, set_project
-    from storage.paths import global_paths, project_scoped
 
     project = Project.from_git(_base_dir)
     set_project(project)
-    _storage_paths = global_paths(_base_dir)      # data/cache/config/state/log/bin
     _project_storage = project_scoped(project.id)  # 按 projectID 隔离的 session/cache/log
     app.state.project = project
     app.state.project_id = project.id

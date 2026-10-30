@@ -262,7 +262,9 @@ def download_model(model_name: str, cache_dir: Optional[Path] = None) -> Path:
     的降级路径接管。
     """
     if cache_dir is None:
-        cache_dir = Path("data/models")
+        from storage.paths import data_path
+
+        cache_dir = data_path(None, "models")
     cache_dir = cache_dir.resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
 

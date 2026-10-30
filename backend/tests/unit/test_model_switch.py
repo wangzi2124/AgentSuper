@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage
 
 import app.deps as deps
 from app.deps import ModelSwitchError, PlatformContext, initial_state
+from config import settings
 
 
 class _FakeSessions:
@@ -57,7 +58,7 @@ def _audit_events(tmp_path):
 
 async def test_switch_rejects_unknown_window(monkeypatch, tmp_path):
     monkeypatch.setattr("models.catalog.read_limits", lambda _mid: {"context_length": 0})
-    monkeypatch.setattr(deps, "__file__", str(tmp_path / "backend" / "app" / "deps.py"))
+    monkeypatch.setattr(settings, "agentsuper_data", str(tmp_path / "backend" / "data"))
     sess = _sess()
     ctx = _FakeCtx(sess, [])
     with pytest.raises(ModelSwitchError) as exc:
@@ -71,7 +72,7 @@ async def test_switch_rejects_unknown_window(monkeypatch, tmp_path):
 
 async def test_switch_rejects_running_session(monkeypatch, tmp_path):
     monkeypatch.setattr("models.catalog.read_limits", lambda _mid: {"context_length": 128000})
-    monkeypatch.setattr(deps, "__file__", str(tmp_path / "backend" / "app" / "deps.py"))
+    monkeypatch.setattr(settings, "agentsuper_data", str(tmp_path / "backend" / "data"))
     sess = _sess(status="running")
     ctx = _FakeCtx(sess, [])
     with pytest.raises(ModelSwitchError) as exc:
@@ -108,7 +109,7 @@ async def test_switch_below_threshold_updates_model_and_persists(monkeypatch, tm
         "app.session.repository.upsert_epoch",
         lambda sid, baseline, seq, snapshot: upserts.append((sid, baseline, seq, snapshot)),
     )
-    monkeypatch.setattr(deps, "__file__", str(tmp_path / "backend" / "app" / "deps.py"))
+    monkeypatch.setattr(settings, "agentsuper_data", str(tmp_path / "backend" / "data"))
     sess = _sess()
     ctx = _FakeCtx(sess, [HumanMessage(content="hi", id="m1")])
     out = await _switch(ctx, "new/model")
@@ -143,7 +144,7 @@ async def test_switch_above_threshold_writes_summary_and_tail(monkeypatch, tmp_p
         "app.session.repository.upsert_epoch",
         lambda sid, baseline, seq, snapshot: upserts.append((sid, baseline, seq, snapshot)),
     )
-    monkeypatch.setattr(deps, "__file__", str(tmp_path / "backend" / "app" / "deps.py"))
+    monkeypatch.setattr(settings, "agentsuper_data", str(tmp_path / "backend" / "data"))
     sess = _sess()
     out = await _switch(_FakeCtx(sess, [m1, m2]), "new/model")
     assert out["summarized"] is True
@@ -157,7 +158,7 @@ async def test_switch_above_threshold_writes_summary_and_tail(monkeypatch, tmp_p
 async def test_switch_compression_failure_keeps_old_model(monkeypatch, tmp_path):
     monkeypatch.setattr("models.catalog.read_limits", lambda _mid: {"context_length": 10000})
     monkeypatch.setattr("cognition.compressor.estimate_tokens", lambda _text: 10_000)
-    monkeypatch.setattr(deps, "__file__", str(tmp_path / "backend" / "app" / "deps.py"))
+    monkeypatch.setattr(settings, "agentsuper_data", str(tmp_path / "backend" / "data"))
 
     async def _compress(*_a, **_k):
         raise RuntimeError("boom")
@@ -185,7 +186,7 @@ async def test_switch_integrity_loss_rolls_back_and_audits(monkeypatch, tmp_path
         "app.session.repository.upsert_epoch",
         lambda sid, baseline, seq, snapshot: upserts.append((sid, baseline, seq, snapshot)),
     )
-    monkeypatch.setattr(deps, "__file__", str(tmp_path / "backend" / "app" / "deps.py"))
+    monkeypatch.setattr(settings, "agentsuper_data", str(tmp_path / "backend" / "data"))
     m1 = HumanMessage(content="keep", id="m1")
     m2 = HumanMessage(content="lost", id="m2")
     ctx = _FakeCtx(_sess(), [m1, m2])

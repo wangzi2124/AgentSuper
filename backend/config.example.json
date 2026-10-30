@@ -89,14 +89,14 @@
   // 三、会话与 LangGraph 检查点
   // ══════════════════════════════════════════════════════════════════════════
 
-  // 会话元数据库路径（相对 backend/，也可写绝对路径）。
-  // 示例：data/session.db 或 D:/agentsuper/session.db
-  "session_db_path": "data/session.db",
+  // 会话元数据库路径（相对数据根，也可写绝对路径）。
+  // 示例：session.db 或 D:/agentsuper/session.db
+  "session_db_path": "session.db",
 
-  // LangGraph 图检查点库路径（相对 backend/，也可写绝对路径）。
+  // LangGraph 图检查点库路径（相对数据根，也可写绝对路径）。
   // 作用：保存会话消息与上下文，跨重启不丢。
-  // 示例：data/checkpoints.db
-  "checkpoint_db_path": "data/checkpoints.db",
+  // 示例：checkpoints.db
+  "checkpoint_db_path": "checkpoints.db",
 
   // 是否持久化检查点。
   // true = SQLite/Postgres 持久化；false = 进程内 MemorySaver（重启即丢，仅调试）。
@@ -115,9 +115,9 @@
   // 四、向量库 / 文档入库 / 模型下载
   // ══════════════════════════════════════════════════════════════════════════
 
-  // ChromaDB 向量库目录（相对 backend/）。
-  // 示例：data/vector_store
-  "vector_store_path": "data/vector_store",
+  // ChromaDB 向量库目录（相对数据根）。
+  // 示例：vector_store
+  "vector_store_path": "vector_store",
 
   // 文档分块大小（字符数）。示例：500；长文档可调到 800~1000。
   "chunk_size": 500,
@@ -414,28 +414,32 @@
   // 示例：sk-litellm-proxy
   "litellm_proxy_key": "sk-litellm-proxy",
 
-  // LiteLLM debug 日志路径（相对 backend/）。
-  // 示例：data/logs/litellm-debug.log
-  "litellm_debug_log": "data/logs/litellm-debug.log",
+  // LiteLLM debug 日志路径；空 = 统一 log 根下的 litellm-debug.log。
+  // 示例：litellm-debug.log 或 D:/agentsuper/logs/litellm-debug.log
+  "litellm_debug_log": "",
 
-  // token trace 等运行日志目录。
-  // 示例：logs 或 D:/agentsuper/logs
-  "agentsuper_log_dir": "logs",
-
-  // 全局存储目录覆盖；空 = 使用 backend/ 下的默认位置。
-  // 注意：这 6 项与 AGENTSUPER_* 同义，适合把数据放到独立磁盘。
-  // 示例：agentsuper_data = "D:/agentsuper/data"
-  "agentsuper_data": "",
-  // 示例：D:/agentsuper/cache
-  "agentsuper_cache": "",
-  // 示例：D:/agentsuper/config
-  "agentsuper_config": "",
-  // 示例：D:/agentsuper/state
-  "agentsuper_state": "",
+  // token trace 等运行日志目录；空 = 统一 log 根。
   // 示例：D:/agentsuper/logs
+  "agentsuper_log_dir": "",
+
+  // 全局数据根；空 = 平台用户数据目录（Windows %LOCALAPPDATA%/agentsuper，
+  // macOS ~/Library/Application Support/agentsuper，Linux ~/.local/share/agentsuper）。
+  // 注意：以下 6 项与 AGENTSUPER_* 同义，适合把数据放到独立磁盘。
+  // 示例：agentsuper_data = "D:/agentsuper"
+  "agentsuper_data": "",
+  // 空 = 跟随数据根；示例：D:/agentsuper/cache
+  "agentsuper_cache": "",
+  // 空 = 跟随数据根；示例：D:/agentsuper/config
+  "agentsuper_config": "",
+  // 空 = 跟随数据根；示例：D:/agentsuper/state
+  "agentsuper_state": "",
+  // 空 = 跟随数据根；示例：D:/agentsuper/logs
   "agentsuper_log": "",
-  // 示例：D:/agentsuper/bin
+  // 空 = 跟随数据根；示例：D:/agentsuper/bin
   "agentsuper_bin": "",
+  // 首次启动把旧 backend/data 拷贝到空数据根（源保留）。
+  // 示例：true 开启，false 关闭。
+  "agentsuper_migrate_legacy": true,
 
   // 自定义 Provider 模型探测超时（秒）。
   // 示例：4；端点慢可设 10。
@@ -458,8 +462,8 @@
   // ══════════════════════════════════════════════════════════════════════════
 
   // 长期记忆 SQLite 文件；memory_recall / memory_store 重启后仍可召回。
-  // 示例：data/agent_memory.db
-  "memory_persist_path": "data/agent_memory.db",
+  // 示例：agent_memory.db
+  "memory_persist_path": "agent_memory.db",
 
   // ══════════════════════════════════════════════════════════════════════════
   // 十八、用户身份签名（可选）
@@ -474,9 +478,9 @@
   // 示例：604800（7 天）
   "auth_token_ttl": 2592000,
 
-  // 用户账号/设备密钥哈希的持久化文件。
-  // 示例：data/auth_users.json
-  "auth_users_path": "data/auth_users.json",
+  // 旧版 JSON 用户文件路径（仅首次启动一次性导入 auth_users 表，成功后删除）。
+  // 新数据统一存 session.db 的 auth_users 表，不再写 JSON。
+  "auth_users_path": "auth_users.json",
 
   // ══════════════════════════════════════════════════════════════════════════
   // 十九、全链路日志（chainlog）

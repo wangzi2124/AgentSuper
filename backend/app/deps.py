@@ -70,7 +70,9 @@ _INTERNAL_DATA_SUBDIRS = (
 
 def internal_data_roots() -> list[str]:
     """程序内部数据目录的绝对路径列表（隐式免审，不暴露给前端白名单）。"""
-    base = Path(__file__).resolve().parents[1] / "data"
+    from storage.paths import global_paths
+
+    base = global_paths()["data"]
     return [str((base / name).resolve()) for name in _INTERNAL_DATA_SUBDIRS]
 
 
@@ -789,10 +791,10 @@ class PlatformContext:
 
     @staticmethod
     def _switch_dir() -> str:
-        """Model switch backup/audit directory (data/model_switches/)."""
-        return os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "data", "model_switches"
-        )
+        """Model switch backup/audit directory (<data>/model_switches/)."""
+        from storage.paths import data_path
+
+        return str(data_path(None, "model_switches"))
 
     async def switch_model(self, session_id: str, target: str) -> dict[str, Any]:
         """Delegate the switch state machine to harness.switch.SwitchService."""

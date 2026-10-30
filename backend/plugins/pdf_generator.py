@@ -56,8 +56,9 @@ def tool_create_pdf(title: str = "Document", sections: str = "[]", output_path: 
     """
     _register_fonts()
 
-    base_dir = Path(__file__).resolve().parents[1]
-    output_dir = base_dir / "data" / "generated"
+    from storage.paths import data_path
+
+    output_dir = data_path(None, "generated")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path:

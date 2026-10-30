@@ -23,13 +23,11 @@ from typing import Optional
 
 from config import settings
 from storage import backends, schema as storage_schema
+from storage.paths import data_path
 
-# 会话库路径：settings.session_db_path 可覆盖（测试隔离 / 自定义部署），缺省 data/session.db
-_raw_db_path = (settings.session_db_path or "").strip()
-_db_path = Path(_raw_db_path) if _raw_db_path else Path("data/session.db")
-if not _db_path.is_absolute():
-    _db_path = Path(__file__).resolve().parents[2] / _db_path
-DB_PATH = _db_path
+# 会话库路径：settings.session_db_path 可覆盖（测试隔离 / 自定义部署），
+# 缺省 session.db，落在统一数据根下。
+DB_PATH = data_path(settings.session_db_path, "session.db")
 
 # 由 metadata 表声明编译的 sqlite DDL（建表 + 建索引，全部 IF NOT EXISTS）
 _SESSION_TABLES = storage_schema.SESSION_TABLES

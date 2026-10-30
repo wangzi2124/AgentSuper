@@ -22,11 +22,9 @@ _conn: Optional[sqlite3.Connection] = None
 
 
 def _resolve_path() -> Path:
-    raw = (settings.memory_persist_path or "data/agent_memory.db").strip()
-    path = Path(raw)
-    if not path.is_absolute():
-        path = Path(__file__).resolve().parents[1] / path
-    return path
+    from storage.paths import data_path
+
+    return data_path(settings.memory_persist_path, "agent_memory.db")
 
 
 def get_memory_store() -> Any:

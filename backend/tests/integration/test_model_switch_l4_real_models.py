@@ -124,7 +124,7 @@ async def test_real_model_switch_preserves_facts(
         "models.catalog.read_limits", lambda _mid: {"context_length": 3_000}
     )
     # 隔离切换备份/审计到 tmp。
-    monkeypatch.setattr(deps, "__file__", str(tmp_path / "backend" / "app" / "deps.py"))
+    monkeypatch.setattr(settings, "agentsuper_data", str(tmp_path / "backend" / "data"))
 
     # epoch 存储用内存替身（真实仓库依赖全局 SessionStore 初始化）。
     epochs: dict[str, tuple] = {}

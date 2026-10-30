@@ -33,12 +33,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-#: 受管库目录名（相对 backend/data/）
+#: 受管库目录名（相对统一数据根）
 MANAGED_DIRNAME = "skills"
-#: 新版状态文件（相对 backend/）
-SOURCES_FILE = "data/skills_sources.json"
-#: 旧版状态文件（相对 backend/），仅用于一次性迁移
-LEGACY_SOURCES_FILE = "data/runtime_skills_dir.json"
+#: 新版状态文件（相对统一数据根）
+SOURCES_FILE = "skills_sources.json"
+#: 旧版状态文件（相对统一数据根），仅用于一次性迁移
+LEGACY_SOURCES_FILE = "runtime_skills_dir.json"
 #: 早期默认目录（相对 backend/）：用户可能手工放过技能，存在则作为外部源纳入
 LEGACY_FALLBACK_DIRNAME = "skills"
 #: 内置技能目录（相对 app/skills/）：随包发布、开箱可用
@@ -59,7 +59,9 @@ def backend_dir() -> Path:
 
 
 def data_dir() -> Path:
-    return backend_dir() / "data"
+    from storage.paths import global_paths
+
+    return global_paths()["data"]
 
 
 def managed_skills_dir() -> Path:
@@ -276,7 +278,7 @@ def bundled_names(managed: str | Path | None = None) -> set[str]:
 
 
 def _sources_path() -> Path:
-    return backend_dir() / SOURCES_FILE
+    return data_dir() / SOURCES_FILE
 
 
 def _read_json(path: Path) -> dict:
@@ -300,7 +302,7 @@ def load_sources() -> tuple[str, list[str]]:
     managed = str(managed_skills_dir())
     extras: list[str] = []
 
-    legacy_file = backend_dir() / LEGACY_SOURCES_FILE
+    legacy_file = data_dir() / LEGACY_SOURCES_FILE
     legacy_dir = str(_read_json(legacy_file).get("directory", "").strip() or "")
     if legacy_dir:
         extras.append(legacy_dir)
@@ -335,7 +337,7 @@ def save_sources(managed: str, extra_dirs: list[str]) -> None:
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("Failed to save skills sources to %s: %s", p, e)
-    legacy = backend_dir() / LEGACY_SOURCES_FILE
+    legacy = data_dir() / LEGACY_SOURCES_FILE
     try:
         if legacy.exists():
             legacy.unlink()

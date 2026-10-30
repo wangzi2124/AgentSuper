@@ -125,8 +125,9 @@ def tool_create_pptx(title: str = "Presentation", slides: str = "[]",
          "bg_color": "optional hex", "font_color": "optional hex"}
     - output_path: optional absolute path to save (auto-generated if empty)
     """
-    base_dir = Path(__file__).resolve().parents[1]
-    output_dir = base_dir / "data" / "generated"
+    from storage.paths import data_path
+
+    output_dir = data_path(None, "generated")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path:

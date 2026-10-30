@@ -11,6 +11,8 @@ import datetime
 import logging
 from pathlib import Path
 
+from storage.paths import data_path
+
 logger = logging.getLogger(__name__)
 
 PLUGIN_NAME = "voice-clone"
@@ -18,7 +20,7 @@ PLUGIN_VERSION = "0.2.0"
 PLUGIN_DESCRIPTION = "Voice cloning and TTS via isolated Qwen3-TTS subprocess"
 
 _BASE_DIR = Path(__file__).resolve().parents[1]
-_OUTPUT_DIR = _BASE_DIR / "data" / "generated"
+_OUTPUT_DIR = data_path(None, "generated")
 _VOICECLONE_DIR = _BASE_DIR / "ttsclone"
 
 

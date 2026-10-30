@@ -76,11 +76,17 @@ _rg_lock = threading.Lock()
 # backend/app/filesystem/ripgrep.py → parents[2] = backend/ 目录
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 
+def _data_bin() -> Path:
+    from storage.paths import data_path
+
+    return data_path(None, "bin")
+
+
 # rg.exe 候选位置（按序探测）：仓库内预置 bundled > 环境 PATH。
 # data/bin 为官方推荐落点（后端已把 rg.exe 复制至此，跨重启稳定可用，
 # 不依赖 shell PATH——winget/scoop 安装后新 PATH 对已运行进程不生效）。
 _RG_CANDIDATES = [
-    _BACKEND_DIR / "data" / "bin" / ("rg.exe" if os.name == "nt" else "rg"),
+    _data_bin() / ("rg.exe" if os.name == "nt" else "rg"),
     _BACKEND_DIR / "bin" / ("rg.exe" if os.name == "nt" else "rg"),
 ]
 

@@ -186,6 +186,8 @@ cd backend
 配置来源：`backend/config.example.json`（全部参数与默认值）→ 复制为 `backend/config.json`。
 优先级：操作系统环境变量 > `config.json` > 代码默认值；`.env` 文件不再读取。
 
+数据根：`agentsuper_data` 留空 = 平台用户目录（Windows `%LOCALAPPDATA%\agentsuper`，macOS `~/Library/Application Support/agentsuper`，Linux `~/.local/share/agentsuper`）；可改为 `D:/agentsuper` 等绝对路径。首次启动会把旧的 `backend/data` 自动拷贝到空数据根（`agentsuper_migrate_legacy=false` 可关闭）。
+
 ---
 
 ## 目录
@@ -195,7 +197,7 @@ backend/      FastAPI + LangGraph + Harness + RAG + 执行/权限
 frontend/     Vue 3 + Pinia + Harness 事件层 + 移动端
 docs/         设计、差距矩阵、历史方案
 deploy/       Nginx/Caddy 部署配置
-data/         运行时数据（会话、检查点、截断输出、模型目录）
+data root/    运行时数据（会话、检查点、截断输出、模型目录；默认平台用户目录，可用 agentsuper_data 覆盖）
 ```
 
 ---

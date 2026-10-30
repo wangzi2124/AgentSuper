@@ -144,9 +144,9 @@ class Settings(BaseSettings):
 
     # ── 会话与检查点持久化 ──
     # 会话元数据/逻辑删除/压缩基线库路径（相对 backend/）。
-    session_db_path: str = "data/session.db"
+    session_db_path: str = "session.db"
     # LangGraph 图检查点库路径（相对 backend/）；跨重启保留会话上下文。
-    checkpoint_db_path: str = "data/checkpoints.db"
+    checkpoint_db_path: str = "checkpoints.db"
     # false 时退回进程内 MemorySaver（重启即丢，仅调试用）。
     checkpoint_persist: bool = True
     # 可选 PostgresSaver 连接串（需 psycopg）；为空则用 SQLite。
@@ -156,7 +156,7 @@ class Settings(BaseSettings):
 
     # ── 向量库 / 文档入库 ──
     # ChromaDB 持久化目录（相对 backend/）。
-    vector_store_path: str = "data/vector_store"
+    vector_store_path: str = "vector_store"
     chunk_size: int = 500
     chunk_overlap: int = 200
     # 强制 metadata 字段 department（部门/租户，权限过滤用）。
@@ -274,17 +274,19 @@ class Settings(BaseSettings):
     # LiteLLM 代理模式地址与 key；为空则直连 Provider。
     litellm_proxy_url: str = ""
     litellm_proxy_key: str = "sk-litellm-proxy"
-    # LiteLLM debug 日志路径（相对 backend/）。
-    litellm_debug_log: str = "data/logs/litellm-debug.log"
-    # token trace 等运行日志目录。
-    agentsuper_log_dir: str = "logs"
-    # 全局存储目录覆盖（空 = backend/ 下的默认位置）。
+    # LiteLLM debug 日志路径（空 = 统一 log 根下的 litellm-debug.log）。
+    litellm_debug_log: str = ""
+    # token trace 等运行日志目录（空 = 统一 log 根）。
+    agentsuper_log_dir: str = ""
+    # 全局数据根（空 = 平台用户数据目录，如 %LOCALAPPDATA%/agentsuper）。
     agentsuper_data: str = ""
     agentsuper_cache: str = ""
     agentsuper_config: str = ""
     agentsuper_state: str = ""
     agentsuper_log: str = ""
     agentsuper_bin: str = ""
+    # 首次启动时把旧的 backend/data 拷贝到空数据根。
+    agentsuper_migrate_legacy: bool = True
     # 自定义 Provider 模型探测超时（秒）。
     model_probe_timeout: float = 4.0
     # DeepSeek tokenizer 目录（为空则用 data/models 或仓库内置）。
@@ -295,7 +297,7 @@ class Settings(BaseSettings):
     langfuse_host: str = ""
 
     # ── 共享记忆 ──
-    memory_persist_path: str = "data/agent_memory.db"
+    memory_persist_path: str = "agent_memory.db"
 
     # ── 用户身份签名（可选）──
     # 设置后启用登录；字段同时接受环境变量 AUTH_TOKEN_SECRET。
@@ -304,7 +306,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AUTH_TOKEN_SECRET", "auth_secret"),
     )
     auth_token_ttl: int = 2592000
-    auth_users_path: str = "data/auth_users.json"
+    auth_users_path: str = "auth_users.json"
 
     # ── 全链路日志（chainlog）──
     chain_log_enabled: bool = True

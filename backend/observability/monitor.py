@@ -13,6 +13,8 @@ from collections import defaultdict
 from pathlib import Path
 from threading import Lock
 
+from storage.paths import data_path
+
 logger = logging.getLogger(__name__)
 
 _stats_lock = Lock()
@@ -40,7 +42,7 @@ _stats = {
     "cost_by_model": defaultdict(float),
 }
 
-_STATS_FILE = Path(__file__).resolve().parents[1] / "data" / "monitor_stats.json"
+_STATS_FILE = data_path(None, "monitor_stats.json")
 
 # 落盘节流：两次持久化之间至少间隔秒数，避免每次请求/每次 LLM 调用都同步写盘阻塞事件循环
 _SAVE_INTERVAL_SECONDS = 5.0
@@ -50,7 +52,7 @@ _last_save = 0.0
 # 累积统计（monitor_stats.json）只有「生命周期总量」，看不到「最近 24h」。
 # 这里把每次模型调用/请求按时间写成 JSONL 追加日志，读取时按时间窗聚合；
 # 落盘与文件裁剪都做节流，避免高频写盘阻塞事件循环。
-_METRICS_FILE = Path(__file__).resolve().parents[1] / "data" / "metrics.jsonl"
+_METRICS_FILE = data_path(None, "metrics.jsonl")
 # 只保留最近 N 小时的事件（时间裁剪），读取窗口不超过该值
 _METRICS_RETENTION_HOURS = 24.0
 # 文件裁剪（读全量→重写）间隔：避免每次 flush 都重写整个文件

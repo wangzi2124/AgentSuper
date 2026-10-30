@@ -345,8 +345,6 @@ def test_account_register_login_token_roundtrip(tmp_path, monkeypatch):
     from config import settings
 
     monkeypatch.setattr(settings, "auth_secret", "test-secret")
-    monkeypatch.setattr(settings, "auth_users_path", str(tmp_path / "users.json"))
-    monkeypatch.setattr(auth, "_users_cache", None)
 
     ok, err, uid = auth.register_account("tester1", "pass1234")
     assert ok, err

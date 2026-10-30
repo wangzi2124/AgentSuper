@@ -3,6 +3,7 @@ from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from typing import List, Optional
 
+from storage.paths import data_path
 from utils.model_download import download_model
 
 logger = logging.getLogger(__name__)
@@ -14,7 +15,7 @@ class LocalEmbeddings:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self.model_name = model_name
         self.backend_dir = Path(__file__).resolve().parents[1]
-        self.local_cache_dir = self.backend_dir / "data" / "models"
+        self.local_cache_dir = data_path(None, "models")
         self.model = self._load_model(model_name)
 
     def _resolve_local_model(self, model_name: str) -> Optional[Path]:

@@ -279,7 +279,12 @@ class PermissionManager:
         self.workspace = Path(workspace).resolve() if workspace else Path.cwd()
         self.allow_source_writes = bool(allow_source_writes)
         self.project_worktree = str(Path(project_worktree).resolve()) if project_worktree else ""
-        whitelist_dir = Path(whitelist_path) if whitelist_path else self.workspace.parent / "data"
+        if whitelist_path:
+            whitelist_dir = Path(whitelist_path)
+        else:
+            from storage.paths import data_path
+
+            whitelist_dir = data_path(None)
         self.data_dir = whitelist_dir if whitelist_dir.is_dir() else whitelist_dir.parent
         self.runtime_workspaces_path = self.data_dir / "runtime_workspaces.json"
         self.extra_workspaces: list[Path] = []
