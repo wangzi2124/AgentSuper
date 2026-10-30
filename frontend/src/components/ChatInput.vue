@@ -535,6 +535,7 @@ const slashLoaded = ref(false)
 const slashLoading = ref(false)
 const slashError = ref('')
 const slashActive = ref(0)
+const slashListRef = ref<HTMLElement | null>(null)
 const slashDismissed = ref(false)
 const slashDetail = ref<SlashItem | null>(null)
 const slashDetailBody = ref('')
@@ -592,12 +593,16 @@ const slashFiltered = computed(() => {
 watch(slashOpen, (open) => {
   if (open) {
     slashActive.value = 0
+    void nextTick(() => { if (slashListRef.value) slashListRef.value.scrollTop = 0 })
     void loadSlashItems()
   } else {
     slashDetail.value = null
   }
 })
-watch(slashFiltered, () => { slashActive.value = 0 })
+watch(slashFiltered, () => {
+  slashActive.value = 0
+  void nextTick(() => { if (slashListRef.value) slashListRef.value.scrollTop = 0 })
+})
 
 async function loadSlashItems() {
   if (slashLoaded.value || slashLoading.value) return
@@ -638,10 +643,26 @@ async function loadSlashItems() {
   }
 }
 
+// 只调整列表自身 scrollTop：选中行在下方越界时贴底，在上方越界时贴顶，不带动弹层/页面滚动
+function ensureSlashActiveVisible() {
+  const list = slashListRef.value
+  if (!list) return
+  const el = list.children[slashActive.value] as HTMLElement | undefined
+  if (!el) return
+  const listRect = list.getBoundingClientRect()
+  const elRect = el.getBoundingClientRect()
+  if (elRect.top < listRect.top) {
+    list.scrollTop -= listRect.top - elRect.top
+  } else if (elRect.bottom > listRect.bottom) {
+    list.scrollTop += elRect.bottom - listRect.bottom
+  }
+}
+
 function slashMove(step: number) {
   const n = slashFiltered.value.length
   if (!n) return
   slashActive.value = (slashActive.value + step + n) % n
+  void nextTick(ensureSlashActiveVisible)
 }
 
 function slashUseDetail() {
@@ -1021,14 +1042,14 @@ const textareaRef = ref<HTMLTextAreaElement>()
       <div v-if="slashLoading" class="slash-empty">加载中…</div>
       <div v-else-if="slashError" class="slash-empty">{{ slashError }}</div>
       <div v-else-if="!slashFiltered.length" class="slash-empty">没有匹配的技能或自定义工具</div>
-      <div v-else class="slash-list">
+      <div v-else ref="slashListRef" class="slash-list">
         <button
           v-for="(it, i) in slashFiltered"
           :key="it.key"
           type="button"
           class="slash-item"
           :class="{ active: i === slashActive, disabled: !it.enabled }"
-          @mouseenter="slashActive = i"
+          @mousemove="slashActive = i"
           @click="slashShowDetail(it)"
         >
           <span class="slash-badge" :class="it.kind">{{ it.kind === 'skill' ? '技能' : '工具' }}</span>
