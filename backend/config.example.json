@@ -162,7 +162,7 @@
   // 历史摘要模型；compress_model 为空时作为压缩模型的回退。
   // null = 未设置（压缩走 tier-simple 或 compress_model）。
   // 示例：ollama_chat/qwen2.5:3b
-  "summarization_model": null,
+  "summarization_model": "ollama_chat/qwen3.5:4b",
 
   // 压缩时保留的最近消息条数（summarization_model 不要求非空）。
   // 示例：6；调大保留更多原文，调小更省上下文。

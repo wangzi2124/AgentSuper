@@ -124,7 +124,7 @@ async function handleDelete(item: CustomToolItem) {
     <div class="skills-m">
       <div class="skills-m-title">⚡ 技能</div>
       <div class="skills-m-dir">
-        {{ skillStore.skills.length }} 个技能 · 受管库 + 外部源
+        {{ skillStore.skills.length }} 个技能 · 受管库（外部源需手动追加）
       </div>
       <van-button size="small" plain type="primary" icon="fire-o" to="/skills">前往技能管理</van-button>
     </div>

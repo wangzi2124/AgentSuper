@@ -8,10 +8,14 @@
 
 状态持久化在 `<backend>/data/skills_sources.json`：
 ```json
-{"managed": "<backend>/data/skills", "extra_dirs": ["D:/my-skills", ...]}
+{"version": 2, "managed": "<backend>/data/skills", "extra_dirs": ["D:/my-skills", ...]}
 ```
 旧版状态文件 `data/runtime_skills_dir.json`（只有单个 `directory`）读取时自动迁移：
 把那个目录当作**外部源**追加（受管库已覆盖「默认目录」语义），随后按新格式落盘。
+
+**遗留目录清理**：早期版本会把 `<backend>/skills` 自动当作外部源并写盘。现在只保留
+一次性迁移——读到的状态文件没有 `version` 时剔除该路径并立刻写回 `version: 2`；
+之后用户再手动添加同一路径会被正常保留。
 
 **内置技能（bundled）**：`app/skills/bundled/` 是随包发布的开箱技能（Skills_Real_Engineers，
 MIT）。启动时由 `seed_bundled()` 播种进受管库 —— 用户无需 clone，且作为受管技能可编辑/删除。
@@ -37,9 +41,11 @@ logger = logging.getLogger(__name__)
 MANAGED_DIRNAME = "skills"
 #: 新版状态文件（相对统一数据根）
 SOURCES_FILE = "skills_sources.json"
+#: 状态文件 schema 版本；无 version 的旧文件会触发一次性遗留目录清理
+SOURCES_VERSION = 2
 #: 旧版状态文件（相对统一数据根），仅用于一次性迁移
 LEGACY_SOURCES_FILE = "runtime_skills_dir.json"
-#: 早期默认目录（相对 backend/）：用户可能手工放过技能，存在则作为外部源纳入
+#: 早期默认目录（相对 backend/）：仅用于清理旧版自动写入的外部源条目
 LEGACY_FALLBACK_DIRNAME = "skills"
 #: 内置技能目录（相对 app/skills/）：随包发布、开箱可用
 BUNDLED_DIRNAME = "bundled"
@@ -50,7 +56,8 @@ BUNDLED_MANIFEST = ".bundled.json"
 #: v3 = 新增内置技能 artifact-writing（P0.2 文件输出规则迁到 Skill）；
 #: v4 = artifact-writing 补充「禁用 mkdir/Set-Content/npm create 脚手架」规则（该条从
 #:      no-KB 系统提示移到按需技能，避免常驻稀释注意力）。
-BUNDLED_VERSION = 4
+#: v5 = 并入 `bundled/library/` 的 31 个技能（原 backend/skills 外部源，现为唯一内置源）。
+BUNDLED_VERSION = 5
 
 
 def backend_dir() -> Path:
@@ -297,7 +304,8 @@ def load_sources() -> tuple[str, list[str]]:
 
     - managed 缺失/损坏 → 回退到 `data/skills`（由调用方 create）。
     - 旧格式 `runtime_skills_dir.json` → 其 `directory` 迁移为第一个外部源。
-    - `backend/skills` 若存在 → 也作为外部源（兼容早期手工放置的技能）。
+    - 无 `version` 的旧状态文件 → 一次性剔除历史自动加入的 `<backend>/skills` 并写回
+      新 schema；之后用户手动添加同一路径会被正常保留。外部源默认只有用户显式添加的目录。
     """
     managed = str(managed_skills_dir())
     extras: list[str] = []
@@ -317,9 +325,14 @@ def load_sources() -> tuple[str, list[str]]:
         if d and d not in extras:
             extras.append(d)
 
-    old_default = str(backend_dir() / LEGACY_FALLBACK_DIRNAME)
-    if old_default not in extras and Path(old_default).is_dir():
-        extras.append(old_default)
+    if data and "version" not in data:
+        old_default = _key(backend_dir() / LEGACY_FALLBACK_DIRNAME)
+        cleaned = [d for d in extras if _key(d) != old_default]
+        if len(cleaned) != len(extras):
+            logger.info("Removed legacy auto-added skills source: %s",
+                        backend_dir() / LEGACY_FALLBACK_DIRNAME)
+        extras = cleaned
+        save_sources(managed, extras)
 
     return managed, _dedupe(extras, exclude=managed)
 
@@ -331,7 +344,7 @@ def save_sources(managed: str, extra_dirs: list[str]) -> None:
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
-            json.dumps({"managed": managed, "extra_dirs": clean},
+            json.dumps({"version": SOURCES_VERSION, "managed": managed, "extra_dirs": clean},
                        indent=2, ensure_ascii=False),
             encoding="utf-8",
         )

@@ -240,7 +240,7 @@ npx vitest run tests/integration/
 
 - **新 API**：`backend/app/api/` 加 router → `app/main.py` include；前端 `frontend/src/api/` 加 client → `errors.ts` 统一解包。
 - **新工具**：`execution/tool_registry.py` 注册；内置工具用 `register_function`；更新工具描述；权限/沙箱/输出边界要一起考虑。
-- **新 Skill**：`backend/skills/` Markdown + frontmatter；需要时更新 `skills` 目录 UI/loader。
+- **新 Skill**：内置技能放 `backend/app/skills/bundled/`（Markdown + frontmatter，随包发布、播种进受管库 `data/skills`）；用户自建走「技能」页写受管库；外部源需手动追加，不再自动扫描 `backend/skills/`。
 - **自定义工具**：统一走前端「自定义工具」页（`/api/custom-tools`）。脚本型写入 `backend/plugins/custom_*.py`，由 `PluginLoader` 加载后经 `sync_plugin_tools` 注册进 `ToolRegistry`；`.enabled` 文件控制启用。旧的「插件」页/`/api/plugins` 已删除，不要再新增第二套管理入口。
 - **新前端事件**：先加 `harness/events.ts` 类型 + `adapter`/`reducer` 分支 + 单测，再接 store/view。
 - **新提示词**：`prompts/system/*.md`、`prompts/nodes/*.md`；不要把大段规则塞进 Python。

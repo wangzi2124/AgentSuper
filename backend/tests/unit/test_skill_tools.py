@@ -1,7 +1,5 @@
 """L1 单元测试：技能接线（1+2）——`load_skill_*` 工具、技能清单、`/技能名` 强制加载。"""
 
-from pathlib import Path
-
 from app.skills.loader import SkillLoader
 from app.skills.slash import apply_slash_skill, parse_slash_command
 from app.skills.tools import make_skill_tools, skills_catalog
@@ -109,8 +107,12 @@ def test_build_context_registers_skill_tools(tmp_path):
 
 
 def test_skills_load_from_disk(tmp_path):
-    """真实磁盘技能源可被加载（backend/skills 是早期外部技能源）。"""
-    legacy = Path(__file__).resolve().parents[2] / "skills"
-    loader = SkillLoader(str(tmp_path / "skills"), create=True, extra_dirs=[str(legacy)])
+    """真实磁盘技能源可被加载（外部源目录含 <name>/SKILL.md）。"""
+    source = tmp_path / "repo"
+    (source / "docx").mkdir(parents=True)
+    (source / "docx" / "SKILL.md").write_text(
+        "---\nname: docx\ndescription: 编辑文档\n---\nbody", encoding="utf-8"
+    )
+    loader = SkillLoader(str(tmp_path / "skills"), create=True, extra_dirs=[str(source)])
     loader.load_all()
     assert loader.get("docx") is not None

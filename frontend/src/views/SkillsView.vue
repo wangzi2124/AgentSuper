@@ -227,7 +227,7 @@ async function handleDelete() {
       <div class="src-head">
         <div class="src-title">技能源</div>
         <div class="src-hint">
-          受管库由系统自动创建，<b>新建的技能保存在这里</b>；<b>{{ bundledCount }} 个内置技能</b>随系统发布、首次启动自动播种进来（和自建技能一样可编辑可删除，删掉不会自动恢复）；外部源用于引入已有的技能仓库，三者并存，同名以受管库优先。
+          受管库由系统自动创建，<b>新建的技能保存在这里</b>；<b>{{ bundledCount }} 个内置技能</b>随系统发布、首次启动自动播种进来（和自建技能一样可编辑可删除，删掉不会自动恢复）。默认只加载受管库；外部源需手动追加已有的技能仓库，同名以受管库优先。
         </div>
       </div>
       <div class="src-row">
