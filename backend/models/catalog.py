@@ -33,6 +33,14 @@ from models.builtin_catalog import ZERO_COST as _ZERO_COST            # noqa: F8
 _PROVIDER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _PROVIDER_LABEL_MAX_LEN = 50
 
+# 目录条目来源（`origin` 字段）：模型管理页「模型列表」只展示 override/extra/provider。
+#   builtin  —— 内置目录（含 DB kind='builtin' 物化副本）
+#   override —— 用户编辑过的内置条目（含重新添加内置 ID）
+#   extra    —— 用户纯新增的自定义模型
+#   provider —— 已配置 Provider 端点实际返回的模型（含已收录的内置 ID）
+#   local    —— 本机 Ollama /api/tags 自动探测的模型（不在模型列表展示）
+_ORIGIN_MANAGED = frozenset({"override", "extra", "provider"})
+
 
 def catalog_path() -> Path:
     """旧 model_catalog.json 覆盖文件（迁移备份，DB 生效后不再写入）。"""
@@ -567,6 +575,59 @@ def _apply_ollama_native(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _origin_context(
+    cfg: dict[str, Any],
+    local_ids: set[str],
+    provider_seen: dict[str, set[str]],
+) -> tuple[set[str], set[str], set[str], dict[str, str]]:
+    """把用户配置/探测结果整理成 origin 判定所需的四组集合。"""
+    overrides = {str(k) for k in (cfg.get("overrides") or {})}
+    extras = {
+        str(e.get("id"))
+        for e in (cfg.get("extra") or [])
+        if isinstance(e, dict) and e.get("id")
+    }
+    local = {str(x) for x in (local_ids or set()) if x}
+    provider_of: dict[str, str] = {}
+    for pname, ids in (provider_seen or {}).items():
+        for mid in ids:
+            provider_of.setdefault(str(mid), str(pname))
+    return overrides, extras, local, provider_of
+
+
+def annotate_origin(
+    entries: list[dict[str, Any]],
+    *,
+    cfg: dict[str, Any],
+    local_ids: set[str],
+    provider_seen: dict[str, set[str]],
+) -> list[dict[str, Any]]:
+    """给目录条目补只读来源字段：`origin` +（provider 时）`origin_provider`。
+
+    优先级：override/extra（用户手动配置）> provider（端点实际返回）> local（本机
+    Ollama 探测）> builtin。前端模型列表据此只展示手动与 Provider 探测模型。
+    """
+    overrides, extras, local, provider_of = _origin_context(cfg, local_ids, provider_seen)
+    out: list[dict[str, Any]] = []
+    for e in entries:
+        item = dict(e)
+        item.pop("origin_provider", None)
+        mid = str(item.get("id") or "")
+        if mid in overrides:
+            item["origin"] = "override"
+        elif mid in extras:
+            item["origin"] = "extra"
+        elif mid in provider_of:
+            item["origin"] = "provider"
+            item["origin_provider"] = provider_of[mid]
+        elif mid in local:
+            item["origin"] = "local"
+        else:
+            item["origin"] = "builtin"
+        out.append(item)
+    return out
+
+
 def get_catalog(force_reload: bool = False) -> list[dict[str, Any]]:
     """目录快照（按数据目录键的线程安全缓存；force_reload=True 重新读库 + 重探测）。"""
     global _ollama_native
@@ -580,16 +641,34 @@ def get_catalog(force_reload: bool = False) -> list[dict[str, Any]]:
                 known = {e["id"] for e in static}
                 # 复位真实值快照：由紧随其后的探测重新填充（探测被 stub 时保持空，不影响测试）。
                 _ollama_native = {}
-                probe = probe_ollama_models(known, force=force_reload)
-                known |= {e["id"] for e in probe}
-                probe = probe + probe_configured_providers(known, force=force_reload)
-                merged = _apply_ollama_native(static + probe)
+                local_probe = probe_ollama_models(known, force=force_reload)
+                known |= {e["id"] for e in local_probe}
+                provider_probe = probe_configured_providers(known, force=force_reload)
+                merged = _apply_ollama_native(static + local_probe + provider_probe)
+                # 去重：探测缓存与并发探测可能让同一 id 多次出现（保持首次出现顺序）。
+                deduped: list[dict[str, Any]] = []
+                seen_ids: set[str] = set()
+                for e in merged:
+                    mid = str(e.get("id") or "")
+                    if not mid or mid in seen_ids:
+                        continue
+                    seen_ids.add(mid)
+                    deduped.append(e)
+                merged = deduped
                 # 隐藏集合：用户显式删除过的模型 id（含 Provider 探测增量/内置条目）。
                 # 探测会在每次重建时把端点上仍在线的模型自动注册回来，仅删 overrides/
                 # extra 会被下个请求「复活」；这里统一过滤，使删除真正持久。
                 hidden = read_hidden()
                 if hidden:
                     merged = [e for e in merged if e.get("id") not in hidden]
+                with _provider_seen_lock:
+                    provider_seen = {k: set(v) for k, v in _provider_seen.items()}
+                merged = annotate_origin(
+                    merged,
+                    cfg=load_config(),
+                    local_ids={str(e.get("id")) for e in local_probe if e.get("id")},
+                    provider_seen=provider_seen,
+                )
                 cached = merged
                 _catalog_cache[key] = cached
     return cached
@@ -803,27 +882,47 @@ _PROBE_TTL = 60.0
 # 单个 provider 的 /v1/models 探测超时。探测只用于把「provider 上有但目录未收录」的模型
 # 补进下拉框，属锦上添花，不值得让请求等太久——调小它可降低不可达端点的拖累。
 _PROBE_TIMEOUT = float(settings.model_probe_timeout or 4)
-_probe_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_probe_cache: dict[str, tuple[float, list[dict[str, Any]], set[str]]] = {}
+# 每个 enabled Provider 最近一次探测实际返回的完整模型 ID（含已收录的内置 ID）。
+# 模型管理页据此判断「该模型确实由 Provider 拉取」，而不是按前缀猜测。
+_provider_seen: dict[str, set[str]] = {}
+_provider_seen_lock = threading.Lock()
 _ollama_probe_state: tuple[Optional[list[dict[str, Any]]], float] = (None, 0.0)
+
+
+def _set_provider_seen(provider_name: str, ids: set[str]) -> None:
+    with _provider_seen_lock:
+        _provider_seen[provider_name] = set(ids)
+
+
+def _cached_probe(cached: tuple[float, list[dict[str, Any]], set[str]],
+                  known_ids: set[str], provider_name: str) -> list[dict[str, Any]]:
+    """TTL 命中：恢复 seen 集合，并过滤掉后来已进入目录的增量条目（防重复）。"""
+    extras, seen = cached[1], cached[2]
+    _set_provider_seen(provider_name, seen)
+    return [e for e in extras if e.get("id") not in known_ids]
 
 
 def probe_provider_models(provider_name: str, api_base: str, api_key: str,
                           known_ids: set[str], force: bool = False) -> list[dict[str, Any]]:
     """探测 OpenAI 兼容 provider（vLLM/LM Studio/llama.cpp 等）的 /v1/models。
 
-    成功结果按 TTL 缓存；失败/超时返回 []（不阻塞）。
+    成功结果按 TTL 缓存；失败/超时返回 []（不阻塞）。探测同时记录端点实际返回的
+    全部完整 id（含已收录的内置 id），供目录 origin 判定使用。
     """
     now = time.time()
     cached = _probe_cache.get(provider_name)
     if cached and not force and now - cached[0] < _PROBE_TTL:
-        return cached[1]
+        return _cached_probe(cached, known_ids, provider_name)
     base = str(api_base or "").rstrip("/")
     if not base:
-        _probe_cache[provider_name] = (now, [])
+        _probe_cache[provider_name] = (now, [], set())
+        _set_provider_seen(provider_name, set())
         return []
     # 本地端点没人监听就直接放弃（被 TUN 代理丢包时 HTTP 探测会赔满超时，见 local_endpoint_alive）
     if not local_endpoint_alive(base):
-        _probe_cache[provider_name] = (now, [])
+        _probe_cache[provider_name] = (now, [], set())
+        _set_provider_seen(provider_name, set())
         return []
     try:
         import urllib.request
@@ -837,11 +936,13 @@ def probe_provider_models(provider_name: str, api_base: str, api_key: str,
         with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         extras: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for m in data.get("data") or []:
             mid = m.get("id") or ""
             if not mid:
                 continue
             full = f"{provider_name}/{mid}"
+            seen.add(full)
             if full in known_ids:
                 continue
             title = m.get("owned_by") or provider_name
@@ -852,10 +953,12 @@ def probe_provider_models(provider_name: str, api_base: str, api_key: str,
                 "context_length": 32768, "limits": {"max_output_tokens": 8192},
                 "cost": dict(_ZERO_COST),
             })
-        _probe_cache[provider_name] = (now, extras)
+        _probe_cache[provider_name] = (now, extras, seen)
+        _set_provider_seen(provider_name, seen)
         return extras
     except Exception:
-        _probe_cache[provider_name] = (now, [])
+        _probe_cache[provider_name] = (now, [], set())
+        _set_provider_seen(provider_name, set())
         return []
 
 
@@ -870,13 +973,15 @@ def probe_ollama_provider_models(provider_name: str, api_base: str, api_key: str
     cache_key = f"ollama:{provider_name}"
     cached = _probe_cache.get(cache_key)
     if cached and not force and now - cached[0] < _PROBE_TTL:
-        return cached[1]
+        return _cached_probe(cached, known_ids, provider_name)
     url = _ollama_tags_url(api_base)
     if not url:
-        _probe_cache[cache_key] = (now, [])
+        _probe_cache[cache_key] = (now, [], set())
+        _set_provider_seen(provider_name, set())
         return []
     if not local_endpoint_alive(_ollama_native_base(api_base)):
-        _probe_cache[cache_key] = (now, [])
+        _probe_cache[cache_key] = (now, [], set())
+        _set_provider_seen(provider_name, set())
         return []
     headers = {"User-Agent": "agentsuper/0.1"}
     if api_key:
@@ -887,11 +992,13 @@ def probe_ollama_provider_models(provider_name: str, api_base: str, api_key: str
         with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         extras: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for m in (data.get("models") or []):
             name = (m.get("name") or m.get("model") or "").strip()
             if not name:
                 continue
             full = f"{provider_name}/{name}"
+            seen.add(full)
             if full in known_ids:
                 continue
             family = name.split(":", 1)[0]
@@ -918,10 +1025,12 @@ def probe_ollama_provider_models(provider_name: str, api_base: str, api_key: str
                 "limits": {"max_output_tokens": 8192},
                 "cost": dict(_ZERO_COST),
             })
-        _probe_cache[cache_key] = (now, extras)
+        _probe_cache[cache_key] = (now, extras, seen)
+        _set_provider_seen(provider_name, seen)
         return extras
     except Exception:
-        _probe_cache[cache_key] = (now, [])
+        _probe_cache[cache_key] = (now, [], set())
+        _set_provider_seen(provider_name, set())
         return []
 
 
@@ -933,6 +1042,9 @@ def probe_configured_providers(known_ids: set[str], force: bool = False) -> list
     `GET /api/models`，而该接口在前端每次整页加载的 critical path 上）。
     并行后总耗时 = 最慢的那一个。`known_ids` 只读，无需跨线程共享写状态。
     """
+    # 每次重建都从 enabled Provider 重新收集；禁用/删除的 Provider 不应残留 seen。
+    with _provider_seen_lock:
+        _provider_seen.clear()
     targets = [
         (name, p)
         for name, p in read_providers().items()
@@ -1213,14 +1325,26 @@ def normalize_llm_exception(exc: BaseException, model_id: Optional[str] = None) 
 
 
 def provider_models_source() -> list[dict[str, Any]]:
-    """当前可用的提供商信息（前端模型管理面板）。"""
+    """当前可用的提供商信息（前端模型管理面板）。
+
+    `models` 只包含「会出现在模型列表里的模型」：端点实际返回的（含已收录内置 ID）
+    + 用户手动添加/覆盖在该前缀下的条目。未被端点返回的内置模型不再计入，
+    使 Provider 表格的「模型数」与模型列表口径一致。
+    """
+    entries = get_catalog()
     out = []
     for name, p in read_providers().items():
+        prefix = f"{name}/"
+        models = [
+            e for e in entries
+            if str(e.get("id") or "").startswith(prefix)
+            and e.get("origin") in _ORIGIN_MANAGED
+        ]
         out.append({"provider": name, "label": p.get("label") or name,
                     "api_base": p.get("api_base") or "", "api_key": p.get("api_key") or "",
                     "enabled": bool(p.get("enabled", True)),
                     "type": _provider_type(p),
-                    "models": lookup_all(f"{name}/")})
+                    "models": models})
     return out
 
 

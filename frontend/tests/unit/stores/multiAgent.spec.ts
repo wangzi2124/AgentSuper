@@ -749,9 +749,9 @@ describe('model config 前端缓存（启动加载 + 离线兜底）', () => {
   })
 
   it('无缓存/非法缓存时 loadModelCache 返回 null', () => {
-    localStorage.setItem('agentsuper:model-config-cache:v1', '{not-json')
+    localStorage.setItem('agentsuper:model-config-cache:v2', '{not-json')
     expect(loadModelCache()).toBeNull()
-    localStorage.setItem('agentsuper:model-config-cache:v1', JSON.stringify({ foo: 1 }))
+    localStorage.setItem('agentsuper:model-config-cache:v2', JSON.stringify({ foo: 1 }))
     expect(loadModelCache()).toBeNull()
   })
 })

@@ -213,6 +213,7 @@ npx vitest run tests/integration/
 - **压缩**：`cognition/compressor.py` 是 canonical；`harness/compression.py` 是统一门面。不要再新增第三套压缩逻辑。
 - **自动压缩/手动 compact**：`ContextHarness` + `tail_snapshot` 语义；手动 compact 也要写 tail 起点。
 - **模型目录**：`models/catalog.py` 读取能力/窗口；`harness/capabilities.build_profile` 有 60s TTL，人工 override 优先。
+- **模型列表口径**：目录条目的只读 `origin`（`override` / `extra` / `provider` / `builtin` / `local`）是「模型管理 → 模型列表」的过滤依据；前端只展示前三类，内置与本机 Ollama 自动探测仅保留在下拉/聊天选择器。Provider 表格「模型数」同口径（`provider_models_source`）。`_provider_seen` 仅在内存记录本次探测实际返回的 ID（含已收录内置 ID），Provider 重建时离线/禁用即清空，不持久化；前端缓存 v2，v1 直接丢弃。要在列表里管理内置/本机模型，需手动添加，或配置一个非保留名的 ollama 类型 Provider。
 - **Provider 表单**：Label（显示名）与模型前缀（litellm provider 段）**都必填、互不推导**；前缀新增时校验 `^[a-z0-9][a-z0-9_-]*$`、编辑时只读；后端 `upsert_provider` 同样校验（存量条目不做回溯）。
 - **Ollama 窗口**：默认不下发 `num_ctx`，以 Ollama 服务器配置为准；运行时窗口取自 `/api/ps.context_length`（30s 快照 + per-model last-known），未加载时回落 `OLLAMA_NUM_CTX`（默认 4096）。只有「模型管理」显式设置过 `context_length` 才下发覆盖；`/api/models` 的 `runtime_context_length` 是只读展示字段。prompt 适配守卫（`models/context_guard.py`）会按该窗口裁剪；**若 system+工具+当前消息仍装不下，会自动把 `num_ctx` 提升到所需窗口（2 的幂，上限 32768）**，只有超过上限才报错。不要把回落值再当 8192。
 - **上下文窗口**：未知窗口时 `resolve_mode` 保守回退；不要在未知窗口上做原生工具假设。
@@ -228,6 +229,7 @@ npx vitest run tests/integration/
 - **权限**：`permission_request` 归一化后交给 `PermissionStore`；不要塞回 reducer 里弹窗。
 - **排队**：`turn_done` 由 store 决定 drain/下一轮；controller 只产出终态。
 - **移动端**：`MobileChat` 复用 `MultiAgentView`；改聊天逻辑时先确认移动端不被破坏。
+- **模型列表过滤**：`ModelManagerView` 的表格/搜索/分页用 `utils/modelOrigin.ts` 过滤；默认/轻量/图片下拉与聊天选择器必须保持全量，不要把过滤下沉到 store。
 - **聊天表面**：主结构是 `ConversationTimeline` 的单一时间线；不要重新引入按 Agent 分块的 `MultiAgentResponse` 作为主渲染路径。
 - **只展示真实工具**：时间线过滤 `!step.tool_name` 的 Harness 图内节点（filter/plan/rag/execute_subagent 等）；不要渲染 `NODE_LABELS` 或 Agent 过滤 chips。
 - **工具步骤**：默认紧凑行，点击展开；不要默认展开所有参数/输出，避免长任务淹没最终答案。

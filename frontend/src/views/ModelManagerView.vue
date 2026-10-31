@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useModelManagerStore } from '../stores/modelManager'
 import type { ModelInfo, ProviderInfo } from '../api/models'
 import { validateProviderForm } from '../utils/providerForm'
+import { managedModels } from '../utils/modelOrigin'
 
 const mm = useModelManagerStore()
 
@@ -26,7 +27,9 @@ function syncSelectors() {
   voiceSel.value = mm.config?.voice_model_size || ''
 }
 
+// 默认/轻量/图片模型下拉仍用全量目录；表格只展示手动配置或 Provider 实际返回的模型。
 const modelList = computed(() => mm.config?.models || [])
+const managedModelList = computed(() => managedModels(modelList.value))
 
 // ── 模型列表：名称/ID 检索 + 分页 ──
 const modelQuery = ref('')
@@ -35,8 +38,8 @@ const pageSize = ref(10)
 
 const filteredModels = computed(() => {
   const q = modelQuery.value.trim().toLowerCase()
-  if (!q) return modelList.value
-  return modelList.value.filter(m =>
+  if (!q) return managedModelList.value
+  return managedModelList.value.filter(m =>
     (m.name || '').toLowerCase().includes(q) || m.id.toLowerCase().includes(q)
   )
 })
@@ -128,8 +131,7 @@ const modelForm = reactive<{
   tool_use: true, vision: false, reasoning: false, thinking: '',
 })
 
-function openModelForm(m?: ModelInfo) {
-  modelForm.id = m?.id || ''
+function applyModelForm(m?: ModelInfo) {
   modelForm.name = m?.name || ''
   modelForm.provider = m?.provider || 'ollama'
   modelForm.family = m?.family || m?.id?.split('/')[1] || ''
@@ -144,6 +146,24 @@ function openModelForm(m?: ModelInfo) {
   modelForm.vision = m?.capabilities?.vision ?? false
   modelForm.reasoning = m?.capabilities?.reasoning ?? false
   modelForm.thinking = m?.thinking || ''
+}
+
+// 重新添加内置/已探测模型时，按 id 自动带出目录参数，避免用表单默认值覆盖真实窗口/能力。
+const modelFormCatalogId = ref('')
+watch(() => modelForm.id, (raw) => {
+  if (!showModelForm.value) return
+  const id = raw.trim()
+  if (!id || id === modelFormCatalogId.value) return
+  const known = modelList.value.find(m => m.id === id)
+  if (!known) return
+  modelFormCatalogId.value = id
+  applyModelForm(known)
+})
+
+function openModelForm(m?: ModelInfo) {
+  modelForm.id = m?.id || ''
+  modelFormCatalogId.value = m?.id || ''
+  applyModelForm(m)
   showModelForm.value = true
 }
 
@@ -298,7 +318,7 @@ function capOf(m: ModelInfo) {
           <span v-if="mm.refreshing" class="spinner-mm mm-refresh-spin" title="刷新中"></span>
           <button class="btn btn-primary mm-title-action" @click="openModelForm()">+ 自定义模型</button>
         </div>
-        <p class="hint">自定义 <code>provider/model</code>：若该 provider 未配置，调用回落后端 .env 的 api_base/key。</p>
+        <p class="hint">仅显示手动添加/编辑的模型与已配置 Provider 实际返回的模型；内置模型仍可在上方默认模型下拉中选择。要在此管理内置/本机模型，请重新添加其 ID（自动带出目录参数），或配置一个 ollama 类型 Provider。</p>
         <div class="mm-list-toolbar">
           <label class="mm-search">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
@@ -322,7 +342,7 @@ function capOf(m: ModelInfo) {
               </button>
             </span>
           </div>
-          <div v-if="!filteredModels.length" class="empty-tip">{{ modelQuery ? '未找到匹配的模型' : '暂无模型' }}</div>
+          <div v-if="!filteredModels.length" class="empty-tip">{{ modelQuery ? '未找到匹配的模型' : '暂无自定义或 Provider 模型' }}</div>
         </div>
         <div v-if="filteredModels.length" class="mm-pager">
           <span class="mm-pager-info">第 {{ page }} / {{ totalPages }} 页</span>
@@ -397,7 +417,7 @@ function capOf(m: ModelInfo) {
   <!-- 自定义模型编辑弹窗 -->
   <div v-if="showModelForm" class="overlay">
     <div class="dialog wide">
-      <div class="form-title">{{ modelForm.id && modelList.find(m => m.id === modelForm.id) ? '编辑模型' : '新增自定义模型' }}</div>
+      <div class="form-title">{{ modelForm.id.trim() && modelList.find(m => m.id === modelForm.id.trim()) ? '编辑模型' : '新增自定义模型' }}</div>
       <div class="form-row">
         <label class="mm-field"><span>模型 ID（provider/model）</span>
           <input v-model="modelForm.id" class="ctrl" placeholder="ollama/qwen2.5-coder:latest" />

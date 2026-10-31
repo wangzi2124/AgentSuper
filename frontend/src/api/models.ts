@@ -15,6 +15,9 @@ export interface ModelCapabilities {
   reasoning: boolean
 }
 
+// 目录条目来源：模型管理页「模型列表」只展示 override/extra/provider。
+export type ModelOrigin = 'builtin' | 'override' | 'extra' | 'provider' | 'local'
+
 export interface ModelInfo {
   id: string
   provider: string
@@ -28,6 +31,9 @@ export interface ModelInfo {
   default?: boolean
   // Ollama 思考模式：enabled / disabled / adaptive（空 = 跟随全局 OLLAMA_THINKING）
   thinking?: string
+  // 后端只读来源标注（builtin/local 不进入模型列表；provider 时附带 origin_provider）
+  origin?: ModelOrigin
+  origin_provider?: string
 }
 
 export interface ModelCatalogResponse {
