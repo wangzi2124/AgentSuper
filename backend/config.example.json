@@ -159,22 +159,13 @@
   // 五、摘要 / 压缩模型
   // ══════════════════════════════════════════════════════════════════════════
 
-  // 历史摘要模型；compress_model 为空时作为压缩模型的回退。
-  // null = 未设置（压缩走 tier-simple 或 compress_model）。
-  // 示例：ollama_chat/qwen2.5:3b
-  "summarization_model": null,
-
-  // 压缩时保留的最近消息条数（summarization_model 不要求非空）。
-  // 示例：6；调大保留更多原文，调小更省上下文。
-  "summarization_keep_messages": 6,
-
-  // 压缩专用模型；优先于 summarization_model。
-  // null = 未设置（走 summarization_model 或 tier-simple）。
+  // 压缩专用模型。
+  // null = 未设置（走本回合主模型或 tier-simple）。
   // 示例：deepseek/deepseek-v4-flash
   "compress_model": null,
 
-  // 是否启用 LLM 摘要压缩。
-  // true = 用模型生成摘要；false = 只做规则截断，不调模型。
+  // 是否启用自动压缩。
+  // true = 超阈值时用模型生成摘要；false = 不生成摘要、也不做规则截断。
   // 示例：想省 token 可设 false。
   "compress_model_enabled": true,
 
@@ -243,13 +234,14 @@
   // 九、上下文压缩
   // ══════════════════════════════════════════════════════════════════════════
 
-  // 压缩时尾部保留的最近轮次。
-  // 示例：2 表示保留最近 2 轮原文。
-  "context_tail_turns": 2,
+  // 压缩时保留的最近原文 token（opencode v2 keep.tokens）。
+  // 示例：15000；调大保留更多原文，调小更省上下文。
+  "compaction_keep_tokens": 15000,
 
-  // 自动压缩保留的最近消息条数；0 = 按 context_tail_turns × 2 折算。
-  // 示例：0（推荐）或 10。
-  "compaction_tail_messages": 0,
+  // 自动压缩预留窗口：百分比或绝对 token。
+  // "15%" = max(15% × 模型窗口, 16000)；也可写 32000 这样的绝对值。
+  // 示例："15%"
+  "compaction_buffer": "15%",
 
   // 单条工具输出的 token 上限。
   // 示例：8000；想压低上下文可设 4000。
@@ -259,20 +251,8 @@
   // 示例：true
   "compaction_auto": true,
 
-  // 是否清理旧工具输出（保护最近 40k token，收益 >= 20k 才落桩）。
-  // 示例：true
-  "compaction_prune": true,
-
-  // 压缩时保留的最近原文 token；0 = 自动 clamp(2000, 8000, 25% × 可用窗口)。
-  // 示例：0
-  "compaction_preserve_recent_tokens": 0,
-
-  // 压缩预留输出 token；0 = min(20000, llm_max_tokens)。
-  // 示例：0
-  "compaction_reserved_tokens": 0,
-
   // ══════════════════════════════════════════════════════════════════════════
-  // 九点五、聊天附件 / 历史预算
+  // 九点五、聊天附件
   // ══════════════════════════════════════════════════════════════════════════
 
   // 非图片附件内联进模型上下文的单文件字符上限；超出部分已落盘，模型可用 read_file 读取。
@@ -286,10 +266,6 @@
   // 「查看正文」接口单次返回字符上限（不影响模型上下文）。
   // 示例：200000。
   "attachment_extract_max_chars": 200000,
-
-  // execute 节点回灌历史（摘要之外）的字符下限；大窗口仍按窗口自动放宽（上限 60k）。
-  // 示例：12000；多轮长对话想保留更多可调大。
-  "history_budget_chars": 12000,
 
   // ══════════════════════════════════════════════════════════════════════════
   // 十、图片 / OCR / 视觉描述桥

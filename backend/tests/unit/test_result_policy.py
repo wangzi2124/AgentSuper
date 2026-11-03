@@ -63,14 +63,7 @@ async def test_tool_loop_bounds_tool_output_and_persists_full_text(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_tool_loop_prunes_before_the_next_model_call(monkeypatch):
-    calls: list[int] = []
-
-    def fake_prune(messages, **kwargs):
-        calls.append(len(messages))
-        return messages
-
-    monkeypatch.setattr("graph.nodes.base.prune_tool_outputs", fake_prune)
+async def test_tool_loop_no_longer_prunes_tool_outputs():
     model = _ScriptedModel(
         [
             _call("c1"),
@@ -79,11 +72,12 @@ async def test_tool_loop_prunes_before_the_next_model_call(monkeypatch):
         ]
     )
 
-    await run_tool_loop(
+    out = await run_tool_loop(
         model,
         [{"role": "user", "content": "go"}],
         _registry("ok"),
         adapter=ToolAdapter(model, mode="native"),
     )
 
-    assert calls, "prune_tool_outputs must run before the next model call"
+    assert out["text"] == "done"
+    assert len(out["tool_trace"]) == 2

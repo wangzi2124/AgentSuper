@@ -7,10 +7,7 @@
 
 import asyncio
 import logging
-import time as tmod
 from typing import Any, Optional
-
-from harness.compression import tail_snapshot as build_tail_snapshot
 
 from . import history as session_history
 from . import repository
@@ -18,16 +15,6 @@ from . import task_bridge
 from .models import ContextEpoch, Message, SessionInfo, SessionStatus
 
 logger = logging.getLogger(__name__)
-
-
-def _auto_tail_limit() -> int:
-    """自动压缩时保留的最近消息条数（compaction_tail_messages，0 → 按轮次折算）。"""
-    from config import settings
-
-    n = settings.compaction_tail_messages
-    if n > 0:
-        return n
-    return max(2, settings.context_tail_turns * 2)
 
 
 class SessionService:
@@ -176,35 +163,6 @@ class SessionService:
     def initialize_context(self, session_id: str, baseline: str, snapshot: dict) -> ContextEpoch:
         return session_history.initialize_epoch(session_id, baseline, snapshot)
 
-    async def compact(self, user_id: str, session_id: str, checkpoint: str = "",
-                     mode: str = "manual", tail_messages: int | None = None) -> None:
-        """写压缩水位：落一条 compaction 消息并重建 epoch baseline。
-
-        checkpoint 为空时用占位文案；落库后把 session.time_compacted 置为当前时间，
-        使压缩基线持久化（重启/恢复后 history.load 仍能定位水位）。
-
-        mode="manual"（前端按钮）：保留「当前可见的全部历史」作 tail（既有语义不变）。
-        mode="auto"（请求内自动压缩）：tail 收敛为最近 `tail_messages` 条消息 ——
-        全留会让模型视角只增不减（history.load 的 tail 回放会把水位之下的原文再拉回来），
-        水位就等于没写。
-        """
-        self._authorized(user_id, session_id)
-        async with self.write_lock(session_id):
-            if not checkpoint:
-                checkpoint = "[compacted]"
-            # 定位压缩时模型视角的第一条原文作为 tail 起点 → 压缩后视角无损：
-            # [checkpoint] + [tail 原文] + [压缩后新增]（与脚本/executor 路径一致）
-            load = session_history.load(session_id)
-            tail_msgs = [m for m in load.messages if m.type != "compaction"]
-            if mode == "auto":
-                limit = tail_messages if tail_messages is not None else _auto_tail_limit()
-                if limit > 0 and len(tail_msgs) > limit:
-                    tail_msgs = tail_msgs[-limit:]
-            tail_snapshot: dict = build_tail_snapshot(tail_msgs)
-            repository.append_message(session_id, "compaction", {"content": checkpoint, "mode": mode})
-            session_history.replace_epoch_after_compaction(session_id, checkpoint, tail_snapshot)
-            repository.update_session(session_id, time_compacted=int(tmod.time() * 1000))
-
     async def revert(self, user_id: str, session_id: str, message_id: str) -> dict[str, Any]:
         """撤销到指定消息：删除其后的所有消息与部件（对齐 revert.ts）。
 
@@ -216,7 +174,19 @@ class SessionService:
         """
         self._authorized(user_id, session_id)
         async with self.write_lock(session_id):
+            target_seq = repository.seq_of_message(session_id, message_id)
+            doomed_ids = [
+                m.id
+                for m in repository.list_messages(session_id)
+                if target_seq is not None and m.seq > target_seq
+            ]
             deleted = repository.revert_to_message(session_id, message_id)
+            if doomed_ids:
+                current = repository.require_session(session_id)
+                repository.update_session(
+                    session_id,
+                    hidden_ids=set(current.hidden_ids or []) | set(doomed_ids),
+                )
             # 级联撤销任务子会话 + 清除父会话待执行输入
             child_ids = [c.id for c in repository.list_children(session_id) if c.kind == "task"]
             task_bridge.cancel_children(child_ids)
@@ -235,7 +205,14 @@ class SessionService:
         不级联子会话/不清输入（单条删除，保留会话其余历史）。
         """
         self._authorized(user_id, session_id)
-        return repository.delete_message(session_id, message_id)
+        ok = repository.delete_message(session_id, message_id)
+        if ok:
+            current = repository.require_session(session_id)
+            repository.update_session(
+                session_id,
+                hidden_ids=set(current.hidden_ids or []) | {message_id},
+            )
+        return ok
 
     # ── 输入 / 执行 ──────────────────────────────────────────────────────
 

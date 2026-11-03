@@ -64,7 +64,7 @@ async def test_compress_node_uses_injected_compressor():
     payload = await node(state)
     assert payload["token_usage"]["compressed"] is True
     assert payload["context_summary"] == "压缩后的结构化摘要"
-    assert len(payload["messages"]) <= 3  # 摘要 system + 最近 1 条
+    assert "messages" not in payload  # v2：不物理删除历史，仅写水位
 
 
 @pytest.mark.asyncio

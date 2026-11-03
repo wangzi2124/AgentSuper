@@ -95,6 +95,9 @@ class PartDataTool(BaseModel):
     state: str = "completed"  # pending | running | completed | error
     name: str = ""
     args: dict[str, Any] = Field(default_factory=dict)
+    # 原生工具调用还原用：保留原始参数串与调用 id，避免只存解析后的 dict。
+    arguments: str = ""
+    tool_call_id: Optional[str] = None
     output: str = ""
     error: Optional[str] = None
     time_start: Optional[int] = None

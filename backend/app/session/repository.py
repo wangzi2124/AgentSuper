@@ -371,6 +371,149 @@ def seq_of_message(session_id: str, message_id: str) -> Optional[int]:
         conn.close()
 
 
+def get_message(session_id: str, message_id: str) -> Optional[Message]:
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM session_messages WHERE session_id = ? AND id = ?",
+            (session_id, message_id),
+        ).fetchone()
+        if not row:
+            return None
+        return Message(
+            id=row["id"], session_id=row["session_id"], type=row["type"],
+            data=json.loads(row["data"]), seq=row["seq"], time_created=row["time_created"],
+        )
+    finally:
+        conn.close()
+
+
+def upsert_message(
+    session_id: str, message_id: str, msg_type: str, data: dict[str, Any]
+) -> Message:
+    """按稳定 id 幂等写入一条会话消息（投影用）。
+
+    已存在时只更新 type/data；seq 与 time_created 保持不变，避免 UI 顺序漂移。
+    """
+    conn = _get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        now = int(time.time() * 1000)
+        existing = conn.execute(
+            "SELECT seq, time_created FROM session_messages WHERE session_id = ? AND id = ?",
+            (session_id, message_id),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE session_messages SET type = ?, data = ? WHERE session_id = ? AND id = ?",
+                (msg_type, json.dumps(data, ensure_ascii=False), session_id, message_id),
+            )
+            seq, created = int(existing["seq"]), int(existing["time_created"])
+        else:
+            conn.execute(
+                "INSERT INTO session_messages (seq, id, session_id, type, data, time_created)"
+                " SELECT COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?"
+                " FROM session_messages WHERE session_id = ?",
+                (message_id, session_id, msg_type, json.dumps(data, ensure_ascii=False), now, session_id),
+            )
+            row = conn.execute(
+                "SELECT seq, time_created FROM session_messages WHERE session_id = ? AND id = ?",
+                (session_id, message_id),
+            ).fetchone()
+            seq, created = int(row["seq"]), int(row["time_created"])
+        conn.execute("UPDATE sessions SET time_updated = ? WHERE id = ?", (now, session_id))
+        conn.commit()
+        return Message(
+            id=message_id, session_id=session_id, type=msg_type, data=data,
+            seq=seq, time_created=created,
+        )
+    finally:
+        conn.close()
+
+
+def list_conversation_messages(session_id: str) -> list[Message]:
+    """会话正文消息（排除 compaction/epoch 等控制事件），按 seq 升序。"""
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM session_messages WHERE session_id = ?"
+            " AND type IN ('user', 'assistant', 'tool', 'system') ORDER BY seq",
+            (session_id,),
+        ).fetchall()
+        return [
+            Message(
+                id=r["id"], session_id=r["session_id"], type=r["type"],
+                data=json.loads(r["data"]), seq=r["seq"], time_created=r["time_created"],
+            )
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def latest_compaction(
+    session_id: str, *, hidden_ids: Optional[set[str]] = None
+) -> Optional[Message]:
+    hidden = hidden_ids or set()
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM session_messages WHERE session_id = ? AND type = 'compaction'"
+            " ORDER BY seq DESC",
+            (session_id,),
+        ).fetchall()
+        for row in rows:
+            if row["id"] in hidden:
+                continue
+            return Message(
+                id=row["id"], session_id=row["session_id"], type=row["type"],
+                data=json.loads(row["data"]), seq=row["seq"], time_created=row["time_created"],
+            )
+        return None
+    finally:
+        conn.close()
+
+
+def compactions_after(session_id: str, seq: int) -> list[Message]:
+    """seq 之后（含）的压缩检查点；撤销到压缩点之前时用于作废摘要卡。"""
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM session_messages WHERE session_id = ? AND type = 'compaction'"
+            " AND seq >= ? ORDER BY seq",
+            (session_id, int(seq)),
+        ).fetchall()
+        return [
+            Message(
+                id=r["id"], session_id=r["session_id"], type=r["type"],
+                data=json.loads(r["data"]), seq=r["seq"], time_created=r["time_created"],
+            )
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def find_tool_part(session_id: str, message_id: str, tool_call_id: str) -> Optional[Part]:
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM message_parts WHERE session_id = ? AND message_id = ?"
+            " AND type = 'tool' ORDER BY time_created, id",
+            (session_id, message_id),
+        ).fetchall()
+        for r in rows:
+            data = json.loads(r["data"])
+            if str(data.get("tool_call_id") or "") == str(tool_call_id):
+                return Part(
+                    id=r["id"], session_id=r["session_id"], message_id=r["message_id"],
+                    type=r["type"], data=data, time_created=r["time_created"],
+                )
+        return None
+    finally:
+        conn.close()
+
+
 def add_session_usage(session_id: str, input_tokens: int = 0, output_tokens: int = 0,
                       cost: float = 0.0, cache_read: int = 0, cache_write: int = 0,
                       reasoning: int = 0) -> None:

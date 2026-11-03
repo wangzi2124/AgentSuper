@@ -274,6 +274,7 @@ def initial_state(
     use_vector_db: bool = False,
     message_id: str | None = None,
     staged_attachments: list[Any] | None = None,
+    history_messages: list[Any] | None = None,
     context_summary: str = "",
     context_tail_start_id: str | None = None,
     context_bound: bool = False,
@@ -360,8 +361,13 @@ def initial_state(
     if keep_recent_tokens_override > 0:
         keep_recent_tokens = keep_recent_tokens_override
 
+    messages: Any = [msg]
+    if history_messages is not None:
+        # session.db 是对话真相源：用 Overwrite 绕过 add_messages 合并，
+        # 避免 checkpoint 旧消息与本轮重建视图重复。
+        messages = Overwrite([*history_messages, msg])
     state: dict[str, Any] = {
-        "messages": [msg],
+        "messages": messages,
         "iteration_count": 0,
         "user_id": user_id,
         "task_plan": [],
@@ -979,13 +985,22 @@ class PlatformContext:
         from .attachment_processor import stage_attachments
 
         staged_attachments = stage_attachments(files, sess.directory if sess else None)
+        await self.ensure_conversation(session_id)
+        history = self.rebuild_history(session_id)
+        from .session.projector import project_user_message
+
+        user_msg_id = message_id or f"um_{uuid.uuid4().hex[:12]}"
+        if history is not None:
+            history = [m for m in history if getattr(m, "id", None) != user_msg_id]
+        project_user_message(session_id, user_msg_id, question, files)
         try:
             result = await self.graph.ainvoke(
                 initial_state(
                     question, user_id, files=files, model=model,
                     use_vector_db=use_vector_db,
-                    message_id=message_id,
+                    message_id=user_msg_id,
                     staged_attachments=staged_attachments,
+                    history_messages=history,
                     context_summary=binding.get("summary", ""),
                     context_tail_start_id=binding.get("tail_start_id"),
                     context_bound=binding.get("active", False),
@@ -1004,6 +1019,7 @@ class PlatformContext:
             clear_turn_command_approvals()
             get_manager().clear_session_command_approvals(session_id)
             reset_request_model(model_token)
+        await self.ensure_conversation(session_id)
         await self.persist_compaction(session_id, (result or {}).get("compaction_event"))
         self.sessions.touch(session_id)
         return jsonable(result)
@@ -1050,9 +1066,19 @@ class PlatformContext:
         from .attachment_processor import stage_attachments
 
         staged_attachments = stage_attachments(files, sess.directory if sess else None)
+        await self.ensure_conversation(session_id)
+        history = self.rebuild_history(session_id)
+        from .session.projector import project_user_message
+
+        user_msg_id = f"um_{uuid.uuid4().hex[:12]}"
+        if history is not None:
+            history = [m for m in history if getattr(m, "id", None) != user_msg_id]
+        project_user_message(session_id, user_msg_id, question, files)
         state = initial_state(
             question, user_id, files=files, model=model, use_vector_db=use_vector_db,
             staged_attachments=staged_attachments,
+            history_messages=history,
+            message_id=user_msg_id,
             context_summary=binding.get("summary", ""),
             context_tail_start_id=binding.get("tail_start_id"),
             context_bound=binding.get("active", False),
@@ -1088,6 +1114,7 @@ class PlatformContext:
             clear_turn_command_approvals()
             get_manager().clear_session_command_approvals(session_id)
             reset_request_model(model_token)
+        await self.ensure_conversation(session_id)
         self.sessions.touch(session_id)
         snapshot = await self.state(session_id)
         yield {
@@ -1138,6 +1165,45 @@ class PlatformContext:
         msgs = values.get("messages") if isinstance(values, dict) else None
         return msgs if isinstance(msgs, list) else []
 
+    async def ensure_conversation(self, session_id: str) -> None:
+        """把 checkpoint 增量投影到 session.db（幂等，懒回填入口）。"""
+        from .session.projector import project_checkpoint_messages
+
+        raw = await self._raw_messages(session_id)
+        if raw:
+            from .session import repository as _repo
+
+            sess = self.sessions.get(session_id)
+            hidden = set(getattr(sess, "hidden_ids", None) or [])
+            try:
+                stored = _repo.require_session(session_id)
+                hidden |= set(stored.hidden_ids or [])
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                project_checkpoint_messages(
+                    session_id, raw, skip_ids=hidden
+                )
+            except Exception:  # noqa: BLE001 - 投影失败不阻断本轮
+                logger.warning("session projection failed for %s", session_id, exc_info=True)
+
+    def rebuild_history(self, session_id: str) -> list[Any]:
+        """从 session.db 重建历史模型视图（压缩水位已应用）。"""
+        from .session import repository as _repo
+        from .session.projector import rebuild_model_messages
+
+        sess = self.sessions.get(session_id)
+        try:
+            stored = _repo.require_session(session_id)
+            hidden = set(stored.hidden_ids or [])
+            hidden |= set(getattr(sess, "hidden_ids", None) or [])
+            baseline = int(stored.compact_baseline_seq or 0)
+        except Exception:  # noqa: BLE001 - 未落库的临时会话回退 checkpoint
+            return None
+        return rebuild_model_messages(
+            session_id, hidden_ids=hidden, baseline=baseline
+        )
+
     def messages(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         msgs = state.get("messages") if isinstance(state, dict) else None
         return msgs if isinstance(msgs, list) else []
@@ -1184,18 +1250,110 @@ class PlatformContext:
         """
         _role = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
         sess = self.sessions.get(session_id)
-        hidden = sess.hidden_ids if sess else set()
-        baseline = sess.compact_baseline_seq if sess else 0
-        raw = await self._raw_messages(session_id)
+        hidden = set(getattr(sess, "hidden_ids", None) or [])
+        baseline = int(getattr(sess, "compact_baseline_seq", 0) or 0)
+        graph = getattr(self, "graph", None)
+        values: dict[str, Any] = {}
+        if graph is not None:
+            snap = await graph.aget_state(
+                {"configurable": {"thread_id": session_id}}
+            )
+            values = getattr(snap, "values", {}) or {}
+        raw = values.get("messages") if isinstance(values, dict) else None
+        if not isinstance(raw, list):
+            raw = await self._raw_messages(session_id)
+        active_summary = str(values.get("context_summary") or "") if isinstance(values, dict) else ""
+        compaction_event = (
+            values.get("compaction_event") if isinstance(values, dict) else None
+        ) or {}
         out: list[dict[str, Any]] = []
-        for idx, msg in enumerate(raw, start=1):
+        from .session import repository as _repo
+
+        if graph is not None:
+            try:
+                await self.ensure_conversation(session_id)
+            except Exception:  # noqa: BLE001 - 投影失败回退 checkpoint
+                pass
+        rows = _repo.list_conversation_messages(session_id)
+        if rows:
+            try:
+                stored = _repo.require_session(session_id)
+                hidden = hidden | set(stored.hidden_ids or [])
+                baseline = max(baseline, int(stored.compact_baseline_seq or 0))
+            except Exception:  # noqa: BLE001
+                pass
+            comp = _repo.latest_compaction(session_id, hidden_ids=hidden)
+            if (
+                comp is not None
+                and int(baseline or 0) > 0
+                and int(comp.seq or 0) > int(baseline or 0)
+            ):
+                # 撤销到压缩之前：晚于基线的压缩检查点不再呈现。
+                comp = None
+                active_summary = ""
+                compaction_event = {}
+            if comp is not None:
+                cdata = comp.data or {}
+                if not active_summary:
+                    active_summary = str(
+                        cdata.get("summary") or cdata.get("content") or ""
+                    )
+                if not compaction_event:
+                    compaction_event = cdata
+            parts_map = _repo.list_parts_for_messages([r.id for r in rows])
+            for row in rows:
+                if row.id in hidden or row.type == "tool":
+                    continue
+                data = dict(row.data or {})
+                content = str(data.get("content") or "")
+                if row.type == "assistant" and not content.strip() and data.get("tool_calls"):
+                    continue
+                ui = data.get("ui") if isinstance(data.get("ui"), dict) else {}
+                item = {
+                    "id": row.id,
+                    "session_id": session_id,
+                    "type": row.type,
+                    "role": row.type,
+                    "content": content,
+                    "data": {k: v for k, v in data.items() if k != "ui"},
+                    "seq": int(row.seq or 0),
+                    "time_created": int(row.time_created or 0),
+                    "parts": [
+                        {
+                            "id": p.id,
+                            "session_id": p.session_id,
+                            "message_id": p.message_id,
+                            "type": p.type,
+                            "data": p.data,
+                            "time_created": p.time_created,
+                        }
+                        for p in parts_map.get(row.id, [])
+                    ],
+                    "is_compacted": False,
+                }
+                for key in (
+                    "agents",
+                    "files_changed",
+                    "steps",
+                    "plan_path",
+                    "snapshot_restored",
+                    "partial_error",
+                ):
+                    if ui.get(key):
+                        item["data"][key] = ui[key]
+                out.append(item)
+        for idx, msg in enumerate([] if rows else raw, start=1):
             mid = PlatformContext.stable_message_id(session_id, msg)
             # 兼容旧版 hidden_ids（`<sid>_m<idx>`）与基线水位（seq）。
             legacy_mid = self.message_id(session_id, idx)
             if (mid in hidden or legacy_mid in hidden) or idx <= baseline:
                 continue
             mtype = _role.get(_msg_role(msg), "system")
+            if mtype == "tool":
+                continue
             content = content_text(_msg_content(msg))
+            if mtype == "assistant" and not content.strip() and getattr(msg, "tool_calls", None):
+                continue
             ui = _msg_ui(msg)
             data: dict[str, Any] = {"content": content}
             ak = getattr(msg, "additional_kwargs", None) or {}
@@ -1239,7 +1397,30 @@ class PlatformContext:
             isinstance(item.get("data"), dict) and item["data"].get("compaction")
             for item in out
         )
-        if baseline > 0 and not has_compaction_card:
+        if active_summary and not has_compaction_card:
+            content = f"[历史摘要]\n{active_summary}"
+            card = {
+                "reason": str(compaction_event.get("reason") or "manual"),
+                "tokens_before": int(compaction_event.get("tokens_before") or 0),
+                "tokens_after": int(compaction_event.get("tokens_after") or 0),
+                "model": str(compaction_event.get("model") or ""),
+            }
+            out.insert(
+                0,
+                {
+                    "id": f"{session_id}_compact",
+                    "session_id": session_id,
+                    "type": "system",
+                    "role": "system",
+                    "content": content,
+                    "data": {"content": content, "compaction": card},
+                    "seq": 0,
+                    "time_created": 0,
+                    "parts": [],
+                    "is_compacted": True,
+                },
+            )
+        elif baseline > 0 and not has_compaction_card and not rows:
             summary = f"（早期 {baseline} 条消息已压缩为上下文摘要）"
             out.insert(
                 0,
@@ -1308,27 +1489,55 @@ class PlatformContext:
         sess = self.sessions.get(session_id)
         if sess is None:
             return {"deleted": 0, "messages": []}
-        history = await self._full_history(session_id)
+        from .session import repository as _repo
+
+        rows = _repo.list_conversation_messages(session_id)
         target: int | None = None
-        for entry in history:
-            if message_id in (entry["id"], entry.get("legacy_id")):
-                target = int(entry["seq"])
-                break
+        if rows:
+            for row in rows:
+                if message_id == row.id:
+                    target = int(row.seq or 0)
+                    break
+            ids = [row.id for row in rows if target is not None and int(row.seq or 0) >= target]
+        else:
+            history = await self._full_history(session_id)
+            for entry in history:
+                if message_id in (entry["id"], entry.get("legacy_id")):
+                    target = int(entry["seq"])
+                    break
+            ids = [
+                entry["id"]
+                for entry in history
+                if target is not None and int(entry["seq"]) >= target
+            ]
         if target is None:
             return {"deleted": 0, "messages": await self.session_messages(session_id)}
         deleted = 0
-        for entry in history:
-            if entry["seq"] < target:
-                continue
-            if entry["id"] not in sess.hidden_ids:
-                sess.hidden_ids.add(entry["id"])
+        for mid in ids:
+            if mid not in sess.hidden_ids:
+                sess.hidden_ids.add(mid)
                 deleted += 1
-            legacy = entry.get("legacy_id")
-            if legacy:
-                sess.hidden_ids.add(legacy)
-        # 压缩基线之后被撤回 → 基线回退到撤回点之前
+        # 撤销到压缩点之前 → 作废该点之后的摘要卡，避免旧摘要重新进入模型视角。
+        try:
+            for comp in _repo.compactions_after(session_id, target):
+                sess.hidden_ids.add(comp.id)
+        except Exception:  # noqa: BLE001 - 压缩卡清理失败不阻断撤销
+            logger.debug("revert: compaction cleanup failed", exc_info=True)
         if target - 1 < sess.compact_baseline_seq:
             sess.compact_baseline_seq = max(0, target - 1)
+        # 撤销到压缩点之前 → 同时清掉上下文绑定里的摘要/tail，避免下一轮
+        # `initial_state.context_summary` 把已撤回内容的摘要带回来。
+        try:
+            epoch = _repo.get_epoch(session_id)
+            if epoch is not None and int(epoch.baseline_seq or 0) > target:
+                snap = dict(epoch.snapshot or {})
+                snap.pop("summary", None)
+                snap.pop("tail_start_id", None)
+                _repo.upsert_epoch(
+                    session_id, "", int(sess.compact_baseline_seq), snap
+                )
+        except Exception:  # noqa: BLE001 - 绑定清理失败不阻断撤销
+            logger.debug("revert: epoch cleanup failed", exc_info=True)
         sess.updated_at = time.time()
         self.sessions.persist(session_id)  # 撤回集跨重启存活
         return {"deleted": deleted, "messages": await self.session_messages(session_id)}
@@ -1380,8 +1589,10 @@ class PlatformContext:
     async def compact_session(self, session_id: str, keep_last: int = 10) -> dict[str, Any]:
         """手动压缩：生成摘要、更新 checkpoint、写压缩检查点。
 
-        `keep_last` 已废弃（保留参数兼容旧调用）；tail 由 `context_tail_turns`
-        与 `compaction_preserve_recent_tokens` 决定。
+        `keep_last` 已废弃（保留参数兼容旧调用）；tail 由
+        `compaction_keep_tokens` 决定。不物理删除历史；模型视角按
+        `context_summary` + `context_tail_start_id` 过滤。LLM 失败时降级为
+        确定性摘要，仍写入压缩事件。
         """
         sess = self.sessions.get(session_id)
         if sess is None:
@@ -1389,9 +1600,6 @@ class PlatformContext:
         raw = await self._raw_messages(session_id)
         if not raw:
             return {"compacted": False, "baseline": sess.compact_baseline_seq}
-
-        from langchain_core.messages import RemoveMessage, SystemMessage
-        from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
         from harness.compression import (
             CompressionPlan,
@@ -1424,9 +1632,9 @@ class PlatformContext:
                 keep_tokens=plan.keep_tokens,
                 # 手动压缩至少把更早的一轮折进摘要，避免“点了压缩但全在 tail 里”无操作。
                 tail_turns=1,
-                require_llm=True,
-                raise_on_error=True,
-                require_precision=True,
+                require_llm=False,
+                raise_on_error=False,
+                require_precision=False,
             )
         except Exception as exc:  # noqa: BLE001 - 手动压缩失败时保留原历史
             logger.warning("manual compaction failed: %s", exc)
@@ -1443,20 +1651,6 @@ class PlatformContext:
             "model": sess.model or "",
         }
         payload = {
-            "messages": [
-                RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                SystemMessage(
-                    content=f"[历史摘要]\n{result.summary}",
-                    additional_kwargs={
-                        "compaction": True,
-                        "compaction_reason": "manual",
-                        "tokens_before": event["tokens_before"],
-                        "tokens_after": event["tokens_after"],
-                        "model": event["model"],
-                    },
-                ),
-                *result.recent,
-            ],
             "context_summary": result.summary,
             "context_tail_start_id": result.tail_start_id,
             "context_compressed": True,

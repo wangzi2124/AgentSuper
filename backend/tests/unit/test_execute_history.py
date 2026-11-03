@@ -63,15 +63,20 @@ async def test_history_conversation_injected():
     assert contents.count("我的项目代号是什么？") == 0
 
 
-async def test_tool_messages_dropped_summary_kept():
+async def test_tool_messages_kept_summary_kept():
     model = _CaptureModel()
     node = make_execute_node(model, ToolRegistry(), system_prompt="SYS")
     state = _state(
         [
             SystemMessage(content="[历史摘要]\n早前对话摘要"),
             HumanMessage(content="读文件"),
-            AIMessage(content="好的"),
-            ToolMessage(content="巨大的工具输出噪音", tool_call_id="c1"),
+            AIMessage(
+                content="好的",
+                tool_calls=[
+                    {"id": "c1", "name": "read_file", "args": {}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(content="工具输出事实", tool_call_id="c1"),
             HumanMessage(content="继续"),
         ]
     )
@@ -79,7 +84,8 @@ async def test_tool_messages_dropped_summary_kept():
     sent = model.calls[0]
     joined = "\n".join(str(m.get("content")) for m in sent)
     assert "早前对话摘要" in joined
-    assert "巨大的工具输出噪音" not in joined
+    # 原生工具结果属于 tail 原文，要保留给下一轮（回退模型会转成文本）。
+    assert "工具输出事实" in joined
 
 
 async def test_memory_context_merged_into_system():

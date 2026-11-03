@@ -15,30 +15,24 @@
 严格按以下 Markdown 结构输出，段落顺序不变，缺失段落写“无”：
 
 ```markdown
-## Goal
+## Objective
 - [一句话任务目标]
 
-## Constraints & Preferences
-- [用户约束、偏好、规格，或“无”]
+## Important Details
+- [用户约束、偏好、规格、关键事实与精确值，或“无”]
 
-## Progress
-### Done
+## Work State
+### Completed
 - [已完成事项，或“无”]
 
-### In Progress
+### Active
 - [进行中事项，或“无”]
 
 ### Blocked
 - [阻塞项，或“无”]
 
-## Key Decisions
-- [决策及理由；被否决方案也写在这里，或“无”]
-
-## Next Steps
+## Next Move
 - [按顺序的下一步，或“无”]
-
-## Critical Context
-- [重要技术事实、错误、待确认项、原文缺失，或“无”]
 
 ## Relevant Files
 - [文件或目录路径：为什么重要，或“无”]
@@ -48,10 +42,10 @@
 
 | 原文 | 正确压缩 | 错误做法 |
 |------|----------|----------|
-| `python train.py --lr 0.003` | Critical Context 原样记 `python train.py --lr 0.003` | 写成“用学习率 0.003 训练” |
-| 用户说“先别删那个备份” | Constraints 逐字保留“先别删那个备份” | 概括为“用户要求保留数据” |
+| `python train.py --lr 0.003` | Important Details 原样记 `python train.py --lr 0.003` | 写成“用学习率 0.003 训练” |
+| 用户说“先别删那个备份” | Important Details 逐字保留“先别删那个备份” | 概括为“用户要求保留数据” |
+| 原文未提部署时间 | Blocked 写“部署时间：原文未提” | Objective 补“计划下周部署” |
 | 路径 `src/utils/io.py` | Relevant Files 原样记 `src/utils/io.py` | 写成 `utils/io.py` |
-| 原文未提部署时间 | Critical Context 写“部署时间：原文未提” | Goal 补“计划下周部署” |
 
 已有摘要（若有，在此基础上增量更新）与待压缩历史：
 

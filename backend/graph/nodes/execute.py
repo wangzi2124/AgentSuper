@@ -6,16 +6,15 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from execution.tool_registry import ToolRegistry
 from harness.budget import BudgetLedger
-from harness.context import assemble_model_view
-from harness.tool_history import human_count, last_human_id, merge_tool_history
 from models.router import TierModel, resolve_model
 from prompts.loader import PromptLoader, model_id_of
 
-from .base import content_text, run_tool_loop
+from .base import run_tool_loop
 
 TOOL_SCOPE = "location"
 
@@ -26,38 +25,121 @@ VISION_SYSTEM_PREFIX = (
     "- 先给出对图像的直接观察，再回答用户问题。"
 )
 
-# 历史注入预算（字符）：把同一 thread 的既有对话（checkpointer 中的 state.messages）
-# 作为上下文喂给 LLM，使模型具备会话内短期记忆（对齐 agent.md §4.2：工作记忆 State.messages）。
-# 只保留最近的内容，超出预算从最旧处丢弃，避免提示词无限增长。
-_DEFAULT_HISTORY_BUDGET_CHARS = 12_000
-
-
-def _history_budget_chars() -> int:
-    try:
-        from config import settings
-
-        return max(1_000, int(getattr(settings, "history_budget_chars", 0) or _DEFAULT_HISTORY_BUDGET_CHARS))
-    except Exception:  # noqa: BLE001 - 配置不可用时用默认值
-        return _DEFAULT_HISTORY_BUDGET_CHARS
-
-# 历史里不需要回灌的 role（工具中间结果属噪音；压缩摘要另以 system 保留）。
-
-
 
 def _has_image_block(blocks: list[dict[str, Any]]) -> bool:
     return any(isinstance(b, dict) and b.get("type") == "image_url" for b in blocks)
 
 
+def _msg_to_provider_dict(msg: Any) -> dict[str, Any] | None:
+    """把 LangChain 消息还原成 provider 结构（保留原生 tool_calls / tool 结果）。"""
+    role = getattr(msg, "type", None) or getattr(msg, "role", None) or ""
+    content = getattr(msg, "content", "")
+    if role in ("human", "user"):
+        return {"role": "user", "content": content}
+    if role in ("ai", "assistant"):
+        out: dict[str, Any] = {"role": "assistant", "content": content}
+        calls = getattr(msg, "tool_calls", None) or []
+        if calls:
+            out["tool_calls"] = [
+                {
+                    "id": c.get("id"),
+                    "type": "function",
+                    "function": {
+                        "name": c.get("name"),
+                        "arguments": c.get("args")
+                        if isinstance(c.get("args"), str)
+                        else json.dumps(c.get("args") or {}, ensure_ascii=False),
+                    },
+                }
+                for c in calls
+                if isinstance(c, dict)
+            ]
+        return out
+    if role == "tool":
+        return {
+            "role": "tool",
+            "content": content,
+            "tool_call_id": getattr(msg, "tool_call_id", ""),
+            "name": getattr(msg, "name", "") or "",
+        }
+    if role == "system":
+        return {"role": "system", "content": content}
+    return None
+
+
+def _tool_history_to_lc(history: list[dict[str, Any]]) -> list[Any]:
+    """把工具轮还原成原生 LangChain 消息，写回 state 供下一轮重建。"""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    out: list[Any] = []
+    for msg in history:
+        role = msg.get("role")
+        if role == "assistant":
+            calls = []
+            for call in msg.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                raw = fn.get("arguments")
+                try:
+                    args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                except Exception:  # noqa: BLE001
+                    args = {}
+                calls.append(
+                    {
+                        "id": call.get("id"),
+                        "name": fn.get("name") or call.get("name"),
+                        "args": args if isinstance(args, dict) else {},
+                        "type": "tool_call",
+                    }
+                )
+            out.append(
+                AIMessage(content=str(msg.get("content") or ""), tool_calls=calls)
+            )
+        elif role == "tool":
+            out.append(
+                ToolMessage(
+                    content=str(msg.get("content") or ""),
+                    tool_call_id=str(msg.get("tool_call_id") or ""),
+                    name=str(msg.get("name") or ""),
+                )
+            )
+    return out
+
+
 def _conversation_history(
     state: dict[str, Any], budget_chars: int | None = None
 ) -> list[dict[str, Any]]:
-    """Assemble the model view via ContextHarness (summary + tail + tool history)."""
-    return assemble_model_view(
-        state,
-        content_text=content_text,
-        budget_chars=budget_chars,
-        history_budget_chars=_history_budget_chars(),
-    )
+    """直接使用本轮已由 session.db 重建的 state.messages（含摘要 + tail）。"""
+    raw = list(state.get("messages") or [])
+    cut = len(raw)
+    for i in range(len(raw) - 1, -1, -1):
+        role = getattr(raw[i], "type", None) or getattr(raw[i], "role", None)
+        if role in ("human", "user"):
+            cut = i
+            break
+    summary = str(state.get("context_summary") or "").strip()
+    out: list[dict[str, Any]] = []
+    for msg in raw[:cut]:
+        item = _msg_to_provider_dict(msg)
+        if item is None:
+            continue
+        if (
+            summary
+            and item["role"] == "system"
+            and str(item.get("content") or "").startswith("[历史摘要]")
+        ):
+            continue
+        out.append(item)
+    if summary:
+        out.insert(0, {"role": "system", "content": f"[历史摘要]\n{summary}"})
+    if budget_chars is not None and budget_chars > 0:
+        systems = [m for m in out if m["role"] == "system"]
+        convo = [m for m in out if m["role"] != "system"]
+        total = sum(len(str(m.get("content") or "")) for m in convo)
+        while convo and total > budget_chars:
+            total -= len(str(convo[0].get("content") or ""))
+            convo.pop(0)
+        out = systems + convo
+    return out
 
 
 def _multimodal_user_content(state: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -151,24 +233,6 @@ def make_execute_node(
             stream=True,
         )
 
-        tool_updates: dict[str, Any] = {}
-        new_tool_history = result.get("tool_history") or []
-        if new_tool_history:
-            raw_messages = state.get("messages") or []
-            merged, turn, anchor = merge_tool_history(
-                state.get("tool_history") or [],
-                new_tool_history,
-                existing_turn=state.get("tool_history_turn"),
-                new_turn=human_count(raw_messages),
-                existing_anchor=state.get("tool_history_anchor_id"),
-                new_anchor=last_human_id(raw_messages),
-            )
-            tool_updates = {
-                "tool_history": merged,
-                "tool_history_turn": turn,
-                "tool_history_anchor_id": anchor,
-            }
-
         task_id = task.get("id", "t?")
         for t in plan:
             if t.get("id") == task_id:
@@ -182,7 +246,7 @@ def make_execute_node(
             "draft_output": result["text"],
             "tool_rounds": state.get("tool_rounds", 0) + result["rounds"],
             "token_usage": result.get("usage") or {},
-            **tool_updates,
+            "messages": _tool_history_to_lc(result.get("tool_history") or []),
         }
 
     return execute_node

@@ -223,13 +223,6 @@ def prune_tool_outputs(
     """
     if not messages:
         return messages
-    try:
-        from config import settings
-
-        if not bool(getattr(settings, "compaction_prune", True)):
-            return messages
-    except Exception:  # noqa: BLE001
-        pass
 
     result = list(messages)
 

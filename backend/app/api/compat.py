@@ -701,6 +701,21 @@ async def _run_turn_body(
                 staged_attachments = stage_attachments(
                     turn_attachments, sess.directory
                 )
+                await ctx.ensure_conversation(sess.id)
+                history = ctx.rebuild_history(sess.id)
+                from ..session.projector import project_user_message
+
+                if history is not None:
+                    history = [
+                        m for m in history
+                        if getattr(m, "id", None) != turn_user_msg_id
+                    ]
+                project_user_message(
+                    sess.id,
+                    turn_user_msg_id,
+                    turn_question,
+                    turn_attachments,
+                )
                 state = initial_state(
                     # `/技能名`：本轮强制加载技能正文（找不到或未启用则原样发送）
                     apply_slash_skill(
@@ -712,6 +727,7 @@ async def _run_turn_body(
                     files=turn_attachments,
                     model=sess.model,
                     staged_attachments=staged_attachments,
+                    history_messages=history,
                     use_vector_db=bool(body.use_vector_db),
                     message_id=turn_user_msg_id,
                     context_summary=binding.get("summary", ""),
@@ -763,6 +779,7 @@ async def _run_turn_body(
                     ),
                     message_id=assistant_msg_id,
                 )
+                await ctx.ensure_conversation(sess.id)
                 # 权威完整正文流式下发（前端 text_delta 逐段渲染，done 再兜底覆盖）
                 if final:
                     runner.emit({"type": "text_delta", "agent_id": "", "delta": final})
@@ -893,6 +910,7 @@ async def multi_agent(
             ui={"files_changed": files_changed},
             message_id=assistant_msg_id,
         )
+        await ctx.ensure_conversation(sess.id)
     except Exception as exc:  # noqa: BLE001
         err = classify_error(exc)
         return {

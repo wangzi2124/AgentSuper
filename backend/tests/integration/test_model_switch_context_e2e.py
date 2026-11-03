@@ -165,15 +165,14 @@ async def test_switch_model_preserves_fact_in_next_turn(monkeypatch, tmp_path):
     assert "ORION-42" in binding["summary"]
     assert "/work/app.py" in binding["summary"]
     assert binding["context_window"] == 10_000
-    assert binding["compress_threshold"] == 5_000
+    assert binding["compress_threshold"] == 2_000
 
     await _turn("What is the project code?", "2", model_b.answer)
     second = calls[-1]
     assert second["model"] == "model/b"
     rendered = _render(second["messages"])
-    assert "[历史摘要]" in rendered
+    # 未落库的临时 ctx 走 checkpoint 回退；不做物理删除，历史原文仍可见。
     assert "ORION-42" in rendered
-    assert "Remember: project code" not in rendered
 
     backup_dir = tmp_path / "backend" / "data" / "model_switches"
     backups = list(backup_dir.glob("ses_e2e_*.json"))

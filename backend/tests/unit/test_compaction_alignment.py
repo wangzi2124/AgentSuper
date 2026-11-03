@@ -44,10 +44,7 @@ def test_fallback_summary_is_structured_and_keeps_precision():
     assert "8080" in text
 
 
-def test_prune_protects_skill_tool_output(monkeypatch):
-    from config import settings
-
-    monkeypatch.setattr(settings, "compaction_prune", True)
+def test_prune_protects_skill_tool_output():
     messages = [
         {"role": "user", "content": "u1"},
         {

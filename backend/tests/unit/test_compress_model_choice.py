@@ -1,4 +1,4 @@
-"""压缩模型选择：compress_model / summarization_model 的取值必须真正生效。"""
+"""压缩模型选择：compress_model 的取值必须真正生效。"""
 
 from __future__ import annotations
 

@@ -174,14 +174,10 @@ class Settings(BaseSettings):
     # 插件发现目录（相对 backend/）。
     plugins_dir: str = "plugins"
 
-    # ── 历史摘要 / 压缩模型 ──
-    # 历史摘要模型；compress_model 为空时作为压缩模型回退。
-    summarization_model: Optional[str] = None
-    # 压缩时保留的最近消息条数（每次压缩实时读取，支持 API 热更新）。
-    summarization_keep_messages: int = 6
-    # 压缩专用模型；优先于 summarization_model，空 = tier-simple。
+    # ── 压缩模型 ──
+    # 压缩专用模型；空 = 本回合主模型 / tier-simple。
     compress_model: Optional[str] = None
-    # 是否启用 LLM 摘要压缩（false = 仅规则截断）。
+    # 是否启用自动压缩（false = 不生成摘要、也不做规则截断）。
     compress_model_enabled: bool = True
     # 单次摘要输出硬上限。
     compress_max_tokens: int = 800
@@ -209,23 +205,16 @@ class Settings(BaseSettings):
     # token 估算校正系数（cognition/token_counter.py）。
     token_estimate_correction: float = 1.13
 
-    # ── 上下文压缩 ──
-    # 压缩时尾部保留的最近轮次。
-    context_tail_turns: int = 2
-    # 自动压缩保留的最近消息条数（0 = 按 context_tail_turns × 2 折算）。
-    compaction_tail_messages: int = 0
+    # ── 上下文压缩（对齐 opencode v2）──
+    # 压缩时保留的最近原文 token（keep.tokens）。
+    compaction_keep_tokens: int = 15_000
+    # 自动压缩预留窗口：百分比或绝对 token；"15%" = max(15% × 窗口, 16000)。
+    compaction_buffer: str = "15%"
     # 单条工具输出 token 上限（bound_tool_output 使用）。
     tool_output_max_tokens: int = 8_000
 
-    # ── 压缩策略（对齐 opencode compaction）──
     # 是否在上下文超阈值时自动压缩。
     compaction_auto: bool = True
-    # 是否清理旧工具输出（40k 保护 / 20k 最小收益）。
-    compaction_prune: bool = True
-    # 压缩时保留的最近原文 token；0 = 按可用窗口自动 clamp(2k, 8k, 25%)。
-    compaction_preserve_recent_tokens: int = 0
-    # 压缩预留输出 token；0 = min(20k, llm_max_tokens)。
-    compaction_reserved_tokens: int = 0
 
     # ── 聊天附件 / 历史预算 ──
     # 非图片附件内联进模型上下文的单文件字符上限（超出部分落盘，由工具按需读取）。
@@ -234,8 +223,6 @@ class Settings(BaseSettings):
     attachment_inline_max_chars_total: int = 12_000
     # 「查看正文」接口单次返回的字符上限。
     attachment_extract_max_chars: int = 200_000
-    # execute 节点回灌历史时的字符下限；大窗口仍按窗口自动放宽（上限 60k）。
-    history_budget_chars: int = 12_000
 
     # ── 图片 / OCR / 视觉描述桥 ──
     image_thumbnail_px: int = 256

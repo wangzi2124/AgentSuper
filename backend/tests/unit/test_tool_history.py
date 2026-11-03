@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from graph.nodes.base import run_tool_loop
@@ -216,59 +216,44 @@ def test_merge_tool_history_appends_same_turn_and_replaces_new_turn():
     assert unchanged == first and turn == 1 and anchor == "um1"
 
 
-def _state_with_tool_history(turn=2, anchor="um2", tool_turn=2):
-    messages = [
-        HumanMessage(content="first", id="um1"),
-        AIMessage(content="ok", id="am1"),
-        HumanMessage(content="second", id="um2"),
-        AIMessage(content="done", id="am2"),
-        HumanMessage(content="current", id="um3"),
-    ]
-    history = [
-        make_tool_call_message([("c1", "echo", '{"text": "hi"}')]),
-        make_tool_result_message("c1", "echo", "ORION-42"),
-    ]
+def _state_with_native_tools():
     return {
-        "messages": messages,
-        "tool_history": history,
-        "tool_history_turn": tool_turn,
-        "tool_history_anchor_id": anchor,
+        "messages": [
+            HumanMessage(content="first", id="um1"),
+            AIMessage(
+                content="",
+                id="am1",
+                tool_calls=[
+                    {"id": "c1", "name": "echo", "args": {"text": "hi"}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(content="ORION-42", tool_call_id="c1", name="echo", id="tm1"),
+            AIMessage(content="done", id="am2"),
+            HumanMessage(content="current", id="um3"),
+        ],
+        # 旧版跨轮注入字段应被忽略。
+        "tool_history": [
+            make_tool_call_message([("c1", "echo", '{"text": "hi"}')]),
+            make_tool_result_message("c1", "echo", "OLD-INJECTED"),
+        ],
+        "tool_history_turn": 2,
+        "tool_history_anchor_id": "um2",
     }
 
 
-def test_conversation_history_injects_after_turn_anchor():
-    history = _conversation_history(_state_with_tool_history())
+def test_conversation_history_uses_native_state_messages():
+    history = _conversation_history(_state_with_native_tools())
     roles = [m["role"] for m in history]
 
-    assert roles == ["user", "assistant", "user", "assistant", "tool", "assistant"]
-    assert history[2]["content"] == "second"
-    assert history[3]["tool_calls"][0]["id"] == "c1"
-    assert history[4]["content"] == "ORION-42"
-    assert history[-1]["content"] == "done"
+    assert roles == ["user", "assistant", "tool", "assistant"]
+    assert history[1]["tool_calls"][0]["id"] == "c1"
+    assert history[2]["tool_call_id"] == "c1"
+    assert history[2]["content"] == "ORION-42"
+    assert "OLD-INJECTED" not in json.dumps(history, ensure_ascii=False)
 
 
-def test_conversation_history_expires_after_two_turns():
-    state = _state_with_tool_history(tool_turn=1)
-    state["messages"].append(HumanMessage(content="fourth", id="um4"))
-    history = _conversation_history(state)
-    assert "ORION-42" not in json.dumps(history, ensure_ascii=False)
-
-
-def test_conversation_history_does_not_inject_same_turn():
-    state = _state_with_tool_history(tool_turn=3)
-    history = _conversation_history(state)
-    assert "ORION-42" not in json.dumps(history, ensure_ascii=False)
-
-
-def test_conversation_history_falls_back_when_anchor_missing():
-    state = _state_with_tool_history(anchor="missing")
-    history = _conversation_history(state)
-    assert history[-2]["tool_calls"][0]["id"] == "c1"
-    assert history[-1]["content"] == "ORION-42"
-
-
-def test_injected_history_normalizes_for_native_and_fallback():
-    history = _conversation_history(_state_with_tool_history())
+def test_conversation_history_native_normalizes_for_fallback():
+    history = _conversation_history(_state_with_native_tools())
 
     native = normalize_native(history)
     assistant = next(m for m in native if m["role"] == "assistant" and m.get("tool_calls"))

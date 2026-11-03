@@ -19,7 +19,7 @@ def test_keep_recent_reads_settings_at_call_time(monkeypatch):
         )
 
     monkeypatch.setattr(compress_mod, "compress_graph_messages", fake_compress)
-    monkeypatch.setattr(settings, "summarization_keep_messages", 3)
+    monkeypatch.setattr(settings, "compaction_keep_tokens", 3)
 
     node = compress_mod.make_compress_node(None)
     asyncio.run(node({"messages": [object() for _ in range(10)]}))
@@ -38,7 +38,7 @@ def test_model_factory_is_called_per_invocation(monkeypatch):
         )
 
     monkeypatch.setattr(compress_mod, "compress_graph_messages", fake_compress)
-    monkeypatch.setattr(settings, "summarization_keep_messages", 1)
+    monkeypatch.setattr(settings, "compaction_keep_tokens", 1)
 
     node = compress_mod.make_compress_node(None, model_factory=lambda: sentinel)
     asyncio.run(node({"messages": [object() for _ in range(4)]}))

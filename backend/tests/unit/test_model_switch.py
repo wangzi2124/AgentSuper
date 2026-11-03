@@ -118,7 +118,7 @@ async def test_switch_below_threshold_updates_model_and_persists(monkeypatch, tm
     assert sess.model == "new/model"
     assert ctx.sessions.persisted == ["ses_1"]
     assert upserts and upserts[0][3]["context_window"] == 128000
-    assert upserts[0][3]["compress_threshold"] == 108000
+    assert upserts[0][3]["compress_threshold"] == 108800
     assert list((tmp_path / "backend" / "data" / "model_switches").glob("*.json"))
     events = _audit_events(tmp_path)
     assert events[-1]["status"] == "committed"
@@ -223,8 +223,8 @@ def test_initial_state_binds_stable_id_and_window(monkeypatch):
     assert state["context_summary"] == "summary"
     assert state["context_tail_start_id"] == "m2"
     assert state["context_window"] == 100000
-    assert state["compress_threshold"] == 80000
-    assert state["keep_recent_tokens"] == 8000
+    assert state["compress_threshold"] == 84000
+    assert state["keep_recent_tokens"] == 15000
 
 
 def test_initial_state_uses_bound_compression_config():

@@ -130,14 +130,9 @@ def build_main_graph(
             try:
                 from models.router import get_compress_model
 
-                # compress_model 优先；未配时用 summarization_model（历史摘要模型）
-                configured_compress = (
-                    getattr(settings, "compress_model", None)
-                    or getattr(settings, "summarization_model", None)
-                )
                 compress_model = get_compress_model(
                     max_tokens=getattr(settings, "compress_max_tokens", 800),
-                    model=configured_compress,
+                    model=getattr(settings, "compress_model", None),
                 )
             except Exception as exc:  # noqa: BLE001 - 构造失败降级为规则截断
                 logger.warning("compress model build failed, rule-only compression: %s", exc)
@@ -189,7 +184,6 @@ def build_main_graph(
     builder.add_node("grade_docs", make_grade_node(grade_model))
     builder.add_node("rewrite", make_rewrite_node(rewrite_model))
     builder.add_node("memory_recall", make_memory_recall_node(store))
-    # summarization_model 启用时，用 summarization_keep_messages 作为保留条数；
     def _resolve_compress_model() -> Any | None:
         if not getattr(settings, "compress_model_enabled", True):
             return None
@@ -197,11 +191,10 @@ def build_main_graph(
 
         return get_compress_model(
             max_tokens=getattr(settings, "compress_max_tokens", 800),
-            model=settings.compress_model or settings.summarization_model,
+            model=settings.compress_model,
         )
 
-    # 未注入压缩模型时，节点每次调用重新解析配置：/api/config/summarization
-    # 修改 summarization_model / keep_messages 后无需重启即生效。
+    # 未注入压缩模型时，节点每次调用重新解析配置：修改 compress_model 后无需重启即生效。
     builder.add_node(
         "context_compress",
         make_compress_node(

@@ -82,4 +82,5 @@ def test_build_compress_prompt_has_self_check():
     prompt = build_compress_prompt("旧摘要", "用户: 你好")
     assert "旧摘要" in prompt and "用户: 你好" in prompt
     assert "## Relevant Files" in prompt
-    assert "## Critical Context" in prompt
+    assert "## Work State" in prompt
+    assert "### Blocked" in prompt

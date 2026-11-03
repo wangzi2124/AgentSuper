@@ -12,7 +12,7 @@ import time
 import typing
 from typing import Any, Awaitable, Callable
 
-from cognition.tool_output import bound_tool_output, prune_tool_outputs
+from cognition.tool_output import bound_tool_output
 from execution.quota import get_quota
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from harness.adapter import call_argument_error
@@ -208,6 +208,40 @@ def _strip_media_blocks(messages: list[dict]) -> tuple[list[dict], bool]:
             msg = {**msg, "content": parts}
         out.append(msg)
     return out, stripped
+
+
+def _merge_history_summary(
+    messages: list[dict], summary: str, recent: list[Any]
+) -> list[dict]:
+    """把压缩摘要合并进首条 system，再拼接 tail 原文。"""
+    tail = [dict(m) for m in recent if isinstance(m, dict)]
+    if not tail:
+        return messages
+    head = [dict(m) for m in messages[:1]] if messages and messages[0].get("role") == "system" else []
+    if head:
+        original = str(head[0].get("content") or "")
+        head[0]["content"] = f"{original}\n\n[历史摘要]\n{summary}" if summary else original
+    elif summary:
+        head = [{"role": "system", "content": f"[历史摘要]\n{summary}"}]
+    return head + tail
+
+
+def _trim_for_overflow(messages: list[dict], keep_last: int = 6) -> list[dict]:
+    """兜底裁剪：保留 system + 最近若干条，并丢弃失去配对的 tool 消息。"""
+    head = [messages[0]] if messages and messages[0].get("role") == "system" else []
+    tail = messages[len(head):][-keep_last:]
+    valid_ids = {
+        str(call.get("id") or "")
+        for msg in tail
+        for call in (msg.get("tool_calls") or [])
+        if isinstance(call, dict)
+    }
+    cleaned = [
+        m
+        for m in tail
+        if not (m.get("role") == "tool" and str(m.get("tool_call_id") or "") not in valid_ids)
+    ]
+    return head + cleaned
 
 
 def has_image_content(content: Any) -> bool:
@@ -558,8 +592,6 @@ async def run_tool_loop(
     overflow_retried = False
 
     while rounds < max_rounds:
-        if rounds:
-            convo = prune_tool_outputs(convo)
         if budget is not None:
             try:
                 budget.ensure_available()
@@ -603,18 +635,39 @@ async def run_tool_loop(
                     result = await retry_async(
                         lambda: tool_adapter.complete(convo, tool_defs or None)
                     )
-        except Exception as exc:  # noqa: BLE001 - 上下文超限时剥媒体重试一次
+        except Exception as exc:  # noqa: BLE001 - 上下文超限时压缩后重试一次
             from models.context_guard import is_overflow_error
 
             if overflow_retried or not is_overflow_error(exc):
                 raise
             overflow_retried = True
-            convo, stripped = _strip_media_blocks(convo)
-            convo = prune_tool_outputs(
-                convo, protect_tokens=0, minimum_tokens=0, tail_turns=1
-            )
+            before = len(convo)
+            try:
+                from harness.compression import DEFAULT_KEEP_TOKENS, compress_messages
+
+                result_c = await compress_messages(
+                    convo,
+                    model=model,
+                    threshold=1,
+                    keep_tokens=DEFAULT_KEEP_TOKENS,
+                )
+                if result_c.triggered:
+                    convo = _merge_history_summary(
+                        convo, result_c.summary, result_c.recent
+                    )
+            except Exception:  # noqa: BLE001 - 摘要失败继续降级
+                logger.warning("overflow compression failed", exc_info=True)
+            if len(convo) >= before or not convo:
+                convo, stripped = _strip_media_blocks(convo)
+                logger.warning(
+                    "context overflow: retry once after stripping media (%s)", stripped
+                )
+            if len(convo) >= before and before > 2:
+                convo = _trim_for_overflow(convo)
             logger.warning(
-                "context overflow: retry once after stripping media (%s)", stripped
+                "context overflow: compressed %d -> %d messages, retrying",
+                before,
+                len(convo),
             )
             continue
         rounds += 1

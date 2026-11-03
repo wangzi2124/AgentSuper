@@ -175,11 +175,9 @@ async def _run_case(tmp_path, monkeypatch, *, keep_tool_history: bool):
     assert model_a.calls[0]["tools"], "A 应走原生工具调用"
 
     state = await ctx.state("ses_cross")
-    assert state.get("tool_history"), "A 的工具历史必须写入 state"
-    assert "ORION-42" in json.dumps(state["tool_history"], ensure_ascii=False)
-    assert "ORION-42" not in json.dumps(
-        [m for m in state.get("messages", [])], ensure_ascii=False, default=str
-    )
+    serialized = json.dumps(state.get("messages", []), ensure_ascii=False, default=str)
+    assert "ORION-42" in serialized, "工具结果必须以原生 tool 消息写入 state"
+    assert '"role": "tool"' in serialized
 
     if not keep_tool_history:
         await graph.aupdate_state(
@@ -236,12 +234,9 @@ async def _run_case(tmp_path, monkeypatch, *, keep_tool_history: bool):
     assert b_call["tools"] is None, "回退模型不能收到原生 tools"
     assert '"role": "tool"' not in prepared
     assert '"tool_calls"' not in prepared
-    if keep_tool_history:
-        assert "ORION-42" in prepared
-        assert second["final_output"] == "ORION-42"
-    else:
-        assert "ORION-42" not in prepared
-        assert second["final_output"] == "unknown"
+    # 模型切换后仍依赖 state.messages 里的原生工具轮（旧 tool_history 注入已退役）。
+    assert "ORION-42" in prepared
+    assert second["final_output"] == "ORION-42"
 
     audit_path = tmp_path / "backend" / "data" / "model_switches" / "switches.jsonl"
     records = [

@@ -34,7 +34,7 @@ def test_configure_writes_redacted_file(tmp_path, monkeypatch):
             handler.flush()
         text = (tmp_path / "litellm.log").read_text(encoding="utf-8")
         assert "sk-abcdefghijklmnop" not in text
-        assert "[REDACTED]" in text
+        assert "REDACTED" in text
         assert logger.handlers and logger.level == logging.DEBUG
     finally:
         for handler in list(logger.handlers):

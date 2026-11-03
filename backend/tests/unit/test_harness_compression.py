@@ -1,17 +1,23 @@
 ﻿from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+import harness.compression as compression
 from harness.compression import (
     CompressionError,
     CompressionPlan,
     compress_graph_messages,
     compress_messages,
+    parse_buffer,
+    select_tail_messages,
     summarize_messages,
     tail_snapshot,
+    tail_start_id,
+    turn_ranges,
 )
 
 
@@ -26,17 +32,18 @@ class _FakeModel:
 
 
 def test_plan_for_window_is_bounded_and_paired():
+    # v2 buffer: max(15% × window, 16000); 10k window falls back to the 2k floor.
     plan = CompressionPlan.for_window(10_000)
-    assert plan.threshold == 5_000
+    assert plan.threshold == 2_000
     assert plan.keep_tokens == 2_000
 
     sized = CompressionPlan.for_window(100_000, max_output_tokens=8_000)
-    assert sized.threshold == 92_000
-    assert sized.keep_tokens == 8_000
+    assert sized.threshold == 84_000
+    assert sized.keep_tokens == 15_000
 
     fallback = CompressionPlan.for_window(0)
     assert fallback.threshold == 80_000
-    assert fallback.keep_tokens == 20_000
+    assert fallback.keep_tokens == 15_000
 
 
 @pytest.mark.asyncio
@@ -162,3 +169,90 @@ def test_tail_snapshot_reads_id_and_seq():
     out = tail_snapshot([SimpleNamespace(id="m1", seq=4)])
     assert out == {"tail_start_id": "m1", "tail_start_seq": 4}
     assert tail_snapshot([]) == {}
+    assert tail_start_id([]) is None
+
+
+def test_parse_buffer_handles_percent_absolute_and_invalid():
+    assert parse_buffer("50%", 100_000) == 50_000
+    assert parse_buffer("bad%", 100_000) == 16_000
+    assert parse_buffer("20000", 100_000) == 20_000
+    assert parse_buffer("bad", 100_000) == 16_000
+    assert parse_buffer(None, 0) == 16_000
+
+    class _Boom:
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    assert parse_buffer(_Boom(), 100_000) == 16_000
+
+
+def test_defaults_fall_back_when_config_import_fails(monkeypatch):
+    monkeypatch.setitem(sys.modules, "config", None)
+    assert compression._keep_default(None) == 15_000
+    assert compression._buffer_default(100_000) == 16_000
+
+
+def test_tail_selection_edge_cases():
+    assert turn_ranges([AIMessage(content="x")]) == []
+    assert select_tail_messages([], 10, 0) == ([], [])
+    only_ai = [AIMessage(content="x")]
+    assert select_tail_messages(only_ai, 10, 0) == (only_ai, [])
+    # 空内容 turn 的 token 为 0，keep=0 时整段都可作为 tail。
+    assert select_tail_messages([HumanMessage(content="")], 0, 0) == ([], [HumanMessage(content="")])
+
+
+@pytest.mark.asyncio
+async def test_summarize_empty_and_default_model(monkeypatch):
+    assert await summarize_messages([], "existing") == "existing"
+
+    model = _FakeModel("auto summary")
+
+    def _get_model(_tier):
+        return model
+
+    monkeypatch.setattr("models.router.get_model", _get_model)
+    out = await summarize_messages([HumanMessage(content="hello", id="m1")])
+    assert out == "auto summary"
+
+
+@pytest.mark.asyncio
+async def test_summarize_segments_and_falls_back_on_error(monkeypatch):
+    model = _FakeModel("segmented")
+    messages = [HumanMessage(content="one " * 20, id="m1"), AIMessage(content="two " * 20, id="m2")]
+    out = await summarize_messages(messages, model=model, segment_tokens=1)
+    assert out == "segmented"
+    assert len(model.calls) >= 2
+
+    class _Boom:
+        async def ainvoke(self, _messages):
+            raise RuntimeError("down")
+
+    out = await summarize_messages(messages, model=_Boom())
+    assert out  # deterministic fallback
+
+
+@pytest.mark.asyncio
+async def test_compress_messages_noop_paths_and_fallback_summary():
+    keep_all = [HumanMessage(content="hi")]
+    out = await compress_messages(keep_all, threshold=-1, keep_tokens=100)
+    assert out.triggered is False
+
+    messages = [HumanMessage(content="fact /work/app.py"), AIMessage(content="done")]
+    out = await compress_messages(messages, threshold=0, keep_tokens=0)
+    assert out.triggered is True
+    assert out.summary
+
+
+@pytest.mark.asyncio
+async def test_graph_compress_turn_mode_and_noop():
+    messages = [
+        HumanMessage(content="a /work/app.py", id="m1"),
+        AIMessage(content="b", id="m2"),
+    ]
+    out = await compress_graph_messages(
+        messages, keep_tokens=1, keep_recent=1, model=None
+    )
+    assert out.triggered is True
+
+    no_op = await compress_graph_messages([AIMessage(content="x")], keep_recent=1)
+    assert no_op.triggered is False

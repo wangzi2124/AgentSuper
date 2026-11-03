@@ -1,9 +1,10 @@
 """上下文压缩节点（对齐 opencode compaction）。
 
 - 触发由 `route_after_supervisor` 按可用窗口判断；
-- tail 按最近 user 轮次 + token 预算保留；
-- 摘要使用 8 段模板，LLM 门禁不过时用确定性兜底；
-- 压缩检查点写入 state，并由 PlatformContext 同步到 session.db。
+- tail 按最近 user 轮次 + token 预算保留（keep.tokens，默认 15k）；
+- 摘要始终优先走模型，失败时用确定性兜底；
+- 压缩检查点写入 state，并由 PlatformContext 同步到 session.db；
+- 不物理删除历史，模型视角由 session.db 重建时过滤。
 """
 
 from __future__ import annotations
@@ -11,22 +12,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from langchain_core.messages import SystemMessage
-
 from harness.compression import (
+    DEFAULT_KEEP_TOKENS,
     compress_graph_messages,
     estimate_messages,
     tail_start_id,
 )
 
 logger = logging.getLogger(__name__)
-
-try:  # pragma: no cover - 版本差异兜底
-    from langchain_core.messages import RemoveMessage
-    from langgraph.graph.message import REMOVE_ALL_MESSAGES
-except Exception:  # noqa: BLE001
-    RemoveMessage = None  # type: ignore
-    REMOVE_ALL_MESSAGES = None  # type: ignore
 
 KEEP_RECENT = 6
 
@@ -62,10 +55,7 @@ def make_compress_node(
                 logger.warning("compress model resolve failed, rule-only: %s", exc)
                 active_model = None
         # 未显式配置压缩模型时，按 opencode 行为回退到本回合主模型。
-        if active_model is not None and not (
-            getattr(settings, "compress_model", None)
-            or getattr(settings, "summarization_model", None)
-        ):
+        if active_model is not None and not getattr(settings, "compress_model", None):
             if session_model_factory is not None:
                 try:
                     active_model = session_model_factory(state)
@@ -73,7 +63,7 @@ def make_compress_node(
                     logger.warning("session model resolve failed, keep compress model: %s", exc)
 
         active_keep = (
-            max(1, int(settings.summarization_keep_messages or KEEP_RECENT))
+            max(0, int(settings.compaction_keep_tokens or 0))
             if keep_recent is None
             else max(1, int(keep_recent))
         )
@@ -120,12 +110,13 @@ def make_compress_node(
             model=active_model,
             compress_count=int(state.get("compress_count", 0) or 0),
             keep_recent=active_keep,
-            keep_tokens=0 if legacy_keep else int(state.get("keep_recent_tokens") or 0),
-            tail_turns=(
-                None
+            keep_tokens=(
+                0
                 if legacy_keep
-                else int(getattr(settings, "context_tail_turns", 2) or 2)
+                else int(state.get("keep_recent_tokens") or 0)
+                or DEFAULT_KEEP_TOKENS
             ),
+            tail_turns=None if legacy_keep else 0,
         )
         if not getattr(result, "triggered", False):
             return {"token_usage": {"compressed": False}, "context_compressed": True}
@@ -172,19 +163,4 @@ def _compaction_payload(
         payload["context_tail_start_id"] = tail_id
     if compress_count is not None:
         payload["compress_count"] = compress_count
-    if RemoveMessage is not None and REMOVE_ALL_MESSAGES is not None:
-        payload["messages"] = [
-            RemoveMessage(id=REMOVE_ALL_MESSAGES),
-            SystemMessage(
-                content=f"[历史摘要]\n{summary}",
-                additional_kwargs={
-                    "compaction": True,
-                    "compaction_reason": reason,
-                    "tokens_before": int(tokens_before),
-                    "tokens_after": after,
-                    "model": model_label,
-                },
-            ),
-            *recent,
-        ]
     return payload

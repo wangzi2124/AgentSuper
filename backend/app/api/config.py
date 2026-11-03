@@ -33,9 +33,9 @@ class SummarizationStatus(BaseModel):
 async def get_summarization_config():
     """获取当前摘要功能的配置状态。"""
     return SummarizationStatus(
-        model=settings.summarization_model,
-        keep_messages=settings.summarization_keep_messages,
-        enabled=settings.summarization_model is not None,
+        model=settings.compress_model,
+        keep_messages=settings.compaction_keep_tokens,
+        enabled=bool(getattr(settings, "compress_model_enabled", True)),
     )
 
 
@@ -44,18 +44,18 @@ async def update_summarization_config(body: SummarizationConfig, request: Reques
     """更新摘要功能的配置参数。"""
     require_admin(request)
     if body.model is not None:
-        settings.summarization_model = body.model if body.model else None
+        settings.compress_model = body.model if body.model else None
     if body.keep_messages is not None:
-        settings.summarization_keep_messages = max(1, body.keep_messages)
+        settings.compaction_keep_tokens = max(1, body.keep_messages)
 
     logger.info(
         "Summarization config updated: model=%s, keep=%d",
-        settings.summarization_model,
-        settings.summarization_keep_messages,
+        settings.compress_model,
+        settings.compaction_keep_tokens,
     )
 
     return SummarizationStatus(
-        model=settings.summarization_model,
-        keep_messages=settings.summarization_keep_messages,
-        enabled=settings.summarization_model is not None,
+        model=settings.compress_model,
+        keep_messages=settings.compaction_keep_tokens,
+        enabled=bool(getattr(settings, "compress_model_enabled", True)),
     )

@@ -25,6 +25,14 @@ _DELETED_KEYS = {
     "external_path_default",
     "compress_min_tokens",
     "compress_max_llm_calls",
+    "summarization_model",
+    "summarization_keep_messages",
+    "context_tail_turns",
+    "compaction_tail_messages",
+    "compaction_prune",
+    "compaction_preserve_recent_tokens",
+    "compaction_reserved_tokens",
+    "history_budget_chars",
 }
 
 

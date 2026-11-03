@@ -1,8 +1,7 @@
-"""L1 单元测试：压缩 LLM 摘要门禁 + 精确值回填（agent-1.md §1.4 / §1.5）。
+"""L1 单元测试：压缩摘要 + 精确值回填。
 
-原则：压缩=低成本高收益可积极启用，但每次调模型都要过门禁：
-C1 被压缩内容 ≥5000 token；C2 含精确值关键词；C3 本会话 LLM 摘要 <3 次。
-越不过门禁 → 规则截断（不调模型）。摘要生成后纯规则回填精确值（确定性保证）。
+v2 起移除 LLM 门禁：只要有模型就生成摘要，失败才走确定性兜底。
+摘要生成后纯规则回填精确值（确定性保证）。
 """
 
 from langchain_core.messages import HumanMessage
@@ -111,14 +110,13 @@ async def test_node_calls_model_when_gate_passes():
     assert out["context_compressed"] is True
 
 
-async def test_node_skips_model_when_gate_fails():
+async def test_node_calls_model_even_for_short_content():
     model = _CaptureModel()
     node = make_compress_node(model, keep_recent=2)
-    # 内容太少 → C1 失败 → 规则截断，不调模型
     msgs = [HumanMessage(content="短") for _ in range(4)]
     out = await node({"messages": msgs, "compress_count": 0})
-    assert model.calls == 0
-    assert out.get("compress_count", 0) == 0
+    assert model.calls == 1
+    assert out.get("compress_count", 0) == 1
 
 
 async def test_node_skips_model_when_disabled():
@@ -131,16 +129,14 @@ async def test_node_skips_model_when_disabled():
     assert out.get("compress_count", 0) == 0
 
 
-async def test_node_backfills_precision_on_rule_path():
-    """§1.5：精确值回填是「每次压缩后」的确定性保证 —— 门禁失败走规则截断时
-    精确值（路径/命令/数字）同样会随 older 被丢弃，必须回填，不能只补 LLM 分支。"""
-    model = _CaptureModel()  # C1 失败 → 不调模型，走规则截断
+async def test_node_backfills_precision_even_when_llm_omits_it():
+    """精确值回填是「每次压缩后」的确定性保证：LLM 摘要漏掉的路径/数字必须补回。"""
+    model = _CaptureModel("已压缩，但没写具体值")
     node = make_compress_node(model, keep_recent=2)
     older = [HumanMessage(content="端口 8080 路径 /a/b.txt version 3")]
     recent = [HumanMessage(content="最近1"), HumanMessage(content="最近2")]
     out = await node({"messages": older + recent, "compress_count": 0})
-    assert model.calls == 0  # 未调模型（规则路径）
+    assert model.calls == 1
     summary = out["context_summary"]
-    assert "Critical Context" in summary
     assert "8080" in summary and "/a/b.txt" in summary
 

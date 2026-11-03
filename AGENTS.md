@@ -22,7 +22,7 @@ backend/
     turn_runner.py          # 后台回合：有界事件日志、订阅重放、心跳、清理
     live_turns.py           # 在途回合 sidecar 正文 + 启动对账
     api/                    # chat / compat / sessions / documents / models / ...
-    session/                # session.db、history、service、repository
+    session/                # session.db、history、service、repository、projector
   graph/
     main_graph.py           # LangGraph 主图
     nodes/                  # supervisor/plan/rag/execute/compress/parallel/...
@@ -40,8 +40,8 @@ backend/
     history.py              # 历史归一化
     delimiters.py           # 文本回退定界符
     streaming.py            # 流式解析/前置抑制
-    tool_history.py         # 跨轮工具历史（锚点/上限/过期）
-    context.py              # 模型视角装配（摘要 + tail + 工具历史）
+    tool_history.py         # 旧跨轮工具历史工具函数（注入已退役）
+    context.py              # 旧模型视角装配（保留给回滚/测试）
     compression.py          # 压缩计划/摘要/精确值/tail
     switch.py               # SwitchService 状态机
     budget.py               # BudgetLedger
@@ -86,11 +86,13 @@ HTTP / SSE
 - **TurnHarness**：`harness/kernel.py`。`PlatformContext.run/stream` 已接入；`turn_id` 通过 contextvar 传播。
 - **AgentLoop**：`run_tool_loop`。默认完整响应；`graph/nodes/execute.py` 传 `stream=True`，回退模型在 `ToolCallReady` 时提前执行工具。空回复最多补答 2 次，之后收尾；不把 thinking 模型的 reasoning 冒充答案。
 - **文件任务证据**：用户要求列目录/读文件，但本轮 `tool_trace` 为空时，禁止返回模型编造的文件清单；统一提示“先执行工具/换 tool-capable 模型”。
-- **聊天附件**：图片走多模态内联；PDF/Word/Excel 等落盘到会话工作区 `attachments/`，并生成可读的 `.extracted.txt`（超过 12k 字符按 6k 分片），模型用 `read_file`/`grep` 读全文；模型上下文只内联 `attachment_inline_max_chars_per_file` / `_total` 上限内的正文，`history_budget_chars` 控制历史回灌下限；聊天记录不再内联正文，前端「查看正文」走 `POST /api/attachments/extract`（上限 `attachment_extract_max_chars`）。
+- **聊天附件**：图片走多模态内联；PDF/Word/Excel 等落盘到会话工作区 `attachments/`，并生成可读的 `.extracted.txt`（超过 12k 字符按 6k 分片），模型用 `read_file`/`grep` 读全文；模型上下文只内联 `attachment_inline_max_chars_per_file` / `_total` 上限内的正文；聊天记录不再内联正文，前端「查看正文」走 `POST /api/attachments/extract`（上限 `attachment_extract_max_chars`）。
 - **模型切换**：`harness/switch.py`。门禁 → 原文备份 → 摘要/精确值探针 → 原子写 epoch → 持久化 model；失败回滚。
-- **压缩（对齐 opencode）**：`harness/compression.py`。阈值 = `context_window - reserved`（`reserved=min(20k, 模型 max_output)`；目录未声明输出上限时给窗口留一半）；tail 按最近 `context_tail_turns` 轮 + `compaction_preserve_recent_tokens`（0=clamp(2k,8k,25%)）；8 段摘要见 `prompts/nodes/compress.md`，LLM 门禁不过/失败时用确定性兜底；自动、手动 compact、模型切换共用同一核心，手动 compact 会真正更新 checkpoint；检查点写 `session_messages(type=compaction)` + epoch，前端显示可折叠压缩卡。相关配置：`compaction_auto`、`compaction_prune`、`compaction_preserve_recent_tokens`、`compaction_reserved_tokens`。
-- **上下文视图**：`harness/context.py`。`[摘要] + [tail 原文] + [tool_history 回插] + [当前 user]`。
-- **工具历史**：`harness/tool_history.py`。只保留最近一个有工具轮；最多 10 条 / 8KB / 单结果 2KB；最多注入 2 个用户轮。
+- **压缩（对齐 opencode v2）**：`harness/compression.py`。阈值 = `context_window - buffer`，`buffer` 来自 `compaction_buffer`（默认 `"15%"`，按 `max(15%×窗口, 16000)` 解析）；tail 按最近 user 轮 + `compaction_keep_tokens`（默认 15000），不按消息条数；摘要请求复用完整对话，8 段模板见 `prompts/nodes/compress.md`；移除 LLM 门禁，模型可用即生成摘要，失败/手动压缩失败降级确定性摘要；自动、手动 compact、模型切换共用同一核心；**不再物理删除历史**，只写 `context_summary` + `context_tail_start_id` 与 `session_messages(type=compaction)`；前端显示可折叠压缩卡。相关配置：`compaction_auto`、`compaction_keep_tokens`、`compaction_buffer`、`compress_model`、`compress_model_enabled`、`compress_max_tokens`。
+- **会话真相源（v2）**：`session.db` 的 `session_messages`（含 `user/assistant/tool` 与 `message_parts`）是对话真相源；每轮结束由 `app/session/projector.py` 把 checkpoint 增量幂等投影进来，checkpoint 只做单轮运行时。投影按稳定消息 id 去重；assistant 的 `tool_calls` 落为 tool part，tool 结果回填 output；逻辑删除/撤销用 `hidden_ids` 墓碑，防止 checkpoint 重新投影复活；撤销到压缩点之前会同时隐藏该点之后的 compaction 行并清空 epoch 摘要/tail。
+- **模型视角重建**：回合前 `PlatformContext.rebuild_history` 从 DB 重建 `[最新 compaction 摘要] + [tail_start_id 之后原文]`，以 `Overwrite([...history, 当前 user])` 写入 state；tail 内保留原生 `assistant(tool_calls)` + `ToolMessage(tool_call_id)`，更早历史只进摘要。DB 无该会话时回退 checkpoint。
+- **上下文视图**：`graph/nodes/execute._conversation_history` 直接消费已重建的 `state.messages`；跨轮 `tool_history` 回插已退役（模块保留但不再注入）。
+- **溢出恢复**：`run_tool_loop` 捕获 `ContextOverflowError` 后先用 `harness.compression` 压缩对话并重试一次；摘要失败再降级剥媒体/裁剪。Ollama 仍由 `models/context_guard.py` 先行自动扩窗。
 - **Ollama prompt 适配**：`models/context_guard.py`，在 `TierModel` 传输层（`raw_invoke/raw_ainvoke/raw_stream`）执行。窗口 = 显式 override > `/api/ps` last-known > `OLLAMA_NUM_CTX`；输出预留 `max(512, 25%×窗口)`，估算裕量 `max(256, 8%×窗口)`；超预算先 `truncate_messages` + `sanitize_tool_messages`，保留 system + 最新 user；system+工具+当前 user 仍装不下时**自动扩展**：按所需最小窗口（2 的幂，上限 32768）随请求下发 `num_ctx`，让 Ollama 重载到更大窗口；只有超过自动上限才抛 `ContextOverflowError`。真实 `prompt_tokens` 按模型 EWMA 校准估算比；一次 overflow 会清窗口缓存、重探、重试一次。`OLLAMA_CONTEXT_GUARD=0` 关闭。
 - **治理**：`BudgetLedger`、`classify_error`、`retry_async`、`redact_secrets`、`ToolSchemaCache`。
 - **LiteLLM 调试**：`observability/litellm_debug.py`，默认 `litellm_debug=true`；启动时 `litellm._turn_on_debug()`，日志写 `data/logs/litellm-debug.log`（20MB×3 轮转，`redact_secrets` 过滤）。控制台仍保持 INFO；`LITELLM_DEBUG=0` 关闭。
@@ -210,7 +212,7 @@ npx vitest run tests/integration/
 - **Python**：`backend/.python-version` 为 3.13；始终用 `backend\.venv\Scripts\python.exe`。
 - **启动慢**：embedding 模型、技能播种、语音预热；不要几秒没响应就判定死。
 - **uvicorn --reload**：E: 盘不可靠，且可能残留幽灵 8000；改代码后 `taskkill /PID <pid> /T /F`。
-- **会话存储**：模型视角历史主要来自 graph checkpoint；`session.db` 负责 UI/事件/队列/epoch。不要把两者混为一个真相源。
+- **会话存储**：`session.db` 是对话正文真相源；graph checkpoint 只做单轮运行时并双写投影。模型视角每轮从 DB 重建，不要绕过 `app/session/projector.py` 直接拼历史。
 - **用户身份**：账号/设备密钥哈希存 `session.db` 的 `auth_users` 表（`storage/schema.py`），不再写 JSON；旧 `auth_users.json` 仅首次访问时一次性导入并删除。
 - **`session_inputs`**：执行中追加任务走 `/api/sessions/{id}/prompts` 队列；旧单数 `/prompt` 已删除。
 - **权限**：无审批通道时 `require_approval` 工具一律拒绝；`.git` 路径永远拒绝；Shell 重定向目标要过写权限。
@@ -255,11 +257,11 @@ npx vitest run tests/integration/
 
 ## 8. 验收与已知缺口
 
-当前实测（2026-10-26，本地 Windows）：
+当前实测（2026-11-03，本地 Windows）：
 
-- 后端：`564 passed, 18 skipped`（`pytest` 全量）
-- Harness 覆盖率：本轮未重跑（venv 缺 `pytest-cov`；上次 `90.80%`，门槛 90%）
-- 前端单测：`107 passed`（`npm test`）
+- 后端：`pytest` 全量通过（env-gated 用例默认 skip；含 v2 投影/重建测试）
+- Harness 覆盖率：`92.46%`（`pytest ... --cov=harness --cov-fail-under=90`，门槛 90%）
+- 前端单测：`143 passed | 119 skipped`（`npm test`；live 用例需后端）
 - 前端 live SSE 集成：本轮未重跑（需后端；上次 `119 passed`）
 - 前端 `npm run build`：通过
 - 真实模型：DeepSeek `deepseek/deepseek-v4-flash → deepseek-v4-pro`；E2E 8 条、PF-01/02/05/06/07 通过
