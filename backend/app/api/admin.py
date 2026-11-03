@@ -68,12 +68,14 @@ def _prompt_files() -> list[str]:
 async def list_prompts() -> dict:
     items = []
     for rel in _prompt_files():
-        entry: dict = {"path": rel}
-        try:
+        entry: dict = {"path": rel, "hash": None}
+        # 只有 Agent 角色提示词参与组装哈希；provider profile / 节点模板单独列文件。
+        if rel.startswith("system/"):
             agent_type = rel.split("/", 1)[1].removesuffix(".md")
-            entry["hash"] = prompt_hash(agent_type)
-        except Exception:  # noqa: BLE001 - provider/node 模板无哈希
-            entry["hash"] = None
+            try:
+                entry["hash"] = prompt_hash(agent_type)
+            except Exception:  # noqa: BLE001 - 模板缺失时保持 None
+                entry["hash"] = None
         items.append(entry)
     return {"prompts": items, "count": len(items)}
 

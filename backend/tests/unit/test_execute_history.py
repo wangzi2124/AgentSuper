@@ -161,3 +161,16 @@ def test_history_budget_trims_oldest():
     assert total <= 1000 + 400  # 至少丢弃了大部分旧内容
     # 最近的内容保留
     assert any(c["content"].startswith("a49") for c in hist)
+
+
+async def test_attachment_context_injected_into_messages():
+    model = _CaptureModel()
+    node = make_execute_node(model, ToolRegistry(), system_prompt="SYS")
+    state = _state(
+        [HumanMessage(content="对比这两个文件")],
+        attachment_context="【附件：a.txt】\n苹果 10 元\n\n【附件：b.txt】\n香蕉 20 元",
+    )
+    await node(state)
+    joined = "\n".join(str(m.get("content")) for m in model.calls[0])
+    assert "苹果 10 元" in joined
+    assert "香蕉 20 元" in joined

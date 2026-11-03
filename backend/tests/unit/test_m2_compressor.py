@@ -81,5 +81,5 @@ async def test_llm_failure_keeps_existing_summary():
 def test_build_compress_prompt_has_self_check():
     prompt = build_compress_prompt("旧摘要", "用户: 你好")
     assert "旧摘要" in prompt and "用户: 你好" in prompt
-    assert "9. 待办与风险" in prompt
-    assert "压缩自检清单" in prompt
+    assert "## Relevant Files" in prompt
+    assert "## Critical Context" in prompt

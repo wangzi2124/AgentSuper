@@ -46,40 +46,20 @@ export async function fetchTurnDiff(
   }, true) as Promise<TurnDiff>
 }
 
-export async function sendMultiAgentStream(
-  data: MultiAgentChatRequest,
+function streamError(status: number, detail: string, statusText: string): ChatError {
+  return {
+    type: status === 429 ? 'rate_limit' : status >= 500 ? 'server_error' : 'unknown',
+    message: `Stream error: ${detail || statusText}`,
+    retryable: status === 429 || status >= 500,
+    statusCode: status,
+  }
+}
+
+async function consumeMultiAgentSSE(
+  res: Response,
   onEvent: (event: MultiAgentSSEEvent) => void,
   signal?: AbortSignal,
-  onSessionId?: (sessionId: string) => void,
 ): Promise<void> {
-  let res: Response
-  try {
-    // S1: 连接阶段使用 fetchWithTimeout（30s），防止服务端挂起不响应
-    res = await fetchWithTimeout(BASE + '/multi-agent/stream', {
-      method: 'POST',
-      headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(data),
-      signal,
-    }, 30_000)
-  } catch (err) {
-    throw classifyNetworkError(err)
-  }
-  if (!res.ok) {
-    const err = await res.text()
-    const error: ChatError = {
-      type: res.status === 429 ? 'rate_limit' : res.status >= 500 ? 'server_error' : 'unknown',
-      message: `Stream error: ${err || res.statusText}`,
-      retryable: res.status === 429 || res.status >= 500,
-      statusCode: res.status,
-    }
-    throw error
-  }
-  // 响应头尽早透出会话 id：后端在返回流式响应的同时注入 X-Session-Id，
-  // 前端在消费任何 SSE 事件前即可记录 conversation_id，保证"停止/撤销"能立刻打断后台任务
-  const sessionId = res.headers.get('X-Session-Id')
-  if (sessionId && onSessionId) {
-    onSessionId(sessionId)
-  }
   const reader = res.body?.getReader()
   if (!reader) throw { type: 'network', message: 'No response body', retryable: true } as ChatError
   const decoder = new TextDecoder()
@@ -146,4 +126,63 @@ export async function sendMultiAgentStream(
     if (stallTimer) clearTimeout(stallTimer)
     reader.releaseLock()
   }
+}
+
+export async function sendMultiAgentStream(
+  data: MultiAgentChatRequest,
+  onEvent: (event: MultiAgentSSEEvent) => void,
+  signal?: AbortSignal,
+  onSessionId?: (sessionId: string) => void,
+): Promise<void> {
+  let res: Response
+  try {
+    // S1: 连接阶段使用 fetchWithTimeout（30s），防止服务端挂起不响应
+    res = await fetchWithTimeout(BASE + '/multi-agent/stream', {
+      method: 'POST',
+      headers: await addAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(data),
+      signal,
+    }, 30_000)
+  } catch (err) {
+    throw classifyNetworkError(err)
+  }
+  if (!res.ok) {
+    const err = await res.text()
+    throw streamError(res.status, err, res.statusText)
+  }
+  // 响应头尽早透出会话 id：后端在返回流式响应的同时注入 X-Session-Id，
+  // 前端在消费任何 SSE 事件前即可记录 conversation_id，保证"停止/撤销"能立刻打断后台任务
+  const sessionId = res.headers.get('X-Session-Id')
+  if (sessionId && onSessionId) {
+    onSessionId(sessionId)
+  }
+  await consumeMultiAgentSSE(res, onEvent, signal)
+}
+
+/**
+ * 重连到仍在后台执行的回合：服务端重放已产生的事件（`turn_id + seq` 去重），
+ * 随后继续 tail。断连不再等于取消。
+ */
+export async function resumeMultiAgentStream(
+  sessionId: string,
+  afterSeq: number,
+  onEvent: (event: MultiAgentSSEEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const suffix = afterSeq > 0 ? `?after_seq=${Math.floor(afterSeq)}` : ''
+  let res: Response
+  try {
+    res = await fetchWithTimeout(
+      `${BASE}/multi-agent/stream/${encodeURIComponent(sessionId)}${suffix}`,
+      { method: 'GET', headers: await addAuthHeaders({}), signal },
+      30_000,
+    )
+  } catch (err) {
+    throw classifyNetworkError(err)
+  }
+  if (!res.ok) {
+    const err = await res.text()
+    throw streamError(res.status, err, res.statusText)
+  }
+  await consumeMultiAgentSSE(res, onEvent, signal)
 }

@@ -199,7 +199,7 @@ async def _run_case(tmp_path, monkeypatch, *, keep_tool_history: bool):
         "cognition.compressor.estimate_tokens", lambda _text: 10_000
     )
 
-    async def _compress(messages, **kwargs):
+    async def _compress(messages, existing_summary="", model=None, **kwargs):
         return {
             "summary": "A 执行过一次文件读取，但摘要不包含具体代号。",
             "recent": [],
@@ -207,7 +207,7 @@ async def _run_case(tmp_path, monkeypatch, *, keep_tool_history: bool):
             "tokens": 20_000,
         }
 
-    monkeypatch.setattr("cognition.compressor.compress_context", _compress)
+    monkeypatch.setattr("harness.compression.summarize_messages", _compress)
     monkeypatch.setattr(
         "app.session.repository.get_epoch", lambda sid: epochs.get(sid)
     )

@@ -52,6 +52,7 @@ export type HarnessEventType =
   | 'turn_done'
   | 'error'
   | 'heartbeat'
+  | 'replay_gap'
 
 export type HarnessEvent = MultiAgentSSEEvent & {
   type: HarnessEventType

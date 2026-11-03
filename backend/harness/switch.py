@@ -164,7 +164,9 @@ class SwitchService:
             raise ModelSwitchError(reason, 409)
 
         messages = await self.deps.read_messages(session_id)
-        plan = CompressionPlan.for_window(window)
+        plan = CompressionPlan.for_window(
+            window, max_output_tokens=int(limits.get("max_output_tokens") or 0)
+        )
         tokens = estimate_messages(messages)
         threshold = plan.threshold
         keep_tokens = plan.keep_tokens
@@ -216,9 +218,11 @@ class SwitchService:
                         model=None,
                         threshold=threshold,
                         keep_tokens=keep_tokens,
+                        tail_turns=plan.tail_turns,
                         segment_tokens=max(4_000, min(12_000, threshold // 4)),
                         require_precision=True,
                         raise_on_error=True,
+                        require_llm=True,
                     )
                 finally:
                     if token is not None and self.deps.reset_request_model is not None:
@@ -331,7 +335,9 @@ class SwitchService:
             "from": old_model,
             "to": target,
             "summarized": bool(summary),
+            "summary": summary,
             "tail_start_id": tail_start_id,
+            "tokens_before": tokens,
             "context_window": window,
             "compress_threshold": threshold,
             "keep_recent_tokens": keep_tokens,

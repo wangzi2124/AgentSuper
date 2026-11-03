@@ -1,29 +1,67 @@
 """提示词加载器（对齐 agent.md §7.2 / §7.7）。
 
 - 模板以文件管理，`Template.safe_substitute` 填充变量。
-- `build_system_prompt` 组装 `Provider 前缀 + Agent 角色`。
+- `build_agent_prompt` 按模型 provider 组装 `共享规则 + 模型 profile + Agent 角色`。
+- `PROMPT_PROFILE_LAYER=0` 可关闭模型 profile 层，回退为纯角色提示词。
 - `prompt_hash` / `prompt_version` 支持哈希追踪与 Trace 归因。
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 from string import Template
 
+logger = logging.getLogger(__name__)
+
 PROMPTS_DIR = Path(__file__).resolve().parent
 
 _DOUBLE_BRACE = re.compile(r"\{\{(\w+)\}\}")
 
-PROVIDER_BY_TIER = {
-    "simple": "openai",
-    "medium": "anthropic",
-    "complex": "anthropic",
-    "reasoning": "anthropic",
+# catalog provider → prompt profile。只按 provider 区分，不猜模型家族。
+PROVIDER_PROFILE_MAP = {
+    "anthropic": "anthropic",
+    "openai": "gpt",
+    "google": "gemini",
+    "gemini": "gemini",
+    "kimi": "kimi",
+    "moonshot": "kimi",
+    "trinity": "trinity",
 }
-DEFAULT_PROVIDER = "anthropic"
+DEFAULT_PROFILE = "default"
+SHARED_PROMPT = "providers/_shared.md"
+
+_PROFILE_LAYER_ENV = "PROMPT_PROFILE_LAYER"
+_FALSE_VALUES = {"0", "false", "off", "no"}
+
+
+def profile_layer_enabled() -> bool:
+    """模型 profile 层开关；默认开启，`PROMPT_PROFILE_LAYER=0` 关闭。"""
+    raw = os.environ.get(_PROFILE_LAYER_ENV, "1").strip().lower()
+    return raw not in _FALSE_VALUES
+
+
+def model_id_of(model: object) -> str | None:
+    """从模型对象提取完整 id（兼容 `TierModel.model_name()` 方法与普通属性）。"""
+    value = getattr(model, "model_name", None)
+    if callable(value):
+        try:
+            value = value()
+        except Exception:  # noqa: BLE001 - 解析失败按未知模型处理
+            return None
+    return value if isinstance(value, str) and value else None
+
+
+def resolve_profile(model_id: str | None) -> str:
+    """由完整模型 id（`provider/model`）解析 profile；未知 provider 落 default。"""
+    provider = (model_id or "").split("/", 1)[0].strip().lower()
+    if provider == "ollama_chat":
+        provider = "ollama"
+    return PROVIDER_PROFILE_MAP.get(provider, DEFAULT_PROFILE)
 
 
 class PromptLoader:
@@ -45,11 +83,20 @@ class PromptLoader:
         normalized = _DOUBLE_BRACE.sub(r"$\1", self.raw(template_path))
         return Template(normalized).safe_substitute(**variables)
 
-    def build_system_prompt(
-        self, agent_type: str, provider: str = DEFAULT_PROVIDER
-    ) -> str:
+    def build_agent_prompt(self, agent_type: str, model_id: str | None = None) -> str:
+        """组装某个 Agent 的 system prompt，模型 profile 按 provider 选择。"""
+        if not profile_layer_enabled():
+            return self.load(f"system/{agent_type}.md")
+        profile = resolve_profile(model_id)
+        logger.debug(
+            "prompt profile: agent=%s model=%s profile=%s", agent_type, model_id, profile
+        )
+        return self._compose(agent_type, profile)
+
+    def _compose(self, agent_type: str, profile: str) -> str:
         parts = [
-            self.load(f"providers/{provider}_prefix.md"),
+            self.load(SHARED_PROMPT),
+            self.load(f"providers/{profile}.md"),
             self.load(f"system/{agent_type}.md"),
         ]
         return "\n\n---\n\n".join(parts)
@@ -77,16 +124,20 @@ def build_environment_message(working_dir: str, git_status: str = "") -> str:
     return PromptLoader.build_environment_message(working_dir, git_status)
 
 
-def build_for_tier(agent_type: str, tier: str) -> str:
-    provider = PROVIDER_BY_TIER.get(tier, DEFAULT_PROVIDER)
-    return PromptLoader().build_system_prompt(agent_type, provider)
+def build_agent_prompt(agent_type: str, model_id: str | None = None) -> str:
+    """模块级便捷函数（等价于 PromptLoader.build_agent_prompt）。"""
+    return PromptLoader().build_agent_prompt(agent_type, model_id)
 
 
-def prompt_hash(agent_type: str, provider: str = DEFAULT_PROVIDER) -> str:
+def prompt_hash(agent_type: str, profile: str = DEFAULT_PROFILE) -> str:
     """对组装后的 system prompt 取短哈希，用于 Trace 归因（§7.7.3）。"""
-    text = PromptLoader().build_system_prompt(agent_type, provider)
+    loader = PromptLoader()
+    if profile_layer_enabled():
+        text = loader._compose(agent_type, profile)
+    else:
+        text = loader.load(f"system/{agent_type}.md")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
-def prompt_version(agent_type: str, provider: str = DEFAULT_PROVIDER) -> str:
-    return f"{agent_type}.{provider}.{prompt_hash(agent_type, provider)}"
+def prompt_version(agent_type: str, profile: str = DEFAULT_PROFILE) -> str:
+    return f"{agent_type}.{profile}.{prompt_hash(agent_type, profile)}"

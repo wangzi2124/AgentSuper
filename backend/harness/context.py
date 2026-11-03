@@ -112,10 +112,12 @@ def assemble_model_view(
 
     if budget_chars is None:
         window = int(state.get("context_window") or 0)
+        auto = max(8_000, min(60_000, int(window * 2))) if window > 0 else 0
+        # 配置值是下限：大窗口仍按窗口自动放宽（上限 60k），设更大值时以配置为准。
         budget_chars = (
-            max(8_000, min(60_000, int(window * 2)))
-            if window > 0
-            else history_budget_chars
+            max(auto, history_budget_chars)
+            if auto and history_budget_chars > 0
+            else (auto or history_budget_chars or DEFAULT_HISTORY_BUDGET_CHARS)
         )
 
     systems = [h for h in history if h["role"] == "system"]

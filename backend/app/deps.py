@@ -188,23 +188,56 @@ def _image_blocks(text: str, images: list[dict[str, Any]]) -> list[dict[str, Any
     return blocks
 
 
+def _document_context(
+    files: list[Any] | None, staged_attachments: list[Any] | None = None
+) -> str:
+    """非图片附件的正文 + 可读路径（供 execute 节点显式注入本轮上下文）。"""
+    from .attachment_processor import build_attachment_sections
+    from .image_processor import is_image_file
+
+    documents: list[dict[str, Any]] = []
+    staged: list[Any] = []
+    for index, f in enumerate(files or []):
+        if not isinstance(f, dict) or not f.get("data") or is_image_file(f):
+            continue
+        documents.append(f)
+        staged.append(
+            staged_attachments[index]
+            if staged_attachments and index < len(staged_attachments)
+            else None
+        )
+    return build_attachment_sections(documents, staged) if documents else ""
+
+
 def _attachment_content(
-    question: str, files: list[Any] | None, model: str | None
+    question: str,
+    files: list[Any] | None,
+    model: str | None,
 ) -> Any:
     """把聊天附件并入用户消息 content：图片（模型声明 vision 时）→ `image_url` 分块。
 
-    非图片附件 / 模型无视觉能力 → 只在文本里列出文件名（不臆造解析结果）。
+    非图片附件正文不进入可见 content（聊天记录只显示文件名/附件条），由
+    `attachment_context` 单独喂给模型；模型无视觉能力时说明图片未发送。
     返回 `str`（纯文本）或分块 `list[dict]`（多模态）——两者 litellm 均接受。
     """
+    from .image_processor import is_image_file
+
     items = [f for f in (files or []) if isinstance(f, dict) and f.get("data")]
     if not items:
         return question
     names = [str(f.get("filename") or "附件") for f in items]
     text = f"{question}\n\n[附件：{'、'.join(names)}]"
-    images = [f for f in items if str(f.get("mime_type") or "").startswith("image/")]
+    images = [f for f in items if is_image_file(f)]
     if not images:
         return text
     if not _vision_capable(model):
+        captions = [
+            f"- {str(f.get('filename') or '图片')}: {f.get('_caption')}"
+            for f in images
+            if str(f.get("_caption") or "").strip()
+        ]
+        if captions:
+            return text + "\n\n[图片内容描述]\n" + "\n".join(captions)
         return text + "\n（当前模型未声明图像理解能力，图片未随请求发送）"
     text += (
         "\n（图片已随本条消息内联提供，请直接依据图像内容作答；"
@@ -240,6 +273,7 @@ def initial_state(
     model: str | None = None,
     use_vector_db: bool = False,
     message_id: str | None = None,
+    staged_attachments: list[Any] | None = None,
     context_summary: str = "",
     context_tail_start_id: str | None = None,
     context_bound: bool = False,
@@ -260,6 +294,19 @@ def initial_state(
     """
     from langchain_core.messages import HumanMessage
 
+    # 会话未显式选模型时，按运行时默认模型判断 vision/窗口，避免默认模型下
+    # 图片被误判为“当前模型不支持视觉”而不发送。
+    if not model:
+        try:
+            from config import settings
+
+            model = str(getattr(settings, "llm_model", "") or "") or None
+        except Exception:  # noqa: BLE001
+            model = None
+    # 非图片附件正文单独存一份：`messages` 里的当前轮 human 会被历史装配排除，
+    # 由 execute 节点显式把这段附件正文补进本轮上下文。正文不进 content，
+    # 聊天记录只显示问题 + 附件名，完整内容走「查看正文」接口。
+    attachment_context = _document_context(files, staged_attachments)
     # 稳定消息 ID：跨模型/协议切换后保持不变（禁止 index 重算）。
     msg = HumanMessage(
         content=_attachment_content(question, files, model),
@@ -278,25 +325,36 @@ def initial_state(
     # 压缩配置与「本轮模型」成对绑定：目标窗口更小 → 阈值同步调低，
     # 禁止复用旧模型/全局默认阈值（agent-3 §2.2）。窗口未知时保留默认值。
     context_window = 0
+    max_output_tokens = 0
     compress_threshold = 0
     keep_recent_tokens = 0
     if model:
         try:
-            from models.catalog import effective_context_length
+            from models.catalog import effective_context_length, read_limits
 
             context_window = int(effective_context_length(model))
+            max_output_tokens = int(read_limits(model).get("max_output_tokens") or 0)
         except Exception:  # noqa: BLE001 - 目录不可用时按未知处理
             context_window = 0
+            max_output_tokens = 0
+    from harness.compression import CompressionPlan
+
     if context_window > 0:
-        compress_threshold = max(2_000, int(context_window * 0.6))
-        keep_recent_tokens = max(1_000, min(20_000, int(context_window * 0.25)))
+        plan = CompressionPlan.for_window(
+            context_window, max_output_tokens=max_output_tokens
+        )
+        compress_threshold = plan.threshold
+        keep_recent_tokens = plan.keep_tokens
     # 切换绑定的压缩配置优先：即使目录临时不可用，也不能退回旧模型/全局阈值。
     if context_window_override > 0:
         context_window = context_window_override
+        plan = CompressionPlan.for_window(
+            context_window, max_output_tokens=max_output_tokens
+        )
         if compress_threshold_override <= 0:
-            compress_threshold = max(2_000, int(context_window * 0.6))
+            compress_threshold = plan.threshold
         if keep_recent_tokens_override <= 0:
-            keep_recent_tokens = max(1_000, min(20_000, int(context_window * 0.25)))
+            keep_recent_tokens = plan.keep_tokens
     if compress_threshold_override > 0:
         compress_threshold = compress_threshold_override
     if keep_recent_tokens_override > 0:
@@ -321,6 +379,8 @@ def initial_state(
         "compress_threshold": compress_threshold,
         "keep_recent_tokens": keep_recent_tokens,
         "rag_context": "",
+        "attachment_context": attachment_context,
+        "compaction_event": {},
         "rag_done": False,
         "use_vector_db": bool(use_vector_db),
         # §13.4.3 单轮字段：每轮重置，避免上一轮的「相关/已改写」污染本轮。
@@ -692,6 +752,8 @@ class PlatformContext:
     snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
     # 在途回合取消标志（interrupt 置位；compat 流循环每步检查）
     cancels: dict[str, asyncio.Event] = field(default_factory=dict)
+    # 后台回合执行器（session_id → TurnRunner）：断连不取消，重连订阅同一事件日志
+    runners: dict[str, Any] = field(default_factory=dict)
     # 并发闸门（对齐 MAX_CONCURRENT_AGENTS）：超出并发时 SSE 发 `queued`
     max_concurrent: int = 4
     max_queue_size: int = 20
@@ -727,9 +789,34 @@ class PlatformContext:
         """请求取消在途回合；返回是否确有在途回合。"""
         event = self.cancels.get(session_id)
         if event is None:
+            runner = self.runners.get(session_id)
+            event = getattr(runner, "cancel_event", None) if runner is not None else None
+        if event is None:
             return False
         event.set()
         return True
+
+    # ── 后台回合注册表 ──────────────────────────────────────────────────
+    def get_runner(self, session_id: str) -> Any | None:
+        return self.runners.get(session_id)
+
+    def register_runner(self, runner: Any) -> None:
+        self.runners[runner.session_id] = runner
+
+    def schedule_runner_cleanup(self, runner: Any, delay: float | None = None) -> None:
+        """回合结束后保留事件日志一小段时间（供晚到的重连重放），再释放。"""
+        from .turn_runner import RETENTION_SEC
+
+        wait = RETENTION_SEC if delay is None else max(0.0, float(delay))
+
+        def _drop() -> None:
+            if self.runners.get(runner.session_id) is runner:
+                self.runners.pop(runner.session_id, None)
+
+        try:
+            asyncio.get_running_loop().call_later(wait, _drop)
+        except RuntimeError:  # pragma: no cover - no loop (tests)
+            _drop()
 
     def session_model(self, session_id: str) -> str | None:
         """会话当前选中的模型 id（前端「模型管理」选择器写入；未选时为 None）。"""
@@ -802,7 +889,13 @@ class PlatformContext:
         from models.catalog import effective_context_length
 
         def _effective_limits(mid: str) -> dict[str, Any]:
-            return {"context_length": effective_context_length(mid)}
+            from models.catalog import read_limits
+
+            limits = read_limits(mid)
+            return {
+                "context_length": effective_context_length(mid),
+                "max_output_tokens": int(limits.get("max_output_tokens") or 0),
+            }
 
         deps = SwitchDeps(
             get_session=self.sessions.get,
@@ -819,7 +912,21 @@ class PlatformContext:
             set_request_model=set_request_model,
             reset_request_model=reset_request_model,
         )
-        return await SwitchService(deps).switch(session_id, target)
+        result = await SwitchService(deps).switch(session_id, target)
+        persist = getattr(self, "persist_compaction", None)
+        if result.get("summarized") and result.get("summary") and persist is not None:
+            await persist(
+                session_id,
+                {
+                    "summary": result.get("summary"),
+                    "reason": "model_switch",
+                    "tail_start_id": result.get("tail_start_id"),
+                    "tokens_before": int(result.get("tokens_before") or 0),
+                    "tokens_after": 0,
+                    "model": target,
+                },
+            )
+        return result
 
     async def run(
         self,
@@ -869,12 +976,16 @@ class PlatformContext:
         if sess is not None:
             sess.status = "running"
         self.begin_turn(session_id)
+        from .attachment_processor import stage_attachments
+
+        staged_attachments = stage_attachments(files, sess.directory if sess else None)
         try:
             result = await self.graph.ainvoke(
                 initial_state(
                     question, user_id, files=files, model=model,
                     use_vector_db=use_vector_db,
                     message_id=message_id,
+                    staged_attachments=staged_attachments,
                     context_summary=binding.get("summary", ""),
                     context_tail_start_id=binding.get("tail_start_id"),
                     context_bound=binding.get("active", False),
@@ -893,6 +1004,7 @@ class PlatformContext:
             clear_turn_command_approvals()
             get_manager().clear_session_command_approvals(session_id)
             reset_request_model(model_token)
+        await self.persist_compaction(session_id, (result or {}).get("compaction_event"))
         self.sessions.touch(session_id)
         return jsonable(result)
 
@@ -934,8 +1046,13 @@ class PlatformContext:
         )
         model = self.session_model(session_id)
         binding = await self.resolve_context_binding(session_id)
+        sess = self.sessions.get(session_id)
+        from .attachment_processor import stage_attachments
+
+        staged_attachments = stage_attachments(files, sess.directory if sess else None)
         state = initial_state(
             question, user_id, files=files, model=model, use_vector_db=use_vector_db,
+            staged_attachments=staged_attachments,
             context_summary=binding.get("summary", ""),
             context_tail_start_id=binding.get("tail_start_id"),
             context_bound=binding.get("active", False),
@@ -945,7 +1062,6 @@ class PlatformContext:
         )
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))
-        sess = self.sessions.get(session_id)
         root_token = set_active_root(sess.directory if sess else "")
         model_token = set_request_model(model)
         if sess is not None:
@@ -958,6 +1074,10 @@ class PlatformContext:
                 stream_mode="updates",
             ):
                 for node, update in (chunk or {}).items():
+                    if node == "context_compress" and isinstance(update, dict):
+                        await self.persist_compaction(
+                            session_id, update.get("compaction_event")
+                        )
                     yield {"event": "node", "node": node, "data": jsonable(update)}
         finally:
             if sess is not None:
@@ -1078,6 +1198,14 @@ class PlatformContext:
             content = content_text(_msg_content(msg))
             ui = _msg_ui(msg)
             data: dict[str, Any] = {"content": content}
+            ak = getattr(msg, "additional_kwargs", None) or {}
+            if isinstance(ak, dict) and ak.get("compaction"):
+                data["compaction"] = {
+                    "reason": ak.get("compaction_reason") or "auto",
+                    "tokens_before": int(ak.get("tokens_before") or 0),
+                    "tokens_after": int(ak.get("tokens_after") or 0),
+                    "model": str(ak.get("model") or ""),
+                }
             files = _msg_files(msg)
             if files:
                 data["files"] = files
@@ -1107,8 +1235,12 @@ class PlatformContext:
                     "is_compacted": False,
                 }
             )
-        if baseline > 0:
-            summary = f"（早前 {baseline} 条消息已压缩为上下文摘要）"
+        has_compaction_card = any(
+            isinstance(item.get("data"), dict) and item["data"].get("compaction")
+            for item in out
+        )
+        if baseline > 0 and not has_compaction_card:
+            summary = f"（早期 {baseline} 条消息已压缩为上下文摘要）"
             out.insert(
                 0,
                 {
@@ -1117,7 +1249,7 @@ class PlatformContext:
                     "type": "system",
                     "role": "system",
                     "content": summary,
-                    "data": {"content": summary, "compaction": True},
+                    "data": {"content": summary, "compaction": {"reason": "manual"}},
                     "seq": 0,
                     "time_created": 0,
                     "parts": [],
@@ -1201,20 +1333,143 @@ class PlatformContext:
         self.sessions.persist(session_id)  # 撤回集跨重启存活
         return {"deleted": deleted, "messages": await self.session_messages(session_id)}
 
+    async def persist_compaction(
+        self, session_id: str, event: dict[str, Any] | None
+    ) -> None:
+        """把压缩检查点写入 session.db（消息记录 + epoch 快照），供审计/前端读取。"""
+        if not isinstance(event, dict) or not str(event.get("summary") or "").strip():
+            return
+        try:
+            from .session import repository as repo
+
+            reason = str(event.get("reason") or "auto")
+            summary = str(event.get("summary") or "")
+            data = {
+                "content": summary,
+                "mode": reason,
+                "reason": reason,
+                "tail_start_id": event.get("tail_start_id"),
+                "tokens_before": int(event.get("tokens_before") or 0),
+                "tokens_after": int(event.get("tokens_after") or 0),
+                "model": str(event.get("model") or ""),
+            }
+            repo.append_message(session_id, "compaction", data)
+            epoch = repo.get_epoch(session_id)
+            snap = dict(epoch.snapshot or {}) if epoch else {}
+            snap.update(
+                {
+                    "summary": summary,
+                    "tail_start_id": event.get("tail_start_id"),
+                    "compaction_reason": reason,
+                    "compaction_at": time.time(),
+                    "compaction_tokens_before": data["tokens_before"],
+                    "compaction_tokens_after": data["tokens_after"],
+                }
+            )
+            baseline_seq = repo.latest_seq(session_id)
+            repo.upsert_epoch(
+                session_id,
+                summary or (epoch.baseline if epoch else ""),
+                baseline_seq,
+                snap,
+            )
+            repo.update_session(session_id, time_compacted=int(time.time() * 1000))
+        except Exception:  # noqa: BLE001 - 审计落库失败不阻断聊天
+            logger.warning("persist compaction failed for %s", session_id, exc_info=True)
+
     async def compact_session(self, session_id: str, keep_last: int = 10) -> dict[str, Any]:
-        """压缩历史：保留最近 `keep_last` 条可见消息，之前折叠为摘要占位。"""
+        """手动压缩：生成摘要、更新 checkpoint、写压缩检查点。
+
+        `keep_last` 已废弃（保留参数兼容旧调用）；tail 由 `context_tail_turns`
+        与 `compaction_preserve_recent_tokens` 决定。
+        """
         sess = self.sessions.get(session_id)
         if sess is None:
             return {"compacted": False, "baseline": 0}
-        history = await self._full_history(session_id)
-        visible = [e for e in history if e["id"] not in sess.hidden_ids and e["seq"] > sess.compact_baseline_seq]
-        if len(visible) <= keep_last:
+        raw = await self._raw_messages(session_id)
+        if not raw:
             return {"compacted": False, "baseline": sess.compact_baseline_seq}
-        baseline = visible[len(visible) - keep_last - 1]["seq"]
-        sess.compact_baseline_seq = max(sess.compact_baseline_seq, baseline)
+
+        from langchain_core.messages import RemoveMessage, SystemMessage
+        from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+        from harness.compression import (
+            CompressionPlan,
+            compress_messages,
+            estimate_messages,
+        )
+
+        window = 0
+        if sess.model:
+            try:
+                from models.catalog import effective_context_length
+
+                window = int(effective_context_length(sess.model))
+            except Exception:  # noqa: BLE001
+                window = 0
+        plan = CompressionPlan.for_window(window)
+        existing = str((await self.state(session_id)).get("context_summary") or "")
+        tokens_before = estimate_messages(raw)
+        model = None
+        if sess.model:
+            from models.router import TierModel
+
+            model = TierModel(tier="auto", model_override=sess.model)
+        try:
+            result = await compress_messages(
+                raw,
+                existing_summary=existing,
+                model=model,
+                threshold=0,
+                keep_tokens=plan.keep_tokens,
+                # 手动压缩至少把更早的一轮折进摘要，避免“点了压缩但全在 tail 里”无操作。
+                tail_turns=1,
+                require_llm=True,
+                raise_on_error=True,
+                require_precision=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - 手动压缩失败时保留原历史
+            logger.warning("manual compaction failed: %s", exc)
+            return {"compacted": False, "baseline": sess.compact_baseline_seq, "error": str(exc)}
+        if not result.triggered or not result.summary.strip():
+            return {"compacted": False, "baseline": sess.compact_baseline_seq}
+
+        event = {
+            "summary": result.summary,
+            "reason": "manual",
+            "tail_start_id": result.tail_start_id,
+            "tokens_before": tokens_before,
+            "tokens_after": estimate_messages(result.recent) + len(result.summary),
+            "model": sess.model or "",
+        }
+        payload = {
+            "messages": [
+                RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                SystemMessage(
+                    content=f"[历史摘要]\n{result.summary}",
+                    additional_kwargs={
+                        "compaction": True,
+                        "compaction_reason": "manual",
+                        "tokens_before": event["tokens_before"],
+                        "tokens_after": event["tokens_after"],
+                        "model": event["model"],
+                    },
+                ),
+                *result.recent,
+            ],
+            "context_summary": result.summary,
+            "context_tail_start_id": result.tail_start_id,
+            "context_compressed": True,
+            "compaction_event": event,
+        }
+        await self.graph.aupdate_state(
+            {"configurable": {"thread_id": session_id}}, payload
+        )
+        await self.persist_compaction(session_id, event)
+        sess.compact_baseline_seq = 0
         sess.updated_at = time.time()
-        self.sessions.persist(session_id)  # 压缩基线跨重启存活
-        return {"compacted": True, "baseline": sess.compact_baseline_seq}
+        self.sessions.persist(session_id)
+        return {"compacted": True, "baseline": 0, "summary": result.summary}
 
     async def copy_messages_to_thread(
         self, src_id: str, dst_id: str, up_to_id: str | None = None

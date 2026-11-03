@@ -118,7 +118,7 @@ async def test_switch_below_threshold_updates_model_and_persists(monkeypatch, tm
     assert sess.model == "new/model"
     assert ctx.sessions.persisted == ["ses_1"]
     assert upserts and upserts[0][3]["context_window"] == 128000
-    assert upserts[0][3]["compress_threshold"] == 76800
+    assert upserts[0][3]["compress_threshold"] == 108000
     assert list((tmp_path / "backend" / "data" / "model_switches").glob("*.json"))
     events = _audit_events(tmp_path)
     assert events[-1]["status"] == "committed"
@@ -132,11 +132,11 @@ async def test_switch_above_threshold_writes_summary_and_tail(monkeypatch, tmp_p
     m2 = HumanMessage(content="recent", id="m2")
     calls: list[dict] = []
 
-    async def _compress(messages, **kwargs):
+    async def _summarize(messages, existing_summary="", model=None, **kwargs):
         calls.append(kwargs)
-        return {"summary": "S", "recent": [m2], "triggered": True, "tokens": 20_000}
+        return "S"
 
-    monkeypatch.setattr("cognition.compressor.compress_context", _compress)
+    monkeypatch.setattr("harness.compression.summarize_messages", _summarize)
     upserts: list[tuple] = []
     monkeypatch.setattr("app.session.repository.get_epoch", lambda _sid: None)
     monkeypatch.setattr("app.session.repository.latest_seq", lambda _sid: 0)
@@ -148,8 +148,8 @@ async def test_switch_above_threshold_writes_summary_and_tail(monkeypatch, tmp_p
     sess = _sess()
     out = await _switch(_FakeCtx(sess, [m1, m2]), "new/model")
     assert out["summarized"] is True
+    assert calls
     assert out["tail_start_id"] == "m2"
-    assert calls and calls[0]["threshold"] == 6000
     assert upserts[0][3]["summary"] == "S"
     assert upserts[0][3]["tail_start_id"] == "m2"
     assert _audit_events(tmp_path)[-1]["summarized"] is True
@@ -163,7 +163,7 @@ async def test_switch_compression_failure_keeps_old_model(monkeypatch, tmp_path)
     async def _compress(*_a, **_k):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("cognition.compressor.compress_context", _compress)
+    monkeypatch.setattr("harness.compression.summarize_messages", _compress)
     sess = _sess()
     ctx = _FakeCtx(sess, [HumanMessage(content="x", id="m1")])
     with pytest.raises(ModelSwitchError) as exc:
@@ -223,8 +223,8 @@ def test_initial_state_binds_stable_id_and_window(monkeypatch):
     assert state["context_summary"] == "summary"
     assert state["context_tail_start_id"] == "m2"
     assert state["context_window"] == 100000
-    assert state["compress_threshold"] == 60000
-    assert state["keep_recent_tokens"] == 20000
+    assert state["compress_threshold"] == 80000
+    assert state["keep_recent_tokens"] == 8000
 
 
 def test_initial_state_uses_bound_compression_config():

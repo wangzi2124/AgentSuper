@@ -7,6 +7,7 @@ import type { MultiAgentSSEEvent, FileContent, VoiceMessageData } from '@/types'
 
 const mocks = vi.hoisted(() => ({
   sendStream: vi.fn(),
+  resumeStream: vi.fn(),
   restoreSnapshot: vi.fn(),
   getConversation: vi.fn(),
   getSessionMessages: vi.fn(),
@@ -30,6 +31,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/api/multiAgent', () => ({
   sendMultiAgentStream: mocks.sendStream,
+  resumeMultiAgentStream: mocks.resumeStream,
   restoreSnapshot: mocks.restoreSnapshot,
   fetchTurnDiff: mocks.fetchTurnDiff,
 }))
@@ -72,6 +74,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
   uid = 0
   mocks.sendStream.mockReset()
+  mocks.resumeStream.mockReset()
   mocks.restoreSnapshot.mockReset()
   mocks.getConversation.mockReset()
   mocks.getSessionMessages.mockReset()
@@ -938,5 +941,116 @@ describe('会话运维操作（fork / compact / status）', () => {
     expect(await store.fetchSessionStatus('ses_a')).toEqual({ session_id: 'ses_a', status: 'running' })
     mocks.getSessionStatus.mockRejectedValue(new Error('500'))
     expect(await store.fetchSessionStatus('ses_a')).toBeNull()
+  })
+  it('loadConversation 自动续接服务端在途回合（刷新/断连重连）', async () => {
+    mocks.listConversations.mockResolvedValue([{ id: 'ses_live', title: '在途' }])
+    mocks.getConversation.mockResolvedValue({
+      id: 'ses_live',
+      title: '在途',
+      model: null,
+      messages: [{ id: 'u1', role: 'user', content: '继续' }],
+    })
+    mocks.getSessionStatus.mockResolvedValue({
+      session_id: 'ses_live',
+      status: 'running',
+      active_turn: { turn_id: 'turn_live', last_seq: 0, phase: 'running', started_at: 0 },
+    })
+    mocks.resumeStream.mockImplementation(async (
+      _sid: string,
+      _after: number,
+      onEvent: (e: MultiAgentSSEEvent) => void,
+    ) => {
+      onEvent(ev({ type: 'routing', agent_id: '', turn_id: 'turn_live', session_id: 'ses_live', seq: 1, detail: '执行中' }))
+      onEvent(ev({ type: 'text_delta', agent_id: '', turn_id: 'turn_live', session_id: 'ses_live', seq: 2, delta: '后台' }))
+      onEvent(ev({ type: 'done', agent_id: '', turn_id: 'turn_live', session_id: 'ses_live', seq: 3, answer: '后台答案', conversation_id: 'ses_live' }))
+    })
+
+    const store = useMultiAgentStore()
+    await store.loadConversation('ses_live')
+
+    await vi.waitFor(() => expect(mocks.resumeStream).toHaveBeenCalled())
+    expect(mocks.resumeStream.mock.calls[0][0]).toBe('ses_live')
+    expect(mocks.resumeStream.mock.calls[0][1]).toBe(0)
+    await vi.waitFor(() => expect(store.loading).toBe(false))
+    const assistant = lastMsg(store)
+    expect(assistant.role).toBe('assistant')
+    expect(assistant.content).toBe('后台答案')
+  })
+
+  it('续流重放多轮 drain 时不重复已入历史的 assistant 消息', async () => {
+    mocks.listConversations.mockResolvedValue([{ id: 'ses_multi', title: '多轮' }])
+    mocks.getConversation.mockResolvedValue({
+      id: 'ses_multi',
+      title: '多轮',
+      model: null,
+      messages: [
+        { id: 'um1', role: 'user', content: '第一轮' },
+        { id: 'am1', role: 'assistant', content: 'A1' },
+        { id: 'um2', role: 'user', content: '第二轮' },
+      ],
+    })
+    mocks.getSessionStatus.mockResolvedValue({
+      session_id: 'ses_multi',
+      status: 'running',
+      active_turn: { turn_id: 'turn_multi', last_seq: 0, phase: 'running', started_at: 0 },
+    })
+    mocks.resumeStream.mockImplementation(async (
+      _sid: string,
+      _after: number,
+      onEvent: (e: MultiAgentSSEEvent) => void,
+    ) => {
+      const base = { agent_id: '', turn_id: 'turn_multi', session_id: 'ses_multi' }
+      onEvent(ev({ ...base, type: 'routing', seq: 1 }))
+      onEvent(ev({ ...base, type: 'text_delta', seq: 2, delta: 'A1' }))
+      onEvent(ev({ ...base, type: 'turn_done', seq: 3, answer: 'A1', assistant_msg_id: 'am1', user_msg_id: 'um1' }))
+      onEvent(ev({ ...base, type: 'routing', seq: 4 }))
+      onEvent(ev({ ...base, type: 'text_delta', seq: 5, delta: 'A2' }))
+      onEvent(ev({ ...base, type: 'done', seq: 6, answer: 'A2', assistant_msg_id: 'am2', user_msg_id: 'um2', conversation_id: 'ses_multi' }))
+    })
+
+    const store = useMultiAgentStore()
+    await store.loadConversation('ses_multi')
+    await vi.waitFor(() => expect(store.loading).toBe(false))
+
+    expect(store.messages.filter(m => m.id === 'am1')).toHaveLength(1)
+    expect(store.messages.find(m => m.id === 'am1')?.content).toBe('A1')
+    expect(lastMsg(store).id).toBe('am2')
+    expect(lastMsg(store).content).toBe('A2')
+  })
+
+  it('detachStream 只解绑本地流，不调用 interrupt', async () => {
+    mocks.sendStream.mockImplementation(async () => {
+      await new Promise(() => {})
+    })
+    const store = useMultiAgentStore()
+    const pending = store.send('慢任务')
+    const sid = store.activeSessionId!
+    store.detachStream()
+    expect(mocks.interruptSession).not.toHaveBeenCalled()
+    expect(store.loading).toBe(false)
+    expect(sid).toBeTruthy()
+    void pending
+  })
+
+  it('loadConversation maps compaction checkpoint into message data', async () => {
+    mocks.getConversation.mockResolvedValue({
+      title: '压缩会话',
+      model: null,
+      messages: [
+        {
+          id: 'sys1',
+          role: 'system',
+          content: '[历史摘要]\n## Goal\n- 测试',
+          data: {
+            compaction: { reason: 'auto', tokens_before: 1000, tokens_after: 200, model: 'm' },
+          },
+        },
+      ],
+    })
+    const store = useMultiAgentStore()
+    await store.loadConversation('c1')
+    expect(store.messages[0].role).toBe('system')
+    expect(store.messages[0].compaction?.reason).toBe('auto')
+    expect(store.messages[0].compaction?.tokens_before).toBe(1000)
   })
 })

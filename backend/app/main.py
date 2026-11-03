@@ -28,7 +28,7 @@ from app.auth import AuthMiddleware  # noqa: E402
 from observability.chainlog import ChainLogMiddleware  # noqa: E402
 from observability.monitor import RequestLogMiddleware, get_recent_stats, get_stats  # noqa: E402
 
-from .api import admin, chat, compat, sessions  # noqa: E402
+from .api import admin, attachments, chat, compat, sessions  # noqa: E402
 from .deps import build_context  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -326,9 +326,26 @@ def create_app(
             app.state, "plugin_loader", None
         )
         app.state.platform = build_context(**options, checkpointer=checkpointer)
+        if include_app:
+            # 崩溃/重启对账：把上一进程遗留的 running 会话与半截回合正文落成历史。
+            try:
+                from .live_turns import reconcile_live_turns
+
+                await reconcile_live_turns(app.state.platform)
+            except Exception:  # noqa: BLE001 - never block startup
+                logger.warning("live-turn reconciliation failed", exc_info=True)
         try:
             yield
         finally:
+            platform = getattr(app.state, "platform", None)
+            pending: list[asyncio.Task] = []
+            for runner in list(getattr(platform, "runners", {}).values()):
+                task = getattr(runner, "task", None)
+                if task is not None and not task.done():
+                    task.cancel()
+                    pending.append(task)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             for task in tasks:
                 task.cancel()
             if include_app:
@@ -367,6 +384,7 @@ def create_app(
     app.include_router(compat.router, prefix="/api")
     app.include_router(sessions.router, prefix="/api")
     app.include_router(admin.router, prefix="/api")
+    app.include_router(attachments.router, prefix="/api/attachments", tags=["Attachments"])
     # agent.md §9 约定裸 `/chat` + `/chat/stream`（非 /api 前缀）；与 /api/chat* 同一实现。
     app.include_router(chat.router)
 

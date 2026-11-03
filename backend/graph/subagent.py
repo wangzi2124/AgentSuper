@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from execution.tool_registry import ToolRegistry
 from models.router import get_model
-from prompts.loader import PromptLoader
+from prompts.loader import PromptLoader, model_id_of
 
 from .events import push_event
 from .nodes.base import run_tool_loop
@@ -39,9 +39,10 @@ class SubAgent:
     max_rounds: int = 6
     description: str = ""
 
-    def system_prompt(self) -> str:
+    def system_prompt(self, model: Any | None = None) -> str:
         try:
-            return PromptLoader().load(self.prompt_path)
+            agent_type = self.prompt_path.rsplit("/", 1)[-1].removesuffix(".md")
+            return PromptLoader().build_agent_prompt(agent_type, model_id_of(model))
         except Exception as exc:  # noqa: BLE001
             logger.warning("cannot load prompt %s: %s", self.prompt_path, exc)
             return f"你是 {self.name} 子 Agent，请完成分配的子任务。"
@@ -89,7 +90,7 @@ async def run_subagent(
     scoped = registry.subset(spec.tools) if spec.tools else registry
 
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": spec.system_prompt()},
+        {"role": "system", "content": spec.system_prompt(model)},
     ]
     if context:
         messages.append(

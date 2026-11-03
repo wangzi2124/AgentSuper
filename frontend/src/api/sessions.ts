@@ -57,9 +57,17 @@ export interface SessionMessage {
   is_compacted?: boolean
 }
 
+export interface ActiveTurn {
+  turn_id: string
+  last_seq: number
+  phase: string
+  started_at: number
+}
+
 export interface SessionStatus {
   session_id: string
   status: string
+  active_turn?: ActiveTurn | null
 }
 
 export interface RevertResult {

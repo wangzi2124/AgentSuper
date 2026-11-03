@@ -78,3 +78,45 @@ def test_ocr_reads_text(monkeypatch):
     monkeypatch.setattr(ip, "_tesseract_configured", False)
     text = ip.ocr_image(_text_png_b64("Hello OCR 2026"), "t.png")
     assert "Hello" in text.replace("\n", " ")
+
+@pytest.mark.asyncio
+async def test_caption_reuses_registered_provider_credentials(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(settings, "image_caption_model", "deepseek/deepseek-v4-flash")
+    monkeypatch.setattr(settings, "image_caption_api_key", "")
+    monkeypatch.setattr(settings, "image_caption_api_base", "")
+    monkeypatch.setattr(
+        "models.catalog.read_providers",
+        lambda: {"deepseek": {"api_base": "https://api.deepseek.com", "api_key": "sk-test"}},
+    )
+    monkeypatch.setattr(
+        "models.catalog.provider_api",
+        lambda _mid: {
+            "api_base": "https://api.deepseek.com",
+            "api_key": "sk-test",
+            "litellm_model": None,
+            "options": {"thinking": {"type": "disabled"}},
+        },
+    )
+    monkeypatch.setattr(
+        "models.catalog.litellm_extra_kwargs",
+        lambda creds: {"thinking": {"type": "disabled"}},
+    )
+    captured: dict = {}
+
+    async def _fake(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="一张接口文档截图"))]
+        )
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "acompletion", _fake)
+    ip._caption_cache.clear()
+    out = await ip.caption_image("QUJD", "image/png")
+    assert out == "一张接口文档截图"
+    assert captured["api_key"] == "sk-test"
+    assert captured["api_base"] == "https://api.deepseek.com"
+    assert captured["thinking"] == {"type": "disabled"}

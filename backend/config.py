@@ -217,6 +217,26 @@ class Settings(BaseSettings):
     # 单条工具输出 token 上限（bound_tool_output 使用）。
     tool_output_max_tokens: int = 8_000
 
+    # ── 压缩策略（对齐 opencode compaction）──
+    # 是否在上下文超阈值时自动压缩。
+    compaction_auto: bool = True
+    # 是否清理旧工具输出（40k 保护 / 20k 最小收益）。
+    compaction_prune: bool = True
+    # 压缩时保留的最近原文 token；0 = 按可用窗口自动 clamp(2k, 8k, 25%)。
+    compaction_preserve_recent_tokens: int = 0
+    # 压缩预留输出 token；0 = min(20k, llm_max_tokens)。
+    compaction_reserved_tokens: int = 0
+
+    # ── 聊天附件 / 历史预算 ──
+    # 非图片附件内联进模型上下文的单文件字符上限（超出部分落盘，由工具按需读取）。
+    attachment_inline_max_chars_per_file: int = 6_000
+    # 单轮所有非图片附件内联字符合计上限。
+    attachment_inline_max_chars_total: int = 12_000
+    # 「查看正文」接口单次返回的字符上限。
+    attachment_extract_max_chars: int = 200_000
+    # execute 节点回灌历史时的字符下限；大窗口仍按窗口自动放宽（上限 60k）。
+    history_budget_chars: int = 12_000
+
     # ── 图片 / OCR / 视觉描述桥 ──
     image_thumbnail_px: int = 256
     image_use_ocr: bool = False

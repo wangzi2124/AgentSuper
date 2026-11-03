@@ -191,6 +191,25 @@ def content_text(content: Any) -> str:
     return str(content)
 
 
+def _strip_media_blocks(messages: list[dict]) -> tuple[list[dict], bool]:
+    """移除多模态图片分块，保留文本；用于 context overflow 的一次性重试。"""
+    out: list[dict] = []
+    stripped = False
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            parts: list[Any] = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    stripped = True
+                    parts.append({"type": "text", "text": "[图片已移除：上下文超限]"})
+                else:
+                    parts.append(part)
+            msg = {**msg, "content": parts}
+        out.append(msg)
+    return out, stripped
+
+
 def has_image_content(content: Any) -> bool:
     """content 是否为含图片分块的多模态列表。"""
     if isinstance(content, list):
@@ -536,6 +555,7 @@ async def run_tool_loop(
     continued_parts: list[str] = []
     last_finish = "stop"
     empty_nudges = 0
+    overflow_retried = False
 
     while rounds < max_rounds:
         if rounds:
@@ -563,25 +583,40 @@ async def run_tool_loop(
                     "budget_exceeded": True,
                 }
         early: dict[str, tuple[Any, str, dict[str, Any], dict[str, Any]]] = {}
-        if (
-            stream
-            and getattr(tool_adapter, "mode", "") == "fallback"
-            and getattr(tool_adapter, "can_stream", lambda: False)()
-        ):
-            with trace_span("llm.call", rounds=rounds):
-                result, early = await _stream_step(
-                    tool_adapter,
-                    convo,
-                    tool_defs or None,
-                    registry,
-                    agent_id,
-                    rounds,
-                )
-        else:
-            with trace_span("llm.call", rounds=rounds):
-                result = await retry_async(
-                    lambda: tool_adapter.complete(convo, tool_defs or None)
-                )
+        try:
+            if (
+                stream
+                and getattr(tool_adapter, "mode", "") == "fallback"
+                and getattr(tool_adapter, "can_stream", lambda: False)()
+            ):
+                with trace_span("llm.call", rounds=rounds):
+                    result, early = await _stream_step(
+                        tool_adapter,
+                        convo,
+                        tool_defs or None,
+                        registry,
+                        agent_id,
+                        rounds,
+                    )
+            else:
+                with trace_span("llm.call", rounds=rounds):
+                    result = await retry_async(
+                        lambda: tool_adapter.complete(convo, tool_defs or None)
+                    )
+        except Exception as exc:  # noqa: BLE001 - 上下文超限时剥媒体重试一次
+            from models.context_guard import is_overflow_error
+
+            if overflow_retried or not is_overflow_error(exc):
+                raise
+            overflow_retried = True
+            convo, stripped = _strip_media_blocks(convo)
+            convo = prune_tool_outputs(
+                convo, protect_tokens=0, minimum_tokens=0, tail_turns=1
+            )
+            logger.warning(
+                "context overflow: retry once after stripping media (%s)", stripped
+            )
+            continue
         rounds += 1
         label = model.model_name() if hasattr(model, "model_name") else model.tier
         call_usage = usage_from_result(result, label)

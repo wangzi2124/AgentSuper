@@ -1,8 +1,10 @@
 """Unified compression helpers for graph compaction, manual compact and switch.
 
-This module owns the deterministic parts of context compression: token estimate,
-window-derived thresholds, summary generation, precision backfill and tail anchor.
-It does not touch storage; callers decide where the summary/watermark is written.
+Aligns with opencode compaction:
+- ``usable = context_window - reserved`` (reserved defaults to min(20k, max output));
+- tail is chosen by user turns within ``preserve_recent_tokens``;
+- summary uses the 8-section template, with a deterministic fallback when the
+  LLM gate rejects the call or the model fails.
 """
 
 from __future__ import annotations
@@ -13,24 +15,89 @@ from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
 
+COMPACTION_BUFFER = 20_000
+MIN_PRESERVE_RECENT_TOKENS = 2_000
+MAX_PRESERVE_RECENT_TOKENS = 8_000
+DEFAULT_TAIL_TURNS = 2
+
 
 class CompressionError(RuntimeError):
     """Compression could not preserve required facts."""
+
+
+def _reserved_default(max_output_tokens: int = 0, window: int = 0) -> int:
+    try:
+        from config import settings
+
+        configured = int(getattr(settings, "compaction_reserved_tokens", 0) or 0)
+        global_max = int(getattr(settings, "llm_max_tokens", 32_000) or 32_000)
+    except Exception:  # noqa: BLE001
+        configured, global_max = 0, 32_000
+    output = int(max_output_tokens or 0)
+    if not output:
+        # 目录未声明输出上限时，至少给窗口留一半给提示词，避免小窗口直接压到 0。
+        output = min(global_max, max(512, int(window) // 2)) if window > 0 else global_max
+    return configured or min(COMPACTION_BUFFER, output)
+
+
+def _tail_turns_default(tail_turns: int | None = None) -> int:
+    if tail_turns is not None:
+        return max(0, int(tail_turns))
+    try:
+        from config import settings
+
+        return max(0, int(getattr(settings, "context_tail_turns", DEFAULT_TAIL_TURNS) or DEFAULT_TAIL_TURNS))
+    except Exception:  # noqa: BLE001
+        return DEFAULT_TAIL_TURNS
+
+
+def _preserve_default(usable: int, preserve: int | None = None) -> int:
+    if preserve is not None and preserve > 0:
+        return preserve
+    try:
+        from config import settings
+
+        configured = int(getattr(settings, "compaction_preserve_recent_tokens", 0) or 0)
+    except Exception:  # noqa: BLE001
+        configured = 0
+    if configured > 0:
+        return configured
+    return max(
+        MIN_PRESERVE_RECENT_TOKENS,
+        min(MAX_PRESERVE_RECENT_TOKENS, int(usable * 0.25)),
+    )
 
 
 @dataclass(frozen=True)
 class CompressionPlan:
     threshold: int
     keep_tokens: int
+    tail_turns: int = DEFAULT_TAIL_TURNS
 
     @classmethod
-    def for_window(cls, window: int, *, default_threshold: int = 80_000,
-                   default_keep: int = 20_000) -> "CompressionPlan":
+    def for_window(
+        cls,
+        window: int,
+        *,
+        default_threshold: int = 80_000,
+        default_keep: int = 20_000,
+        reserved: int = 0,
+        preserve_recent_tokens: int = 0,
+        tail_turns: int | None = None,
+        max_output_tokens: int = 0,
+    ) -> "CompressionPlan":
+        turns = _tail_turns_default(tail_turns)
         if window <= 0:
-            return cls(default_threshold, default_keep)
+            keep = preserve_recent_tokens or default_keep
+            return cls(default_threshold, keep, turns)
+        usable = max(
+            2_000,
+            int(window) - (reserved or _reserved_default(max_output_tokens, int(window))),
+        )
         return cls(
-            threshold=max(2_000, int(window * 0.6)),
-            keep_tokens=max(1_000, min(20_000, int(window * 0.25))),
+            usable,
+            _preserve_default(usable, preserve_recent_tokens),
+            turns,
         )
 
 
@@ -77,12 +144,80 @@ def tail_snapshot(recent: Sequence[Any]) -> dict[str, Any]:
     return out
 
 
+def _role(msg: Any) -> str:
+    if isinstance(msg, dict):
+        value = msg.get("role") or msg.get("type") or ""
+    else:
+        value = getattr(msg, "type", None) or getattr(msg, "role", None) or ""
+    return "user" if value in ("human", "user") else ("assistant" if value in ("ai", "assistant") else str(value))
+
+
+def turn_ranges(messages: Sequence[Any]) -> list[tuple[int, int]]:
+    starts = [i for i, m in enumerate(messages) if _role(m) == "user"]
+    if not starts:
+        return []
+    ends = starts[1:] + [len(messages)]
+    return list(zip(starts, ends))
+
+
+def select_tail_messages(
+    messages: Sequence[Any],
+    keep_tokens: int,
+    tail_turns: int,
+) -> tuple[list[Any], list[Any]]:
+    """Split (head, tail) by user turns within ``keep_tokens``.
+
+    Mirrors opencode's tail selection: keep whole recent turns; split the last
+    overflowing turn at a message boundary. A split may start on an assistant
+    message, but never on an orphan tool result.
+    """
+    msgs = list(messages)
+    if not msgs:
+        return [], []
+    turns = turn_ranges(msgs)
+    if not turns or tail_turns <= 0:
+        return msgs, []
+
+    keep: int | None = None
+    total = 0
+    for start, end in reversed(turns[-tail_turns:]):
+        size = estimate_messages(msgs[start:end])
+        if total + size <= keep_tokens:
+            total += size
+            keep = start
+            continue
+        remaining = max(0, keep_tokens - total)
+        split: int | None = None
+        for s in range(start + 1, end):
+            if estimate_messages(msgs[s:end]) <= remaining:
+                split = s
+                break
+        if split is not None:
+            keep = split
+        break
+
+    if keep is None:
+        last_user = turns[-1][0]
+        if last_user == 0:
+            return msgs, []
+        return msgs[:last_user], msgs[last_user:]
+    if keep == 0:
+        return [], msgs
+
+    tail = msgs[keep:]
+    # 分割点可能落在 assistant 上（opencode 同样允许）；只避免 tail 以孤立 tool 结果开头。
+    if tail and _role(tail[0]) == "tool" and keep > 0 and _role(msgs[keep - 1]) == "assistant":
+        tail = [msgs[keep - 1]] + tail
+    return msgs[: len(msgs) - len(tail)], tail
+
+
 async def summarize_messages(
     messages: Sequence[Any],
     existing_summary: str = "",
     model: Any | None = None,
     *,
     segment_tokens: int = 0,
+    raise_on_error: bool = False,
 ) -> str:
     """Summarize an explicit message slice (no splitting decision here)."""
     from cognition.compressor import (
@@ -116,10 +251,18 @@ async def summarize_messages(
             chunks.append(current)
 
     summary = existing_summary
-    for chunk in chunks:
-        prompt = build_compress_prompt(summary, serialize_messages(chunk))
-        result = await model.ainvoke([{"role": "user", "content": prompt}])
-        summary = str(getattr(result, "content", "") or "").strip() or summary
+    try:
+        for chunk in chunks:
+            prompt = build_compress_prompt(summary, serialize_messages(chunk))
+            result = await model.ainvoke([{"role": "user", "content": prompt}])
+            summary = str(getattr(result, "content", "") or "").strip() or summary
+    except Exception as exc:  # noqa: BLE001
+        if raise_on_error:
+            raise CompressionError(f"摘要生成失败：{exc}") from exc
+        logger.warning("compress LLM call failed, using fallback summary: %s", exc)
+        from cognition.compressor import build_fallback_summary
+
+        return build_fallback_summary(msgs, existing_summary)
     return summary
 
 
@@ -130,16 +273,19 @@ async def compress_messages(
     model: Any | None = None,
     threshold: int = 80_000,
     keep_tokens: int = 20_000,
+    tail_turns: int | None = None,
     segment_tokens: int = 0,
     require_precision: bool = False,
     raise_on_error: bool = False,
+    require_llm: bool = False,
 ) -> CompressionResult:
-    """Compress a history via the canonical ``cognition.compressor`` core."""
+    """Compress a history (switch/manual path) with turn-based tail selection."""
     from cognition.compressor import (
-        compress_context,
+        build_fallback_summary,
         enforce_precision,
         extract_precision_values,
         serialize_messages,
+        should_use_llm_summary,
     )
 
     msgs = list(messages)
@@ -154,55 +300,42 @@ async def compress_messages(
             keep_tokens=keep_tokens,
         )
 
-    try:
-        result = await compress_context(
-            msgs,
-            existing_summary=existing_summary,
-            model=model,
-            threshold=threshold,
-            keep_tokens=keep_tokens,
-            raise_on_error=raise_on_error,
-            segment_tokens=segment_tokens,
-        )
-    except Exception as exc:  # noqa: BLE001
-        if raise_on_error:
-            raise CompressionError(f"???????{exc}") from exc
-        logger.warning("compress LLM call failed, keeping existing summary: %s", exc)
-        result = {
-            "summary": existing_summary,
-            "recent": msgs,
-            "triggered": False,
-            "tokens": total,
-        }
-
-    summary = str(result.get("summary") or existing_summary)
-    recent = list(result.get("recent") or [])
-    if not result.get("triggered"):
+    older, recent = select_tail_messages(msgs, keep_tokens, _tail_turns_default(tail_turns))
+    if not older:
         return CompressionResult(
-            summary=summary,
-            recent=recent,
+            summary=existing_summary,
+            recent=msgs,
             triggered=False,
-            tokens=int(result.get("tokens") or total),
+            tokens=total,
             threshold=threshold,
             keep_tokens=keep_tokens,
         )
 
-    recent_ids = {id(m) for m in recent}
-    older = [m for m in msgs if id(m) not in recent_ids]
+    summary = existing_summary
+    use_llm = require_llm or (model is not None and should_use_llm_summary(older))
+    if use_llm:
+        summary = await summarize_messages(
+            older,
+            existing_summary,
+            model,
+            segment_tokens=segment_tokens,
+            raise_on_error=raise_on_error,
+        )
+    if not str(summary or "").strip():
+        summary = build_fallback_summary(older, existing_summary)
+
     summary = enforce_precision(summary, older)
     preserved = f"{summary}\n{serialize_messages(recent)}"
     facts = extract_precision_values(serialize_messages(msgs))
     missing = [fact for fact in facts if fact not in preserved]
     if missing and require_precision:
-        raise CompressionError(
-            "?????????????" + ", ".join(missing[:5])
-        )
+        raise CompressionError("压缩结果缺失精确值：" + ", ".join(missing[:5]))
 
     return CompressionResult(
         summary=summary,
         recent=recent,
         triggered=True,
-        tokens=int(result.get("tokens") or total),
+        tokens=total,
         threshold=threshold,
         keep_tokens=keep_tokens,
         tail_start_id=tail_start_id(recent),
@@ -217,21 +350,27 @@ async def compress_graph_messages(
     model: Any | None = None,
     compress_count: int = 0,
     keep_recent: int = 6,
+    keep_tokens: int = 0,
+    tail_turns: int | None = None,
+    require_llm: bool = False,
 ) -> CompressionResult:
-    """Graph-node compression: message-count tail + C1/C2/C3 gate.
-
-    The graph historically keeps the last N messages verbatim (rather than a token
-    budget), so this entry preserves that split while sharing summary/precision/tail
-    with the switch path.
-    """
+    """Graph-node compression with turn-based tail + deterministic fallback."""
     from cognition.compressor import (
+        build_fallback_summary,
         enforce_precision,
         should_use_llm_summary,
     )
 
     msgs = list(messages)
     total = estimate_messages(msgs)
-    if len(msgs) <= keep_recent:
+    use_turns = tail_turns is not None or keep_tokens > 0
+    if use_turns:
+        older, recent = select_tail_messages(
+            msgs, keep_tokens or 8_000, _tail_turns_default(tail_turns)
+        )
+    else:
+        older, recent = msgs[:-keep_recent], msgs[-keep_recent:]
+    if not older:
         return CompressionResult(
             summary=existing_summary,
             recent=msgs,
@@ -240,23 +379,21 @@ async def compress_graph_messages(
             compress_count=compress_count,
         )
 
-    older = msgs[:-keep_recent]
-    recent = msgs[-keep_recent:]
     count = int(compress_count or 0)
     summary = existing_summary
-    if model is not None and should_use_llm_summary(older, compress_count=count):
-        try:
-            summary = await summarize_messages(older, existing_summary, model)
-        except Exception:  # noqa: BLE001
-            summary = existing_summary or "(压缩调用失败，保留最近消息)"
+    use_llm = require_llm or (model is not None and should_use_llm_summary(older, compress_count=count))
+    if use_llm:
+        summary = await summarize_messages(older, existing_summary, model)
         count += 1
+    if not str(summary or "").strip():
+        summary = build_fallback_summary(older, existing_summary)
     summary = enforce_precision(summary, older)
     return CompressionResult(
         summary=summary,
         recent=recent,
         triggered=True,
         tokens=total,
-        keep_tokens=0,
+        keep_tokens=keep_tokens,
         tail_start_id=tail_start_id(recent),
         compress_count=count,
     )
@@ -269,7 +406,9 @@ __all__ = [
     "compress_graph_messages",
     "compress_messages",
     "estimate_messages",
+    "select_tail_messages",
     "summarize_messages",
     "tail_snapshot",
     "tail_start_id",
+    "turn_ranges",
 ]

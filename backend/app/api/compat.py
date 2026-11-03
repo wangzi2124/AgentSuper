@@ -41,8 +41,10 @@ from execution.filesystem import (
 )
 
 from ..deps import PlatformContext, get_context, initial_state
+from ..live_turns import LiveTurnRecorder
 from ..skills.slash import apply_slash_skill
 from ..image_processor import enrich_image_files
+from ..turn_runner import TurnRunner
 
 router = APIRouter(prefix="/chat", tags=["compat"])
 
@@ -106,7 +108,29 @@ def _sse(event: dict) -> str:
                 event["seq"] = seq
     except Exception:  # noqa: BLE001
         pass
+    return _format_sse(event)
+
+
+def _format_sse(event: dict) -> str:
+    """Serialize an already-sequenced runner event as one SSE frame."""
     return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+
+
+async def _runner_stream(runner: Any, after_seq: int = 0):
+    async for event in runner.subscribe(after_seq):
+        yield _format_sse(event)
+
+
+def _runner_response(runner: Any, after_seq: int = 0) -> StreamingResponse:
+    return StreamingResponse(
+        _runner_stream(runner, after_seq),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Session-Id": runner.session_id,
+        },
+    )
 
 
 def _summarize(update: object) -> dict:
@@ -262,10 +286,19 @@ def _part_event_to_sse(
 
 
 def _turn_meta(
-    agents_map: dict[str, dict[str, Any]], files_changed: list[dict[str, Any]]
+    agents_map: dict[str, dict[str, Any]],
+    files_changed: list[dict[str, Any]],
+    *,
+    partial_error: str | None = None,
 ) -> dict[str, Any]:
     """本轮 UI 细节（随 assistant 消息持久化，刷新/重开后历史回放可见）。"""
-    return {"agents": list(agents_map.values()), "files_changed": files_changed}
+    meta: dict[str, Any] = {
+        "agents": list(agents_map.values()),
+        "files_changed": files_changed,
+    }
+    if partial_error:
+        meta["partial_error"] = partial_error
+    return meta
 
 
 async def _discard(event: dict) -> None:  # 非流式路径：审批事件无需下发
@@ -373,11 +406,10 @@ async def _graph_events(
                 timeout=_HEARTBEAT_SEC,
             )
             if not done:
-                # 心跳：图仍在执行但没有节点完成（长工具循环），继续等下一块。
-                # next_task 保持挂起，get_task 重建（与既有每轮重建语义一致）。
+                # 图仍在执行但没有节点完成（长工具循环）：先把已产生的 part 事件
+                # 下发，再继续等下一块。心跳由订阅端按空闲时间生成，不进事件日志。
                 for part_ev in _drain_part_events():
                     yield part_ev
-                yield {"type": "heartbeat", "ts": round(time.time(), 3)}
                 get_task.cancel()
                 continue
             if get_task in done:
@@ -411,6 +443,10 @@ async def _graph_events(
                         continue
                     chunk = payload if isinstance(payload, dict) else {}
                 for node, update in (chunk or {}).items():
+                    if node == "context_compress" and isinstance(update, dict):
+                        await ctx.persist_compaction(
+                            sess.id, update.get("compaction_event")
+                        )
                     # [面板整合] supervisor 是编排节点，其步骤与 plan/build 重复，
                     # 且从不发 agent_done（旧逻辑跳过）→ 面板永久「运行中」。直接不作为
                     # 独立 Agent 面板下发，只保留真正干活的 plan/build（各自会收到 agent_done）。
@@ -511,20 +547,84 @@ async def multi_agent_stream(
     if not sess.title or sess.title == "新会话":
         ctx.sessions.update(sess.id, title=body.message[:20])
 
+    # 已有在途 runner：新消息转排队任务，客户端订阅现有事件流（多标签页/并发提交）。
+    active = ctx.get_runner(sess.id)
+    if active is not None and active.active:
+        prompt_id = body.client_msg_id or f"pr_{uuid4().hex[:12]}"
+        if not any(p.get("id") == prompt_id for p in sess.prompts):
+            queued_files = await enrich_image_files(body.files) if body.files else None
+            sess.prompts.append(
+                {
+                    "id": prompt_id,
+                    "message": body.message,
+                    "files": queued_files,
+                    "enqueued_at": int(time.time() * 1000),
+                }
+            )
+        return _runner_response(active, 0)
+
+    turn_id = f"turn_{sess.id}_{uuid4().hex[:12]}"
+    runner = TurnRunner(sess.id, turn_id, recorder=LiveTurnRecorder(sess.id, turn_id))
+    ctx.register_runner(runner)
+    runner.task = asyncio.create_task(
+        _run_turn_body(ctx, sess, body, user_id, runner)
+    )
+    return _runner_response(runner, 0)
+
+
+@router.get("/multi-agent/stream/{session_id}")
+async def resume_multi_agent_stream(
+    session_id: str,
+    after_seq: int = 0,
+    ctx: PlatformContext = Depends(get_context),
+    x_user_id: str | None = Header(default=None),
+) -> StreamingResponse:
+    """Reconnect to an in-flight (or just-finished) turn and replay from ``after_seq``."""
+    sess = ctx.sessions.get(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail=f"会话不存在: {session_id}")
+    if x_user_id and sess.user_id not in ("anonymous", x_user_id):
+        raise HTTPException(status_code=403, detail="无权访问该会话")
+    runner = ctx.get_runner(session_id)
+    if runner is None:
+        raise HTTPException(status_code=404, detail="没有可续接的回合")
+    return _runner_response(runner, max(0, int(after_seq or 0)))
+
+
+async def _run_turn_body(
+    ctx: PlatformContext,
+    sess: Any,
+    body: MultiAgentRequest,
+    user_id: str,
+    runner: Any,
+) -> None:
+    """Background drain sequence: emits events into ``runner`` instead of yielding."""
+    from ..snapshot import snapshot_begin, snapshot_end
+    from ..deps import ModelSwitchError
+
+    recorder = runner.recorder
     # 稳定消息 ID：优先使用前端 client_msg_id，历史回放/乐观消息可精确对齐。
     user_msg_id = body.client_msg_id or f"um_{uuid4().hex[:12]}"
-
-    async def event_source():
-        from ..snapshot import snapshot_begin, snapshot_end
-        from ..deps import ModelSwitchError
-
+    cancel = runner.cancel_event
+    ctx.cancels[sess.id] = cancel
+    turn = TurnContext(
+        turn_id=runner.turn_id,
+        session_id=sess.id,
+        user_id=user_id,
+        model=sess.model,
+    )
+    turn_token = set_current_turn(turn)
+    roots_token, root_token = _enter_roots(ctx, sess.id)
+    slot_queued: int | None = None
+    sem = ctx.semaphore
+    try:
         # 会话内切换模型：门禁 + 迁移摘要 + 原子绑定；失败直接下发 error，
         # 不启动本轮（旧模型继续可用）。
         if body.target_model and body.target_model != sess.model:
             try:
                 await ctx.switch_model(sess.id, body.target_model)
             except ModelSwitchError as exc:
-                yield _sse(
+                runner.emit(
                     {
                         "type": "error",
                         "error": redact_secrets(str(exc)),
@@ -538,179 +638,192 @@ async def multi_agent_stream(
 
         # [D3] 字段名与前端 store 对齐：`model_ref`（{id, name, provider}）
         if sess.model:
-            yield _sse(
+            runner.emit(
                 {
                     "type": "model_switched",
                     "model_ref": {"id": sess.model, "name": sess.model, "provider": ""},
                 }
             )
 
-        turn = TurnContext(
-            turn_id=f"turn_{sess.id}_{uuid4().hex[:12]}",
-            session_id=sess.id,
-            user_id=user_id,
-            model=sess.model,
-        )
-        turn_token = set_current_turn(turn)
-        cancel = ctx.begin_turn(sess.id)
-        roots_token, root_token = _enter_roots(ctx, sess.id)
-        slot_queued: int | None = None
-        sem = ctx.semaphore
-        try:
-            if sem is not None and sem.locked():
-                if ctx.queue_counter >= ctx.max_queue_size:
-                    yield _sse(
-                        {
-                            "type": "error",
-                            "error": "服务繁忙，排队已满，请稍后重试",
-                            "detail": "服务繁忙，排队已满，请稍后重试",
-                            "retryable": True,
-                            "status_code": 429,
-                            "error_type": "QueueFullError",
-                        }
-                    )
-                    return
-                ctx.queue_counter += 1
-                slot_queued = ctx.queue_counter
-                yield _sse({"type": "queued", "queue_position": slot_queued})
+        if sem is not None and sem.locked():
+            if ctx.queue_counter >= ctx.max_queue_size:
+                runner.emit(
+                    {
+                        "type": "error",
+                        "error": "服务繁忙，排队已满，请稍后重试",
+                        "detail": "服务繁忙，排队已满，请稍后重试",
+                        "retryable": True,
+                        "status_code": 429,
+                        "error_type": "QueueFullError",
+                    }
+                )
+                return
+            ctx.queue_counter += 1
+            slot_queued = ctx.queue_counter
+            runner.emit({"type": "queued", "queue_position": slot_queued})
 
-            async with sem:
-                if slot_queued is not None:
-                    ctx.queue_counter = max(0, ctx.queue_counter - 1)
-                    slot_queued = None
-
-                turn_question = body.message
-                turn_user_msg_id = user_msg_id
-                turn_files = await enrich_image_files(body.files)
-                while True:
-                    # 队列快照仅提示前端「本轮之后还有活」；done/turn_done 由末尾原子 pop 决定
-                    pending = len(sess.prompts)
-                    if pending:
-                        yield _sse(
-                            {
-                                "type": "queue_drain",
-                                "queue_size": pending,
-                                "detail": f"本轮完成后继续执行 {pending} 个排队任务",
-                            }
-                        )
-                    yield _sse(
-                        {"type": "routing", "agent_id": "supervisor", "detail": "正在分析并路由..."}
-                    )
-                    ctx.sessions.update(sess.id, status="running")
-                    seen: list[str] = []
-                    agents_map: dict[str, dict[str, Any]] = {}
-                    snap_begin = snapshot_begin(ctx.vfs)
-                    before_usage = await _current_usage(ctx, sess.id)
-                    binding = await ctx.resolve_context_binding(sess.id)
-                    state = initial_state(
-                        # `/技能名`：本轮强制加载技能正文（找不到或未启用则原样发送）
-                        apply_slash_skill(
-                            turn_question,
-                            getattr(ctx, "skill_loader", None),
-                            getattr(ctx, "plugin_loader", None),
-                        )[0],
-                        user_id,
-                        files=turn_files if turn_user_msg_id == user_msg_id else None,
-                        model=sess.model,
-                        use_vector_db=bool(body.use_vector_db),
-                        message_id=turn_user_msg_id,
-                        context_summary=binding.get("summary", ""),
-                        context_tail_start_id=binding.get("tail_start_id"),
-                        context_bound=binding.get("active", False),
-                        context_window_override=binding.get("context_window", 0),
-                        compress_threshold_override=binding.get("compress_threshold", 0),
-                        keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
-                    )
-                    async for ev in _graph_events(ctx, sess, state, seen, cancel, agents_map):
-                        yield _sse(ev)
-
-                    snapshot = await ctx.state(sess.id)
-                    final = redact_secrets(snapshot.get("final_output", "") or "")
-                    after_usage = snapshot.get("token_usage") or {}
-                    usage = usage_delta(before_usage, after_usage)
-                    files_changed, descriptor = snapshot_end(ctx.vfs, snap_begin)
-                    assistant_msg_id = f"am_{uuid4().hex[:12]}"
-                    ctx.snapshots[assistant_msg_id] = descriptor
-                    tokens = _token_fields(usage)
-                    cost = float(usage.get("cost", 0.0) or 0.0)
-                    _accumulate_session_usage(ctx, sess.id, usage)
-
-                    # 原子认领下一个排队任务（后来居上）→ 决定 done 还是 turn_done。
-                    # [停止即终态] 用户在回合中按了停止：不再认领排队任务，直接收尾为
-                    # done —— 否则会发 turn_done 后 break、缺一个终态 done，前端读到干净
-                    # 断流却因未收到终态事件而误判为 network 错误（横幅卡「运行中」/误触发重试）。
-                    if cancel.is_set():
-                        nxt = None
-                    else:
-                        nxt = sess.prompts.pop() if sess.prompts else None
-                    is_final = nxt is None
-                    ctx.sessions.update(sess.id, status="idle", title=sess.title)
-
-                    agents_map_snapshot = dict(agents_map)
-                    await _append_assistant(
-                        ctx,
-                        sess.id,
-                        final,
-                        ui=_turn_meta(agents_map_snapshot, files_changed),
-                        message_id=assistant_msg_id,
-                    )
-
-                    # 权威完整正文流式下发（前端 text_delta 逐段渲染，done 再兜底覆盖）
-                    if final:
-                        yield _sse({"type": "text_delta", "agent_id": "", "delta": final})
-                    yield _sse(
-                        {
-                            "type": "done" if is_final else "turn_done",
-                            "agent_id": "",
-                            "answer": final,
-                            "conversation_id": sess.id,
-                            "title": sess.title,
-                            "model": sess.model,
-                            "agents": list(agents_map_snapshot.values()) or _agents_snapshot(seen),
-                            "tokens": tokens,
-                            "cost": round(cost, 8),
-                            "files_changed": files_changed,
-                            "plan_path": None,
-                            "user_msg_id": turn_user_msg_id,
-                            "assistant_msg_id": assistant_msg_id,
-                            "queued_turn": not is_final,
-                            "next_prompt_id": nxt.get("id") if nxt else None,
-                        }
-                    )
-                    if is_final or cancel.is_set():
-                        break
-                    turn_question = str(nxt.get("message") or "")
-                    turn_files = nxt.get("files") or None
-                    turn_user_msg_id = f"um_{uuid4().hex[:12]}"
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            ctx.sessions.update(sess.id, status="error")
-            err = classify_error(exc)
-            yield _sse(
-                {
-                    "type": "error",
-                    "agent_id": "",
-                    "error": redact_secrets(f"{err.error_type}: {exc}"),
-                    "detail": redact_secrets(str(exc)),
-                    "retryable": err.retryable,
-                    "status_code": err.status_code,
-                    "error_type": err.error_type,
-                    "error_code": err.code,
-                }
-            )
-        finally:
+        async with sem:
             if slot_queued is not None:
                 ctx.queue_counter = max(0, ctx.queue_counter - 1)
-            ctx.end_turn(sess.id)
-            _exit_roots(roots_token, root_token)
-            reset_current_turn(turn_token)
+                slot_queued = None
 
-    return StreamingResponse(
-        event_source(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Session-Id": sess.id},
-    )
+            turn_question = body.message
+            turn_user_msg_id = user_msg_id
+            turn_files = await enrich_image_files(body.files)
+            while True:
+                if recorder is not None:
+                    # 每个 drain 回合一条 assistant，sidecar 只跟踪当前回合。
+                    recorder.reset()
+                # 队列快照仅提示前端「本轮之后还有活」；done/turn_done 由末尾原子 pop 决定
+                pending = len(sess.prompts)
+                if pending:
+                    runner.emit(
+                        {
+                            "type": "queue_drain",
+                            "queue_size": pending,
+                            "detail": f"本轮完成后继续执行 {pending} 个排队任务",
+                        }
+                    )
+                runner.emit(
+                    {"type": "routing", "agent_id": "supervisor", "detail": "正在分析并路由..."}
+                )
+                ctx.sessions.update(sess.id, status="running")
+                seen: list[str] = []
+                agents_map: dict[str, dict[str, Any]] = {}
+                snap_begin = snapshot_begin(ctx.vfs)
+                before_usage = await _current_usage(ctx, sess.id)
+                binding = await ctx.resolve_context_binding(sess.id)
+                turn_attachments = (
+                    turn_files if turn_user_msg_id == user_msg_id else None
+                )
+                from ..attachment_processor import stage_attachments
+
+                staged_attachments = stage_attachments(
+                    turn_attachments, sess.directory
+                )
+                state = initial_state(
+                    # `/技能名`：本轮强制加载技能正文（找不到或未启用则原样发送）
+                    apply_slash_skill(
+                        turn_question,
+                        getattr(ctx, "skill_loader", None),
+                        getattr(ctx, "plugin_loader", None),
+                    )[0],
+                    user_id,
+                    files=turn_attachments,
+                    model=sess.model,
+                    staged_attachments=staged_attachments,
+                    use_vector_db=bool(body.use_vector_db),
+                    message_id=turn_user_msg_id,
+                    context_summary=binding.get("summary", ""),
+                    context_tail_start_id=binding.get("tail_start_id"),
+                    context_bound=binding.get("active", False),
+                    context_window_override=binding.get("context_window", 0),
+                    compress_threshold_override=binding.get("compress_threshold", 0),
+                    keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
+                )
+                async for ev in _graph_events(ctx, sess, state, seen, cancel, agents_map):
+                    runner.emit(ev)
+
+                snapshot = await ctx.state(sess.id)
+                final = redact_secrets(snapshot.get("final_output", "") or "")
+                if not final and cancel.is_set() and recorder is not None:
+                    # 显式停止时保留已流出的部分正文（sidecar 记录的最后状态）。
+                    final = redact_secrets(recorder.text or "")
+                after_usage = snapshot.get("token_usage") or {}
+                usage = usage_delta(before_usage, after_usage)
+                files_changed, descriptor = snapshot_end(ctx.vfs, snap_begin)
+                assistant_msg_id = f"am_{uuid4().hex[:12]}"
+                ctx.snapshots[assistant_msg_id] = descriptor
+                tokens = _token_fields(usage)
+                cost = float(usage.get("cost", 0.0) or 0.0)
+                _accumulate_session_usage(ctx, sess.id, usage)
+
+                # 原子认领下一个排队任务（后来居上）→ 决定 done 还是 turn_done。
+                # [停止即终态] 用户在回合中按了停止：不再认领排队任务，直接收尾为
+                # done —— 否则会发 turn_done 后 break、缺一个终态 done，前端读到干净
+                # 断流却因未收到终态事件而误判为 network 错误（横幅卡「运行中」/误触发重试）。
+                if cancel.is_set():
+                    nxt = None
+                else:
+                    nxt = sess.prompts.pop() if sess.prompts else None
+                is_final = nxt is None
+                ctx.sessions.update(sess.id, status="idle", title=sess.title)
+
+                agents_map_snapshot = dict(agents_map)
+                if recorder is not None:
+                    recorder.note_assistant_id(assistant_msg_id)
+                await _append_assistant(
+                    ctx,
+                    sess.id,
+                    final,
+                    ui=_turn_meta(
+                        agents_map_snapshot,
+                        files_changed,
+                        partial_error="任务已停止" if cancel.is_set() else None,
+                    ),
+                    message_id=assistant_msg_id,
+                )
+                # 权威完整正文流式下发（前端 text_delta 逐段渲染，done 再兜底覆盖）
+                if final:
+                    runner.emit({"type": "text_delta", "agent_id": "", "delta": final})
+                runner.emit(
+                    {
+                        "type": "done" if is_final else "turn_done",
+                        "agent_id": "",
+                        "answer": final,
+                        "conversation_id": sess.id,
+                        "title": sess.title,
+                        "model": sess.model,
+                        "agents": list(agents_map_snapshot.values()) or _agents_snapshot(seen),
+                        "tokens": tokens,
+                        "cost": round(cost, 8),
+                        "files_changed": files_changed,
+                        "plan_path": None,
+                        "user_msg_id": turn_user_msg_id,
+                        "assistant_msg_id": assistant_msg_id,
+                        "queued_turn": not is_final,
+                        "next_prompt_id": nxt.get("id") if nxt else None,
+                    }
+                )
+                if recorder is not None:
+                    # 终态事件已下发后再清理；clear 后 recorder 不再写回 sidecar。
+                    recorder.clear()
+                if is_final or cancel.is_set():
+                    break
+                turn_question = str(nxt.get("message") or "")
+                turn_files = nxt.get("files") or None
+                turn_user_msg_id = f"um_{uuid4().hex[:12]}"
+    except asyncio.CancelledError:
+        # 进程关停：保留 sidecar，启动对账时导入为 interrupted 消息。
+        if recorder is not None:
+            recorder.flush("interrupted")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        ctx.sessions.update(sess.id, status="error")
+        if recorder is not None:
+            recorder.clear()
+        err = classify_error(exc)
+        runner.emit(
+            {
+                "type": "error",
+                "agent_id": "",
+                "error": redact_secrets(f"{err.error_type}: {exc}"),
+                "detail": redact_secrets(str(exc)),
+                "retryable": err.retryable,
+                "status_code": err.status_code,
+                "error_type": err.error_type,
+                "error_code": err.code,
+            }
+        )
+    finally:
+        if slot_queued is not None:
+            ctx.queue_counter = max(0, ctx.queue_counter - 1)
+        if ctx.cancels.get(sess.id) is cancel:
+            ctx.cancels.pop(sess.id, None)
+        _exit_roots(roots_token, root_token)
+        reset_current_turn(turn_token)
+        runner.finish()
+        ctx.schedule_runner_cleanup(runner)
 
 
 @router.post("/multi-agent")

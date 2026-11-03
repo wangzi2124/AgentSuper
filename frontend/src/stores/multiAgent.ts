@@ -53,6 +53,8 @@ interface SessionState {
   queuePosition: number | null
   /** [队列] 本会话「执行中追加」的待处理任务（后端 session_inputs；新→旧执行） */
   pendingPrompts: QueuedPrompt[]
+  /** [后台续流] 当前订阅中的服务端回合（断连重连锁定只接这一轮） */
+  attachedTurnId?: string
 }
 
 export const useMultiAgentStore = defineStore('multiAgent', () => {
@@ -172,6 +174,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         streamPhase: 'idle',
         queuePosition: null,
         pendingPrompts: [],
+        attachedTurnId: undefined,
       }
     }
     return sessions.value[sessionId]
@@ -254,7 +257,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     catch (e) { console.error('Failed to load conversations:', e) }
   }
 
-  async function loadConversation(id: string) {
+  async function loadConversation(id: string, autoResume = true) {
     const meta = conversations.value.find(c => c.id === id)
     const session = getOrCreateSession(id, meta?.title)
     session.conversationId = id
@@ -270,8 +273,9 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       }
       const serverMessages: MultiAgentMessage[] = detail.messages.map(m => ({
         id: m.id,
-        role: m.role as 'user' | 'assistant',
+        role: m.role as 'user' | 'assistant' | 'system',
         content: m.content || '',
+        compaction: ((m as any).data?.compaction as MultiAgentMessage['compaction']) || undefined,
         agents: (m as any).agents || [],
         files: (m as any).files || [],
         voice: (m as any).voice,
@@ -292,6 +296,9 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       session.messages = serverMessages
       await saveSessionToCache(id, serverMessages, id, detail.title)
       activeSessionId.value = id
+      // [后台续流] 刷新/切回时后台可能仍在跑：有活动回合就自动接上，
+      // 断连不再等于取消。
+      if (autoResume) void resumeSession(id)
     } catch (e) {
       console.error('Failed to load conversation:', e)
       // 服务器获取失败（离线），退化为只读缓存
@@ -557,8 +564,307 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     if (Object.keys(map).length === 0 && event.agents?.length) {
       msg.agents = event.agents
     } else {
-      msg.agents = Object.values(map)
+      // 'system' 是本轮临时提示（如 reconnecting），不随消息持久化展示。
+      msg.agents = Object.values(map).filter(a => a.agent_id !== 'system')
     }
+  }
+
+  // ── [后台续流] 断连/刷新后重连在途回合 ────────────────────────────────
+  function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms))
+  }
+
+  function lastUserText(session: SessionState): string {
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+      const m = session.messages[i]
+      if (m.role === 'user') return m.content || ''
+    }
+    return ''
+  }
+
+  function ensureResumePlaceholder(
+    session: SessionState,
+    turnId: string,
+    seq: number,
+  ): MultiAgentMessage {
+    const id = `local-${turnId}-${seq}`
+    const found = session.messages.find(m => m.id === id)
+    if (found) return found
+    const msg: MultiAgentMessage = reactive({
+      id,
+      role: 'assistant',
+      content: '',
+      agents: [],
+      timestamp: new Date(),
+      startedAt: Date.now(),
+    })
+    session.messages = [...session.messages, msg]
+    return msg
+  }
+
+  function removeIfEmptyPlaceholder(session: SessionState, msg: MultiAgentMessage): void {
+    if (msg.content || msg.isError) return
+    if (msg.agents && msg.agents.length) return
+    if (msg.files_changed?.length) return
+    session.messages = session.messages.filter(m => m.id !== msg.id)
+  }
+
+  /**
+   * 订阅一个服务端在途回合：从头重放事件日志重建状态；中途断流先查
+   * `/status`，仍在跑就再次续接，只有确认无活且无终态才退回报错/重试。
+   * 本地 abort（离开页面/切换会话）只解绑，不取消后台任务。
+   */
+  async function attachTurn(
+    sessionKey: string,
+    session: SessionState,
+    target: { turn_id: string; last_seq?: number },
+  ): Promise<void> {
+    const streamId = session.conversationId || sessionKey
+    session.attachedTurnId = target.turn_id
+    session.loading = true
+    session.streamPhase = 'running'
+    session.queuePosition = null
+    session.abortController?.abort()
+    const controller = new AbortController()
+    session.abortController = controller
+
+    const resumeNotice: AgentStreamData = {
+      agent_id: 'system',
+      agent_name: 'System',
+      status: 'completed',
+      content: '',
+      steps: [],
+      parts: [{ seq: 0, kind: 'notice', text: '已重新连接，任务在后台继续' }],
+    }
+    const mergeAgents = (agents: Record<string, AgentStreamData>): AgentStreamData[] => {
+      const list = Object.values(agents)
+      const system = list.find(a => a.agent_id === 'system')
+      return [system || resumeNotice, ...list.filter(a => a.agent_id !== 'system')]
+    }
+    let assistantMsg = ensureResumePlaceholder(session, target.turn_id, 0)
+    assistantMsg.agents = [resumeNotice]
+    let completed = false
+    let failures = 0
+    let handedOff = false
+
+    while (!controller.signal.aborted) {
+      const harness = useHarnessTurn()
+      let sawEvents = false
+      let fatal: ChatError | null = null
+      try {
+        await harness.resume(streamId, target, {
+          signal: controller.signal,
+          onEvent: (event, reduced) => {
+            if (controller.signal.aborted) return
+            // 服务端已切到新的 turn（旧回合结束后又来了新任务）：不污染当前重建。
+            if (event.turn_id && event.turn_id !== target.turn_id) return
+            sawEvents = true
+            const t = event.type
+            if (
+              t === 'agent_start' || t === 'agent_step' || t === 'agent_done' ||
+              t === 'agent_error' || t === 'context_truncated' ||
+              t === 'text_delta' || t === 'replay_gap'
+            ) {
+              assistantMsg.agents = mergeAgents(reduced.agents)
+              if (t === 'text_delta') assistantMsg.content = reduced.assistantContent
+              return
+            }
+            if (event.conversation_id && !session.conversationId) {
+              session.conversationId = event.conversation_id
+            }
+            if (t === 'queued') {
+              session.streamPhase = 'queued'
+              session.queuePosition = event.queue_position ?? null
+              return
+            }
+            if (t === 'model_switched') {
+              const ref = event.model_ref
+              if (ref?.id) assistantMsg.model = ref.name || ref.id
+              return
+            }
+            if (t === 'permission_request') {
+              usePermissionStore().handleIncoming({
+                id: event.request_id!,
+                path: event.path!,
+                operation: event.operation!,
+                tool_name: event.tool_name!,
+                tool_args: event.tool_args as Record<string, unknown>,
+                created_at: event.created_at || new Date().toISOString(),
+                expires_at: event.expires_at,
+              })
+              return
+            }
+            if (t === 'routing') {
+              routingStatus.value = event.detail || 'Routing...'
+              return
+            }
+            if (t === 'queue_drain') {
+              if (event.queue_size != null) session.queuePosition = event.queue_size
+              return
+            }
+            if (t === 'error') {
+              session.streamPhase = 'idle'
+              routingStatus.value = ''
+              assistantMsg.isError = true
+              const errorInfo = classifySSEError(event)
+              assistantMsg.errorInfo = errorInfo
+              assistantMsg.content = formatErrorMessage(errorInfo)
+              persistSession(sessionKey)
+              if (errorInfo.retryable) startAutoRetry(sessionKey, lastUserText(session))
+              completed = true
+              return
+            }
+            if (t === 'done' || t === 'turn_done') {
+              // 重放时，同一 drain 序列里已结束的回合可能已从历史加载：按
+              // assistant_msg_id 对齐，丢弃重放占位，避免刷新后出现重复气泡。
+              const dup = event.assistant_msg_id
+                ? session.messages.find(m => m.id === event.assistant_msg_id && m !== assistantMsg)
+                : undefined
+              if (dup) {
+                session.messages = session.messages.filter(m => m.id !== assistantMsg.id)
+                assistantMsg = dup
+              } else {
+                finalizeTurn(session, event, assistantMsg, reduced.agents)
+              }
+              if (t === 'done') {
+                completed = true
+                session.streamPhase = 'idle'
+                session.loading = false
+                routingStatus.value = ''
+                session.conversationId = event.conversation_id || session.conversationId
+                session.attachedTurnId = undefined
+                persistSession(sessionKey)
+                return
+              }
+              // 同一 drain 序列还有下一轮：新建占位继续接。
+              session.streamPhase = 'running'
+              routingStatus.value = ''
+              assistantMsg = ensureResumePlaceholder(session, target.turn_id, event.seq || 0)
+            }
+          },
+        })
+      } catch (err) {
+        // 断流：下一步用 /status 判断后台是否仍在执行。
+        if (err && typeof err === 'object' && 'statusCode' in err) {
+          fatal = err as ChatError
+        }
+      }
+      if (completed || controller.signal.aborted) break
+
+      // 服务端已没有可续接回合（404）：退回历史刷新，而不是报网络错误。
+      if (fatal?.statusCode === 404) {
+        session.loading = false
+        session.streamPhase = 'idle'
+        session.queuePosition = null
+        session.attachedTurnId = undefined
+        removeIfEmptyPlaceholder(session, assistantMsg)
+        await loadConversation(sessionKey, false)
+        break
+      }
+      if (fatal && fatal.retryable === false) {
+        // 403 等不可重试错误：直接收尾，不进入重试循环。
+        session.loading = false
+        session.streamPhase = 'idle'
+        session.queuePosition = null
+        session.attachedTurnId = undefined
+        assistantMsg.isError = true
+        assistantMsg.errorInfo = fatal
+        assistantMsg.content = formatErrorMessage(fatal)
+        persistSession(sessionKey)
+        break
+      }
+
+      const status = await apiGetSessionStatus(streamId).catch(() => null)
+      const active = status?.active_turn
+      if (active && active.turn_id === target.turn_id) {
+        failures = 0
+        await sleep(800)
+        continue
+      }
+      if (active) {
+        // 旧回合已结束、后台已开始新的 turn：以服务端历史为准并接上新回合。
+        session.loading = false
+        session.streamPhase = 'idle'
+        session.queuePosition = null
+        session.attachedTurnId = undefined
+        removeIfEmptyPlaceholder(session, assistantMsg)
+        await loadConversation(sessionKey, false)
+        handedOff = true
+        await resumeSession(sessionKey)
+        break
+      }
+
+      // 后台已无该回合：若事件日志里已有内容，说明回合结束，拉历史补齐权威结果。
+      if (sawEvents) {
+        session.loading = false
+        session.streamPhase = 'idle'
+        session.queuePosition = null
+        session.attachedTurnId = undefined
+        removeIfEmptyPlaceholder(session, assistantMsg)
+        await loadConversation(sessionKey, false)
+        break
+      }
+
+      failures += 1
+      if (failures >= 3) {
+        session.streamPhase = 'idle'
+        session.loading = false
+        session.queuePosition = null
+        assistantMsg.isError = true
+        const errorInfo: ChatError = {
+          type: 'network',
+          message: '网络连接中断，请检查网络后重试',
+          retryable: true,
+        }
+        assistantMsg.errorInfo = errorInfo
+        assistantMsg.content = formatErrorMessage(errorInfo)
+        persistSession(sessionKey)
+        if (autoRetrySessionId.value === sessionKey) startAutoRetry(sessionKey, lastUserText(session))
+        break
+      }
+      await sleep(1000)
+    }
+
+    if (session.abortController === controller) session.abortController = null
+    if (handedOff) return
+    if (!session.loading) return
+    session.loading = false
+    session.streamPhase = 'idle'
+    session.queuePosition = null
+    if (!completed) {
+      session.attachedTurnId = undefined
+      removeIfEmptyPlaceholder(session, assistantMsg)
+    }
+  }
+
+  /** 查询会话是否有在途回合；有则自动订阅续流。返回是否接上了活动回合。 */
+  async function resumeSession(id: string): Promise<boolean> {
+    const session = sessions.value[id]
+    if (!session) return false
+    const serverId = session.conversationId || id
+    let status: SessionStatus | null = null
+    try {
+      status = await apiGetSessionStatus(serverId)
+    } catch {
+      return false
+    }
+    const active = status?.active_turn
+    if (!active) return false
+    if (session.attachedTurnId === active.turn_id && session.abortController) return true
+    await attachTurn(id, session, active)
+    return true
+  }
+
+  /** 仅解绑本地 SSE（离开页面/切换会话），后台任务继续执行。 */
+  function detachStream(): void {
+    const id = activeSessionId.value
+    const session = id ? sessions.value[id] : undefined
+    if (!session) return
+    session.abortController?.abort()
+    session.abortController = null
+    session.loading = false
+    session.streamPhase = 'idle'
+    session.queuePosition = null
   }
 
   async function send(text: string, clientMsgId?: string, files?: FileContent[], voice?: VoiceMessageData): Promise<boolean> {
@@ -731,6 +1037,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             session.streamPhase = 'idle'
             routingStatus.value = ''
             session.conversationId = event.conversation_id || session.conversationId
+            session.attachedTurnId = undefined
             persistSession(sessionId)
             migrateToServerId(sessionId)
             cancelAutoRetry()
@@ -879,6 +1186,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       if (session) {
         // 本地中断 SSE 连接（前端立即停止接收）
         session.abortController?.abort()
+        session.attachedTurnId = undefined
         // 通知后端真正停止 Agent 任务（fire-and-forget，本地 abort 不会让后端停止）
         if (session.conversationId) {
           interruptSession(session.conversationId).catch((e) => {
@@ -908,6 +1216,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       if (s.streamPhase !== 'idle' || s.abortController) {
         s.abortController?.abort()
         s.abortController = null
+        s.attachedTurnId = undefined
         if (s.conversationId) {
           try { await interruptSession(s.conversationId) } catch (e) { console.error('Failed to interrupt before undo:', e) }
         }
@@ -974,6 +1283,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       cancelAutoRetry()
       const s = sessions.value[activeSessionId.value]
       s?.abortController?.abort()
+      if (s) s.attachedTurnId = undefined
       const serverId = s?.conversationId || activeSessionId.value
       if (serverId) { try { await apiDeleteConversation(serverId) } catch (e) { console.error('Failed to delete:', e) } }
       await deleteSessionFromCache(serverId)
@@ -1057,6 +1367,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     pendingPrompts, removeQueuedPrompt,
     retryCountdown, notice, setNotice,
     send, cancel, clear, undoMessage, restoreSnapshot, fetchMessageDiff, deleteMessage, deleteConversation,
+    resumeSession, detachStream,
     loadConversations, loadConversation, newChat, renameConversation,
     forkConversation, compactConversation, fetchSessionStatus,
     retryLastMessage, manualRetry, cancelAutoRetry,

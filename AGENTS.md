@@ -19,6 +19,8 @@ backend/
   app/
     main.py                 # FastAPI 入口；挂载 /api、裸 /chat 契约、启动清理
     deps.py                 # PlatformContext：会话、图、切换、权限、并发
+    turn_runner.py          # 后台回合：有界事件日志、订阅重放、心跳、清理
+    live_turns.py           # 在途回合 sidecar 正文 + 启动对账
     api/                    # chat / compat / sessions / documents / models / ...
     session/                # session.db、history、service、repository
   graph/
@@ -51,7 +53,7 @@ backend/
   cognition/                # compressor / token_counter / tool_output
   execution/                # VFS / permission / tool_registry / tools
   observability/            # trace / metrics / cost
-  prompts/                  # system/*.md, nodes/*.md
+  prompts/                  # providers/{_shared,default,anthropic,gpt,gemini,kimi,trinity}.md, system/*.md, nodes/*.md
   tests/                    # unit / contract / integration / e2e / perf / reliability / security
 
 frontend/
@@ -80,11 +82,13 @@ HTTP / SSE
   → synthesize → memory_store → END
 ```
 
+- **后台回合 / 断连续流**：`app/turn_runner.py`（有界事件日志 + 订阅者 + `turn_id/seq`）与 `app/live_turns.py`（sidecar 部分正文 + 启动对账）。`POST /api/chat/multi-agent/stream` 只创建/订阅 runner，执行在后台 task；断连、刷新、切路由不取消。`GET /api/chat/multi-agent/stream/{session_id}?after_seq=N` 重放并续流；`/api/sessions/{id}/status` 的 `active_turn` 用于重连判定。仅在停止/撤销/删除会话/进程关闭时 cancel。runner 结束保留 60s，超限丢最旧并推 `replay_gap`。
 - **TurnHarness**：`harness/kernel.py`。`PlatformContext.run/stream` 已接入；`turn_id` 通过 contextvar 传播。
 - **AgentLoop**：`run_tool_loop`。默认完整响应；`graph/nodes/execute.py` 传 `stream=True`，回退模型在 `ToolCallReady` 时提前执行工具。空回复最多补答 2 次，之后收尾；不把 thinking 模型的 reasoning 冒充答案。
 - **文件任务证据**：用户要求列目录/读文件，但本轮 `tool_trace` 为空时，禁止返回模型编造的文件清单；统一提示“先执行工具/换 tool-capable 模型”。
+- **聊天附件**：图片走多模态内联；PDF/Word/Excel 等落盘到会话工作区 `attachments/`，并生成可读的 `.extracted.txt`（超过 12k 字符按 6k 分片），模型用 `read_file`/`grep` 读全文；模型上下文只内联 `attachment_inline_max_chars_per_file` / `_total` 上限内的正文，`history_budget_chars` 控制历史回灌下限；聊天记录不再内联正文，前端「查看正文」走 `POST /api/attachments/extract`（上限 `attachment_extract_max_chars`）。
 - **模型切换**：`harness/switch.py`。门禁 → 原文备份 → 摘要/精确值探针 → 原子写 epoch → 持久化 model；失败回滚。
-- **压缩**：`harness/compression.py`。切换走 `compress_messages`；图节点走 `compress_graph_messages`；手动 compact 走 `tail_snapshot`。
+- **压缩（对齐 opencode）**：`harness/compression.py`。阈值 = `context_window - reserved`（`reserved=min(20k, 模型 max_output)`；目录未声明输出上限时给窗口留一半）；tail 按最近 `context_tail_turns` 轮 + `compaction_preserve_recent_tokens`（0=clamp(2k,8k,25%)）；8 段摘要见 `prompts/nodes/compress.md`，LLM 门禁不过/失败时用确定性兜底；自动、手动 compact、模型切换共用同一核心，手动 compact 会真正更新 checkpoint；检查点写 `session_messages(type=compaction)` + epoch，前端显示可折叠压缩卡。相关配置：`compaction_auto`、`compaction_prune`、`compaction_preserve_recent_tokens`、`compaction_reserved_tokens`。
 - **上下文视图**：`harness/context.py`。`[摘要] + [tail 原文] + [tool_history 回插] + [当前 user]`。
 - **工具历史**：`harness/tool_history.py`。只保留最近一个有工具轮；最多 10 条 / 8KB / 单结果 2KB；最多注入 2 个用户轮。
 - **Ollama prompt 适配**：`models/context_guard.py`，在 `TierModel` 传输层（`raw_invoke/raw_ainvoke/raw_stream`）执行。窗口 = 显式 override > `/api/ps` last-known > `OLLAMA_NUM_CTX`；输出预留 `max(512, 25%×窗口)`，估算裕量 `max(256, 8%×窗口)`；超预算先 `truncate_messages` + `sanitize_tool_messages`，保留 system + 最新 user；system+工具+当前 user 仍装不下时**自动扩展**：按所需最小窗口（2 的幂，上限 32768）随请求下发 `num_ctx`，让 Ollama 重载到更大窗口；只有超过自动上限才抛 `ContextOverflowError`。真实 `prompt_tokens` 按模型 EWMA 校准估算比；一次 overflow 会清窗口缓存、重探、重试一次。`OLLAMA_CONTEXT_GUARD=0` 关闭。
@@ -168,6 +172,7 @@ npx vitest run tests/integration/
 - `compat._sse` 为每个 turn 维护单调 `seq`；前端严格按 `turn_id + seq` 去重/排序。
 - legacy 事件没有 `turn_id` 时，前端归入当前 turn；没有 `seq` 时按到达顺序。
 - 终态：`done`（会话空闲）或 `turn_done`（还有排队轮次）；两者都必须被 store 收尾。
+- `replay_gap`：续流时事件日志已截断，部分历史缺失；前端渲染内联提示，不参与正文。
 - `context_truncated`：Ollama prompt 被裁剪时推送（`window`/`budget`/`reserve`/`estimated_before`/`estimated_after`/`dropped_messages`）；`compat` 透传，前端渲染为时间线内联提示，不进入正文。
 
 ### 4.2 工具调用
@@ -224,6 +229,7 @@ npx vitest run tests/integration/
 ## 6. 前端陷阱
 
 - **store 公共 API 不变**：`send`/`cancel`/`loadConversation`/`undoMessage` 等签名保持；内部事件处理走 `useHarnessTurn`。
+- **断线续接**：`loadConversation` 末尾触发 `resumeSession` → `/status.active_turn` 有值就 `attachTurn`（GET `after_seq=0` 全量重放，按 `turn_id+seq` 去重）；刷新/切路由只 `detachStream`，**不要**调 `interruptSession`。`useHarnessTurn.run` 每轮必须重置为 `'local'`。
 - **不要重置消息列表**：`model_switched` 只更新后续 turn 的模型；消息 key 用稳定 id。
 - **持久化**：`text_delta` 不写 IndexedDB；queued/done/turn_done/error 等阶段才写。服务端是唯一真相源，缓存只做离线回退。
 - **权限**：`permission_request` 归一化后交给 `PermissionStore`；不要塞回 reducer 里弹窗。
@@ -245,7 +251,7 @@ npx vitest run tests/integration/
 - **新 Skill**：内置技能放 `backend/app/skills/bundled/`（Markdown + frontmatter，随包发布、播种进受管库 `data/skills`）；用户自建走「技能」页写受管库；外部源需手动追加，不再自动扫描 `backend/skills/`。
 - **自定义工具**：统一走前端「自定义工具」页（`/api/custom-tools`）。脚本型写入 `backend/plugins/custom_*.py`，由 `PluginLoader` 加载后经 `sync_plugin_tools` 注册进 `ToolRegistry`；`.enabled` 文件控制启用。旧的「插件」页/`/api/plugins` 已删除，不要再新增第二套管理入口。
 - **新前端事件**：先加 `harness/events.ts` 类型 + `adapter`/`reducer` 分支 + 单测，再接 store/view。
-- **新提示词**：`prompts/system/*.md`、`prompts/nodes/*.md`；不要把大段规则塞进 Python。
+- **新提示词**：角色提示词放 `prompts/system/*.md`，provider 行为层放 `prompts/providers/<profile>.md`，节点提示词放 `prompts/nodes/*.md`；运行时由 `PromptLoader.build_agent_prompt(agent_type, model_id)` 按 provider 组装 `shared + profile + role`，provider→profile 映射在 `prompts/loader.py`；`PROMPT_PROFILE_LAYER=0` 可关闭该层。不要把大段规则塞进 Python。
 
 ## 8. 验收与已知缺口
 

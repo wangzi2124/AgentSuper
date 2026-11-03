@@ -162,7 +162,7 @@
   // 历史摘要模型；compress_model 为空时作为压缩模型的回退。
   // null = 未设置（压缩走 tier-simple 或 compress_model）。
   // 示例：ollama_chat/qwen2.5:3b
-  "summarization_model": "ollama_chat/qwen3.5:4b",
+  "summarization_model": null,
 
   // 压缩时保留的最近消息条数（summarization_model 不要求非空）。
   // 示例：6；调大保留更多原文，调小更省上下文。
@@ -254,6 +254,42 @@
   // 单条工具输出的 token 上限。
   // 示例：8000；想压低上下文可设 4000。
   "tool_output_max_tokens": 8000,
+
+  // 是否在上下文超过可用窗口时自动压缩。
+  // 示例：true
+  "compaction_auto": true,
+
+  // 是否清理旧工具输出（保护最近 40k token，收益 >= 20k 才落桩）。
+  // 示例：true
+  "compaction_prune": true,
+
+  // 压缩时保留的最近原文 token；0 = 自动 clamp(2000, 8000, 25% × 可用窗口)。
+  // 示例：0
+  "compaction_preserve_recent_tokens": 0,
+
+  // 压缩预留输出 token；0 = min(20000, llm_max_tokens)。
+  // 示例：0
+  "compaction_reserved_tokens": 0,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 九点五、聊天附件 / 历史预算
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 非图片附件内联进模型上下文的单文件字符上限；超出部分已落盘，模型可用 read_file 读取。
+  // 示例：6000；长文档想少占 token 可设 3000。
+  "attachment_inline_max_chars_per_file": 6000,
+
+  // 单轮所有非图片附件内联字符合计上限。
+  // 示例：12000。
+  "attachment_inline_max_chars_total": 12000,
+
+  // 「查看正文」接口单次返回字符上限（不影响模型上下文）。
+  // 示例：200000。
+  "attachment_extract_max_chars": 200000,
+
+  // execute 节点回灌历史（摘要之外）的字符下限；大窗口仍按窗口自动放宽（上限 60k）。
+  // 示例：12000；多轮长对话想保留更多可调大。
+  "history_budget_chars": 12000,
 
   // ══════════════════════════════════════════════════════════════════════════
   // 十、图片 / OCR / 视觉描述桥

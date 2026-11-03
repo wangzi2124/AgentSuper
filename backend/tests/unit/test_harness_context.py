@@ -51,3 +51,18 @@ def test_budget_never_drops_summary():
 
 def test_empty_messages_returns_empty_view():
     assert assemble_model_view({"messages": []}, content_text=_text) == []
+
+def test_history_budget_config_raises_floor():
+    state = {
+        "messages": [
+            HumanMessage(content="x" * 15_000, id="h1"),
+            HumanMessage(content="current", id="h2"),
+        ],
+        "context_window": 4_000,
+    }
+
+    dropped = assemble_model_view(state, content_text=_text, history_budget_chars=12_000)
+    kept = assemble_model_view(state, content_text=_text, history_budget_chars=30_000)
+
+    assert all("x" * 15_000 != m["content"] for m in dropped)
+    assert any(m["content"] == "x" * 15_000 for m in kept)

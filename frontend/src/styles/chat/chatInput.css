@@ -1,5 +1,8 @@
 .chat-input {
 position: relative;
+display: flex;
+flex-direction: column;
+align-items: stretch;
 padding: 10px clamp(12px, 3vw, 32px) calc(14px + env(safe-area-inset-bottom, 0px));
 background: transparent;
 }
@@ -260,12 +263,21 @@ box-shadow:
   0 0 0 3px color-mix(in srgb, var(--primary, #4f46e5) 12%, transparent),
   0 8px 28px rgba(15, 23, 42, 0.10);
 }
+/* 附件条：位于输入卡上方，独占一行；文件多时内部滚动，不挤压/覆盖权限卡与输入卡 */
 .file-list {
 width: 100%;
-margin: 0 auto 10px;
+max-width: 800px;
+margin: 0 auto 8px;
 display: flex;
 flex-wrap: wrap;
+align-content: flex-start;
 gap: 8px;
+max-height: min(28vh, 200px);
+overflow-y: auto;
+overscroll-behavior: contain;
+padding: 2px;
+box-sizing: border-box;
+flex-shrink: 0;
 }
 .file-chip {
 display: inline-flex;
@@ -381,6 +393,7 @@ font-size: 12px; font-weight: 600; cursor: pointer; flex-shrink: 0;
 .model-pill { max-width: 128px; padding: 0 6px 0 8px; }
 .model-current { max-width: 60px; }
 .agent-pill .agent-icon { display: none; }
+.file-list { max-height: min(24vh, 160px); }
 .file-chip { max-width: 100%; }
 .preview-overlay { padding: 12px; }
 .preview-panel { max-width: 100%; max-height: 86vh; }

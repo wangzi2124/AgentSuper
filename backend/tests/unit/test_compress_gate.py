@@ -141,6 +141,6 @@ async def test_node_backfills_precision_on_rule_path():
     out = await node({"messages": older + recent, "compress_count": 0})
     assert model.calls == 0  # 未调模型（规则路径）
     summary = out["context_summary"]
-    assert "精确值补充" in summary
+    assert "Critical Context" in summary
     assert "8080" in summary and "/a/b.txt" in summary
 

@@ -142,6 +142,23 @@ async def caption_image(data_b64: str, mime_type: str = "", filename: str = "") 
     model, api_base, api_key, prompt, timeout = _caption_kwargs()
     if not model or not data_b64:
         return ""
+    # 未单独配置 caption 凭证时，复用「模型管理」里已注册 provider 的 api_base/key；
+    # 否则 litellm 只会去找环境变量，导致 gpt-4o-mini 这类模型直接失败。
+    extra_kwargs: dict = {}
+    try:
+        from models.catalog import litellm_extra_kwargs, provider_api, read_providers
+
+        provider = model.split("/", 1)[0] if "/" in model else ""
+        default_provider = (settings.llm_model or "").split("/", 1)[0]
+        if provider and (provider in read_providers() or provider == default_provider):
+            creds = provider_api(model)
+            api_base = api_base or creds.get("api_base") or None
+            api_key = api_key or creds.get("api_key") or None
+            extra_kwargs = litellm_extra_kwargs(creds)
+            if creds.get("litellm_model"):
+                model = creds["litellm_model"]
+    except Exception:  # noqa: BLE001 - 目录不可用时保持原配置
+        pass
     fp = _img_fingerprint(data_b64)
     if fp in _caption_cache:
         return _caption_cache[fp]
@@ -171,6 +188,7 @@ async def caption_image(data_b64: str, mime_type: str = "", filename: str = "") 
             kwargs["api_key"] = api_key
         if api_base:
             kwargs["api_base"] = api_base
+        kwargs.update(extra_kwargs)
         resp = await litellm.acompletion(**kwargs)
         content = (resp.choices[0].message.content or "").strip()
         if content:

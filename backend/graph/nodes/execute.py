@@ -11,9 +11,10 @@ from typing import Any, Callable
 from execution.tool_registry import ToolRegistry
 from harness.budget import BudgetLedger
 from harness.context import assemble_model_view
-from models.router import TierModel, resolve_model
-
 from harness.tool_history import human_count, last_human_id, merge_tool_history
+from models.router import TierModel, resolve_model
+from prompts.loader import PromptLoader, model_id_of
+
 from .base import content_text, run_tool_loop
 
 TOOL_SCOPE = "location"
@@ -26,9 +27,18 @@ VISION_SYSTEM_PREFIX = (
 )
 
 # 历史注入预算（字符）：把同一 thread 的既有对话（checkpointer 中的 state.messages）
-# 作为上下文喂给 LLM，使模型具备会话内短期记忆（对齐 agent.md §4.2：工作记忆=State.messages）。
+# 作为上下文喂给 LLM，使模型具备会话内短期记忆（对齐 agent.md §4.2：工作记忆 State.messages）。
 # 只保留最近的内容，超出预算从最旧处丢弃，避免提示词无限增长。
-_HISTORY_BUDGET_CHARS = 12_000
+_DEFAULT_HISTORY_BUDGET_CHARS = 12_000
+
+
+def _history_budget_chars() -> int:
+    try:
+        from config import settings
+
+        return max(1_000, int(getattr(settings, "history_budget_chars", 0) or _DEFAULT_HISTORY_BUDGET_CHARS))
+    except Exception:  # noqa: BLE001 - 配置不可用时用默认值
+        return _DEFAULT_HISTORY_BUDGET_CHARS
 
 # 历史里不需要回灌的 role（工具中间结果属噪音；压缩摘要另以 system 保留）。
 
@@ -46,7 +56,7 @@ def _conversation_history(
         state,
         content_text=content_text,
         budget_chars=budget_chars,
-        history_budget_chars=_HISTORY_BUDGET_CHARS,
+        history_budget_chars=_history_budget_chars(),
     )
 
 
@@ -66,19 +76,28 @@ def _multimodal_user_content(state: dict[str, Any]) -> list[dict[str, Any]] | No
 def make_execute_node(
     model: TierModel | None = None,
     registry: ToolRegistry | None = None,
-    system_prompt: str = "",
+    system_prompt: str | None = None,
     scope: str | None = TOOL_SCOPE,
+    extra_system: str = "",
 ) -> Callable[[dict[str, Any]], Any]:
     from models.router import resolve_model
 
     _model = model
     _registry = registry
     _system_prompt = system_prompt
+    _extra_system = extra_system
 
     async def execute_node(state: dict[str, Any]) -> dict[str, Any]:
         model = _model if _model is not None else resolve_model(state, default_tier="medium")
         registry = _registry
-        system_prompt = _system_prompt
+        # 未显式注入时，按本轮实际模型选择 provider profile（shared + profile + role）。
+        system_prompt = (
+            _system_prompt
+            if _system_prompt is not None
+            else PromptLoader().build_agent_prompt("file_agent", model_id_of(model))
+        )
+        if _extra_system:
+            system_prompt = f"{system_prompt}\n\n{_extra_system}"
         plan = [dict(t) for t in (state.get("task_plan") or [])]
         pending = [t for t in plan if t.get("status") != "done"]
         if not pending:
@@ -116,6 +135,10 @@ def make_execute_node(
         messages.extend(_conversation_history(state))
         if user_blocks is not None:
             messages.append({"role": "user", "content": user_blocks})
+        # 当前轮 human 消息被历史装配排除；附件正文需单独补回，否则模型看不到文件内容。
+        attachment_ctx = str(state.get("attachment_context") or "").strip()
+        if attachment_ctx:
+            messages.append({"role": "user", "content": attachment_ctx})
         messages.append({"role": "user", "content": task.get("desc", "")})
 
         result = await run_tool_loop(

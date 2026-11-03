@@ -54,9 +54,12 @@ def route_after_supervisor(state: dict[str, Any]) -> str:
     if state.get("final_output"):
         return "end"
 
+    from config import settings
+
     compress_threshold = int(state.get("compress_threshold") or COMPRESS_THRESHOLD)
     if (
-        not state.get("context_compressed")
+        bool(getattr(settings, "compaction_auto", True))
+        and not state.get("context_compressed")
         and _context_tokens(state) > compress_threshold
         and len(state.get("messages") or []) > KEEP_RECENT
     ):

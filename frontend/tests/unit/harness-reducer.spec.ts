@@ -73,6 +73,20 @@ describe('harness reducer', () => {
     expect(notices[0].notice?.dropped_messages).toBe(6)
   })
 
+  it('records replay_gap as a system notice and keeps seq monotonic', () => {
+    let state = createTurnState('t1')
+    state = applyHarnessEvent(state, adaptLegacyEvent({
+      type: 'text_delta', agent_id: '', turn_id: 't1', seq: 5, delta: 'abc',
+    } as any))
+    state = applyHarnessEvent(state, adaptLegacyEvent({
+      type: 'replay_gap', agent_id: '', turn_id: 't1', seq: 4,
+      detail: '部分历史事件已过期',
+    } as any))
+    expect(state.lastSeq).toBe(5)
+    const notice = state.agents.system.parts?.find(p => p.kind === 'notice')
+    expect(notice?.text).toBe('部分历史事件已过期')
+  })
+
   it('adapts legacy events without turn_id to the current turn', () => {
     const event = adaptLegacyEvent({ type: 'text_delta', agent_id: '', delta: 'x' } as any, 'turn-local')
     expect(event.turn_id).toBe('turn-local')

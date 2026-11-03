@@ -12,7 +12,7 @@ from graph.nodes import compress as compress_mod
 def test_keep_recent_reads_settings_at_call_time(monkeypatch):
     captured = {}
 
-    async def fake_compress(messages, *, existing_summary, model, compress_count, keep_recent):
+    async def fake_compress(messages, *, existing_summary, model, compress_count, keep_recent, **_kw):
         captured.update(model=model, keep_recent=keep_recent)
         return SimpleNamespace(
             summary="s", compress_count=1, tail_start_id=None, recent=[]
@@ -31,7 +31,7 @@ def test_model_factory_is_called_per_invocation(monkeypatch):
     captured = []
     sentinel = object()
 
-    async def fake_compress(messages, *, existing_summary, model, compress_count, keep_recent):
+    async def fake_compress(messages, *, existing_summary, model, compress_count, keep_recent, **_kw):
         captured.append(model)
         return SimpleNamespace(
             summary="s", compress_count=1, tail_start_id=None, recent=[]

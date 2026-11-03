@@ -210,6 +210,16 @@ def list_sessions(
         conn.close()
 
 
+def list_sessions_by_status(status: str) -> list[SessionInfo]:
+    """列出所有处于指定状态的会话（启动对账用，不区分用户）。"""
+    conn = _get_db()
+    try:
+        rows = conn.execute("SELECT * FROM sessions WHERE status = ?", (status,)).fetchall()
+        return [_row_to_session(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def update_session(session_id: str, **fields: Any) -> SessionInfo:
     allowed = {"title", "archived", "agent", "model", "status", "cost", "directory",
                "tokens_input", "tokens_output", "tokens_cache_read", "tokens_cache_write",

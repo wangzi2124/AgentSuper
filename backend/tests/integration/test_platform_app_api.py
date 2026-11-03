@@ -476,24 +476,25 @@ def test_delete_message_hides_single(client):
     assert [m["id"] for m in after] == [msgs[1]["id"]]
 
 
-def test_compact_collapses_history(client):
+def test_compact_collapses_history(client, monkeypatch):
+    async def _summary(messages, existing_summary="", model=None, **kwargs):
+        return "## Goal\n- 测试压缩"
+
+    monkeypatch.setattr("harness.compression.summarize_messages", _summary)
     sid = _sid_after_turn(client)
     _sid_after_turn(client, "again", conversation_id=sid)  # → 4 条可见消息
     ctx = client.app.state.platform
     assert len(client.get(f"/api/sessions/{sid}/messages").json()) == 4
 
-    # 端点（默认 keep_last=10 → 无操作，仅 204）
-    assert client.post(f"/api/sessions/{sid}/compact").status_code == 204
-
-    # 单元级 keep_last=1 → 折叠为「摘要占位 + 最近 1 条」
     import asyncio
 
-    result = asyncio.run(ctx.compact_session(sid, keep_last=1))
-    assert result["compacted"] is True and result["baseline"] == 3
+    result = asyncio.run(ctx.compact_session(sid))
+    assert result["compacted"] is True and result["baseline"] == 0
     msgs = client.get(f"/api/sessions/{sid}/messages").json()
-    assert msgs[0]["id"].endswith("_compact")
     assert msgs[0]["type"] == "system"
-    assert [m["seq"] for m in msgs[1:]] == [4]
+    assert msgs[0]["data"]["compaction"]["reason"] == "manual"
+    assert "[历史摘要]" in msgs[0]["content"]
+    assert len(msgs) >= 2
 
 
 def test_fork_copies_visible_and_lists_children(client):

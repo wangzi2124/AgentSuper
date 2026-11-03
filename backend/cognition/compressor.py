@@ -1,8 +1,8 @@
 """上下文压缩（对齐 agent.md §4.3）。
 
-- 阈值触发（默认 80K token），保留最近 N token 原文，仅对更早的历史做增量摘要。
-- 9 段式结构化摘要模板（prompts/nodes/compress.md）。
-- 摘要生成后附自检清单，确保关键信息（路径/命令/数字/约束）未丢失。
+- 阈值触发（默认按可用窗口），保留最近 N token/轮次原文，仅对更早的历史做增量摘要。
+- 8 段式结构化摘要模板（prompts/nodes/compress.md，对齐 opencode）。
+- 摘要生成后附精确值回填；LLM 门禁不过/失败时用确定性兜底摘要。
 """
 
 from __future__ import annotations
@@ -181,7 +181,7 @@ def _split_suffix(
 
 
 def build_compress_prompt(existing_summary: str, serialized: str) -> str:
-    """用 9 段式模板渲染压缩提示词。"""
+    """用 8 段式模板渲染压缩提示词。"""
     body = f"<previous-summary>\n{existing_summary or '（无）'}\n</previous-summary>\n\n{serialized}"
     return PromptLoader().load("nodes/compress.md", content=body)
 
@@ -322,3 +322,53 @@ def enforce_precision(summary: str, older_messages: Sequence[Any]) -> str:
         return summary
     backfill = "\n".join(f"- {t}" for t in missing[:_PRECISION_BACKFILL_MAX])
     return f"{summary}\n\n[精确值补充]\n{backfill}"
+
+_FALLBACK_SNIPPET_CHARS = 240
+_FALLBACK_MAX_PRECISION = 20
+
+
+def _snippet(text: str, limit: int = _FALLBACK_SNIPPET_CHARS) -> str:
+    value = " ".join(str(text or "").split())
+    return value[:limit] + ("…" if len(value) > limit else "")
+
+
+def build_fallback_summary(
+    messages: Sequence[Any], existing_summary: str = ""
+) -> str:
+    """确定性抽取式摘要：LLM 门禁不过/调用失败时兜底，避免“丢历史还无摘要”。"""
+    msgs = list(messages or [])
+    users = [m for m in msgs if _msg_role(m) in ("user", "human")]
+    assistants = [m for m in msgs if _msg_role(m) in ("assistant", "ai")]
+
+    goal = _snippet(_msg_text(users[0])) if users else "无"
+    done = [f"- {_snippet(_msg_text(m))}" for m in assistants[-3:] if _msg_text(m).strip()]
+    facts = extract_precision_values(serialize_messages(msgs))[:_FALLBACK_MAX_PRECISION]
+    critical = [f"- {fact}" for fact in facts]
+    files = [f"- {fact}" for fact in facts if "/" in fact or "\\" in fact][:10]
+    next_step = _snippet(_msg_text(users[-1])) if users else "无"
+
+    sections = [
+        "## Goal",
+        f"- {goal}",
+        "## Constraints & Preferences",
+        "- 无",
+        "## Progress",
+        "### Done",
+        "\n".join(done) or "- 无",
+        "### In Progress",
+        f"- {_snippet(_msg_text(users[-1])) if len(users) > 1 else '无'}",
+        "### Blocked",
+        "- 无",
+        "## Key Decisions",
+        "- 无（规则兜底摘要无法可靠提取决策，请以 Critical Context 为准）",
+        "## Next Steps",
+        f"- {next_step}",
+        "## Critical Context",
+        "\n".join(critical) or "- 无",
+        "## Relevant Files",
+        "\n".join(files) or "- 无",
+    ]
+    fallback = "\n".join(sections)
+    if existing_summary.strip():
+        return f"{existing_summary.strip()}\n\n{fallback}"
+    return fallback

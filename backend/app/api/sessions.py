@@ -150,7 +150,18 @@ async def delete_message(
 @router.get("/{session_id}/status")
 async def get_status(session_id: str, ctx: PlatformContext = Depends(get_context)) -> dict:
     sess = _must_get(ctx, session_id)
-    return {"session_id": session_id, "status": sess.status}
+    runner = ctx.get_runner(session_id)
+    active_turn = None
+    if runner is not None:
+        try:
+            active_turn = runner.active_turn_info()
+        except Exception:  # noqa: BLE001 - status must stay best-effort
+            active_turn = None
+    return {
+        "session_id": session_id,
+        "status": sess.status,
+        "active_turn": active_turn,
+    }
 
 
 @router.get("/{session_id}/children")

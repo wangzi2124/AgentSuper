@@ -10,6 +10,7 @@ import ConversationTimeline from '../components/ConversationTimeline.vue'
 import ChatInput from '../components/ChatInput.vue'
 import PermissionInlineCard from '../components/PermissionInlineCard.vue'
 import VoiceBubble from '../components/VoiceBubble.vue'
+import { extractAttachmentText } from '../api/attachments'
 import { useStickToBottom } from '../harness/useTimelineStream'
 
 const route = useRoute()
@@ -51,6 +52,15 @@ function fmtCost(n?: number) {
   if (!n || n <= 0) return ''
   return n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`
 }
+function compactionLabel(reason?: string): string {
+  switch (reason) {
+    case 'manual': return '手动'
+    case 'model_switch': return '模型切换'
+    case 'overflow': return '窗口溢出'
+    default: return '自动'
+  }
+}
+
 function usageLabel(msg: MultiAgentMessage): string {
   const t = msg.tokens || {}
   const parts: string[] = []
@@ -98,6 +108,8 @@ function onGlobalKeydown(e: KeyboardEvent) {
 }
 
 watch(() => route.params.id, (newId) => {
+  // 切换会话只解绑本地 SSE；后台任务继续，回来时自动续流。
+  agent.detachStream()
   if (newId) agent.loadConversation(newId as string)
   else agent.newChat()
 })
@@ -230,6 +242,8 @@ function stopSpeaking() {
 }
 onBeforeUnmount(() => {
   stopSpeaking()
+  // 离开页面/移动端切页：只解绑 SSE，不取消后台任务（回来会续流）。
+  agent.detachStream()
   window.removeEventListener('keydown', onGlobalKeydown)
   if (escTimer) clearTimeout(escTimer)
 })
@@ -261,6 +275,89 @@ async function handleCopy(messageId: string, text: string) {
     console.error('Copy failed:', e)
   }
 }
+
+  // ── 附件正文查看：PDF/Word/Excel 等由后端提取后展示 ──
+  interface AttachmentViewerState {
+    file: FileContent
+    loading: boolean
+    error: string
+    text: string
+    truncated: boolean
+  }
+  const attachmentViewer = ref<AttachmentViewerState | null>(null)
+  const attachmentCopied = ref(false)
+
+  async function openAttachmentText(file: FileContent) {
+    if (!file?.data) return
+    attachmentViewer.value = { file, loading: true, error: '', text: '', truncated: false }
+    try {
+      const res = await extractAttachmentText({
+        filename: file.filename,
+        mime_type: file.mime_type,
+        data: file.data,
+      })
+      if (attachmentViewer.value?.file === file) {
+        attachmentViewer.value = {
+          file, loading: false, error: '', text: res.text, truncated: res.truncated,
+        }
+      }
+    } catch (e) {
+      if (attachmentViewer.value?.file === file) {
+        attachmentViewer.value = {
+          file, loading: false, truncated: false, text: '',
+          error: e instanceof Error ? e.message : String(e),
+        }
+      }
+    }
+  }
+
+  function closeAttachmentViewer() {
+    attachmentViewer.value = null
+    attachmentCopied.value = false
+  }
+
+  async function copyAttachmentText() {
+    const text = attachmentViewer.value?.text || ''
+    if (!text) return
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.left = '-9999px'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      }
+      attachmentCopied.value = true
+      setTimeout(() => { attachmentCopied.value = false }, 1500)
+    } catch (e) {
+      console.error('Copy attachment text failed:', e)
+    }
+  }
+
+  function base64ToBytes(data: string): Uint8Array {
+    const bin = atob(data)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return bytes
+  }
+
+  function downloadAttachment(file: FileContent) {
+    if (!file?.data) return
+    const blob = new Blob([base64ToBytes(file.data)], {
+      type: file.mime_type || 'application/octet-stream',
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = file.filename || 'attachment'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   /* @@CHAT_TABLIST_SCRIPT@@ */
   // ── 会话标签条：聊天框顶部切换 / 新建会话（数据源 = agent.conversations） ──
@@ -356,9 +453,30 @@ async function handleCopy(messageId: string, text: string) {
                       @click="previewImage = `data:${f.mime_type};base64,${f.data}`"
                     />
                     <span v-if="f._caption" class="msg-file-caption">{{ f._caption }}</span>
-                    <span v-else class="msg-file-name">📄 {{ f.filename }}</span>
+                    <span v-else-if="f.mime_type?.startsWith('image/')" class="msg-file-name">📄 {{ f.filename }}</span>
+                    <button
+                      v-else
+                      type="button"
+                      class="msg-file-name msg-file-open"
+                      title="查看提取正文"
+                      @click="openAttachmentText(f)"
+                    >
+                      📄 {{ f.filename }} <span class="msg-file-action">查看正文</span>
+                    </button>
                   </div>
                 </div>
+              </template>
+
+              <template v-else-if="msg.compaction">
+                <details class="compaction-card">
+                  <summary class="compaction-card-head">
+                    <span class="compaction-card-title">上下文已压缩 · {{ compactionLabel(msg.compaction.reason) }}</span>
+                    <span v-if="msg.compaction.tokens_before" class="compaction-card-tokens">
+                      {{ msg.compaction.tokens_before }} → {{ msg.compaction.tokens_after }}
+                    </span>
+                  </summary>
+                  <div class="compaction-card-body">{{ msg.content }}</div>
+                </details>
               </template>
 
               <template v-else>
@@ -429,6 +547,53 @@ async function handleCopy(messageId: string, text: string) {
 
     <div class="chat-footer">
       <ChatInput ref="chatInputRef" :loading="agent.loading" @send="handleSend" @cancel="handleCancel" />
+    </div>
+
+    <!-- [附件正文] PDF/Word 等提取文本弹层 -->
+    <div
+      v-if="attachmentViewer"
+      class="attachment-viewer-overlay"
+      @click.self="closeAttachmentViewer"
+    >
+      <div class="attachment-viewer" role="dialog" aria-modal="true">
+        <div class="attachment-viewer-head">
+          <span class="attachment-viewer-title" :title="attachmentViewer.file.filename">
+            {{ attachmentViewer.file.filename }}
+          </span>
+          <button
+            type="button"
+            class="attachment-viewer-close"
+            title="关闭"
+            @click="closeAttachmentViewer"
+          >✕</button>
+        </div>
+        <div class="attachment-viewer-body">
+          <div v-if="attachmentViewer.loading" class="attachment-viewer-hint">正在提取正文…</div>
+          <div v-else-if="attachmentViewer.error" class="attachment-viewer-hint is-error">
+            {{ attachmentViewer.error }}
+          </div>
+          <pre v-else class="attachment-viewer-text">{{ attachmentViewer.text }}</pre>
+        </div>
+        <div class="attachment-viewer-foot">
+          <span v-if="attachmentViewer.truncated" class="attachment-viewer-warn">
+            正文超过返回上限，已截断；可下载原文件查看完整内容
+          </span>
+          <span v-else class="attachment-viewer-meta">
+            共 {{ attachmentViewer.text.length }} 字
+          </span>
+          <button
+            type="button"
+            class="attachment-viewer-btn"
+            :disabled="!attachmentViewer.text"
+            @click="copyAttachmentText"
+          >{{ attachmentCopied ? '已复制' : '复制全文' }}</button>
+          <button
+            type="button"
+            class="attachment-viewer-btn primary"
+            @click="downloadAttachment(attachmentViewer.file)"
+          >下载原文件</button>
+        </div>
+      </div>
     </div>
 
     <!-- [F8] 聊天图片放大预览遮罩 -->

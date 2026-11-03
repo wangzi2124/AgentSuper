@@ -35,6 +35,10 @@ class AgentState(TypedDict, total=False):
     compress_count: int
     memory_context: str
     rag_context: str
+    # 本轮聊天非图片附件的解析正文（当前轮 human 被历史装配排除，由 execute 显式注入）
+    attachment_context: str
+    # 压缩检查点事件（auto/manual/overflow）；由 PlatformContext 同步到 session.db。
+    compaction_event: dict[str, Any]
     use_vector_db: bool
     rag_done: bool
     rag_relevant: bool

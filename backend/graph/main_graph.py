@@ -17,8 +17,7 @@ from config import settings
 from execution.filesystem import VirtualFileSystem
 from execution.sandbox import shell_exec
 from execution.tool_registry import ToolRegistry
-from models.router import get_model
-from prompts.loader import PROMPTS_DIR, PromptLoader
+from models.router import get_model, resolve_model
 
 from .nodes import (
     make_compress_node,
@@ -41,13 +40,6 @@ from .subagent import SUBAGENTS, make_runner, make_task_tool
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOOL_SCOPE = "location"
-
-
-def _default_execute_prompt() -> str:
-    try:
-        return PromptLoader().load("system/file_agent.md")
-    except Exception:  # noqa: BLE001
-        return "你是执行专家，使用提供的工具完成任务。"
 
 
 def _build_simple_grade_model() -> Any | None:
@@ -122,11 +114,13 @@ def build_main_graph(
     model = model or get_model("medium")
     if registry is None:
         registry, _ = default_registry(vfs)
-    system_prompt = system_prompt if system_prompt is not None else _default_execute_prompt()
-    # 技能清单（名称 + 描述 + 对应 load_skill_* 工具）并入 system prompt；
-    # 正文按需加载，避免常驻稀释注意力。
-    if skills_catalog:
+    # 未显式注入 system_prompt 时，execute 节点在运行时按本轮模型选择 provider profile；
+    # 技能清单作为附加段在运行时拼接，避免构建期绑定模型。
+    extra_system = ""
+    if system_prompt is not None and skills_catalog:
         system_prompt = f"{system_prompt}\n\n{skills_catalog}"
+    elif system_prompt is None:
+        extra_system = skills_catalog
 
     # 压缩模型（agent-1.md §1）：压缩=信息压缩而非推理 → simple tier，输出硬上限
     # `compress_max_tokens`（默认 800）；可用 COMPRESS_MODEL 独立别名隔离成本（§1.3）。
@@ -215,11 +209,20 @@ def build_main_graph(
             keep_recent=None,
             compressor=compressor,
             model_factory=None if _compress_injected else _resolve_compress_model,
+            session_model_factory=lambda state: resolve_model(
+                state, default_tier="medium"
+            ),
         ),
     )
     builder.add_node(
         "execute_subagent",
-        make_execute_node(model, registry, system_prompt, scope=DEFAULT_TOOL_SCOPE),
+        make_execute_node(
+            model,
+            registry,
+            system_prompt,
+            scope=DEFAULT_TOOL_SCOPE,
+            extra_system=extra_system,
+        ),
     )
     # Send 动态扇出 worker（§2.3）：route_after_plan 逐个 Send 到本节点并发执行。
     # （旧静态三路 `parallel` 节点/边已删除 —— `route_after_plan` 从不返回字符串

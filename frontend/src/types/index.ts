@@ -327,7 +327,7 @@ export interface TurnDiff {
 export interface MultiAgentSSEEvent {
   // 注：后端从不发 'agent_stream'（子 Agent 增量文本走 text_delta），故此处不列。
   // [队列] turn_done = 本回合完成但还有排队任务（同一条 SSE 流继续）；queue_drain = 队列提示。
-  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_done' | 'agent_error' | 'context_truncated' | 'permission_request' | 'done' | 'turn_done' | 'queue_drain' | 'error' | 'queued' | 'text_delta' | 'model_switched' | 'heartbeat'
+  type: 'routing' | 'agent_start' | 'agent_step' | 'agent_done' | 'agent_error' | 'context_truncated' | 'permission_request' | 'done' | 'turn_done' | 'queue_drain' | 'error' | 'queued' | 'text_delta' | 'model_switched' | 'heartbeat' | 'replay_gap'
   agent_id: string
   agent_name?: string
   agent_avatar?: string
@@ -405,8 +405,15 @@ export interface MultiAgentChatRequest {
 
 export interface MultiAgentMessage {
   id: string
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   content: string
+  /** [压缩检查点] 自动/手动/切换压缩后的 system 卡片数据 */
+  compaction?: {
+    reason: string
+    tokens_before: number
+    tokens_after: number
+    model?: string
+  }
   agents: AgentStreamData[]
   timestamp: Date
   /** 本轮实际耗时（ms，前端墙钟；历史回放可能缺失） */

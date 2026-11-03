@@ -196,6 +196,7 @@ def estimate_output_tokens(output: str) -> int:
 
 _COMPACTION_MARKER = "[Task checkpoint"
 _PRUNE_STUB_PREFIX = "[tool output pruned"
+_PRUNE_PROTECTED_TOOLS = frozenset({"skill"})
 
 
 def prune_tool_outputs(
@@ -222,6 +223,13 @@ def prune_tool_outputs(
     """
     if not messages:
         return messages
+    try:
+        from config import settings
+
+        if not bool(getattr(settings, "compaction_prune", True)):
+            return messages
+    except Exception:  # noqa: BLE001
+        pass
 
     result = list(messages)
 
@@ -264,6 +272,12 @@ def prune_tool_outputs(
             break
         if role != "tool":
             continue
+        tool_name = (
+            msg.get("tool_name")
+            or tool_name_by_id.get(msg.get("tool_call_id"), "")
+        )
+        if tool_name in _PRUNE_PROTECTED_TOOLS:
+            continue
         content = msg.get("content") or ""
         if content.startswith(_PRUNE_STUB_PREFIX):
             continue
@@ -292,7 +306,7 @@ def prune_tool_outputs(
         if saved:
             stub += (
                 f"\nFull output saved to: {saved}\n"
-                "Use tool_read_file with offset to view specific sections, or tool_grep to search the full content."
+                "Use read_file to view it, or grep to search the full content."
             )
         result[i] = {**result[i], "content": stub}
     logger.info("Pruned %d tool outputs (~%d tokens) to free context budget", len(candidates), pruned)

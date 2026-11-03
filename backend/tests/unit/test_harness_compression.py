@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from types import SimpleNamespace
 
@@ -27,8 +27,12 @@ class _FakeModel:
 
 def test_plan_for_window_is_bounded_and_paired():
     plan = CompressionPlan.for_window(10_000)
-    assert plan.threshold == 6_000
-    assert plan.keep_tokens == 2_500
+    assert plan.threshold == 5_000
+    assert plan.keep_tokens == 2_000
+
+    sized = CompressionPlan.for_window(100_000, max_output_tokens=8_000)
+    assert sized.threshold == 92_000
+    assert sized.keep_tokens == 8_000
 
     fallback = CompressionPlan.for_window(0)
     assert fallback.threshold == 80_000
@@ -51,18 +55,12 @@ async def test_compress_messages_uses_canonical_compressor_and_backfills(monkeyp
         AIMessage(content="done", id="m2"),
     ]
 
-    async def fake_compress(msgs, **kwargs):
-        assert kwargs["threshold"] == 5
-        return {
-            "summary": "project facts",
-            "recent": [msgs[-1]],
-            "triggered": True,
-            "tokens": 500,
-        }
+    async def fake_summarize(msgs, existing_summary="", model=None, **kwargs):
+        return "project facts"
 
-    monkeypatch.setattr("cognition.compressor.compress_context", fake_compress)
+    monkeypatch.setattr("harness.compression.summarize_messages", fake_summarize)
     out = await compress_messages(
-        messages, threshold=5, keep_tokens=10, require_precision=True
+        messages, threshold=5, keep_tokens=6, require_precision=True, require_llm=True
     )
 
     assert out.triggered is True
@@ -78,15 +76,10 @@ async def test_compress_messages_raises_when_precision_missing(monkeypatch):
         AIMessage(content="done", id="m2"),
     ]
 
-    async def fake_compress(msgs, **kwargs):
-        return {
-            "summary": "no facts",
-            "recent": [msgs[-1]],
-            "triggered": True,
-            "tokens": 500,
-        }
+    async def fake_summarize(msgs, existing_summary="", model=None, **kwargs):
+        return "no facts"
 
-    monkeypatch.setattr("cognition.compressor.compress_context", fake_compress)
+    monkeypatch.setattr("harness.compression.summarize_messages", fake_summarize)
     monkeypatch.setattr(
         "cognition.compressor.enforce_precision", lambda summary, older: summary
     )
@@ -97,7 +90,7 @@ async def test_compress_messages_raises_when_precision_missing(monkeypatch):
 
     with pytest.raises(CompressionError):
         await compress_messages(
-            messages, threshold=5, keep_tokens=10, require_precision=True
+            messages, threshold=5, keep_tokens=6, require_precision=True, require_llm=True
         )
 
 

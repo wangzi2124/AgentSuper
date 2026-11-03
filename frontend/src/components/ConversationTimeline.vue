@@ -67,10 +67,11 @@ const statusText = computed(() => {
         <TimelineToolRow v-if="item.kind === 'tool' && item.step" :step="item.step" />
         <div v-else-if="item.kind === 'notice'" class="timeline-notice">
           <span class="notice-dot"></span>
-          <span>
-            上下文已裁剪：{{ item.notice?.estimated_before || '—' }} → {{ item.notice?.estimated_after || '—' }} tokens
-            （窗口 {{ item.notice?.window || '—' }}<template v-if="item.notice?.dropped_messages"> · 丢弃 {{ item.notice.dropped_messages }} 条</template>）
+          <span v-if="item.notice">
+            上下文已裁剪：{{ item.notice.estimated_before || '—' }} → {{ item.notice.estimated_after || '—' }} tokens
+            （窗口 {{ item.notice.window || '—' }}<template v-if="item.notice.dropped_messages"> · 丢弃 {{ item.notice.dropped_messages }} 条</template>）
           </span>
+          <span v-else>{{ item.text || '提示' }}</span>
         </div>
         <details v-else-if="item.kind === 'reasoning'" class="reasoning-block">
           <summary>思考过程</summary>

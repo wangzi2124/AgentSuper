@@ -32,7 +32,7 @@ function deny() {
 </template>
 
 <style scoped>
-.perm-inline { display: flex; align-items: center; gap: 12px; width: 100%; max-width: 920px; margin: 0 auto 8px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--warning, #d97706) 35%, var(--border)); border-radius: 10px; background: color-mix(in srgb, var(--warning, #d97706) 7%, var(--surface-elevated)); }
+.perm-inline { position: relative; z-index: 1; display: flex; align-items: center; gap: 12px; box-sizing: border-box; width: min(800px, calc(100% - 2 * clamp(12px, 3vw, 32px))); margin: 0 auto 8px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--warning, #d97706) 35%, var(--border)); border-radius: 10px; background: color-mix(in srgb, var(--warning, #d97706) 7%, var(--surface-elevated)); }
 .perm-inline-main { display: flex; align-items: flex-start; gap: 9px; min-width: 0; flex: 1; }
 .perm-icon { width: 20px; height: 20px; border-radius: 50%; background: var(--warning, #d97706); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
 .perm-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }

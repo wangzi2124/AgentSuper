@@ -99,7 +99,12 @@ export function applyHarnessEvent(state: TurnState, event: HarnessEvent): TurnSt
   ) {
     return state
   }
-  if (typeof event.seq === 'number' && event.seq <= state.lastSeq) {
+  // replay_gap 是本地提示（seq 复用丢事件前的最后一条），不参与去重。
+  if (
+    event.type !== 'replay_gap' &&
+    typeof event.seq === 'number' &&
+    event.seq <= state.lastSeq
+  ) {
     return state
   }
 
@@ -107,7 +112,10 @@ export function applyHarnessEvent(state: TurnState, event: HarnessEvent): TurnSt
     ...state,
     turnId: event.turn_id || state.turnId,
     sessionId: event.session_id || state.sessionId,
-    lastSeq: typeof event.seq === 'number' ? event.seq : state.lastSeq,
+    lastSeq:
+      typeof event.seq === 'number'
+        ? Math.max(state.lastSeq, event.seq)
+        : state.lastSeq,
   }
 
   switch (event.type) {
@@ -227,6 +235,28 @@ export function applyHarnessEvent(state: TurnState, event: HarnessEvent): TurnSt
       next.phase = 'error'
       next.error = errorFromEvent(event)
       break
+    case 'replay_gap': {
+      // 服务端事件日志有界，过旧的部分已丢弃：以时间线内联提示告知用户。
+      const id = 'system'
+      const agent = next.agents[id]
+        ? cloneAgent(next.agents[id])
+        : {
+            agent_id: id,
+            agent_name: 'System',
+            status: 'completed' as const,
+            content: '',
+            steps: [],
+            parts: [],
+          }
+      if (!agent.parts) agent.parts = []
+      agent.parts.push({
+        seq: agent.parts.length,
+        kind: 'notice',
+        text: event.detail || '部分历史事件已过期，已从最新进度继续',
+      })
+      next.agents = { ...next.agents, [id]: agent }
+      break
+    }
     case 'heartbeat':
     default:
       break
