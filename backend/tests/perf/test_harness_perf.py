@@ -51,6 +51,12 @@ async def test_pf03_fallback_parse_overhead():
 
 @pytest.mark.asyncio
 async def test_pf04_fake_concurrency_p95():
+    # Cost lookup builds/probes the model catalog on first use; keep that
+    # one-time cold start outside the concurrency measurement.
+    from models.catalog import get_catalog
+
+    get_catalog()
+
     async def one():
         model = _FakeModel("ok")
         return await run_tool_loop(

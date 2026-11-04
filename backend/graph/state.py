@@ -18,6 +18,8 @@ class AgentState(TypedDict, total=False):
     """主图全局状态。"""
 
     messages: Annotated[list[BaseMessage], add_messages]
+    # 当前会话 id（prune 元数据持久化 / 观测使用）
+    session_id: str
     task_plan: list[dict[str, Any]]
     plan_tier: str
     current_task_id: str
@@ -31,6 +33,9 @@ class AgentState(TypedDict, total=False):
     context_window: int
     compress_threshold: int
     keep_recent_tokens: int
+    # execute 节点报告的 system / tool schema token 开销（路由压缩阈值使用）
+    context_system_tokens: int
+    context_tool_tokens: int
     context_compressed: bool
     compress_count: int
     memory_context: str
@@ -57,6 +62,8 @@ class AgentState(TypedDict, total=False):
     tool_history_turn: int | None
     tool_history_anchor_id: str | None
     trace: list[dict[str, Any]]
+    # 本轮使用的模型 id（初始状态写入；供 token 估算/路由读取）
+    model: str
     # 模型绑定（实际切换由 `PlatformContext.switch_model` 完成，绑定存于
     # session_context_epoch.snapshot 与会话 model 字段；此处保留供 resolve_model 读）
     model_binding: dict[str, Any]

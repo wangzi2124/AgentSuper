@@ -237,6 +237,7 @@ async def enqueue_prompt(
             {
                 "id": pid,
                 "message": msg or "",
+                "model": prompt.get("model"),
                 "files": files,
                 "enqueued_at": int(time.time() * 1000),
             }

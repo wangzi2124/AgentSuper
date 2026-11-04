@@ -193,9 +193,8 @@ async def _run_case(tmp_path, monkeypatch, *, keep_tool_history: bool):
     monkeypatch.setattr(
         "models.catalog.read_limits", lambda _mid: {"context_length": 10_000}
     )
-    monkeypatch.setattr(
-        "cognition.compressor.estimate_tokens", lambda _text: 10_000
-    )
+    monkeypatch.setattr("harness.compression.estimate_messages", lambda _msgs: 10_000)
+    monkeypatch.setattr("harness.switch.estimate_messages", lambda _msgs: 10_000)
 
     async def _compress(messages, existing_summary="", model=None, **kwargs):
         return {

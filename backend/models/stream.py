@@ -24,7 +24,6 @@ import litellm
 
 from .dialect import (
     TCC_INNER_KEYS,
-    TCC_PATTERN,
     parse_streamed_tool_call,
     tcc_prefix_ok,
 )
@@ -41,6 +40,86 @@ class StreamResult:
     stream_error: Exception | None = None
 
 
+def _partial_suffix(buf: str, token: str) -> int:
+    """Longest suffix of ``buf`` that is a prefix of ``token`` (excluding full token)."""
+    for k in range(min(len(token) - 1, len(buf)), 0, -1):
+        if buf.endswith(token[:k]):
+            return k
+    return 0
+
+
+class _IncrementalText:
+    """Emit text deltas while holding back possible tool-call payloads.
+
+    Prose streams immediately. Text that could still become an Ollama-style
+    tool-call JSON (``{"name": ...}`` or ``<tool_call>...</tool_call>``) is held
+    until it can be classified, so the UI never flashes raw tool JSON.
+    """
+
+    _MARKER = "<tool_call>"
+
+    def __init__(self, on_text) -> None:
+        self.on_text = on_text
+        self.buf = ""
+        self.mode = "undecided"
+        self.emitted = False
+
+    def _emit(self, text: str) -> None:
+        if not text:
+            return
+        self.emitted = True
+        if self.on_text is not None:
+            self.on_text(text)
+
+    def feed(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self.buf += chunk
+        self._drain()
+
+    def _drain(self) -> None:
+        while True:
+            if self.mode == "undecided":
+                if not self.buf.strip():
+                    return
+                # A marker anywhere means the final content may be a tool call;
+                # hold the whole payload until `finish` so no JSON leaks.
+                if "<tool_call>" in self.buf or tcc_prefix_ok(self.buf):
+                    return
+                self.mode = "text"
+                continue
+            if self.mode == "suppress":
+                idx = self.buf.find("</tool_call>")
+                if idx < 0:
+                    self.buf = ""
+                    return
+                self.buf = self.buf[idx + len("</tool_call>"):]
+                self.mode = "text"
+                continue
+            idx = self.buf.find(self._MARKER)
+            if idx >= 0:
+                self._emit(self.buf[:idx])
+                self.buf = self.buf[idx + len(self._MARKER):]
+                self.mode = "suppress"
+                continue
+            hold = _partial_suffix(self.buf, self._MARKER)
+            if len(self.buf) > hold:
+                cut = len(self.buf) - hold
+                self._emit(self.buf[:cut])
+                self.buf = self.buf[cut:]
+            return
+
+    def finish(self, *, discard: bool = False, emit: str | None = None) -> None:
+        if discard:
+            self.buf = ""
+        elif emit is not None:
+            self.buf = ""
+            self._emit(emit)
+        else:
+            self._emit(self.buf)
+            self.buf = ""
+
+
 def _build_tool_calls(tool_slots: dict[int, dict]) -> list | None:
     if not tool_slots:
         return None
@@ -55,10 +134,10 @@ def _build_tool_calls(tool_slots: dict[int, dict]) -> list | None:
 
 
 async def collect_stream(stream, tool_names: set[str] | None = None, on_text=None) -> StreamResult:
-    """累积一次流式响应（等价移植老 `_llm_call` 的 chunk 循环 + 组装）。"""
+    """累积一次流式响应；正文增量即时下发，疑似工具 JSON 先扣住。"""
     text_chunks: list[str] = []
     reasoning_chunks: list[str] = []
-    pending_text: list[str] = []
+    emitter = _IncrementalText(on_text)
     tool_slots: dict[int, dict] = {}
     finish_reason = None
     usage = None
@@ -82,24 +161,10 @@ async def collect_stream(stream, tool_names: set[str] | None = None, on_text=Non
             c = getattr(delta, "content", None)
             if c:
                 text_chunks.append(c)
-                pending_text.append(c)
+                emitter.feed(c)
             rc = getattr(delta, "reasoning_content", None)
             if rc:
                 reasoning_chunks.append(rc)
-                # 仍可能是 Ollama 工具调用 JSON 的文本 → 暂缓推送，避免闪给前端
-                circum = "".join(text_chunks)
-                if TCC_PATTERN.match(circum) or tcc_prefix_ok(circum) or circum.lstrip().startswith("{"):
-                    if TCC_PATTERN.match(circum) or tcc_prefix_ok(circum):
-                        continue
-                    if circum.count("{") > circum.count("}"):
-                        continue
-                pending_str = "".join(pending_text)
-                if pending_str.strip() in ("{}", "[]", ""):
-                    pending_text.clear()
-                    continue
-                if on_text is not None:
-                    on_text(pending_str)
-                pending_text.clear()
             for tc in (getattr(delta, "tool_calls", None) or []):
                 idx = getattr(tc, "index", None) or 0
                 slot = tool_slots.setdefault(
@@ -119,6 +184,9 @@ async def collect_stream(stream, tool_names: set[str] | None = None, on_text=Non
         stream_error = e
 
     if stream_interrupted and finish_reason is None:
+        # Partial text may be incomplete; the caller's non-stream retry is the
+        # authority. Drop the held suffix to avoid flashing half a tool payload.
+        emitter.finish(discard=True)
         return StreamResult(
             finish_reason=finish_reason, usage=usage,
             interrupted=True, stream_error=stream_error,
@@ -133,7 +201,8 @@ async def collect_stream(stream, tool_names: set[str] | None = None, on_text=Non
             content = reasoning
 
     # [Ollama 流式兼容] 工具调用被注入为 content 中的 JSON 文本 → 重组
-    converted = False
+    converted_to_call = False
+    converted_to_reply = False
     call = parse_streamed_tool_call(content)
     if call and not tool_slots:
         if tool_names and call["name"] in tool_names:
@@ -146,19 +215,21 @@ async def collect_stream(stream, tool_names: set[str] | None = None, on_text=Non
                 },
             }
             content = ""
-            converted = True
+            converted_to_call = True
         else:
             for k in TCC_INNER_KEYS:
                 v = call["arguments"].get(k)
                 if isinstance(v, str) and v.strip():
                     content = v.strip()
-                    converted = True
+                    converted_to_reply = True
                     break
 
-    if on_text is not None and pending_text and not converted:
-        pending_str = "".join(pending_text)
-        if pending_str.strip() not in ("{}", "[]"):
-            on_text(pending_str)
+    if converted_to_call:
+        emitter.finish(discard=True)
+    elif converted_to_reply:
+        emitter.finish(emit=content)
+    else:
+        emitter.finish()
 
     return StreamResult(
         content=content,
@@ -237,7 +308,14 @@ async def stream_chat(
     )
 
     # [Ollama 工具轮次] 尝试流式路径：移除强制非流式，由 collect_stream + dialect 处理方言
-    is_ollama = (model or "").lower().startswith(("ollama/", "ollama_chat/"))
+    emitted = {"any": False}
+
+    def emit(chunk: str) -> None:
+        if not chunk:
+            return
+        emitted["any"] = True
+        if on_text is not None:
+            on_text(chunk)
 
     try:
         stream = await litellm.acompletion(
@@ -245,11 +323,14 @@ async def stream_chat(
         )
     except Exception:  # noqa: BLE001
         resp = await litellm.acompletion(**base)
-        return nonstream_result(resp, on_text)
+        return nonstream_result(resp, emit)
 
     names = {t.get("function", {}).get("name") for t in (tools or [])} or None
-    result = await collect_stream(stream, tool_names=names, on_text=on_text)
+    result = await collect_stream(stream, tool_names=names, on_text=emit)
     if result.interrupted and result.finish_reason is None:
         resp = await litellm.acompletion(**base)
-        return nonstream_result(resp, on_text)
+        # A mid-stream retry re-generates the whole answer. If the client already
+        # saw deltas, do not replay the full text a second time; `Done` carries
+        # the authoritative content and the turn's `done.answer` reconciles it.
+        return nonstream_result(resp, None if emitted["any"] else emit)
     return result

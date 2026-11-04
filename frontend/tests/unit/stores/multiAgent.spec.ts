@@ -66,6 +66,8 @@ vi.mock('@/api/errors', () => ({
 
 import { useMultiAgentStore } from '@/stores/multiAgent'
 import { usePermissionStore } from '@/stores/permission'
+import { useSessionModelStore } from '@/stores/sessionModel'
+import { useModelSwitchStore } from '@/stores/modelSwitch'
 import { loadModelCache, saveModelCache } from '@/api/model-cache'
 
 let uid = 0
@@ -89,6 +91,7 @@ beforeEach(() => {
   mocks.deleteCache.mockResolvedValue(undefined)
   mocks.fetchModels.mockReset()
   mocks.fetchModels.mockResolvedValue({ models: [], default_model: '', small_model: null, image_caption_model: null, voice_model_size: null })
+  mocks.enqueuePrompt.mockReset()
   localStorage.clear()
   rngSpy = vi.spyOn(crypto, 'randomUUID').mockImplementation(() => `id-${uid++}`)
 })
@@ -319,8 +322,9 @@ describe('撤销 / 删除', () => {
     expect(mocks.revertSession).toHaveBeenCalledWith('c1', 'm1')
   })
 
-  it('切换模型只按服务端前后对比，不被本地脏消息误判回滚', async () => {
+  it('选择模型写本地 desired，并对空闲会话后台 PATCH，不拉历史', async () => {
     const store = useMultiAgentStore()
+    const sessionModel = useSessionModelStore()
     mocks.fetchModels.mockResolvedValue({
       models: [
         { id: 'deepseek/deepseek-v4-flash', name: 'Flash', description: '', provider: 'deepseek' },
@@ -333,64 +337,58 @@ describe('撤销 / 删除', () => {
     })
     await store.loadModels()
     store.activeSessionId = 's1'
-    store.selectedModel = 'deepseek/deepseek-v4-flash'
-    store.sessions['s1'] = {
-      // 本地缓存里有一条服务端已撤销的脏消息
-      messages: [
-        { id: 'stale', role: 'assistant', content: '已被服务端撤销', agents: [], timestamp: new Date() },
-      ],
-      conversationId: 'c1', conversationTitle: '', loading: false, abortController: null,
-      streamPhase: 'idle', queuePosition: null,
-    }
-    const serverMsgs = [
-      { id: 'm0', session_id: 'c1', type: 'user', content: 'hi', data: {}, seq: 1, time_created: 0 },
-      { id: 'm1', session_id: 'c1', type: 'assistant', content: 'hello', data: {}, seq: 2, time_created: 0 },
-    ]
-    mocks.getSessionMessages.mockResolvedValue(serverMsgs)
-    mocks.listConversations.mockResolvedValue([])
-
-    const ok = await store.persistSelectedModel('deepseek/deepseek-v4-pro')
-    expect(ok).toBe(true)
-    expect(store.selectedModel).toBe('deepseek/deepseek-v4-pro')
-    // 只有一次 PATCH（切换），没有回滚
-    expect(mocks.updateSession).toHaveBeenCalledTimes(1)
-    expect(mocks.updateSession).toHaveBeenCalledWith('c1', {
-      model: { id: 'deepseek/deepseek-v4-pro', providerID: 'deepseek' },
-    })
-  })
-
-  it('切换模型时服务端真的丢消息才回滚', async () => {
-    const store = useMultiAgentStore()
-    mocks.fetchModels.mockResolvedValue({
-      models: [
-        { id: 'deepseek/deepseek-v4-flash', name: 'Flash', description: '', provider: 'deepseek' },
-        { id: 'deepseek/deepseek-v4-pro', name: 'Pro', description: '', provider: 'deepseek' },
-      ],
-      default_model: 'deepseek/deepseek-v4-flash',
-      small_model: null,
-      image_caption_model: null,
-      voice_model_size: null,
-    })
-    await store.loadModels()
-    store.activeSessionId = 's1'
-    store.selectedModel = 'deepseek/deepseek-v4-flash'
     store.sessions['s1'] = {
       messages: [], conversationId: 'c1', conversationTitle: '', loading: false,
       abortController: null, streamPhase: 'idle', queuePosition: null,
     }
-    const before = [
-      { id: 'm0', session_id: 'c1', type: 'user', content: 'hi', data: {}, seq: 1, time_created: 0 },
-      { id: 'm1', session_id: 'c1', type: 'assistant', content: 'hello', data: {}, seq: 2, time_created: 0 },
-    ]
-    mocks.getSessionMessages
-      .mockResolvedValueOnce(before)
-      .mockResolvedValueOnce([before[0]])
+    sessionModel.setActive('s1', 'deepseek/deepseek-v4-flash')
 
     const ok = await store.persistSelectedModel('deepseek/deepseek-v4-pro')
+    expect(ok).toBe(true)
+    expect(store.selectedModel).toBe('deepseek/deepseek-v4-pro')
+    expect(sessionModel.desired('s1')).toBe('deepseek/deepseek-v4-pro')
+    expect(mocks.updateSession).toHaveBeenCalledWith('c1', {
+      model: { id: 'deepseek/deepseek-v4-pro', providerID: 'deepseek' },
+    }, 120_000)
+    expect(mocks.getSessionMessages).not.toHaveBeenCalled()
+  })
+
+  it('回合开始切换失败 ModelSwitchError → desired 回滚到 active', async () => {
+    const store = useMultiAgentStore()
+    const sessionModel = useSessionModelStore()
+    mocks.fetchModels.mockResolvedValue({
+      models: [
+        { id: 'deepseek/deepseek-v4-flash', name: 'Flash', description: '', provider: 'deepseek' },
+        { id: 'deepseek/deepseek-v4-pro', name: 'Pro', description: '', provider: 'deepseek' },
+      ],
+      default_model: 'deepseek/deepseek-v4-flash',
+      small_model: null,
+      image_caption_model: null,
+      voice_model_size: null,
+    })
+    await store.loadModels()
+    store.activeSessionId = 's1'
+    store.sessions['s1'] = {
+      messages: [], conversationId: 'c1', conversationTitle: '', loading: false,
+      abortController: null, streamPhase: 'idle', queuePosition: null,
+    }
+    sessionModel.setActive('s1', 'deepseek/deepseek-v4-flash')
+    store.selectedModel = 'deepseek/deepseek-v4-pro'
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({
+        type: 'error',
+        error: '窗口未知',
+        detail: '窗口未知',
+        error_type: 'ModelSwitchError',
+        retryable: false,
+      }))
+    })
+
+    const ok = await store.send('hi')
     expect(ok).toBe(false)
+    expect((mocks.sendStream.mock.calls[0][0] as any).target_model).toBe('deepseek/deepseek-v4-pro')
     expect(store.selectedModel).toBe('deepseek/deepseek-v4-flash')
-    // 切换 + 回滚
-    expect(mocks.updateSession).toHaveBeenCalledTimes(2)
+    expect(sessionModel.desired('s1')).toBeUndefined()
   })
 
   it('deleteMessage 过滤 + 同步后端', async () => {
@@ -449,6 +447,30 @@ describe('会话加载', () => {
     const store = useMultiAgentStore()
     await store.loadConversation('c9')
     expect(store.messages.find(m => m.id === 'm9')?.plan_path).toBe('backend/data/plans/c9/plan.md')
+  })
+
+  it('loadConversation 恢复服务端持久化的错误气泡（刷新后不消失）', async () => {
+    mocks.getConversation.mockResolvedValue({
+      id: 'ce', title: '错误会话', directory: '/work',
+      messages: [
+        { id: 'u1', role: 'user', content: 'go', agents: [], files: [] },
+        {
+          id: 'm1', role: 'assistant', content: '出错了: ProviderError: boom', agents: [], files: [],
+          is_error: true,
+          error_info: {
+            type: 'unknown', message: 'ProviderError: boom',
+            retryable: false, errorType: 'ProviderError',
+          },
+        },
+      ],
+    })
+    mocks.loadCache.mockResolvedValue({ messages: [] })
+    const store = useMultiAgentStore()
+    await store.loadConversation('ce')
+    const msg = store.messages.find(m => m.id === 'm1')
+    expect(msg?.isError).toBe(true)
+    expect(msg?.errorInfo?.message).toBe('ProviderError: boom')
+    expect(msg?.errorInfo?.errorType).toBe('ProviderError')
   })
 
   it('[撤回改动] 回放映射 snapshot_restored → snapshotRestored', async () => {
@@ -1052,5 +1074,142 @@ describe('会话运维操作（fork / compact / status）', () => {
     expect(store.messages[0].role).toBe('system')
     expect(store.messages[0].compaction?.reason).toBe('auto')
     expect(store.messages[0].compaction?.tokens_before).toBe(1000)
+  })
+})
+
+describe('按会话模型偏好（opencode 语义）', () => {
+  async function loadTwoModels(store: ReturnType<typeof useMultiAgentStore>) {
+    mocks.fetchModels.mockResolvedValue({
+      models: [
+        { id: 'deepseek/deepseek-v4-flash', name: 'Flash', description: '', provider: 'deepseek' },
+        { id: 'deepseek/deepseek-v4-pro', name: 'Pro', description: '', provider: 'deepseek' },
+      ],
+      default_model: 'deepseek/deepseek-v4-flash',
+      small_model: null,
+      image_caption_model: null,
+      voice_model_size: null,
+    })
+    await store.loadModels()
+  }
+
+  it('每个会话恢复各自的 desired，不被服务端 active 覆盖', async () => {
+    const store = useMultiAgentStore()
+    const sessionModel = useSessionModelStore()
+    await loadTwoModels(store)
+    store.sessions['s1'] = {
+      messages: [], conversationId: 'c1', conversationTitle: '', loading: false,
+      abortController: null, streamPhase: 'idle', queuePosition: null,
+    }
+    store.sessions['s2'] = {
+      messages: [], conversationId: 'c2', conversationTitle: '', loading: false,
+      abortController: null, streamPhase: 'idle', queuePosition: null,
+    }
+    sessionModel.setActive('s1', 'deepseek/deepseek-v4-flash')
+    sessionModel.setActive('s2', 'deepseek/deepseek-v4-flash')
+
+    store.activeSessionId = 's1'
+    store.selectedModel = 'deepseek/deepseek-v4-pro'
+    expect(store.selectedModel).toBe('deepseek/deepseek-v4-pro')
+
+    store.activeSessionId = 's2'
+    expect(store.selectedModel).toBe('deepseek/deepseek-v4-flash')
+
+    store.activeSessionId = 's1'
+    expect(store.selectedModel).toBe('deepseek/deepseek-v4-pro')
+  })
+
+  it('新会话继承 draft，首条消息用 draft 模型且不传 target_model', async () => {
+    const store = useMultiAgentStore()
+    const sessionModel = useSessionModelStore()
+    await loadTwoModels(store)
+    store.selectedModel = 'deepseek/deepseek-v4-pro'
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'done', conversation_id: 'c-new', answer: 'ok', model: 'deepseek/deepseek-v4-pro' }))
+    })
+
+    await store.send('hi')
+    const req = mocks.sendStream.mock.calls[0][0] as any
+    expect(req.model).toBe('deepseek/deepseek-v4-pro')
+    expect(req.target_model).toBeUndefined()
+    expect(sessionModel.desired(store.activeSessionId!)).toBe('deepseek/deepseek-v4-pro')
+  })
+
+  it('执行中发送的排队任务携带当前模型', async () => {
+    const store = useMultiAgentStore()
+    await loadTwoModels(store)
+    store.activeSessionId = 's1'
+    store.sessions['s1'] = {
+      messages: [], conversationId: 'c1', conversationTitle: '', loading: true,
+      abortController: null, streamPhase: 'running', queuePosition: null,
+    }
+    store.selectedModel = 'deepseek/deepseek-v4-pro'
+    mocks.enqueuePrompt.mockReset()
+    mocks.enqueuePrompt.mockResolvedValue({ id: 'q1' })
+
+    const ok = await store.send('排队消息')
+    expect(ok).toBe(true)
+    expect(mocks.enqueuePrompt).toHaveBeenCalledWith(
+      'c1',
+      expect.objectContaining({ model: 'deepseek/deepseek-v4-pro' }),
+      expect.any(String),
+    )
+    expect(store.sessions['s1'].pendingPrompts?.[0]?.model).toBe('deepseek/deepseek-v4-pro')
+  })
+
+  it('发送前等待后台切换完成，再带最新模型发请求', async () => {
+    const store = useMultiAgentStore()
+    const sessionModel = useSessionModelStore()
+    const modelSwitch = useModelSwitchStore()
+    await loadTwoModels(store)
+    store.activeSessionId = 's1'
+    store.sessions['s1'] = {
+      messages: [], conversationId: 'c1', conversationTitle: '', loading: false,
+      abortController: null, streamPhase: 'idle', queuePosition: null,
+    }
+    sessionModel.setActive('s1', 'deepseek/deepseek-v4-flash')
+    store.selectedModel = 'deepseek/deepseek-v4-pro'
+
+    let resolveSwitch: (value: unknown) => void = () => {}
+    mocks.updateSession.mockImplementation(() => new Promise(r => { resolveSwitch = r }))
+    void modelSwitch.enqueue('s1', 'deepseek/deepseek-v4-pro', 'c1')
+
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'done', conversation_id: 'c1', answer: 'ok', model: 'deepseek/deepseek-v4-pro' }))
+    })
+    const pending = store.send('hi')
+    await Promise.resolve()
+    expect(mocks.sendStream).not.toHaveBeenCalled()
+
+    resolveSwitch({})
+    await pending
+    const req = mocks.sendStream.mock.calls[0][0] as any
+    expect(req.model).toBe('deepseek/deepseek-v4-pro')
+    expect(req.target_model).toBe('deepseek/deepseek-v4-pro')
+  })
+
+  it('后台切换失败回滚后，发送使用旧 active 模型', async () => {
+    const store = useMultiAgentStore()
+    const sessionModel = useSessionModelStore()
+    const modelSwitch = useModelSwitchStore()
+    await loadTwoModels(store)
+    store.activeSessionId = 's1'
+    store.sessions['s1'] = {
+      messages: [], conversationId: 'c1', conversationTitle: '', loading: false,
+      abortController: null, streamPhase: 'idle', queuePosition: null,
+    }
+    sessionModel.setActive('s1', 'deepseek/deepseek-v4-flash')
+    store.selectedModel = 'deepseek/deepseek-v4-pro'
+    mocks.updateSession.mockRejectedValueOnce(Object.assign(new Error('窗口未知'), { statusCode: 400 }))
+
+    await modelSwitch.enqueue('s1', 'deepseek/deepseek-v4-pro', 'c1')
+    expect(sessionModel.desired('s1')).toBeUndefined()
+
+    mocks.sendStream.mockImplementation(async (_req: unknown, onEvent: (e: MultiAgentSSEEvent) => void) => {
+      onEvent(ev({ type: 'done', conversation_id: 'c1', answer: 'ok', model: 'deepseek/deepseek-v4-flash' }))
+    })
+    await store.send('hi')
+    const req = mocks.sendStream.mock.calls[0][0] as any
+    expect(req.model).toBe('deepseek/deepseek-v4-flash')
+    expect(req.target_model).toBe('deepseek/deepseek-v4-flash')
   })
 })

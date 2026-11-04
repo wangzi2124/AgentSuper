@@ -225,6 +225,15 @@ def _to_lc_message(msg: repository.Message) -> Any:
             additional_kwargs=kwargs,
         )
     if msg.type == "tool":
+        prune = data.get("prune") if isinstance(data.get("prune"), dict) else None
+        if prune:
+            from cognition.tool_output import prune_stub
+
+            content = prune_stub(
+                str(data.get("tool_name") or ""),
+                int(prune.get("tokens") or 0),
+                str(prune.get("path") or ""),
+            )
         return ToolMessage(
             content=content,
             tool_call_id=str(data.get("tool_call_id") or ""),

@@ -31,18 +31,32 @@ def _has_image(state: dict[str, Any]) -> bool:
 def _context_tokens(state: dict[str, Any]) -> int:
     """当前上下文的 token 估算（§4.3 压缩触发口径）。
 
-    ⚠ 历史 bug：此处曾读 `token_usage["total_tokens"]`，但用量归一化
-    （`graph/usage.py:usage_from_result`）产出的键是 `total` —— `total_tokens`
-    全库无任何写入方，取值为 0，故 `0 > 80000` 恒假，压缩节点**从未被路由到**。
-    压缩阈值应衡量「当前上下文长度」，直接对 `state.messages` 估算（与
-    `cognition/compressor.py` 同口径），而非累计用量。
+    统一走 `ContextMeter`：CJK/ASCII、tool_calls、图片块（固定成本，不数
+    base64）与调用方预先计算的前置开销共用一个口径。历史 bug（误读
+    `token_usage["total_tokens"]`）已在注释与测试中保留说明。
     """
-    from cognition.compressor import estimate_tokens, serialize_messages
+    from cognition.context_meter import get_meter
 
     messages = state.get("messages") or []
     if not messages:
-        return 0
-    return estimate_tokens(serialize_messages(messages))
+        return int(state.get("context_preamble_tokens") or 0)
+    # execute 节点已经用同一 ContextMeter 口径算过 system/tools 开销；优先使用
+    # 标量 token 数，避免把大段提示词/schema 再塞进 checkpoint。旧状态没有这两个
+    # 字段时回退到 text/defs。
+    system_tokens = int(state.get("context_system_tokens") or 0)
+    tool_tokens = int(state.get("context_tool_tokens") or 0)
+    estimate = get_meter().estimate(
+        messages,
+        system="" if system_tokens else str(state.get("context_system_text") or ""),
+        tools=None if tool_tokens else (state.get("context_tool_defs") or None),
+        model_id=str(state.get("model") or ""),
+    )
+    return int(
+        estimate.total
+        + system_tokens
+        + tool_tokens
+        + int(state.get("context_preamble_tokens") or 0)
+    )
 
 
 def route_after_supervisor(state: dict[str, Any]) -> str:

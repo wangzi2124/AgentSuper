@@ -87,6 +87,11 @@ async def test_unknown_window_and_running_gates(tmp_path):
         await SwitchService(deps).switch("s1", "model/b")
     assert exc.value.status_code == 409
 
+    deps, sess, _ = _deps(tmp_path, sess=_Sess(status="running"))
+    out = await SwitchService(deps).switch("s1", "model/b", force=True)
+    assert out["switched"] is True
+    assert sess.model == "model/b"
+
 
 @pytest.mark.asyncio
 async def test_backup_failure_keeps_old_model(tmp_path, monkeypatch):
@@ -108,6 +113,7 @@ async def test_backup_failure_keeps_old_model(tmp_path, monkeypatch):
 async def test_compression_failure_rolls_back(tmp_path, monkeypatch):
     long_messages = [HumanMessage(content="x" * 10000, id="m1")]
     deps, sess, _ = _deps(tmp_path, messages=long_messages)
+    monkeypatch.setattr("harness.switch.estimate_messages", lambda _msgs: 5_000)
 
     async def boom(*args, **kwargs):
         raise CompressionError("cannot preserve")

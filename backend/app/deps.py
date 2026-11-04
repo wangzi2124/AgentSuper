@@ -281,6 +281,7 @@ def initial_state(
     context_window_override: int = 0,
     compress_threshold_override: int = 0,
     keep_recent_tokens_override: int = 0,
+    session_id: str = "",
 ) -> dict[str, Any]:
     """构造一轮的输入状态。
 
@@ -368,6 +369,7 @@ def initial_state(
         messages = Overwrite([*history_messages, msg])
     state: dict[str, Any] = {
         "messages": messages,
+        "session_id": session_id,
         "iteration_count": 0,
         "user_id": user_id,
         "task_plan": [],
@@ -379,11 +381,14 @@ def initial_state(
         "sub_results": Overwrite({}),
         "draft_output": "",
         "final_output": "",
+        "model": str(model or ""),
         "context_compressed": False,
         "context_bound": bool(context_bound),
         "context_window": context_window,
         "compress_threshold": compress_threshold,
         "keep_recent_tokens": keep_recent_tokens,
+        "context_system_tokens": 0,
+        "context_tool_tokens": 0,
         "rag_context": "",
         "attachment_context": attachment_context,
         "compaction_event": {},
@@ -889,8 +894,15 @@ class PlatformContext:
 
         return str(data_path(None, "model_switches"))
 
-    async def switch_model(self, session_id: str, target: str) -> dict[str, Any]:
-        """Delegate the switch state machine to harness.switch.SwitchService."""
+    async def switch_model(
+        self, session_id: str, target: str, *, force: bool = False
+    ) -> dict[str, Any]:
+        """Delegate the switch state machine to harness.switch.SwitchService.
+
+        ``force`` is only for a turn's own pre-start switch: it bypasses the
+        running gate while the cancel marker is already registered, so external
+        PATCH requests still see the session as busy.
+        """
         from .session import repository as repo
         from models.catalog import effective_context_length
 
@@ -918,7 +930,7 @@ class PlatformContext:
             set_request_model=set_request_model,
             reset_request_model=reset_request_model,
         )
-        result = await SwitchService(deps).switch(session_id, target)
+        result = await SwitchService(deps).switch(session_id, target, force=force)
         persist = getattr(self, "persist_compaction", None)
         if result.get("summarized") and result.get("summary") and persist is not None:
             await persist(
@@ -1007,6 +1019,7 @@ class PlatformContext:
                     context_window_override=binding.get("context_window", 0),
                     compress_threshold_override=binding.get("compress_threshold", 0),
                     keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
+                    session_id=session_id,
                 ),
                 config={"configurable": {"thread_id": session_id}},
             )
@@ -1085,6 +1098,7 @@ class PlatformContext:
             context_window_override=binding.get("context_window", 0),
             compress_threshold_override=binding.get("compress_threshold", 0),
             keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
+            session_id=session_id,
         )
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))
@@ -1100,7 +1114,7 @@ class PlatformContext:
                 stream_mode="updates",
             ):
                 for node, update in (chunk or {}).items():
-                    if node == "context_compress" and isinstance(update, dict):
+                    if isinstance(update, dict) and update.get("compaction_event"):
                         await self.persist_compaction(
                             session_id, update.get("compaction_event")
                         )
@@ -1186,11 +1200,24 @@ class PlatformContext:
                 )
             except Exception:  # noqa: BLE001 - 投影失败不阻断本轮
                 logger.warning("session projection failed for %s", session_id, exc_info=True)
+        # Reconcile the epoch cache from the authoritative (and visible)
+        # compaction row.  Undo-hidden checkpoints must not be resurrected.
+        try:
+            from .session import repository as _repo
+            from .session.compaction import CompactionCheckpoint
+
+            stored = _repo.require_session(session_id)
+            hidden = set(stored.hidden_ids or [])
+            sess = self.sessions.get(session_id)
+            hidden |= set(getattr(sess, "hidden_ids", None) or [])
+            CompactionCheckpoint.repair(session_id, hidden_ids=hidden)
+        except Exception:  # noqa: BLE001 - 修复失败不阻断本轮
+            logger.debug("compaction repair skipped for %s", session_id, exc_info=True)
 
     def rebuild_history(self, session_id: str) -> list[Any]:
         """从 session.db 重建历史模型视图（压缩水位已应用）。"""
         from .session import repository as _repo
-        from .session.projector import rebuild_model_messages
+        from .session.compaction import CompactionCheckpoint
 
         sess = self.sessions.get(session_id)
         try:
@@ -1200,9 +1227,9 @@ class PlatformContext:
             baseline = int(stored.compact_baseline_seq or 0)
         except Exception:  # noqa: BLE001 - 未落库的临时会话回退 checkpoint
             return None
-        return rebuild_model_messages(
+        return CompactionCheckpoint.rebuild_view(
             session_id, hidden_ids=hidden, baseline=baseline
-        )
+        ).messages
 
     def messages(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         msgs = state.get("messages") if isinstance(state, dict) else None
@@ -1338,6 +1365,8 @@ class PlatformContext:
                     "plan_path",
                     "snapshot_restored",
                     "partial_error",
+                    "is_error",
+                    "error_info",
                 ):
                     if ui.get(key):
                         item["data"][key] = ui[key]
@@ -1379,6 +1408,10 @@ class PlatformContext:
                 data["snapshot_restored"] = ui["snapshot_restored"]
             if ui.get("partial_error"):
                 data["partial_error"] = ui["partial_error"]
+            if ui.get("is_error"):
+                data["is_error"] = True
+            if ui.get("error_info"):
+                data["error_info"] = ui["error_info"]
             out.append(
                 {
                     "id": mid,
@@ -1545,46 +1578,12 @@ class PlatformContext:
     async def persist_compaction(
         self, session_id: str, event: dict[str, Any] | None
     ) -> None:
-        """把压缩检查点写入 session.db（消息记录 + epoch 快照），供审计/前端读取。"""
+        """把压缩检查点写入 session.db（单一水位 module 负责原子提交）。"""
         if not isinstance(event, dict) or not str(event.get("summary") or "").strip():
             return
-        try:
-            from .session import repository as repo
+        from .session.compaction import CompactionCheckpoint
 
-            reason = str(event.get("reason") or "auto")
-            summary = str(event.get("summary") or "")
-            data = {
-                "content": summary,
-                "mode": reason,
-                "reason": reason,
-                "tail_start_id": event.get("tail_start_id"),
-                "tokens_before": int(event.get("tokens_before") or 0),
-                "tokens_after": int(event.get("tokens_after") or 0),
-                "model": str(event.get("model") or ""),
-            }
-            repo.append_message(session_id, "compaction", data)
-            epoch = repo.get_epoch(session_id)
-            snap = dict(epoch.snapshot or {}) if epoch else {}
-            snap.update(
-                {
-                    "summary": summary,
-                    "tail_start_id": event.get("tail_start_id"),
-                    "compaction_reason": reason,
-                    "compaction_at": time.time(),
-                    "compaction_tokens_before": data["tokens_before"],
-                    "compaction_tokens_after": data["tokens_after"],
-                }
-            )
-            baseline_seq = repo.latest_seq(session_id)
-            repo.upsert_epoch(
-                session_id,
-                summary or (epoch.baseline if epoch else ""),
-                baseline_seq,
-                snap,
-            )
-            repo.update_session(session_id, time_compacted=int(time.time() * 1000))
-        except Exception:  # noqa: BLE001 - 审计落库失败不阻断聊天
-            logger.warning("persist compaction failed for %s", session_id, exc_info=True)
+        CompactionCheckpoint.record(session_id, event)
 
     async def compact_session(self, session_id: str, keep_last: int = 10) -> dict[str, Any]:
         """手动压缩：生成摘要、更新 checkpoint、写压缩检查点。
@@ -1602,8 +1601,8 @@ class PlatformContext:
             return {"compacted": False, "baseline": sess.compact_baseline_seq}
 
         from harness.compression import (
-            CompressionPlan,
-            compress_messages,
+            CompactionPolicy,
+            ContextCompactor,
             estimate_messages,
         )
 
@@ -1615,7 +1614,8 @@ class PlatformContext:
                 window = int(effective_context_length(sess.model))
             except Exception:  # noqa: BLE001
                 window = 0
-        plan = CompressionPlan.for_window(window)
+        compactor = ContextCompactor()
+        plan = compactor.plan(context_window=window)
         existing = str((await self.state(session_id)).get("context_summary") or "")
         tokens_before = estimate_messages(raw)
         model = None
@@ -1624,17 +1624,15 @@ class PlatformContext:
 
             model = TierModel(tier="auto", model_override=sess.model)
         try:
-            result = await compress_messages(
+            result = await compactor.compress(
                 raw,
                 existing_summary=existing,
                 model=model,
-                threshold=0,
-                keep_tokens=plan.keep_tokens,
+                plan=plan,
                 # 手动压缩至少把更早的一轮折进摘要，避免“点了压缩但全在 tail 里”无操作。
-                tail_turns=1,
-                require_llm=False,
-                raise_on_error=False,
-                require_precision=False,
+                policy=CompactionPolicy(
+                    reason="manual", threshold=0, tail_turns=1, min_gain_tokens=0
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - 手动压缩失败时保留原历史
             logger.warning("manual compaction failed: %s", exc)

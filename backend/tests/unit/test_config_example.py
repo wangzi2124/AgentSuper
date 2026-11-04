@@ -29,7 +29,6 @@ _DELETED_KEYS = {
     "summarization_keep_messages",
     "context_tail_turns",
     "compaction_tail_messages",
-    "compaction_prune",
     "compaction_preserve_recent_tokens",
     "compaction_reserved_tokens",
     "history_budget_chars",

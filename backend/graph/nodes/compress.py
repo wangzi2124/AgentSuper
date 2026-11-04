@@ -13,7 +13,8 @@ import logging
 from typing import Any, Callable
 
 from harness.compression import (
-    DEFAULT_KEEP_TOKENS,
+    _min_gain_default,
+    _preserve_default,
     compress_graph_messages,
     estimate_messages,
     tail_start_id,
@@ -104,19 +105,21 @@ def make_compress_node(
             return {"token_usage": {"compressed": True}, "context_compressed": True}
 
         legacy_keep = keep_recent is not None
+        threshold = int(state.get("compress_threshold") or 0)
+        keep_tokens = (
+            0 if legacy_keep else int(state.get("keep_recent_tokens") or 0)
+        )
+        if not legacy_keep and keep_tokens <= 0:
+            keep_tokens = _preserve_default(threshold)
         result = await compress_graph_messages(
             messages,
             existing_summary=existing,
             model=active_model,
             compress_count=int(state.get("compress_count", 0) or 0),
             keep_recent=active_keep,
-            keep_tokens=(
-                0
-                if legacy_keep
-                else int(state.get("keep_recent_tokens") or 0)
-                or DEFAULT_KEEP_TOKENS
-            ),
-            tail_turns=None if legacy_keep else 0,
+            keep_tokens=keep_tokens,
+            tail_turns=None if legacy_keep else None,
+            min_gain_tokens=0 if legacy_keep else _min_gain_default(threshold),
         )
         if not getattr(result, "triggered", False):
             return {"token_usage": {"compressed": False}, "context_compressed": True}

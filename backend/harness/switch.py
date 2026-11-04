@@ -139,7 +139,9 @@ class SwitchService:
         self._audit(session_id, old_model, target, status, error=reason)
 
     # ── switch ──────────────────────────────────────────────────────
-    async def switch(self, session_id: str, target: str) -> dict[str, Any]:
+    async def switch(
+        self, session_id: str, target: str, *, force: bool = False
+    ) -> dict[str, Any]:
         target = (target or "").strip()
         if not target:
             self._audit(session_id, None, "", "rejected", error="目标模型为空")
@@ -158,7 +160,7 @@ class SwitchService:
             reason = f"目标模型上下文窗口未知，已拒绝切换：{target}"
             self._audit(session_id, sess.model, target, "rejected", error=reason)
             raise ModelSwitchError(reason, 400)
-        if sess.status == "running" or self.deps.is_running(session_id):
+        if not force and (sess.status == "running" or self.deps.is_running(session_id)):
             reason = "会话正在运行，请等待本轮完成后再切换模型"
             self._audit(session_id, sess.model, target, "rejected", error=reason)
             raise ModelSwitchError(reason, 409)
@@ -320,6 +322,12 @@ class SwitchService:
             ) from exc
 
         self._mark(backup_path, "committed")
+        try:
+            from models.runtime import schedule_warm
+
+            schedule_warm(target)
+        except Exception:  # noqa: BLE001 - warmth is best-effort
+            logger.debug("model warm scheduling failed for %s", target, exc_info=True)
         self._audit(
             session_id,
             old_model,

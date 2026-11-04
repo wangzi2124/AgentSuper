@@ -652,7 +652,27 @@ describe.skipIf(!RUN)('Generated /api/generated/*', () => {
   const IMG = '__apitest_image.png'
   // 1x1 PNG（有效图片；用于验证 .png 下载路径 + content-type）
   const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
-  const GEN_DIR = path.resolve(process.cwd(), '..', 'backend', 'data', 'generated')
+  // The backend now stores runtime data in the platform user-data root
+  // (`storage/paths.py`), not `backend/data`. Resolve the same root here so the
+  // fixtures land where `/api/generated` looks.
+  const backendDataRoot = (): string => {
+    const override = (process.env.AGENTSUPER_DATA || '').trim()
+    if (override) return path.resolve(override)
+    if (process.platform === 'win32') {
+      return path.join(
+        process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),
+        'agentsuper',
+      )
+    }
+    if (process.platform === 'darwin') {
+      return path.join(os.homedir(), 'Library', 'Application Support', 'agentsuper')
+    }
+    return path.join(
+      process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'),
+      'agentsuper',
+    )
+  }
+  const GEN_DIR = path.join(backendDataRoot(), 'generated')
   beforeAll(() => {
     fs.mkdirSync(GEN_DIR, { recursive: true })
     fs.writeFileSync(path.join(GEN_DIR, FNAME), 'apitest generated content', 'utf-8')
@@ -727,6 +747,8 @@ describe.skipIf(!RUN)('Custom tools /api/custom-tools/*', () => {
   })
   it('POST /api/custom-tools/pin（pinTool，自建自删）', async () => {
     if (!pinnedName) return
+    // Make the test idempotent: a previous failed run may have left the pin behind.
+    try { await customTools.deleteCustomTool(pinnedName) } catch { /* ignore */ }
     const pin = await customTools.pinTool({ tool_name: pinnedName, description: 'apitest pin' })
     expect(pin.name).toBe(pinnedName)
     await customTools.deleteCustomTool(pinnedName)

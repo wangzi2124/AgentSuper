@@ -11,9 +11,9 @@ def test_initial_state_binds_runtime_window(monkeypatch):
     monkeypatch.setattr(catalog, "effective_context_length", lambda mid, fallback=0: 16384)
     state = initial_state("hi", "u1", model="ollama_chat/deepseek-r1:7b")
     assert state["context_window"] == 16384
-    # v2 buffer 下限 16k：16k 窗口下阈值/保留量回落到 2k 地板
-    assert state["compress_threshold"] == 2000
-    assert state["keep_recent_tokens"] == 2000
+    # reserved = min(20k, normalized output) → usable 12k，preserve = 25% × usable
+    assert state["compress_threshold"] == 12288
+    assert state["keep_recent_tokens"] == 3072
 
 
 def test_initial_state_unknown_window_keeps_defaults(monkeypatch):

@@ -92,7 +92,7 @@ async def test_switch_same_model_is_noop(monkeypatch):
         called = True
         return {}
 
-    monkeypatch.setattr("cognition.compressor.compress_context", _compress)
+    monkeypatch.setattr("harness.switch.compress_messages", _compress)
     sess = _sess()
     out = await _switch(_FakeCtx(sess, []), "old/model")
     assert out["switched"] is False
@@ -101,7 +101,8 @@ async def test_switch_same_model_is_noop(monkeypatch):
 
 async def test_switch_below_threshold_updates_model_and_persists(monkeypatch, tmp_path):
     monkeypatch.setattr("models.catalog.read_limits", lambda _mid: {"context_length": 128000})
-    monkeypatch.setattr("cognition.compressor.estimate_tokens", lambda _text: 1)
+    monkeypatch.setattr("harness.compression.estimate_messages", lambda _msgs: 1)
+    monkeypatch.setattr("harness.switch.estimate_messages", lambda _msgs: 1)
     upserts: list[tuple] = []
     monkeypatch.setattr("app.session.repository.get_epoch", lambda _sid: None)
     monkeypatch.setattr("app.session.repository.latest_seq", lambda _sid: 0)
@@ -118,7 +119,7 @@ async def test_switch_below_threshold_updates_model_and_persists(monkeypatch, tm
     assert sess.model == "new/model"
     assert ctx.sessions.persisted == ["ses_1"]
     assert upserts and upserts[0][3]["context_window"] == 128000
-    assert upserts[0][3]["compress_threshold"] == 108800
+    assert upserts[0][3]["compress_threshold"] == 119808
     assert list((tmp_path / "backend" / "data" / "model_switches").glob("*.json"))
     events = _audit_events(tmp_path)
     assert events[-1]["status"] == "committed"
@@ -127,7 +128,8 @@ async def test_switch_below_threshold_updates_model_and_persists(monkeypatch, tm
 
 async def test_switch_above_threshold_writes_summary_and_tail(monkeypatch, tmp_path):
     monkeypatch.setattr("models.catalog.read_limits", lambda _mid: {"context_length": 10000})
-    monkeypatch.setattr("cognition.compressor.estimate_tokens", lambda _text: 10_000)
+    monkeypatch.setattr("harness.compression.estimate_messages", lambda _msgs: 10_000)
+    monkeypatch.setattr("harness.switch.estimate_messages", lambda _msgs: 10_000)
     m1 = HumanMessage(content="old", id="m1")
     m2 = HumanMessage(content="recent", id="m2")
     calls: list[dict] = []
@@ -157,7 +159,8 @@ async def test_switch_above_threshold_writes_summary_and_tail(monkeypatch, tmp_p
 
 async def test_switch_compression_failure_keeps_old_model(monkeypatch, tmp_path):
     monkeypatch.setattr("models.catalog.read_limits", lambda _mid: {"context_length": 10000})
-    monkeypatch.setattr("cognition.compressor.estimate_tokens", lambda _text: 10_000)
+    monkeypatch.setattr("harness.compression.estimate_messages", lambda _msgs: 10_000)
+    monkeypatch.setattr("harness.switch.estimate_messages", lambda _msgs: 10_000)
     monkeypatch.setattr(settings, "agentsuper_data", str(tmp_path / "backend" / "data"))
 
     async def _compress(*_a, **_k):
@@ -178,7 +181,8 @@ async def test_switch_compression_failure_keeps_old_model(monkeypatch, tmp_path)
 
 async def test_switch_integrity_loss_rolls_back_and_audits(monkeypatch, tmp_path):
     monkeypatch.setattr("models.catalog.read_limits", lambda _mid: {"context_length": 128000})
-    monkeypatch.setattr("cognition.compressor.estimate_tokens", lambda _text: 1)
+    monkeypatch.setattr("harness.compression.estimate_messages", lambda _msgs: 1)
+    monkeypatch.setattr("harness.switch.estimate_messages", lambda _msgs: 1)
     upserts: list[tuple] = []
     monkeypatch.setattr("app.session.repository.get_epoch", lambda _sid: None)
     monkeypatch.setattr("app.session.repository.latest_seq", lambda _sid: 0)
@@ -223,8 +227,8 @@ def test_initial_state_binds_stable_id_and_window(monkeypatch):
     assert state["context_summary"] == "summary"
     assert state["context_tail_start_id"] == "m2"
     assert state["context_window"] == 100000
-    assert state["compress_threshold"] == 84000
-    assert state["keep_recent_tokens"] == 15000
+    assert state["compress_threshold"] == 91808
+    assert state["keep_recent_tokens"] == 8000
 
 
 def test_initial_state_uses_bound_compression_config():

@@ -83,6 +83,7 @@ def default_registry(
             description=(shell_exec.__doc__ or "").strip(),
             scope=DEFAULT_TOOL_SCOPE,
             require_approval=True,
+            mutating=True,
         )
     return registry, vfs
 

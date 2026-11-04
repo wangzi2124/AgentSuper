@@ -381,9 +381,11 @@ export interface MultiAgentSSEEvent {
 
 /** [队列] 一条待处理任务（执行中追加的输入，后端 session_inputs 行） */
 export interface QueuedPrompt {
-  /** 入队 id（= 投递时的 client_msg_id，可直接用于移除） */
+  /** 入队 id：投递时用 client_msg_id，可直接用于移除 */
   id: string
   message: string
+  /** 该排队任务执行前要切换到的模型（缺省 = 沿用当前会话模型） */
+  model?: string
   /** 入队时间戳（毫秒） */
   enqueued_at?: number
 }
@@ -392,6 +394,8 @@ export interface MultiAgentChatRequest {
   message: string
   conversation_id?: string
   model?: string
+  /** 已有会话的按轮模型：后端在回合开始前切换，不等点击时 PATCH。 */
+  target_model?: string
   use_vector_db?: boolean
   /** [S2/B4] 客户端消息幂等 id：自动/手动重试复用同一 id，服务端据此去重 */
   client_msg_id?: string

@@ -12,6 +12,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from string import Template
@@ -19,6 +20,8 @@ from string import Template
 logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).resolve().parent
+_FILE_CACHE: dict[str, tuple[float, str]] = {}
+_FILE_LOCK = threading.Lock()
 
 _DOUBLE_BRACE = re.compile(r"\{\{(\w+)\}\}")
 
@@ -72,11 +75,21 @@ class PromptLoader:
         self._cache: dict[str, str] = {}
 
     def raw(self, template_path: str) -> str:
-        if template_path not in self._cache:
-            self._cache[template_path] = (
-                self.base_dir / template_path
-            ).read_text(encoding="utf-8")
-        return self._cache[template_path]
+        path = self.base_dir / template_path
+        key = str(path.resolve())
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        with _FILE_LOCK:
+            cached = _FILE_CACHE.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        text = path.read_text(encoding="utf-8")
+        with _FILE_LOCK:
+            _FILE_CACHE[key] = (mtime, text)
+        self._cache[template_path] = text
+        return text
 
     def load(self, template_path: str, **variables: object) -> str:
         # 同时兼容 `{{var}}`（Jinja 风格）与 `$var`（string.Template）两种占位符。

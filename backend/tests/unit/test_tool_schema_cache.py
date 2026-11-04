@@ -24,8 +24,9 @@ def test_tool_defs_are_capped_and_keep_business_tools():
     names = [d["function"]["name"] for d in defs]
 
     assert len(defs) == MAX_TOOL_DEFS
-    # 业务工具（scope=location）必须先占满名额，global 工具排后
-    assert names[:5] == ["tool_3", "tool_4", "tool_5", "tool_6", "tool_7"]
+    # 业务工具（scope=location）必须先占满名额；最终顺序按 name 排序以保证前缀稳定
+    assert set(names) == {f"tool_{i}" for i in range(3, 3 + MAX_TOOL_DEFS)}
+    assert names == sorted(names)
     assert f"tool_{MAX_TOOL_DEFS + 4}" not in names
     assert "tool_0" not in names
 
@@ -55,6 +56,19 @@ def test_skill_tools_do_not_crowd_out_file_and_shell_tools():
     for required in ("read_file", "write_file", "edit_file", "ls", "grep", "glob", "shell_exec", "task"):
         assert required in names
 
+
+
+def test_tool_order_is_deterministic_across_registration_orders():
+    def build(names: list[str]) -> list[str]:
+        registry = ToolRegistry()
+        for name in names:
+            registry.register(
+                ToolDefinition(name=name, description=name, fn=lambda: "ok", scope="location")
+            )
+        return [d["function"]["name"] for d in build_tool_defs(registry, scope="location")]
+
+    assert build(["b", "a", "c"]) == ["a", "b", "c"]
+    assert build(["c", "b", "a"]) == ["a", "b", "c"]
 
 
 def test_tool_defs_cache_hits_and_invalidates(monkeypatch):

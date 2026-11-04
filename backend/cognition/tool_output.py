@@ -199,11 +199,29 @@ _PRUNE_STUB_PREFIX = "[tool output pruned"
 _PRUNE_PROTECTED_TOOLS = frozenset({"skill"})
 
 
+def prune_stub(tool_name: str = "", tokens: int = 0, path: str = "") -> str:
+    """Canonical stub text; used by both the pruner and the history rebuild."""
+    if tool_name:
+        stub = (
+            f"[tool output pruned to save context space: {tool_name}, "
+            f"~{tokens} tokens omitted]"
+        )
+    else:
+        stub = f"[tool output pruned to save context space: ~{tokens} tokens omitted]"
+    if path:
+        stub += (
+            f"\nFull output saved to: {path}\n"
+            "Use read_file to view it, or grep to search the full content."
+        )
+    return stub
+
+
 def prune_tool_outputs(
     messages: list[dict],
     protect_tokens: int = 40_000,
     minimum_tokens: int = 20_000,
     tail_turns: int = 2,
+    records: list[dict] | None = None,
 ) -> list[dict]:
     """回溯式清理已进入上下文的旧工具输出，腾出 token 预算。
 
@@ -292,15 +310,16 @@ def prune_tool_outputs(
             or tool_name_by_id.get(result[i].get("tool_call_id"), "")
         )
         saved = _write_truncated(content)
-        if tool_name:
-            stub = f"[tool output pruned to save context space: {tool_name}, ~{omitted} tokens omitted]"
-        else:
-            stub = f"[tool output pruned to save context space: ~{omitted} tokens omitted]"
-        if saved:
-            stub += (
-                f"\nFull output saved to: {saved}\n"
-                "Use read_file to view it, or grep to search the full content."
-            )
+        stub = prune_stub(tool_name, omitted, saved)
         result[i] = {**result[i], "content": stub}
+        if records is not None:
+            records.append(
+                {
+                    "index": i,
+                    "tool_name": tool_name,
+                    "path": saved,
+                    "tokens": omitted,
+                }
+            )
     logger.info("Pruned %d tool outputs (~%d tokens) to free context budget", len(candidates), pruned)
     return result

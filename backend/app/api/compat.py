@@ -32,6 +32,12 @@ from harness.errors import classify_error
 from harness.kernel import reset_current_turn, set_current_turn
 from harness.security import redact_secrets
 from models.router import reset_request_model, set_request_model
+from models.runtime import (
+    begin_scope,
+    end_scope,
+    reset_request_session,
+    set_request_session,
+)
 
 from execution.filesystem import (
     reset_active_root,
@@ -226,6 +232,17 @@ def _part_event_to_sse(
     - 未知类型忽略（权限/心跳等走各自通道）。
     """
     etype = ev.get("type")
+    if etype == "text_delta":
+        delta = ev.get("delta")
+        if not delta:
+            return []
+        return [
+            {
+                "type": "text_delta",
+                "agent_id": str(ev.get("agent_id") or ""),
+                "delta": str(delta),
+            }
+        ]
     if etype in ("tool_start", "tool_end"):
         agent_id, out = _ensure_agent_started(seen, agents_map, ev)
         step: dict[str, Any] = {
@@ -347,6 +364,89 @@ async def _append_assistant(
     )
 
 
+def _error_info(
+    *,
+    error_type: str,
+    message: str,
+    retryable: bool,
+    status_code: int | None = None,
+    error_code: str | None = None,
+) -> dict[str, Any]:
+    """Frontend `ChatError` shape (see frontend/src/types/index.ts)."""
+    if retryable:
+        if status_code == 429:
+            kind = "rate_limit"
+        elif status_code and status_code >= 500:
+            kind = "server_error"
+        else:
+            kind = "network"
+    else:
+        kind = "unknown"
+    return {
+        "type": kind,
+        "message": message,
+        "retryable": retryable,
+        "statusCode": status_code,
+        "errorType": error_type,
+        "errorCode": error_code,
+    }
+
+
+def _format_error_text(info: dict[str, Any]) -> str:
+    kind = info.get("type")
+    code = info.get("statusCode")
+    if kind == "rate_limit":
+        return f"请求过于频繁（{code or 429}），请稍后重试"
+    if kind == "server_error":
+        return f"服务器错误（{code or 500}），请稍后重试"
+    if kind == "network":
+        return "网络连接中断，请检查网络后重试"
+    if kind == "timeout":
+        return "请求超时，请稍后重试"
+    return f"出错了: {info.get('message') or 'Unknown error'}"
+
+
+async def _persist_turn_error(
+    ctx: PlatformContext,
+    session_id: str,
+    *,
+    user_msg_id: str,
+    question: str,
+    files: list[Any] | None,
+    info: dict[str, Any],
+    agents: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    """Persist a visible error bubble so a refresh doesn't drop it.
+
+    The user message is projected here too: a pre-turn failure (model switch /
+    queue full) happens before the normal ``project_user_message`` call.
+    """
+    from ..session.projector import project_user_message
+
+    try:
+        project_user_message(session_id, user_msg_id, question, files)
+    except Exception:  # noqa: BLE001 - persistence must never mask the error
+        logger.debug("failed to project user message before error", exc_info=True)
+
+    ui = {
+        "agents": list((agents or {}).values()),
+        "files_changed": [],
+        "is_error": True,
+        "error_info": info,
+    }
+    try:
+        await _append_assistant(
+            ctx,
+            session_id,
+            _format_error_text(info),
+            ui=ui,
+            message_id=f"am_{uuid4().hex[:12]}",
+        )
+        await ctx.ensure_conversation(session_id)
+    except Exception:  # noqa: BLE001 - persistence must never mask the error
+        logger.warning("failed to persist turn error for %s", session_id, exc_info=True)
+
+
 async def _graph_events(
     ctx: PlatformContext,
     sess: Any,
@@ -362,14 +462,18 @@ async def _graph_events(
     决策时仍能把 `permission_request` 送到前端（对齐真实审批流）。
     """
     perm_q: asyncio.Queue = asyncio.Queue()
+    # Tool calls in one round may run concurrently; the user should still see one
+    # approval prompt at a time.
+    perm_lock = asyncio.Lock()
 
     async def emit_perm(event: dict) -> None:
         await perm_q.put(event)
 
     async def hook(tool: str, args: dict) -> bool:
-        return await ctx.request_permission(
-            session_id=sess.id, tool=tool, args=args, emit=emit_perm
-        )
+        async with perm_lock:
+            return await ctx.request_permission(
+                session_id=sess.id, tool=tool, args=args, emit=emit_perm
+            )
 
     token = set_permission_hook(hook)
     # 本回合选中的模型（模型管理页）随 contextvar 传播到图节点任务；此前 body.model
@@ -393,6 +497,9 @@ async def _graph_events(
         state, config={"configurable": {"thread_id": sess.id}}, stream_mode=["updates", "messages"]
     ).__aiter__()
     next_task = asyncio.ensure_future(agen.__anext__())
+    get_task: asyncio.Future[Any] | None = None
+    part_task: asyncio.Future[Any] | None = None
+    cancel_task: asyncio.Future[Any] | None = None
     try:
         while True:
             if cancel.is_set():
@@ -400,8 +507,15 @@ async def _graph_events(
             for part_ev in _drain_part_events():
                 yield part_ev
             get_task = asyncio.ensure_future(perm_q.get())
+            # A blocked ``event_q.get`` is the wake-up that lets text/tool parts
+            # flow immediately instead of waiting for the next graph node or the
+            # 12s heartbeat timeout.
+            part_task = asyncio.ensure_future(event_q.get())
+            # Wake immediately on /interrupt even when the graph node is blocked
+            # inside a long model stream; the finally block cancels next_task.
+            cancel_task = asyncio.ensure_future(cancel.wait())
             done, _ = await asyncio.wait(
-                {next_task, get_task},
+                {next_task, get_task, part_task, cancel_task},
                 return_when=asyncio.FIRST_COMPLETED,
                 timeout=_HEARTBEAT_SEC,
             )
@@ -411,11 +525,29 @@ async def _graph_events(
                 for part_ev in _drain_part_events():
                     yield part_ev
                 get_task.cancel()
+                part_task.cancel()
+                cancel_task.cancel()
+                get_task = part_task = cancel_task = None
                 continue
+            if cancel_task in done:
+                break
+            cancel_task.cancel()
+            cancel_task = None
             if get_task in done:
                 yield get_task.result()
+                get_task = None
             elif not get_task.done():
                 get_task.cancel()
+                get_task = None
+            if part_task in done:
+                raw_part = part_task.result()
+                part_task = None
+                if raw_part is not None:
+                    for part_ev in _part_event_to_sse(raw_part, seen, agents_map):
+                        yield part_ev
+            else:
+                part_task.cancel()
+                part_task = None
             if next_task in done:
                 try:
                     chunk = next_task.result()
@@ -485,8 +617,9 @@ async def _graph_events(
                     yield done_ev
                 next_task = asyncio.ensure_future(agen.__anext__())
     finally:
-        if not next_task.done():
-            next_task.cancel()
+        for task in (next_task, get_task, part_task, cancel_task):
+            if task is not None and not task.done():
+                task.cancel()
         reset_event_queue(event_token)
         reset_permission_hook(token)
         reset_request_model(model_token)
@@ -557,6 +690,7 @@ async def multi_agent_stream(
                 {
                     "id": prompt_id,
                     "message": body.message,
+                    "model": body.target_model or body.model,
                     "files": queued_files,
                     "enqueued_at": int(time.time() * 1000),
                 }
@@ -614,28 +748,60 @@ async def _run_turn_body(
         model=sess.model,
     )
     turn_token = set_current_turn(turn)
+    # Per-turn ModelRuntime snapshot: repeated node/model lookups reuse one
+    # resolution; the cache dies with this runner (queued turns included).
+    scope_token = begin_scope()
+    session_token = set_request_session(sess.id)
     roots_token, root_token = _enter_roots(ctx, sess.id)
     slot_queued: int | None = None
     sem = ctx.semaphore
-    try:
-        # 会话内切换模型：门禁 + 迁移摘要 + 原子绑定；失败直接下发 error，
-        # 不启动本轮（旧模型继续可用）。
-        if body.target_model and body.target_model != sess.model:
+    # 异常可能发生在首次赋值的回合之前：提前给出默认值，供错误落库使用。
+    turn_question = body.message
+    turn_user_msg_id = user_msg_id
+    turn_files: list[Any] | None = body.files
+    agents_map: dict[str, dict[str, Any]] = {}
+
+    async def _apply_turn_model(
+        requested: str | None,
+        *,
+        question: str,
+        user_msg_id: str,
+        files: list[Any] | None,
+    ) -> bool:
+        """Switch before a turn starts; failure keeps the old model usable."""
+        if requested and requested != sess.model:
+            # This switch is the first step of the turn, not an external PATCH.
+            # Force past our own in-flight marker; external PATCH still sees it.
             try:
-                await ctx.switch_model(sess.id, body.target_model)
+                await ctx.switch_model(sess.id, requested, force=True)
             except ModelSwitchError as exc:
+                detail = redact_secrets(str(exc))
+                info = _error_info(
+                    error_type="ModelSwitchError",
+                    message=detail,
+                    retryable=False,
+                    status_code=exc.status_code,
+                )
+                await _persist_turn_error(
+                    ctx,
+                    sess.id,
+                    user_msg_id=user_msg_id,
+                    question=question,
+                    files=files,
+                    info=info,
+                    agents=agents_map,
+                )
                 runner.emit(
                     {
                         "type": "error",
-                        "error": redact_secrets(str(exc)),
-                        "detail": redact_secrets(str(exc)),
+                        "error": detail,
+                        "detail": detail,
                         "retryable": False,
                         "status_code": exc.status_code,
                         "error_type": "ModelSwitchError",
                     }
                 )
-                return
-
+                return False
         # [D3] 字段名与前端 store 对齐：`model_ref`（{id, name, provider}）
         if sess.model:
             runner.emit(
@@ -644,14 +810,41 @@ async def _run_turn_body(
                     "model_ref": {"id": sess.model, "name": sess.model, "provider": ""},
                 }
             )
+        return True
+
+    try:
+        # 会话内切换模型：门禁 + 迁移摘要 + 原子绑定；失败直接下发 error，
+        # 不启动本轮（旧模型继续可用）。
+        if not await _apply_turn_model(
+            body.target_model,
+            question=turn_question,
+            user_msg_id=turn_user_msg_id,
+            files=turn_files,
+        ):
+            return
 
         if sem is not None and sem.locked():
             if ctx.queue_counter >= ctx.max_queue_size:
+                message = "服务繁忙，排队已满，请稍后重试"
+                await _persist_turn_error(
+                    ctx,
+                    sess.id,
+                    user_msg_id=turn_user_msg_id,
+                    question=turn_question,
+                    files=turn_files,
+                    info=_error_info(
+                        error_type="QueueFullError",
+                        message=message,
+                        retryable=True,
+                        status_code=429,
+                    ),
+                    agents=agents_map,
+                )
                 runner.emit(
                     {
                         "type": "error",
-                        "error": "服务繁忙，排队已满，请稍后重试",
-                        "detail": "服务繁忙，排队已满，请稍后重试",
+                        "error": message,
+                        "detail": message,
                         "retryable": True,
                         "status_code": 429,
                         "error_type": "QueueFullError",
@@ -670,7 +863,19 @@ async def _run_turn_body(
             turn_question = body.message
             turn_user_msg_id = user_msg_id
             turn_files = await enrich_image_files(body.files)
+            queued_model: str | None = None
             while True:
+                # 排队任务携带入队时的模型；它开始执行前再切换（当前回合不受影响）。
+                if queued_model:
+                    if not await _apply_turn_model(
+                        queued_model,
+                        question=turn_question,
+                        user_msg_id=turn_user_msg_id,
+                        files=turn_files,
+                    ):
+                        return
+                    queued_model = None
+                streamed_text = False
                 if recorder is not None:
                     # 每个 drain 回合一条 assistant，sidecar 只跟踪当前回合。
                     recorder.reset()
@@ -738,6 +943,8 @@ async def _run_turn_body(
                     keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
                 )
                 async for ev in _graph_events(ctx, sess, state, seen, cancel, agents_map):
+                    if ev.get("type") == "text_delta" and ev.get("delta"):
+                        streamed_text = True
                     runner.emit(ev)
 
                 snapshot = await ctx.state(sess.id)
@@ -780,8 +987,9 @@ async def _run_turn_body(
                     message_id=assistant_msg_id,
                 )
                 await ctx.ensure_conversation(sess.id)
-                # 权威完整正文流式下发（前端 text_delta 逐段渲染，done 再兜底覆盖）
-                if final:
+                # 权威完整正文兜底下发：已经流式输出过增量时不再整段重发，
+                # 由 done.answer 覆盖；只有完全没流式（如寒暄短路/工具收尾）才补一条。
+                if final and not streamed_text:
                     runner.emit({"type": "text_delta", "agent_id": "", "delta": final})
                 runner.emit(
                     {
@@ -809,6 +1017,7 @@ async def _run_turn_body(
                     break
                 turn_question = str(nxt.get("message") or "")
                 turn_files = nxt.get("files") or None
+                queued_model = str(nxt.get("model") or "") or None
                 turn_user_msg_id = f"um_{uuid4().hex[:12]}"
     except asyncio.CancelledError:
         # 进程关停：保留 sidecar，启动对账时导入为 interrupted 消息。
@@ -820,11 +1029,28 @@ async def _run_turn_body(
         if recorder is not None:
             recorder.clear()
         err = classify_error(exc)
+        detail = redact_secrets(f"{err.error_type}: {exc}")
+        # 错误气泡落库：否则刷新后只剩 user 提问，前端本地错误消息被服务端历史覆盖。
+        await _persist_turn_error(
+            ctx,
+            sess.id,
+            user_msg_id=turn_user_msg_id,
+            question=turn_question,
+            files=turn_files,
+            info=_error_info(
+                error_type=err.error_type,
+                message=detail,
+                retryable=err.retryable,
+                status_code=err.status_code,
+                error_code=err.code,
+            ),
+            agents=agents_map,
+        )
         runner.emit(
             {
                 "type": "error",
                 "agent_id": "",
-                "error": redact_secrets(f"{err.error_type}: {exc}"),
+                "error": detail,
                 "detail": redact_secrets(str(exc)),
                 "retryable": err.retryable,
                 "status_code": err.status_code,
@@ -838,6 +1064,8 @@ async def _run_turn_body(
         if ctx.cancels.get(sess.id) is cancel:
             ctx.cancels.pop(sess.id, None)
         _exit_roots(roots_token, root_token)
+        reset_request_session(session_token)
+        end_scope(scope_token)
         reset_current_turn(turn_token)
         runner.finish()
         ctx.schedule_runner_cleanup(runner)

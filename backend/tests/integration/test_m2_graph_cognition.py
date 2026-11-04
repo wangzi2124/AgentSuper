@@ -3,7 +3,6 @@
 import pytest
 from langchain_core.messages import HumanMessage
 
-from cognition.compressor import compress_context
 from execution.filesystem import VirtualFileSystem
 from graph.main_graph import build_main_graph, run_agent
 from graph.nodes.compress import make_compress_node
@@ -49,18 +48,15 @@ async def test_rag_node_uses_cognition_retriever_and_reranker(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_compress_node_uses_injected_compressor():
+async def test_compress_node_uses_compactor():
     class FakeModel:
+        tier = "fake"
+
         async def ainvoke(self, messages, **kwargs):
             return ChatResult(content="压缩后的结构化摘要")
 
-    node = make_compress_node(
-        model=FakeModel(),
-        compressor=lambda m, e, mdl: compress_context(
-            m, existing_summary=e, threshold=5, keep_tokens=1, model=mdl
-        ),
-    )
-    state = {"messages": [HumanMessage(content="很长的一段内容" * 30) for _ in range(6)]}
+    node = make_compress_node(model=FakeModel())
+    state = {"messages": [HumanMessage(content="很长的一段内容" * 300) for _ in range(6)]}
     payload = await node(state)
     assert payload["token_usage"]["compressed"] is True
     assert payload["context_summary"] == "压缩后的结构化摘要"
@@ -69,8 +65,6 @@ async def test_compress_node_uses_injected_compressor():
 
 @pytest.mark.asyncio
 async def test_compress_node_noop_below_threshold():
-    node = make_compress_node(
-        compressor=lambda m, e, mdl: compress_context(m, existing_summary=e, threshold=10**9, model=mdl)
-    )
+    node = make_compress_node(model=None)
     payload = await node({"messages": [HumanMessage(content="短")]})
     assert payload["token_usage"]["compressed"] is False

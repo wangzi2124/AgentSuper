@@ -130,7 +130,8 @@ async def test_switch_model_preserves_fact_in_next_turn(monkeypatch, tmp_path):
 
     epochs: dict[str, tuple] = {}
     monkeypatch.setattr("models.catalog.read_limits", lambda _mid: {"context_length": 10_000})
-    monkeypatch.setattr("cognition.compressor.estimate_tokens", lambda _text: 10_000)
+    monkeypatch.setattr("harness.compression.estimate_messages", lambda _msgs: 10_000)
+    monkeypatch.setattr("harness.switch.estimate_messages", lambda _msgs: 10_000)
 
     async def _compress(messages, existing_summary="", model=None, **kwargs):
         return {
@@ -165,7 +166,7 @@ async def test_switch_model_preserves_fact_in_next_turn(monkeypatch, tmp_path):
     assert "ORION-42" in binding["summary"]
     assert "/work/app.py" in binding["summary"]
     assert binding["context_window"] == 10_000
-    assert binding["compress_threshold"] == 2_000
+    assert binding["compress_threshold"] == 7_500
 
     await _turn("What is the project code?", "2", model_b.answer)
     second = calls[-1]

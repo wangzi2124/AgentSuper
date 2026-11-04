@@ -32,14 +32,15 @@ class _FakeModel:
 
 
 def test_plan_for_window_is_bounded_and_paired():
-    # v2 buffer: max(15% × window, 16000); 10k window falls back to the 2k floor.
+    # reserved = min(20k, normalized output); preserve = clamp(25% × usable, 2k, 8k)
     plan = CompressionPlan.for_window(10_000)
-    assert plan.threshold == 2_000
+    assert plan.threshold == 7_500
     assert plan.keep_tokens == 2_000
+    assert plan.tail_turns == 2
 
     sized = CompressionPlan.for_window(100_000, max_output_tokens=8_000)
-    assert sized.threshold == 84_000
-    assert sized.keep_tokens == 15_000
+    assert sized.threshold == 92_000
+    assert sized.keep_tokens == 8_000
 
     fallback = CompressionPlan.for_window(0)
     assert fallback.threshold == 80_000
@@ -118,10 +119,6 @@ async def test_graph_compress_gate_true_uses_model_and_increments_count(monkeypa
         for i in range(8)
     ]
     model = _FakeModel("graph summary")
-    monkeypatch.setattr(
-        "cognition.compressor.should_use_llm_summary",
-        lambda older, compress_count=0: True,
-    )
 
     out = await compress_graph_messages(
         messages,
@@ -146,11 +143,6 @@ async def test_graph_compress_gate_false_backfills_without_model(monkeypatch):
         AIMessage(content="done", id="m2"),
         HumanMessage(content="tail", id="m3"),
     ]
-    monkeypatch.setattr(
-        "cognition.compressor.should_use_llm_summary",
-        lambda older, compress_count=0: False,
-    )
-
     out = await compress_graph_messages(
         messages,
         existing_summary="old",
@@ -188,7 +180,7 @@ def test_parse_buffer_handles_percent_absolute_and_invalid():
 
 def test_defaults_fall_back_when_config_import_fails(monkeypatch):
     monkeypatch.setitem(sys.modules, "config", None)
-    assert compression._keep_default(None) == 15_000
+    assert compression._keep_default(None) == 0
     assert compression._buffer_default(100_000) == 16_000
 
 
@@ -197,8 +189,9 @@ def test_tail_selection_edge_cases():
     assert select_tail_messages([], 10, 0) == ([], [])
     only_ai = [AIMessage(content="x")]
     assert select_tail_messages(only_ai, 10, 0) == (only_ai, [])
-    # 空内容 turn 的 token 为 0，keep=0 时整段都可作为 tail。
-    assert select_tail_messages([HumanMessage(content="")], 0, 0) == ([], [HumanMessage(content="")])
+    # tail_turns <= 0 表示不保留 tail（对齐 opencode），全部进入 head。
+    only_user = [HumanMessage(content="")]
+    assert select_tail_messages(only_user, 0, 0) == (only_user, [])
 
 
 @pytest.mark.asyncio

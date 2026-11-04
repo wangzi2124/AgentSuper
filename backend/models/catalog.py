@@ -54,16 +54,44 @@ def catalog_db_path() -> Path:
     return _dbp()
 
 
+_config_cache: dict[str, dict[str, Any]] = {}
+_config_lock = threading.Lock()
+
+
+def _invalidate_config_cache() -> None:
+    with _config_lock:
+        _config_cache.pop(_cache_key(), None)
+
+
 def load_config() -> dict[str, Any]:
-    """读取模型配置（DB 为单一事实来源；语义与原 JSON 一致）。"""
-    from models.catalog_db import load_config as _load
-    return _load()
+    """读取模型配置（DB 为单一事实来源；回合内多次读取走进程缓存）。
+
+    返回深拷贝：调用方会原地修改再 ``save_config``，共享缓存会被污染。
+    写操作与 ``reload_catalog`` 主动失效，模型管理页改动下一回合生效。
+    """
+    import copy
+
+    key = _cache_key()
+    with _config_lock:
+        cached = _config_cache.get(key)
+    if cached is None:
+        from models.catalog_db import load_config as _load
+
+        cached = _load()
+        with _config_lock:
+            _config_cache[key] = cached
+    return copy.deepcopy(cached)
 
 
 def save_config(cfg: dict[str, Any]) -> None:
-    """整体写回模型配置到数据库。"""
+    """整体写回模型配置到数据库，并刷新进程缓存。"""
+    import copy
+
     from models.catalog_db import save_config as _save
+
     _save(cfg)
+    with _config_lock:
+        _config_cache[_cache_key()] = copy.deepcopy(cfg)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -148,19 +176,10 @@ _ollama_installed: Optional[set[str]] = None
 _ollama_native: dict[str, dict[str, Any]] = {}
 _ollama_lock = threading.Lock()
 
-# ── Ollama 运行时窗口（/api/ps）───────────────────────────────────────────
-# `/api/tags`、`/api/show` 只给模型**原生上限**，不代表服务器实际运行的 num_ctx
-# （OLLAMA_CONTEXT_LENGTH / 启动参数）。真正生效的窗口在 `/api/ps.context_length`，
-# 但该接口只列**已加载**模型。策略：
-#   - 每次解析前最多每 `_RUNTIME_CTX_TTL` 秒探一次 `/api/ps`（本地 HTTP，毫秒级）；
-#   - 探到的值按模型 id 记住（last-known），模型被卸载后继续沿用，避免窗口跳变。
-_RUNTIME_CTX_TTL = 30.0
-_runtime_ctx_last: dict[str, int] = {}
-_ps_cache: Optional[dict[str, int]] = None
-_ps_cache_at: float = 0.0
-_runtime_ctx_lock = threading.Lock()
-
-
+# ── Ollama runtime window: owned by models.runtime ──────────────────────────
+# Catalog stays declarative. The following functions are compatibility wrappers
+# for callers/UI that still use the old names; state and probing live in
+# `models.runtime`.
 def _explicit_context_override(model_id: str) -> int:
     """用户在「模型管理」显式设置的上下文长度（overrides[mid].context_length）。
 
@@ -176,105 +195,32 @@ def _explicit_context_override(model_id: str) -> int:
         return 0
 
 
-def _ps_snapshot(force: bool = False) -> dict[str, int]:
-    """`/api/ps` 快照：{模型名: 运行窗口}，30s 缓存；不可达返回 {}。"""
-    global _ps_cache, _ps_cache_at
-    now = time.time()
-    with _runtime_ctx_lock:
-        if not force and _ps_cache is not None and now - _ps_cache_at < _RUNTIME_CTX_TTL:
-            return dict(_ps_cache)
-        _ps_cache_at = now
-    out: dict[str, int] = {}
-    if local_endpoint_alive(_ollama_base_url()):
-        try:
-            import urllib.request
-
-            req = urllib.request.Request(
-                f"{_ollama_base_url()}/api/ps",
-                headers={"User-Agent": "agentsuper/0.1"},
-            )
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            for m in data.get("models") or []:
-                try:
-                    ctx = max(0, int(m.get("context_length") or 0))
-                except (TypeError, ValueError):
-                    ctx = 0
-                for name in {str(m.get("name") or ""), str(m.get("model") or "")}:
-                    if name:
-                        out[name] = ctx
-        except Exception:  # noqa: BLE001 - 未启动/超时按未知处理
-            out = {}
-    with _runtime_ctx_lock:
-        _ps_cache = dict(out)
-    return out
-
-
 def probe_runtime_context_length(model_id: Optional[str], force: bool = False) -> int:
-    """Ollama 模型的实际运行窗口（`/api/ps.context_length`），带 30s 探测节流。
+    """Ollama 模型的实际运行窗口（`/api/ps.context_length`）。"""
+    from models.runtime import probe_runtime_context_length as _probe
 
-    读不到（未加载/未启动）时返回上次观测值；从未观测过返回 0。
-    """
-    mid = normalize_model(model_id)
-    if not is_ollama_model(mid):
-        return 0
-    name = get_ollama_model_name(mid)
-    ctx = _ps_snapshot(force=force).get(name, 0)
-    with _runtime_ctx_lock:
-        if ctx > 0:
-            _runtime_ctx_last[mid] = ctx
-        return _runtime_ctx_last.get(mid, 0)
+    return _probe(model_id, force=force)
 
 
 def forget_runtime_context(model_id: Optional[str], *, reprobe: bool = True) -> int:
-    """丢弃某模型的 last-known 运行窗口（超窗错误后调用），可选立即强制重探。
+    """丢弃某模型的 last-known 运行窗口，可选立即强制重探。"""
+    from models.runtime import forget_runtime_context as _forget
 
-    返回重探到的窗口（未加载/不可达时为 0）。`effective_context_length` 随后会
-    回落到 `settings.ollama_num_ctx` 的保守值。
-    """
-    mid = normalize_model(model_id)
-    if not is_ollama_model(mid):
-        return 0
-    with _runtime_ctx_lock:
-        _runtime_ctx_last.pop(mid, None)
-    if reprobe:
-        return probe_runtime_context_length(mid, force=True)
-    return 0
+    return _forget(model_id, reprobe=reprobe)
 
 
 def runtime_context_lengths(model_ids: list[str]) -> dict[str, int]:
-    """批量计算每个模型的**实际**窗口（一次 `/api/ps` 探测，供 UI 只读展示）。"""
-    snap = _ps_snapshot()
-    explicit = load_config().get("overrides") or {}
-    out: dict[str, int] = {}
-    for raw in model_ids:
-        mid = normalize_model(raw) or raw
-        if not is_ollama_model(mid):
-            out[raw] = int(read_limits(mid).get("context_length") or 0)
-            continue
-        name = get_ollama_model_name(mid)
-        ctx = snap.get(name, 0)
-        if ctx > 0:
-            with _runtime_ctx_lock:
-                _runtime_ctx_last[mid] = ctx
-        try:
-            ov = int(((explicit.get(mid) or {})).get("context_length") or 0)
-        except Exception:  # noqa: BLE001
-            ov = 0
-        if ov > 0:
-            ctx = ov
-        elif ctx <= 0:
-            with _runtime_ctx_lock:
-                ctx = _runtime_ctx_last.get(mid, 0)
-        if ctx <= 0:
-            try:
-                from config import settings
+    """批量计算每个模型的**实际**窗口（供 UI 只读展示，不阻塞调用路径）。"""
+    from models.runtime import runtime_context_lengths as _lengths
 
-                ctx = int(settings.ollama_num_ctx or 0)
-            except Exception:  # noqa: BLE001
-                ctx = 0
-        out[raw] = ctx
-    return out
+    return _lengths(model_ids)
+
+
+def effective_context_length(model_id: Optional[str], fallback: int = 0) -> int:
+    """调用链真正可用的上下文窗口（非阻塞；探测在后台刷新）。"""
+    from models.runtime import effective_window
+
+    return effective_window(model_id, fallback)
 
 
 def annotate_runtime_context(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -292,34 +238,6 @@ def annotate_runtime_context(entries: list[dict[str, Any]]) -> list[dict[str, An
             item["runtime_context_length"] = runtime[mid]
         out.append(item)
     return out
-
-
-def effective_context_length(model_id: Optional[str], fallback: int = 0) -> int:
-    """调用链真正可用的上下文窗口。
-
-    - Ollama：用户显式覆盖 > `/api/ps`（含 last-known）> `fallback`
-      （通常是 `settings.ollama_num_ctx`；服务器未加载时的保守值）。
-    - 其它：目录声明值（历史行为）。
-    """
-    mid = normalize_model(model_id)
-    if not mid:
-        return max(0, int(fallback or 0))
-    if is_ollama_model(mid):
-        explicit = _explicit_context_override(mid)
-        if explicit > 0:
-            return explicit
-        runtime = probe_runtime_context_length(mid)
-        if runtime > 0:
-            return runtime
-        if not fallback:
-            try:
-                from config import settings
-
-                fallback = int(settings.ollama_num_ctx or 0)
-            except Exception:  # noqa: BLE001
-                fallback = 0
-        return max(0, int(fallback or 0))
-    return int(read_limits(mid).get("context_length") or 0) or max(0, int(fallback or 0))
 
 
 def _ollama_base_url() -> str:
@@ -675,6 +593,7 @@ def get_catalog(force_reload: bool = False) -> list[dict[str, Any]]:
 
 
 def reload_catalog() -> None:
+    _invalidate_config_cache()
     get_catalog(force_reload=True)
     return None
 

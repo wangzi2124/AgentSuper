@@ -12,9 +12,10 @@ from typing import Any, Callable
 from execution.tool_registry import ToolRegistry
 from harness.budget import BudgetLedger
 from models.router import TierModel, resolve_model
-from prompts.loader import PromptLoader, model_id_of
+from prompts.assembly import compose_system
+from prompts.loader import model_id_of
 
-from .base import run_tool_loop
+from .base import build_tool_defs, run_tool_loop
 
 TOOL_SCOPE = "location"
 
@@ -34,10 +35,16 @@ def _msg_to_provider_dict(msg: Any) -> dict[str, Any] | None:
     """把 LangChain 消息还原成 provider 结构（保留原生 tool_calls / tool 结果）。"""
     role = getattr(msg, "type", None) or getattr(msg, "role", None) or ""
     content = getattr(msg, "content", "")
+    ident = getattr(msg, "id", None)
     if role in ("human", "user"):
-        return {"role": "user", "content": content}
+        out = {"role": "user", "content": content}
+        if ident:
+            out["_id"] = str(ident)
+        return out
     if role in ("ai", "assistant"):
         out: dict[str, Any] = {"role": "assistant", "content": content}
+        if ident:
+            out["_id"] = str(ident)
         calls = getattr(msg, "tool_calls", None) or []
         if calls:
             out["tool_calls"] = [
@@ -56,14 +63,20 @@ def _msg_to_provider_dict(msg: Any) -> dict[str, Any] | None:
             ]
         return out
     if role == "tool":
-        return {
+        out = {
             "role": "tool",
             "content": content,
             "tool_call_id": getattr(msg, "tool_call_id", ""),
             "name": getattr(msg, "name", "") or "",
         }
+        if ident:
+            out["_id"] = str(ident)
+        return out
     if role == "system":
-        return {"role": "system", "content": content}
+        out = {"role": "system", "content": content}
+        if ident:
+            out["_id"] = str(ident)
+        return out
     return None
 
 
@@ -142,6 +155,14 @@ def _conversation_history(
     return out
 
 
+def _current_user_id(state: dict[str, Any]) -> str | None:
+    for msg in reversed(state.get("messages") or []):
+        if getattr(msg, "type", None) in ("human", "user"):
+            value = getattr(msg, "id", None)
+            return str(value) if value else None
+    return None
+
+
 def _multimodal_user_content(state: dict[str, Any]) -> list[dict[str, Any]] | None:
     """最近一条 human 消息的多模态 content（分块列表）；无图片则为 None。
 
@@ -172,14 +193,6 @@ def make_execute_node(
     async def execute_node(state: dict[str, Any]) -> dict[str, Any]:
         model = _model if _model is not None else resolve_model(state, default_tier="medium")
         registry = _registry
-        # 未显式注入时，按本轮实际模型选择 provider profile（shared + profile + role）。
-        system_prompt = (
-            _system_prompt
-            if _system_prompt is not None
-            else PromptLoader().build_agent_prompt("file_agent", model_id_of(model))
-        )
-        if _extra_system:
-            system_prompt = f"{system_prompt}\n\n{_extra_system}"
         plan = [dict(t) for t in (state.get("task_plan") or [])]
         pending = [t for t in plan if t.get("status") != "done"]
         if not pending:
@@ -188,26 +201,32 @@ def make_execute_node(
         task = pending[0]
         user_blocks = _multimodal_user_content(state)
         image_turn = bool(user_blocks) and _has_image_block(user_blocks)
-        sys_text = system_prompt
-        if image_turn:
-            sys_text = f"{VISION_SYSTEM_PREFIX}\n\n{sys_text}" if sys_text else VISION_SYSTEM_PREFIX
-        # 长期记忆（Store，§4.2）由 memory_recall 节点写入 memory_context，此前无人消费；
-        # 这里并入 system 段落，让跨会话事实也能进入本轮提示词。
-        memory_ctx = (state.get("memory_context") or "").strip()
-        if memory_ctx:
-            sys_text = (
-                f"{sys_text}\n\n[相关长期记忆]\n{memory_ctx}" if sys_text else f"[相关长期记忆]\n{memory_ctx}"
+        # Stable head first; vision/memory/RAG/skills are turn-specific and stay
+        # after it so provider prefix caching is not invalidated by volatile text.
+        sys_text = compose_system(
+            "file_agent",
+            model_id_of(model),
+            head_override=_system_prompt,
+            vision_prefix=VISION_SYSTEM_PREFIX if image_turn else "",
+            memory=(state.get("memory_context") or "").strip(),
+            rag=(state.get("rag_context") or "").strip(),
+            extra=_extra_system,
+        )
+        tool_defs = build_tool_defs(registry, scope) if registry is not None else []
+        try:
+            from cognition.context_meter import get_meter
+
+            context_estimate = get_meter().estimate(
+                [],
+                system=sys_text,
+                tools=tool_defs or None,
+                model_id=model_id_of(model) or "",
             )
-        # 知识库检索结果（§4.1）由 rag 节点写入 rag_context，此前无人消费 →
-        # 结果只以 SystemMessage 落进 messages、不进提示词。这里并入 system 段落，
-        # 让 RAG 命中的文档片段真正进入本轮上下文。
-        rag_ctx = (state.get("rag_context") or "").strip()
-        if rag_ctx:
-            sys_text = (
-                f"{sys_text}\n\n[知识库检索结果]\n{rag_ctx}"
-                if sys_text
-                else f"[知识库检索结果]\n{rag_ctx}"
-            )
+            context_system_tokens = int(context_estimate.system)
+            context_tool_tokens = int(context_estimate.tools)
+        except Exception:  # noqa: BLE001 - accounting must not break execute
+            context_system_tokens = 0
+            context_tool_tokens = 0
         messages: list[dict[str, Any]] = []
         if sys_text:
             messages.append({"role": "system", "content": sys_text})
@@ -215,13 +234,25 @@ def make_execute_node(
         # 前几轮说过的内容（此前 execute 只送 task.desc → 追问「我上次说的代号是什么」
         # 完全失忆）。
         messages.extend(_conversation_history(state))
+        current_user_id = _current_user_id(state)
         if user_blocks is not None:
-            messages.append({"role": "user", "content": user_blocks})
+            item = {"role": "user", "content": user_blocks}
+            if current_user_id:
+                item["_id"] = current_user_id
+            messages.append(item)
         # 当前轮 human 消息被历史装配排除；附件正文需单独补回，否则模型看不到文件内容。
         attachment_ctx = str(state.get("attachment_context") or "").strip()
         if attachment_ctx:
             messages.append({"role": "user", "content": attachment_ctx})
-        messages.append({"role": "user", "content": task.get("desc", "")})
+        task_user: dict[str, Any] = {"role": "user", "content": task.get("desc", "")}
+        if current_user_id:
+            task_user["_id"] = current_user_id
+        messages.append(task_user)
+
+        compaction_events: list[dict[str, Any]] = []
+
+        async def _on_compaction(event: dict[str, Any]) -> None:
+            compaction_events.append(event)
 
         result = await run_tool_loop(
             model,
@@ -231,6 +262,9 @@ def make_execute_node(
             agent_id="build",
             budget=BudgetLedger.from_state(state),
             stream=True,
+            context_usable_tokens=int(state.get("compress_threshold") or 0),
+            on_compaction=_on_compaction,
+            session_id=str(state.get("session_id") or ""),
         )
 
         task_id = task.get("id", "t?")
@@ -247,6 +281,9 @@ def make_execute_node(
             "tool_rounds": state.get("tool_rounds", 0) + result["rounds"],
             "token_usage": result.get("usage") or {},
             "messages": _tool_history_to_lc(result.get("tool_history") or []),
+            "compaction_event": compaction_events[-1] if compaction_events else {},
+            "context_system_tokens": context_system_tokens,
+            "context_tool_tokens": context_tool_tokens,
         }
 
     return execute_node

@@ -22,6 +22,8 @@ class ToolDefinition:
     # 配额（0 = 不限制）；显式声明后才由 ToolRegistryQuota 执行。
     token_budget: int = 0
     rate_limit: int = 0
+    # 是否可能修改工作区（写文件 / shell / 自定义脚本）。并发执行时拿写锁。
+    mutating: bool = False
     parameters: dict[str, Any] = field(default_factory=dict)
 
 
@@ -72,8 +74,13 @@ class ToolRegistry:
         description: str = "",
         scope: str = "location",
         require_approval: bool = True,
+        mutating: bool = True,
     ) -> bool:
-        """注册插件（自定义工具）函数；与内置工具重名时保留内置并返回 False。"""
+        """注册插件（自定义工具）函数；与内置工具重名时保留内置并返回 False。
+
+        自定义脚本默认 `mutating=True`：它们可能写文件或执行任意代码，并发时
+        保守地拿工作区写锁；只读插件可显式传 `mutating=False`。
+        """
         if name in self._tools:
             return False
         self.register_function(
@@ -82,6 +89,7 @@ class ToolRegistry:
             description=description,
             scope=scope,
             require_approval=require_approval,
+            mutating=mutating,
         )
         self._plugin_tools.add(name)
         return True

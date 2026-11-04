@@ -4,23 +4,21 @@ from __future__ import annotations
 
 import pytest
 
-from models import catalog
+from models import catalog, runtime
 
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_cache(monkeypatch):
-    catalog._runtime_ctx_last.clear()
-    catalog._ps_cache = None
-    catalog._ps_cache_at = 0.0
+    runtime.reset_state()
+    monkeypatch.setattr(runtime, "local_endpoint_alive", lambda *a, **k: True, raising=False)
     monkeypatch.setattr(catalog, "local_endpoint_alive", lambda *a, **k: True)
     yield
-    catalog._runtime_ctx_last.clear()
-    catalog._ps_cache = None
-    catalog._ps_cache_at = 0.0
+    runtime.reset_state()
 
 
 def _patch_ps(monkeypatch, models):
-    monkeypatch.setattr(catalog, "_ps_snapshot", lambda force=False: dict(models))
+    monkeypatch.setattr(runtime, "_fetch_ps", lambda: dict(models))
+    runtime.refresh_local_windows()
 
 
 def test_no_explicit_override_means_no_num_ctx(monkeypatch):

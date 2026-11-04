@@ -9,10 +9,12 @@ import json
 
 import pytest
 
+from config import settings
 from execution.filesystem import VirtualFileSystem
 from graph.events import reset_event_queue, set_event_queue
 from graph.main_graph import build_main_graph, run_agent
 from models.router import ChatResult, ToolCall
+from models.stream import StreamResult
 
 
 class _ScriptedModel:
@@ -73,6 +75,48 @@ async def test_main_graph_tool_call_emits_part_events(tmp_path):
     assert ends[0]["status"] in {"completed", "failed"}
     assert ends[0]["tool_result"] is not None
     assert out["final_output"] == "读到了内容"
+
+
+class _NativeStreamingModel:
+    """Native tool-capable model that streams two text chunks."""
+
+    tier = "fake"
+
+    def model_name(self) -> str:
+        return "native-e2e"
+
+    async def raw_stream(self, messages, *, tools=None, on_text=None, **kwargs):
+        for piece in ("流式\n", "回答"):
+            if on_text:
+                on_text(piece)
+        return StreamResult(content="流式\n回答", finish_reason="stop")
+
+    async def ainvoke(self, messages, *, tools=None, **kwargs):
+        raise AssertionError("native model must use the streaming path")
+
+
+@pytest.mark.asyncio
+async def test_native_stream_emits_text_delta_parts(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "harness_tool_mode", "native")
+    graph = build_main_graph(
+        model=_NativeStreamingModel(),
+        vfs=VirtualFileSystem(root=str(tmp_path)),
+    )
+
+    q = __import__("asyncio").Queue()
+    token = set_event_queue(q)
+    try:
+        out = await run_agent("打个招呼", graph=graph, thread_id="stream-e2e")
+    finally:
+        reset_event_queue(token)
+
+    events = []
+    while not q.empty():
+        events.append(q.get_nowait())
+    deltas = [e.get("delta") for e in events if e["type"] == "text_delta"]
+    assert deltas, "native streaming must emit text_delta parts"
+    assert "".join(deltas) == "流式\n回答"
+    assert out["final_output"].strip() == "流式\n回答".strip()
 
 
 @pytest.mark.asyncio

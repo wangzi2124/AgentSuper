@@ -205,16 +205,28 @@ class Settings(BaseSettings):
     # token 估算校正系数（cognition/token_counter.py）。
     token_estimate_correction: float = 1.13
 
-    # ── 上下文压缩（对齐 opencode v2）──
-    # 压缩时保留的最近原文 token（keep.tokens）。
-    compaction_keep_tokens: int = 15_000
-    # 自动压缩预留窗口：百分比或绝对 token；"15%" = max(15% × 窗口, 16000)。
+    # ── 上下文压缩（对齐 opencode）──
+    # 压缩时保留的最近原文 token；0 = 按 window 公式 clamp(25% × usable, 2k, 8k)。
+    compaction_keep_tokens: int = 0
+    # 自动压缩预留窗口：绝对 token 覆盖；百分比为旧格式（新公式忽略）。
     compaction_buffer: str = "15%"
+    # 保留最近几轮原文；0/负数 = 不保留 tail（对齐 opencode tail_turns 语义）。
+    compaction_tail_turns: int = 2
+    # 压缩最小收益（token）；低于该值不落 checkpoint。0 = 按 usable 的 5%。
+    compaction_min_gain_tokens: int = 0
     # 单条工具输出 token 上限（bound_tool_output 使用）。
     tool_output_max_tokens: int = 8_000
 
     # 是否在上下文超阈值时自动压缩。
     compaction_auto: bool = True
+
+    # ── 确定性修剪（对齐 opencode compaction.ts:prune）──
+    compaction_prune: bool = True
+    compaction_prune_protect_tokens: int = 40_000
+    compaction_prune_minimum_tokens: int = 20_000
+
+    # 单张图片在上下文中的 token 估算（不按 base64 长度计数）。
+    image_token_estimate: int = 1_600
 
     # ── 聊天附件 / 历史预算 ──
     # 非图片附件内联进模型上下文的单文件字符上限（超出部分落盘，由工具按需读取）。
@@ -260,6 +272,8 @@ class Settings(BaseSettings):
     # 工具默认限流（0 = 不限）：仅对未显式声明 rate_limit / token_budget 的工具生效。
     tool_default_rate_limit: int = 0
     tool_default_token_budget: int = 0
+    # 同一轮内并行执行的工具调用上限（写工具/shell 仍串行）。
+    tool_concurrency: int = 10
 
     # ── 权限 / 工作区 ──
     permission_approval_timeout: int = 180
@@ -271,6 +285,9 @@ class Settings(BaseSettings):
     # 读不到运行窗口时的回落值（实际以 Ollama /api/ps 为准）。
     ollama_num_ctx: int = 4096
     ollama_context_guard: bool = True
+    # 本地 Ollama 模型驻留时长（litellm 顶层 keep_alive）；默认 30m，
+    # 避免空闲 5 分钟卸载后下一条消息承担冷加载。
+    ollama_keep_alive: str = "30m"
     # Ollama 服务地址（目录未注册时兜底）。
     ollama_host: str = "http://localhost:11434"
     # 显式 Ollama API base（优先级高于 ollama_host；为空则用 ollama_host）。

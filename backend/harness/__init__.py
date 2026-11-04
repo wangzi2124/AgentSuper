@@ -17,9 +17,11 @@ from .adapter import (
 from .budget import BudgetExceeded, BudgetLedger
 from .capabilities import resolve_mode, supports_native_tools
 from .compression import (
+    CompactionPolicy,
     CompressionError,
     CompressionPlan,
     CompressionResult,
+    ContextCompactor,
     compress_messages,
     summarize_messages,
     tail_snapshot,
@@ -78,9 +80,11 @@ __all__ = [
     "BudgetExceeded",
     "BudgetExceededError",
     "BudgetLedger",
+    "CompactionPolicy",
     "CompressionError",
     "CompressionPlan",
     "CompressionResult",
+    "ContextCompactor",
     "ContextOverflowError",
     "Done",
     "EventEnvelope",

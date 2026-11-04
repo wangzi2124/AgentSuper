@@ -6,6 +6,7 @@ import json
 import pytest
 
 from execution.tool_registry import ToolDefinition, ToolRegistry
+from graph.events import reset_event_queue, set_event_queue
 from graph.nodes.base import run_tool_loop
 from harness.delimiters import render_tool_call
 from harness.tool_adapter import ToolAdapter
@@ -60,3 +61,52 @@ async def test_fallback_stream_executes_tool_before_stream_finishes():
     assert out["tool_trace"][0]["output"] == "echo:x"
     assert out["tool_history"][1]["tool_call_id"]
     assert out["text"] == "finished"
+
+
+class _NativeStreamModel:
+    tier = "fake"
+    name = "native-stream-model"
+
+    def __init__(self) -> None:
+        self.stream_calls = 0
+        self.ainvoke_calls = 0
+
+    def model_name(self) -> str:
+        return self.name
+
+    async def raw_stream(self, messages, *, tools=None, on_text=None):
+        self.stream_calls += 1
+        for piece in ("流式", "回答"):
+            if on_text:
+                on_text(piece)
+        return StreamResult(content="流式回答", finish_reason="stop")
+
+    async def ainvoke(self, messages, *, tools=None, **kwargs):
+        self.ainvoke_calls += 1
+        raise AssertionError("native streaming must not fall back to complete")
+
+
+@pytest.mark.asyncio
+async def test_native_stream_forwards_text_deltas():
+    model = _NativeStreamModel()
+    q: asyncio.Queue = asyncio.Queue()
+    token = set_event_queue(q)
+    try:
+        out = await run_tool_loop(
+            model,
+            [{"role": "user", "content": "go"}],
+            ToolRegistry(),
+            adapter=ToolAdapter(model, mode="native"),
+            stream=True,
+        )
+    finally:
+        reset_event_queue(token)
+
+    events = []
+    while not q.empty():
+        events.append(q.get_nowait())
+    deltas = [e["delta"] for e in events if e["type"] == "text_delta"]
+    assert deltas == ["流式", "回答"]
+    assert out["text"] == "流式回答"
+    assert model.stream_calls == 1
+    assert model.ainvoke_calls == 0

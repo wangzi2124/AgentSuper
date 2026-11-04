@@ -1,8 +1,31 @@
 """L1 单元测试：路由逻辑（agent.md §10.2 / §3.3）。"""
 
+from types import SimpleNamespace
+
 from langchain_core.messages import HumanMessage
 
+from graph import routers
 from graph.routers import MAX_ITERATIONS, route_after_supervisor
+
+
+def test_context_tokens_passes_state_model(monkeypatch):
+    seen = {}
+
+    class _Meter:
+        def estimate(self, messages, *, system="", tools=None, model_id="", use_cache=False):
+            seen["model_id"] = model_id
+            return SimpleNamespace(total=10)
+
+    monkeypatch.setattr("cognition.context_meter.get_meter", lambda: _Meter())
+    state = {
+        "messages": [HumanMessage(content="hi")],
+        "model": "ollama_chat/qwen2.5:3b",
+    }
+    assert routers._context_tokens(state) == 10
+    assert seen["model_id"] == "ollama_chat/qwen2.5:3b"
+
+    state.update({"context_system_tokens": 100, "context_tool_tokens": 50})
+    assert routers._context_tokens(state) == 160
 
 
 def test_iteration_hard_stop():
@@ -16,9 +39,14 @@ def test_final_output_ends():
 def test_compress_on_threshold():
     # 压缩触发依据「当前上下文 token 估算」（§4.3），而非用量累加键；且消息数须
     # 超过压缩节点的 KEEP_RECENT，否则触发也缩不了身。
-    big = "x" * 60_000  # ≈15k token/条
+    big = "x" * 60_000
     messages = [HumanMessage(content=big) for _ in range(7)]
-    assert route_after_supervisor({"messages": messages}) == "compress"
+    assert (
+        route_after_supervisor(
+            {"messages": messages, "compress_threshold": 50_000}
+        )
+        == "compress"
+    )
 
 
 def test_needs_rag():

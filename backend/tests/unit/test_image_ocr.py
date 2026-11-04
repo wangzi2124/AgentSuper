@@ -71,6 +71,51 @@ def test_ocr_lang_attempts_falls_back(monkeypatch):
     assert ip._ocr_lang_attempts() == ["eng"]
 
 
+@pytest.mark.asyncio
+async def test_describe_prefers_ocr_over_caption(monkeypatch):
+    monkeypatch.setattr(ip, "ocr_image", lambda *a, **k: "OCR TEXT")
+    called = {"caption": 0}
+
+    async def _cap(*a, **k):
+        called["caption"] += 1
+        return "CAPTION TEXT"
+
+    monkeypatch.setattr(ip, "caption_image", _cap)
+    monkeypatch.setattr(settings, "image_vlm_caption", True)
+    assert await ip.describe_image("QQ==") == "OCR TEXT"
+    assert called["caption"] == 0
+
+
+@pytest.mark.asyncio
+async def test_describe_falls_back_to_caption_when_ocr_empty(monkeypatch):
+    monkeypatch.setattr(ip, "ocr_image", lambda *a, **k: "")
+    called = {"caption": 0}
+
+    async def _cap(*a, **k):
+        called["caption"] += 1
+        return "CAPTION TEXT"
+
+    monkeypatch.setattr(ip, "caption_image", _cap)
+    monkeypatch.setattr(settings, "image_vlm_caption", True)
+    assert await ip.describe_image("QQ==") == "CAPTION TEXT"
+    assert called["caption"] == 1
+
+
+@pytest.mark.asyncio
+async def test_describe_skips_caption_when_disabled(monkeypatch):
+    monkeypatch.setattr(ip, "ocr_image", lambda *a, **k: "")
+    called = {"caption": 0}
+
+    async def _cap(*a, **k):
+        called["caption"] += 1
+        return "CAPTION TEXT"
+
+    monkeypatch.setattr(ip, "caption_image", _cap)
+    monkeypatch.setattr(settings, "image_vlm_caption", False)
+    assert await ip.describe_image("QQ==") == ""
+    assert called["caption"] == 0
+
+
 @pytest.mark.skipif(not _tesseract_available(), reason="tesseract binary not available")
 def test_ocr_reads_text(monkeypatch):
     monkeypatch.setattr(settings, "image_use_ocr", True)

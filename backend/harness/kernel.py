@@ -32,7 +32,10 @@ def set_current_turn(ctx: TurnContext) -> contextvars.Token:
 
 
 def reset_current_turn(token: contextvars.Token) -> None:
-    _current_turn.reset(token)
+    try:
+        _current_turn.reset(token)
+    except ValueError:  # generator resumed/closed from another context
+        _current_turn.set(None)
 
 
 def _default_turn_id(session_id: str) -> str:

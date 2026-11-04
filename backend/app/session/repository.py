@@ -311,6 +311,98 @@ def append_message(session_id: str, msg_type: str, data: dict[str, Any]) -> Mess
         conn.close()
 
 
+def record_compaction(
+    session_id: str,
+    data: dict[str, Any],
+    snapshot: dict[str, Any],
+    baseline: str,
+) -> Message:
+    """Atomically append a compaction row and refresh the context epoch.
+
+    The compaction row is the authoritative watermark; the epoch row is a
+    query cache.  Writing both in one transaction means a crash can never
+    leave a checkpoint whose epoch points at a different generation.
+    """
+    conn = _get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        mid = new_id("msg_")
+        now = int(time.time() * 1000)
+        conn.execute(
+            "INSERT INTO session_messages (seq, id, session_id, type, data, time_created)"
+            " SELECT COALESCE(MAX(seq), 0) + 1, ?, ?, 'compaction', ?, ?"
+            " FROM session_messages WHERE session_id = ?",
+            (mid, session_id, json.dumps(data, ensure_ascii=False), now, session_id),
+        )
+        row = conn.execute(
+            "SELECT seq FROM session_messages WHERE session_id = ? AND id = ?",
+            (session_id, mid),
+        ).fetchone()
+        seq = int(row["seq"])
+        conn.execute(
+            "INSERT INTO session_context_epoch (session_id, baseline, baseline_seq, snapshot, time_created, time_updated)"
+            " VALUES (?,?,?,?,?,?)"
+            " ON CONFLICT(session_id) DO UPDATE SET baseline=excluded.baseline,"
+            " baseline_seq=excluded.baseline_seq, snapshot=excluded.snapshot,"
+            " time_updated=excluded.time_updated",
+            (
+                session_id,
+                baseline,
+                seq,
+                json.dumps(snapshot, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE sessions SET time_updated = ?, time_compacted = ? WHERE id = ?",
+            (now, now, session_id),
+        )
+        conn.commit()
+        return Message(
+            id=mid,
+            session_id=session_id,
+            type="compaction",
+            data=data,
+            seq=seq,
+            time_created=now,
+        )
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def mark_tool_pruned(
+    session_id: str, message_id: str, path: str, tokens: int
+) -> bool:
+    """Record that a tool output was pruned (original content is kept)."""
+    conn = _get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT type, data FROM session_messages WHERE session_id = ? AND id = ?",
+            (session_id, message_id),
+        ).fetchone()
+        if row is None or row["type"] != "tool":
+            conn.rollback()
+            return False
+        data = json.loads(row["data"] or "{}")
+        data["prune"] = {"path": str(path or ""), "tokens": int(tokens or 0)}
+        conn.execute(
+            "UPDATE session_messages SET data = ? WHERE session_id = ? AND id = ?",
+            (json.dumps(data, ensure_ascii=False), session_id, message_id),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def list_messages(session_id: str, after_seq: int = 0, limit: Optional[int] = None) -> list[Message]:
     conn = _get_db()
     try:
@@ -400,13 +492,22 @@ def upsert_message(
         conn.execute("BEGIN IMMEDIATE")
         now = int(time.time() * 1000)
         existing = conn.execute(
-            "SELECT seq, time_created FROM session_messages WHERE session_id = ? AND id = ?",
+            "SELECT seq, time_created, data FROM session_messages WHERE session_id = ? AND id = ?",
             (session_id, message_id),
         ).fetchone()
         if existing:
+            merged = dict(data)
+            try:
+                old = json.loads(existing["data"] or "{}")
+            except Exception:  # noqa: BLE001
+                old = {}
+            # Prune metadata is a projection-independent view transform; keep it
+            # when a later checkpoint projection rewrites the row.
+            if isinstance(old, dict) and isinstance(old.get("prune"), dict):
+                merged.setdefault("prune", old["prune"])
             conn.execute(
                 "UPDATE session_messages SET type = ?, data = ? WHERE session_id = ? AND id = ?",
-                (msg_type, json.dumps(data, ensure_ascii=False), session_id, message_id),
+                (msg_type, json.dumps(merged, ensure_ascii=False), session_id, message_id),
             )
             seq, created = int(existing["seq"]), int(existing["time_created"])
         else:

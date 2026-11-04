@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from config import settings
-from models import context_guard, router
+from models import context_guard, router, runtime
 from models.context_guard import FitResult
 from models.router import TierModel
 
@@ -202,7 +202,7 @@ def test_transport_uses_fit_output_and_reserve(monkeypatch):
         lambda: {"model": "ollama_chat/x", "api_base": None, "api_key": "ollama"},
     )
     monkeypatch.setattr(
-        router,
+        context_guard,
         "fit_messages",
         lambda mid, messages, tools=None: FitResult(
             model=mid,
@@ -255,10 +255,10 @@ def test_raw_invoke_retries_once_on_overflow_and_calibrates(monkeypatch):
         estimated_before=1000,
         estimated_after=1000,
     )
-    monkeypatch.setattr(router, "fit_messages", lambda *a, **k: fit)
+    monkeypatch.setattr(context_guard, "fit_messages", lambda *a, **k: fit)
     refits = []
     monkeypatch.setattr(
-        router,
+        runtime,
         "refit_after_overflow",
         lambda mid, messages, tools=None: refits.append(mid) or fit,
     )
@@ -272,10 +272,10 @@ def test_raw_invoke_retries_once_on_overflow_and_calibrates(monkeypatch):
             )
         return _fake_response(prompt_tokens=900)
 
-    monkeypatch.setattr(router.litellm, "completion", fake_completion)
+    monkeypatch.setattr(runtime.litellm, "completion", fake_completion)
     captured = []
     monkeypatch.setattr(
-        router, "record_actual_usage", lambda mid, est, actual: captured.append((est, actual))
+        runtime, "record_actual_usage", lambda mid, est, actual: captured.append((est, actual))
     )
 
     result = model.raw_invoke([_msg("system", "s"), _msg("user", "hi")])
@@ -306,10 +306,10 @@ def test_raw_stream_retries_once_on_overflow(monkeypatch):
         estimated_after=1000,
         num_ctx=16384,
     )
-    monkeypatch.setattr(router, "fit_messages", lambda *a, **k: fit)
+    monkeypatch.setattr(context_guard, "fit_messages", lambda *a, **k: fit)
     refits = []
     monkeypatch.setattr(
-        router,
+        runtime,
         "refit_after_overflow",
         lambda mid, messages, tools=None: refits.append(mid) or fit,
     )
@@ -329,7 +329,7 @@ def test_raw_stream_retries_once_on_overflow(monkeypatch):
     monkeypatch.setattr("models.stream.stream_chat", fake_stream)
     captured = []
     monkeypatch.setattr(
-        router, "record_actual_usage", lambda mid, est, actual: captured.append((est, actual))
+        runtime, "record_actual_usage", lambda mid, est, actual: captured.append((est, actual))
     )
 
     result = asyncio.run(model.raw_stream([_msg("system", "s"), _msg("user", "hi")]))
@@ -352,7 +352,7 @@ def test_preflight_overflow_is_not_retried(monkeypatch):
     exc = ContextOverflowError("Ollama 上下文窗口不足")
     exc.preflight = True
     monkeypatch.setattr(
-        router, "fit_messages", lambda *a, **k: (_ for _ in ()).throw(exc)
+        context_guard, "fit_messages", lambda *a, **k: (_ for _ in ()).throw(exc)
     )
     calls = {"n": 0}
 
@@ -360,7 +360,7 @@ def test_preflight_overflow_is_not_retried(monkeypatch):
         calls["n"] += 1
         return _fake_response()
 
-    monkeypatch.setattr(router.litellm, "completion", fake_completion)
+    monkeypatch.setattr(runtime.litellm, "completion", fake_completion)
     with pytest.raises(ContextOverflowError):
         model.raw_invoke([_msg("system", "s"), _msg("user", "hi")])
     assert calls["n"] == 0
@@ -374,7 +374,7 @@ def test_raw_invoke_does_not_retry_unrelated_errors(monkeypatch):
         lambda: {"model": "ollama_chat/x", "api_base": None, "api_key": "ollama"},
     )
     monkeypatch.setattr(
-        router,
+        context_guard,
         "fit_messages",
         lambda *a, **k: FitResult(
             model="ollama_chat/x",
@@ -390,7 +390,7 @@ def test_raw_invoke_does_not_retry_unrelated_errors(monkeypatch):
         calls["n"] += 1
         raise RuntimeError("connection reset")
 
-    monkeypatch.setattr(router.litellm, "completion", fake_completion)
+    monkeypatch.setattr(runtime.litellm, "completion", fake_completion)
     with pytest.raises(RuntimeError, match="connection reset"):
         model.raw_invoke([_msg("system", "s"), _msg("user", "hi")])
     assert calls["n"] == 1

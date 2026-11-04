@@ -85,20 +85,10 @@ def _get_encoder():
     return _encoder
 
 
-def estimate_tokens(text: str) -> int:
-    """Estimate token count for a string.
-
-    优先 DeepSeek V4 官方 tokenizer（backend/data/models/deepseek-v4-tokenizer，
-    精确计数）；不可用时回落 tiktoken（cl100k_base + 校正系数），最后字符估算。
-    """
+def estimate_tokens_tiktoken(text: str) -> int:
+    """cl100k_base + correction; the generic provider proxy."""
     if not text:
         return 0
-    # [token 精确化] 官方 tokenizer 可用时直接用原生计数（无需校正系数）
-    if _native_enabled:
-        from models.deepseek_tokenizer import count_tokens as _native_count_tokens
-        n = _native_count_tokens(text)
-        if n > 0:
-            return max(1, n)
     enc = _get_encoder()
     corr = _estimate_correction()
     if enc and enc is not False:
@@ -106,25 +96,57 @@ def estimate_tokens(text: str) -> int:
             return max(1, round(len(enc.encode(text)) * corr))
         except Exception:
             pass
-    # Fallback: ~4 chars per token (conservative for English)
     return max(1, round(len(text) / 4 * corr))
 
 
-def _estimate_single_message(msg: dict) -> int:
+def estimate_tokens_deepseek(text: str) -> int:
+    """DeepSeek V4 native tokenizer when available, else the generic proxy."""
+    if not text:
+        return 0
+    if _native_enabled:
+        from models.deepseek_tokenizer import count_tokens as _native_count_tokens
+
+        n = _native_count_tokens(text)
+        if n > 0:
+            return max(1, n)
+    return estimate_tokens_tiktoken(text)
+
+
+def estimate_tokens(text: str) -> int:
+    """Backward-compatible default (DeepSeek-first)."""
+    return estimate_tokens_deepseek(text)
+
+
+def is_deepseek_model(model_id: str | None) -> bool:
+    return "deepseek" in str(model_id or "").lower()
+
+
+def token_counter_for(model_id: str | None):
+    """Return the per-provider text counter used by ContextMeter/truncation."""
+    if not model_id or is_deepseek_model(model_id):
+        return estimate_tokens
+    return estimate_tokens_tiktoken
+
+
+def estimate_tokens_for(model_id: str | None, text: str) -> int:
+    return token_counter_for(model_id)(text)
+
+
+def _estimate_single_message(msg: dict, counter=estimate_tokens) -> int:
     """Estimate tokens of a single message including tool_calls and overhead."""
     content = msg.get("content", "")
     n = 0
     if isinstance(content, list):
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text":
-                n += estimate_tokens(part.get("text", ""))
+                n += counter(part.get("text", ""))
     elif isinstance(content, str):
-        n += estimate_tokens(content)
+        n += counter(content)
     tcs = msg.get("tool_calls") or []
     for tc in tcs:
         fn = tc.get("function") or {}
-        n += estimate_tokens(fn.get("name", ""))
-        n += estimate_tokens(fn.get("arguments", ""))
+        n += counter(fn.get("name", ""))
+        n += counter(fn.get("arguments", ""))
         n += 8
     return n + 4
 
@@ -143,19 +165,26 @@ def estimate_tokens_messages(messages: list[dict]) -> int:
     return sum(_estimate_single_message(msg) for msg in messages)
 
 
-def estimate_tools(tool_defs: list[dict] | None) -> int:
-    """Estimate tokens of serialized OpenAI-style tool definitions (schema).
-
-    DeepSeek 把本轮发送的 tools schema 序列化为 JSON 计入 prompt_tokens，
-    而 estimate_tokens_messages 只统计消息体。truncate_messages 预算须减去该
-    开销，否则截断后实际 pt 仍会越界。
-    """
+def estimate_tools(tool_defs: list[dict] | None, counter=estimate_tokens) -> int:
+    """Estimate tokens of serialized OpenAI-style tool definitions (schema)."""
     if not tool_defs:
         return 0
     try:
-        return estimate_tokens(json.dumps(tool_defs, ensure_ascii=False))
+        return counter(json.dumps(tool_defs, ensure_ascii=False))
     except Exception:
         return 0
+
+
+def estimate_tools_for(model_id: str | None, tool_defs: list[dict] | None) -> int:
+    return estimate_tools(tool_defs, token_counter_for(model_id))
+
+
+def estimate_tokens_messages_for(model_id: str | None, messages: list[dict]) -> int:
+    """Estimate a message list with the provider-appropriate counter."""
+    if not model_id or is_deepseek_model(model_id):
+        return estimate_tokens_messages(messages)
+    counter = estimate_tokens_tiktoken
+    return sum(_estimate_single_message(msg, counter) for msg in messages)
 
 
 def count_message_tokens(messages: list[dict]) -> int:
@@ -205,6 +234,9 @@ def truncate_messages(
     max_tokens: int = 1_000_000,
     reserve_tokens: int = 4096,
     tool_defs: list[dict] | None = None,
+    *,
+    model_id: str | None = None,
+    ratio: float = 1.0,
 ) -> list[dict]:
     """Truncate message list to fit within token budget.
 
@@ -224,15 +256,27 @@ def truncate_messages(
     if not messages:
         return messages
 
-    schema_tokens = estimate_tools(tool_defs)
-    total = estimate_tokens_messages(messages) + schema_tokens
+    if model_id:
+        base_counter = token_counter_for(model_id)
+
+        def counter(text: str) -> int:
+            return max(0, int(round(base_counter(text) * float(ratio or 1.0))))
+
+        def count_messages(items: list[dict]) -> int:
+            return sum(_estimate_single_message(item, counter) for item in items)
+    else:
+        counter = estimate_tokens
+        count_messages = estimate_tokens_messages
+
+    schema_tokens = estimate_tools(tool_defs, counter)
+    total = count_messages(messages) + schema_tokens
     if total <= max_tokens:
         return messages
 
     system_msg = messages[0] if messages[0].get("role") == "system" else None
     rest = messages[1:] if system_msg else messages
 
-    system_tokens = estimate_tokens(system_msg.get("content", "")) + 4 if system_msg else 0
+    system_tokens = (counter(system_msg.get("content", "")) + 4) if system_msg else 0
     # Add a conservative slack buffer to account for model-specific tokenization overhead
     # and any prompt framing not covered by message token estimates.
     slack = max(128, int(max_tokens * 0.03))
@@ -241,7 +285,7 @@ def truncate_messages(
     kept = []
     current = 0
     for msg in reversed(rest):
-        msg_tokens = _estimate_single_message(msg)
+        msg_tokens = _estimate_single_message(msg, counter)
         if current + msg_tokens > budget:
             break
         current += msg_tokens

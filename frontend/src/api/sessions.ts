@@ -95,7 +95,9 @@ async function request<T>(path: string, init?: RequestInit, timeout = 10000): Pr
   const res = await fetchWithTimeout(path, init, timeout)
   if (!res.ok) {
     const err = await res.text()
-    throw new Error(`${res.status} ${err || res.statusText}`)
+    const error = new Error(`${res.status} ${err || res.statusText}`) as Error & { statusCode?: number }
+    error.statusCode = res.status
+    throw error
   }
   return res.json()
 }
@@ -128,12 +130,12 @@ export async function getSession(sessionId: string): Promise<SessionInfo> {
   return request<SessionInfo>(`${BASE}/${encodeURIComponent(sessionId)}`, { method: 'GET' }, 10000)
 }
 
-export async function updateSession(sessionId: string, body: SessionUpdateBody): Promise<SessionInfo> {
+export async function updateSession(sessionId: string, body: SessionUpdateBody, timeout = 10000): Promise<SessionInfo> {
   return request<SessionInfo>(`${BASE}/${encodeURIComponent(sessionId)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  }, 10000)
+  }, timeout)
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
@@ -283,7 +285,7 @@ export interface ConversationMeta {
 }
 
 export interface ConversationDetail extends ConversationMeta {
-  messages: Array<{ id: string; role: string; content: string; sources?: any[]; steps?: any[]; parts?: any[]; agents?: any[]; files?: any[]; files_changed?: any[]; plan_path?: string; partial_error?: any; diffSteps?: number; voice?: any; seq?: number; model?: string; tokens?: Record<string, number>; cost?: number }>
+  messages: Array<{ id: string; role: string; content: string; sources?: any[]; steps?: any[]; parts?: any[]; agents?: any[]; files?: any[]; files_changed?: any[]; plan_path?: string; partial_error?: any; is_error?: boolean; error_info?: any; diffSteps?: number; voice?: any; seq?: number; model?: string; tokens?: Record<string, number>; cost?: number }>
 }
 
 function _msgTypeToRole(msgType: string): string {
@@ -352,6 +354,8 @@ export async function getConversation(conversationId: string, convType?: string)
       if (m.data?.files_changed) msg.files_changed = m.data.files_changed as any[]
       if (m.data?.plan_path) msg.plan_path = m.data.plan_path as string
       if (m.data?.partial_error) msg.partial_error = m.data.partial_error as any
+      if (m.data?.is_error) msg.is_error = true
+      if (m.data?.error_info) msg.error_info = m.data.error_info as any
       if (m.data?.diff_steps != null) msg.diffSteps = m.data.diff_steps as number
       return msg
     }),

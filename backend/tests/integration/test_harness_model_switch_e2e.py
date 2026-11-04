@@ -51,9 +51,9 @@ async def test_native_history_works_after_switch_to_fallback_model(monkeypatch):
     monkeypatch.setattr(settings, "harness_tool_mode", "")
     monkeypatch.setattr(settings, "harness_native_models", ["native-model"])
     monkeypatch.setattr(settings, "harness_fallback_models", ["fallback-model"])
-    monkeypatch.setattr(
-        TierModel, "_endpoint", lambda self: {"model": self._direct_model()}
-    )
+    # Keep bare model ids bare so ToolAdapter's capability lookup sees the
+    # values configured above (runtime normally adds a provider prefix).
+    monkeypatch.setattr("models.runtime.ensure_provider", lambda model, api_base: model)
 
     captured: list[dict] = []
 

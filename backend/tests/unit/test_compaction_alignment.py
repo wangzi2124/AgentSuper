@@ -30,8 +30,9 @@ def test_select_tail_split_never_starts_with_orphan_tool():
         AIMessage(content="a1", id="a1"),
         {"role": "tool", "content": "x", "tool_call_id": "c1"},
     ]
-    head, tail = select_tail_messages(messages, keep_tokens=4, tail_turns=1)
+    head, tail = select_tail_messages(messages, keep_tokens=6, tail_turns=1)
     assert tail and _role(tail[0]) != "tool"
+    assert _role(tail[0]) == "assistant"
     assert head
 
 
@@ -62,9 +63,14 @@ def test_prune_protects_skill_tool_output():
         {"role": "user", "content": "u2"},
         {"role": "user", "content": "u3"},
     ]
-    out = prune_tool_outputs(messages, protect_tokens=0, minimum_tokens=0, tail_turns=1)
+    records: list[dict] = []
+    out = prune_tool_outputs(
+        messages, protect_tokens=0, minimum_tokens=0, tail_turns=1, records=records
+    )
     assert out[2]["content"].startswith("[tool output pruned")
     assert out[4]["content"] == "x" * 100_000
+    assert records and records[0]["index"] == 2
+    assert records[0]["tokens"] > 0
 
 
 def test_strip_media_blocks_for_overflow_retry():

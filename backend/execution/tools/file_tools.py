@@ -170,6 +170,7 @@ def register_file_tools(
             description=(fn.__doc__ or "").strip(),
             scope=scope,
             require_approval=name in WRITE_TOOLS or name in READ_TOOLS,
+            mutating=name in WRITE_TOOLS,
         )
         registered.append(name)
     return registered

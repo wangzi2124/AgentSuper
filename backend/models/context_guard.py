@@ -16,12 +16,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from cognition.token_counter import (
-    estimate_tokens_messages,
-    estimate_tools,
-    sanitize_tool_messages,
-    truncate_messages,
-)
+from cognition.token_counter import sanitize_tool_messages, truncate_messages
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -30,9 +25,6 @@ RESERVE_RATIO = 0.25
 RESERVE_MIN = 512
 SLACK_RATIO = 0.08
 SLACK_MIN = 256
-CALIBRATION_ALPHA = 0.3
-CALIBRATION_MIN = 1.0
-CALIBRATION_MAX = 2.0
 AUTO_MAX_WINDOW = 32768
 
 _OVERFLOW_HINTS = (
@@ -46,7 +38,6 @@ _OVERFLOW_HINTS = (
 )
 
 _lock = threading.Lock()
-_ratios: dict[str, float] = {}
 _last_fit: dict[str, "FitResult"] = {}
 
 
@@ -71,39 +62,29 @@ def guard_enabled() -> bool:
 
 
 def estimate_ratio(model_id: str) -> float:
-    mid = _mid(model_id)
-    with _lock:
-        return _ratios.get(mid, 1.0)
+    from cognition.context_meter import get_meter
+
+    return get_meter().ratio(_mid(model_id))
 
 
 def record_actual_usage(model_id: str, estimated: int, actual: int) -> None:
     """Update the per-model estimate calibration from a real prompt token count."""
-    mid = _mid(model_id)
-    estimated = int(estimated or 0)
-    actual = int(actual or 0)
-    if not mid or estimated <= 0 or actual <= 0:
-        return
-    ratio = actual / estimated
-    ratio = max(CALIBRATION_MIN, min(CALIBRATION_MAX, ratio))
-    with _lock:
-        previous = _ratios.get(mid)
-        if previous is None:
-            _ratios[mid] = ratio
-        else:
-            _ratios[mid] = (
-                previous * (1.0 - CALIBRATION_ALPHA) + ratio * CALIBRATION_ALPHA
-            )
+    from cognition.context_meter import get_meter
+
+    get_meter().observe_model(_mid(model_id), estimated, actual)
 
 
 def resolve_window(model_id: str) -> int:
-    """Real window: explicit override > /api/ps (last-known) > OLLAMA_NUM_CTX."""
-    try:
-        from models.catalog import effective_context_length
+    """Real window: explicit override > /api/ps (last-known) > OLLAMA_NUM_CTX.
 
-        return max(
-            0, int(effective_context_length(model_id, settings.ollama_num_ctx) or 0)
-        )
-    except Exception:  # noqa: BLE001 - window probing must never block a call
+    ``models.runtime`` owns the state; this seam stays non-blocking because the
+    runtime returns a snapshot and refreshes ``/api/ps`` in the background.
+    """
+    try:
+        from models.runtime import effective_window
+
+        return max(0, int(effective_window(model_id, settings.ollama_num_ctx) or 0))
+    except Exception:  # noqa: BLE001 - window resolution must never block a call
         logger.debug("resolve_window failed for %s", model_id, exc_info=True)
         return 0
 
@@ -149,7 +130,7 @@ def fit_messages(
 
     reserve, budget = split_budget(window)
     ratio = estimate_ratio(mid)
-    before = _estimate(messages, tools, ratio)
+    before = _estimate(messages, tools, 1.0, mid)
     fit = FitResult(
         model=mid,
         messages=messages,
@@ -160,7 +141,7 @@ def fit_messages(
         estimated_after=before,
     )
 
-    mandatory = _mandatory_tokens(messages, tools, ratio)
+    mandatory = _mandatory_tokens(messages, tools, 1.0, mid)
     if mandatory > budget:
         previous = window
         expanded = _auto_window(mandatory)
@@ -191,9 +172,11 @@ def fit_messages(
         max_tokens=budget,
         reserve_tokens=0,
         tool_defs=tools,
+        model_id=mid,
+        ratio=ratio,
     )
     fitted = sanitize_tool_messages(fitted)
-    after = _estimate(fitted, tools, ratio)
+    after = _estimate(fitted, tools, 1.0, mid)
 
     fit.messages = fitted
     fit.estimated_after = after
@@ -259,8 +242,10 @@ def last_fit(model_id: str) -> FitResult | None:
 def reset_state() -> None:
     """Test helper: clear calibration and last-fit caches."""
     with _lock:
-        _ratios.clear()
         _last_fit.clear()
+    from cognition.context_meter import get_meter
+
+    get_meter().reset_calibration()
 
 
 def _mid(model_id: str) -> str:
@@ -290,25 +275,33 @@ def _estimate(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     ratio: float,
+    model_id: str = "",
 ) -> int:
-    raw = int(estimate_tokens_messages(messages)) + int(estimate_tools(tools))
-    return _scale(raw, ratio)
+    from cognition.context_meter import get_meter
+
+    raw = get_meter().estimate(messages, tools=tools, model_id=model_id).total
+    # With model_id, ContextMeter already applied the per-model ratio.
+    return raw if model_id else _scale(raw, ratio)
 
 
 def _mandatory_tokens(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     ratio: float,
+    model_id: str = "",
 ) -> int:
-    system = next((m for m in messages if m.get("role") == "system"), None)
-    user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
-    raw = 0
-    if system is not None:
-        raw += int(estimate_tokens_messages([system]))
-    if user is not None:
-        raw += int(estimate_tokens_messages([user]))
-    raw += int(estimate_tools(tools))
-    return _scale(raw, ratio)
+    from cognition.context_meter import get_meter
+
+    mandatory = [
+        m
+        for m in (
+            next((m for m in messages if m.get("role") == "system"), None),
+            next((m for m in reversed(messages) if m.get("role") == "user"), None),
+        )
+        if m is not None
+    ]
+    raw = get_meter().estimate(mandatory, tools=tools, model_id=model_id).total
+    return raw if model_id else _scale(raw, ratio)
 
 
 def _round_up_pow2(value: int) -> int:

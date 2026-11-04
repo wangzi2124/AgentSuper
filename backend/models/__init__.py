@@ -24,6 +24,7 @@ from .router import (
     get_model,
     normalize_finish_reason,
 )
+from .runtime import ModelRuntime, RuntimeSpec, begin_scope, end_scope
 from .stream import StreamResult, collect_stream, nonstream_result, stream_chat
 
 __all__ = [
@@ -31,8 +32,12 @@ __all__ = [
     "TIER_MAP",
     "TIER_ORDER",
     "ChatResult",
+    "ModelRuntime",
+    "RuntimeSpec",
     "StreamResult",
     "TierModel",
+    "begin_scope",
+    "end_scope",
     "ToolCall",
     "collect_stream",
     "embed",

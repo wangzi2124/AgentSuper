@@ -15,6 +15,10 @@ from typing import Any, Awaitable, Callable
 from cognition.tool_output import bound_tool_output
 from execution.quota import get_quota
 from execution.tool_registry import ToolDefinition, ToolRegistry
+from execution.tools.file_tools import (
+    READ_TOOLS as _FILE_READ_TOOLS,
+    WRITE_TOOLS as _FILE_WRITE_TOOLS,
+)
 from harness.adapter import call_argument_error
 from harness.budget import BudgetExceeded, BudgetLedger
 from harness.hooks import run_post_tool, run_pre_tool
@@ -39,6 +43,43 @@ from ..usage import empty_usage, merge_usage, usage_from_result
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 8
+
+# 写文件与 shell 独占工作区；文件读/搜索共享读锁，彼此仍可并行。
+_MUTATING_TOOL_NAMES = frozenset(_FILE_WRITE_TOOLS | {"shell_exec"})
+_WORKSPACE_READ_TOOLS = frozenset(_FILE_READ_TOOLS)
+
+
+class _AsyncRWLock:
+    """Small asyncio reader-writer lock for workspace access."""
+
+    def __init__(self) -> None:
+        self._condition = asyncio.Condition()
+        self._readers = 0
+        self._writer = False
+
+    async def acquire_read(self) -> None:
+        async with self._condition:
+            while self._writer:
+                await self._condition.wait()
+            self._readers += 1
+
+    async def release_read(self) -> None:
+        async with self._condition:
+            self._readers -= 1
+            if self._readers <= 0:
+                self._readers = 0
+                self._condition.notify_all()
+
+    async def acquire_write(self) -> None:
+        async with self._condition:
+            while self._writer or self._readers:
+                await self._condition.wait()
+            self._writer = True
+
+    async def release_write(self) -> None:
+        async with self._condition:
+            self._writer = False
+            self._condition.notify_all()
 
 # 纠正文：小模型常把「工具调用」当纯文本正文输出（无原生 tool_calls），
 # 循环误判为最终答案 → 前端看到裸 JSON（如 {"id":"call_x","type":"function",...}）。
@@ -159,7 +200,10 @@ def set_permission_hook(hook: PermissionHook | None) -> contextvars.Token:
 
 
 def reset_permission_hook(token: contextvars.Token) -> None:
-    _permission_hook_var.reset(token)
+    try:
+        _permission_hook_var.reset(token)
+    except ValueError:  # generator resumed/closed from another context
+        _permission_hook_var.set(None)
 
 
 _TEXT_BLOCK_TYPES = ("text", "input_text")
@@ -406,6 +450,10 @@ async def _execute_tool_call(
     call_id: str,
     registry: ToolRegistry,
     agent_id: str,
+    *,
+    sem: asyncio.Semaphore | None = None,
+    workspace_lock: _AsyncRWLock | None = None,
+    permission_lock: asyncio.Lock | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     parsed_args, arg_error = call_argument_error(tc)
     args: dict[str, Any] = parsed_args or {}
@@ -423,22 +471,58 @@ async def _execute_tool_call(
     )
     started = time.perf_counter()
     td = registry.get(tc.name)
-    if td is None:
-        output = f"错误：未知工具 {tc.name}"
-    elif arg_error:
-        output = f"错误：{arg_error}"
-    else:
+
+    async def _run() -> str:
+        nonlocal args
+        if td is None:
+            return f"错误：未知工具 {tc.name}"
+        if arg_error:
+            return f"错误：{arg_error}"
         args = run_pre_tool(tc.name, args)
         if td.require_approval:
             hook = _permission_hook_var.get()
-            approved = await hook(tc.name, args) if hook is not None else False
-            if not approved:
-                output = f"已拒绝执行工具 {tc.name}（用户未授权）"
+            if hook is None:
+                approved = False
+            elif permission_lock is not None:
+                async with permission_lock:
+                    approved = await hook(tc.name, args)
             else:
-                output = await _execute_with_quota(td, tc, args, get_quota(registry))
+                approved = await hook(tc.name, args)
+            if not approved:
+                return f"已拒绝执行工具 {tc.name}（用户未授权）"
+        output = await _execute_with_quota(td, tc, args, get_quota(registry))
+        return run_post_tool(tc.name, args, output)
+
+    async def _guarded() -> str:
+        # Writers/shell take the exclusive side; file reads/searches take the
+        # shared side. Reads still overlap each other but never a mutation.
+        if td is not None and workspace_lock is not None:
+            if getattr(td, "mutating", False) or td.name in _MUTATING_TOOL_NAMES:
+                await workspace_lock.acquire_write()
+                try:
+                    return await _run()
+                finally:
+                    await workspace_lock.release_write()
+            if td.name in _WORKSPACE_READ_TOOLS:
+                await workspace_lock.acquire_read()
+                try:
+                    return await _run()
+                finally:
+                    await workspace_lock.release_read()
+        return await _run()
+
+    try:
+        if td is None or arg_error:
+            output = await _run()
+        elif sem is not None:
+            async with sem:
+                output = await _guarded()
         else:
-            output = await _execute_with_quota(td, tc, args, get_quota(registry))
-        output = run_post_tool(tc.name, args, output)
+            output = await _guarded()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - one tool must not abort the round
+        output = f"错误：{exc or repr(exc)}"
 
     output = bound_tool_output(str(output), tool_name=tc.name)
     duration_ms = round((time.perf_counter() - started) * 1000, 3)
@@ -506,26 +590,123 @@ async def _stream_step(
     registry: ToolRegistry,
     agent_id: str,
     round_no: int,
+    *,
+    sem: asyncio.Semaphore | None = None,
+    workspace_lock: _AsyncRWLock | None = None,
+    permission_lock: asyncio.Lock | None = None,
 ) -> tuple[Any, dict[str, tuple[Any, str, dict[str, Any], dict[str, Any]]]]:
-    from harness.tool_adapter import Done, ToolCallReady
+    from harness.tool_adapter import Done, TextDelta, ToolCallReady
 
-    early: dict[str, tuple[Any, str, dict[str, Any], dict[str, Any]]] = {}
+    early_calls: dict[str, Any] = {}
+    early_tasks: dict[str, asyncio.Task] = {}
     result = None
-    async for event in adapter.stream(convo, tool_defs):
-        if isinstance(event, ToolCallReady):
-            call = event.call
-            call_id = call.id or f"call_{round_no}_{len(early)}"
-            call.id = call_id
-            if call_id not in early:
-                output, trace, history = await _execute_tool_call(
-                    call, call_id, registry, agent_id
-                )
-                early[call_id] = (call, output, trace, history)
-        elif isinstance(event, Done):
-            result = _chat_result_from_stream(event.response)
-    if result is None:
-        raise RuntimeError("stream finished without Done event")
-    return result, early
+    try:
+        async for event in adapter.stream(convo, tool_defs):
+            if isinstance(event, TextDelta):
+                if event.text:
+                    push_event(
+                        {
+                            "type": "text_delta",
+                            "agent_id": "",
+                            "delta": event.text,
+                        }
+                    )
+            elif isinstance(event, ToolCallReady):
+                call = event.call
+                call_id = call.id or f"call_{round_no}_{len(early_calls)}"
+                call.id = call_id
+                if call_id not in early_calls:
+                    early_calls[call_id] = call
+                    # Do not await here: keep consuming the model stream while the
+                    # tool runs. Results are joined after the stream ends.
+                    early_tasks[call_id] = asyncio.create_task(
+                        _execute_tool_call(
+                            call,
+                            call_id,
+                            registry,
+                            agent_id,
+                            sem=sem,
+                            workspace_lock=workspace_lock,
+                            permission_lock=permission_lock,
+                        )
+                    )
+            elif isinstance(event, Done):
+                result = _chat_result_from_stream(event.response)
+        if result is None:
+            raise RuntimeError("stream finished without Done event")
+        early: dict[str, tuple[Any, str, dict[str, Any], dict[str, Any]]] = {}
+        if early_tasks:
+            outcomes = await asyncio.gather(*early_tasks.values())
+            for call_id, outcome in zip(early_tasks.keys(), outcomes):
+                output, trace, history = outcome
+                early[call_id] = (early_calls[call_id], output, trace, history)
+        return result, early
+    except BaseException:
+        for task in early_tasks.values():
+            task.cancel()
+        raise
+
+
+def _maybe_prune_tool_outputs(
+    convo: list[dict[str, Any]],
+    usable_tokens: int,
+    session_id: str = "",
+    model_id: str = "",
+) -> list[dict[str, Any]]:
+    """Deterministic prune before a request; no LLM, original saved to disk.
+
+    Records are persisted as ``session_messages.data.prune`` metadata so the
+    next rebuild shows the stub without touching the original content.
+    """
+    if usable_tokens <= 0 or not convo:
+        return convo
+    try:
+        from config import settings
+
+        if not getattr(settings, "compaction_prune", True):
+            return convo
+        from cognition.context_meter import get_meter
+        from cognition.tool_output import prune_tool_outputs
+
+        estimated = get_meter().estimate(
+            convo, model_id=model_id, use_cache=True
+        ).total
+        if estimated < int(usable_tokens * 0.7):
+            return convo
+        protect = getattr(settings, "compaction_prune_protect_tokens", 40_000)
+        minimum = getattr(settings, "compaction_prune_minimum_tokens", 20_000)
+        records: list[dict[str, Any]] = []
+        pruned = prune_tool_outputs(
+            convo,
+            protect_tokens=40_000 if protect is None else int(protect),
+            minimum_tokens=20_000 if minimum is None else int(minimum),
+            tail_turns=2,
+            records=records,
+        )
+        if session_id and records:
+            from app.session import repository
+
+            for record in records:
+                index = int(record.get("index") or 0)
+                if index >= len(convo):
+                    continue
+                message = convo[index]
+                message_id = message.get("_id") if isinstance(message, dict) else None
+                if not message_id:
+                    continue
+                try:
+                    repository.mark_tool_pruned(
+                        session_id,
+                        str(message_id),
+                        str(record.get("path") or ""),
+                        int(record.get("tokens") or 0),
+                    )
+                except Exception:  # noqa: BLE001 - metadata write is best-effort
+                    logger.warning("persist prune metadata failed", exc_info=True)
+        return pruned
+    except Exception:  # noqa: BLE001 - prune 失败不阻断请求
+        logger.warning("tool output prune failed", exc_info=True)
+        return convo
 
 
 def _authorized_roots_note() -> str:
@@ -565,6 +746,9 @@ async def run_tool_loop(
     adapter: Any | None = None,
     budget: BudgetLedger | None = None,
     stream: bool = False,
+    context_usable_tokens: int = 0,
+    on_compaction: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    session_id: str = "",
 ) -> dict[str, Any]:
     """LLM 工具调用循环，返回 {text, rounds, tool_trace, tool_history, usage}。
 
@@ -573,8 +757,11 @@ async def run_tool_loop(
     """
     from harness.tool_adapter import get_tool_adapter
 
+    from config import settings as _settings
+
     tool_adapter = adapter or get_tool_adapter(model)
     tool_defs = build_tool_defs(registry, scope)
+    max_parallel_tools = max(1, int(getattr(_settings, "tool_concurrency", 10) or 10))
     convo = [dict(m) for m in messages]
     requires_tool_evidence = _needs_tool_evidence(messages)
     roots_note = _authorized_roots_note()
@@ -582,6 +769,13 @@ async def run_tool_loop(
         content = convo[0].get("content")
         if isinstance(content, str):
             convo[0]["content"] = f"{content}\n\n{roots_note}"
+    try:
+        model_id = model.model_name() if hasattr(model, "model_name") else ""
+        if callable(model_id):
+            model_id = model_id()
+        model_id = str(model_id or "")
+    except Exception:  # noqa: BLE001 - accounting only
+        model_id = ""
     rounds = 0
     usage_total = empty_usage()
     tool_trace: list[dict[str, Any]] = []
@@ -592,6 +786,12 @@ async def run_tool_loop(
     overflow_retried = False
 
     while rounds < max_rounds:
+        convo = _maybe_prune_tool_outputs(
+            convo,
+            context_usable_tokens,
+            session_id=session_id,
+            model_id=model_id,
+        )
         if budget is not None:
             try:
                 budget.ensure_available()
@@ -615,12 +815,13 @@ async def run_tool_loop(
                     "budget_exceeded": True,
                 }
         early: dict[str, tuple[Any, str, dict[str, Any], dict[str, Any]]] = {}
+        # One semaphore + one mutation lock per round. Reads/searches run in
+        # parallel; writes and shell_exec are serialized to protect the workspace.
+        round_sem = asyncio.Semaphore(max_parallel_tools)
+        workspace_lock = _AsyncRWLock()
+        permission_lock = asyncio.Lock()
         try:
-            if (
-                stream
-                and getattr(tool_adapter, "mode", "") == "fallback"
-                and getattr(tool_adapter, "can_stream", lambda: False)()
-            ):
+            if stream and getattr(tool_adapter, "can_stream", lambda: False)():
                 with trace_span("llm.call", rounds=rounds):
                     result, early = await _stream_step(
                         tool_adapter,
@@ -629,6 +830,9 @@ async def run_tool_loop(
                         registry,
                         agent_id,
                         rounds,
+                        sem=round_sem,
+                        workspace_lock=workspace_lock,
+                        permission_lock=permission_lock,
                     )
             else:
                 with trace_span("llm.call", rounds=rounds):
@@ -642,19 +846,50 @@ async def run_tool_loop(
                 raise
             overflow_retried = True
             before = len(convo)
+            tokens_before = 0
             try:
-                from harness.compression import DEFAULT_KEEP_TOKENS, compress_messages
+                from harness.compression import (
+                    CompactionPolicy,
+                    ContextCompactor,
+                    _preserve_default,
+                    estimate_messages,
+                )
 
-                result_c = await compress_messages(
+                tokens_before = estimate_messages(convo)
+                keep = (
+                    _preserve_default(context_usable_tokens)
+                    if context_usable_tokens > 0
+                    else 8_000
+                )
+                result_c = await ContextCompactor().compress(
                     convo,
                     model=model,
-                    threshold=1,
-                    keep_tokens=DEFAULT_KEEP_TOKENS,
+                    policy=CompactionPolicy(
+                        reason="overflow",
+                        threshold=1,
+                        keep_tokens=keep,
+                        min_gain_tokens=1_024,
+                    ),
                 )
                 if result_c.triggered:
                     convo = _merge_history_summary(
                         convo, result_c.summary, result_c.recent
                     )
+                    try:
+                        name = model.model_name() if hasattr(model, "model_name") else ""
+                        model_label = str(name() if callable(name) else (name or ""))
+                    except Exception:  # noqa: BLE001
+                        model_label = ""
+                    event = {
+                        "summary": result_c.summary,
+                        "reason": "overflow",
+                        "tail_start_id": result_c.tail_start_id,
+                        "tokens_before": int(tokens_before),
+                        "tokens_after": estimate_messages(convo),
+                        "model": model_label,
+                    }
+                    if on_compaction is not None:
+                        await on_compaction(event)
             except Exception:  # noqa: BLE001 - 摘要失败继续降级
                 logger.warning("overflow compression failed", exc_info=True)
             if len(convo) >= before or not convo:
@@ -801,23 +1036,47 @@ async def run_tool_loop(
                 ],
             }
         )
+        round_tasks: dict[str, asyncio.Task] = {}
         for idx, tc in enumerate(result.tool_calls):
             call_id = round_calls[idx][0]
-            if call_id in early:
-                _, output, trace, history = early[call_id]
-            else:
-                output, trace, history = await _execute_tool_call(
-                    tc, call_id, registry, agent_id
+            if call_id not in early:
+                round_tasks[call_id] = asyncio.create_task(
+                    _execute_tool_call(
+                        tc,
+                        call_id,
+                        registry,
+                        agent_id,
+                        sem=round_sem,
+                        workspace_lock=workspace_lock,
+                        permission_lock=permission_lock,
+                    )
                 )
-            tool_trace.append(trace)
-            tool_history.append(history)
-            convo.append(
-                {"role": "tool", "tool_call_id": call_id, "content": output}
-            )
+        try:
+            for idx, tc in enumerate(result.tool_calls):
+                call_id = round_calls[idx][0]
+                if call_id in early:
+                    _, output, trace, history = early[call_id]
+                else:
+                    output, trace, history = await round_tasks[call_id]
+                tool_trace.append(trace)
+                tool_history.append(history)
+                convo.append(
+                    {"role": "tool", "tool_call_id": call_id, "content": output}
+                )
+        except BaseException:
+            for task in round_tasks.values():
+                task.cancel()
+            raise
 
     _prior_nudges = {_FINAL_ROUND_NUDGE, _NUDGE_NOT_A_TOOL_CALL, _NUDGE_EMPTY_ANSWER}
     if not (convo and convo[-1].get("role") == "user" and convo[-1].get("content") in _prior_nudges):
         convo.append({"role": "user", "content": _FINAL_ROUND_NUDGE})
+    convo = _maybe_prune_tool_outputs(
+        convo,
+        context_usable_tokens,
+        session_id=session_id,
+        model_id=model_id,
+    )
     if budget is not None:
         try:
             budget.ensure_available()

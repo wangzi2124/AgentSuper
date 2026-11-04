@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from execution.tool_registry import ToolRegistry
+from execution.tool_registry import ToolDefinition, ToolRegistry
 from graph.nodes.execute import _conversation_history, make_execute_node
 from models.router import ChatResult
 
@@ -86,6 +86,23 @@ async def test_tool_messages_kept_summary_kept():
     assert "早前对话摘要" in joined
     # 原生工具结果属于 tail 原文，要保留给下一轮（回退模型会转成文本）。
     assert "工具输出事实" in joined
+
+
+async def test_execute_reports_system_and_tool_tokens():
+    model = _CaptureModel()
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="read_file",
+            description="read a file",
+            fn=lambda: "ok",
+            scope="location",
+        )
+    )
+    node = make_execute_node(model, registry, system_prompt="SYS")
+    out = await node(_state([HumanMessage(content="hi")]))
+    assert out["context_system_tokens"] > 0
+    assert out["context_tool_tokens"] > 0
 
 
 async def test_memory_context_merged_into_system():

@@ -103,7 +103,16 @@ class CustomToolStore:
         pin = {"tool_name": tool_name, "description": description or tool_name, "enabled": True}
         pins.append(pin)
         self._save_pins(pins)
-        return pin
+        # API/front-end contract is the unified CustomToolItem shape (name/type/...),
+        # not the raw persisted pin record (tool_name/...).
+        return self.get(tool_name) or {
+            "name": tool_name,
+            "type": "pin",
+            "description": description or tool_name,
+            "path": str(self.pinned_path),
+            "enabled": True,
+            "tools": [tool_name],
+        }
 
     def pinned_tools(self, enabled_only: bool = True) -> List[str]:
         pins = self._load_pins()

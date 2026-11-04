@@ -62,6 +62,12 @@ class ToolSchemaCache:
 
         selected = self._select(definitions)
         built = [builder(td) for td in selected]
+        # Provider prefix caching keys on the exact tool list bytes. Sort after
+        # selection so registration order / plugin load order cannot reshuffle
+        # the prefix between processes while business tools still win slots.
+        built.sort(
+            key=lambda item: str((item.get("function") or {}).get("name") or "")
+        )
         per_registry[scope] = (signature, built)
         return [dict(d) for d in built]
 

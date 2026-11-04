@@ -4,14 +4,8 @@ RAG 管线 / 混合检索 / 重排序 / 上下文压缩 / 记忆读写。
 """
 
 from .compressor import (
-    COMPRESS_THRESHOLD,
-    KEEP_RECENT_TOKENS,
-    SELF_CHECKLIST,
     build_compress_prompt,
-    compress_context,
     estimate_tokens,
-    select_tail,
-    split_by_token,
 )
 from .rag import RAGPipeline, rag_search
 from .reranker import Reranker, RerankerUnavailable
@@ -52,14 +46,8 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    "COMPRESS_THRESHOLD",
-    "KEEP_RECENT_TOKENS",
-    "SELF_CHECKLIST",
     "build_compress_prompt",
-    "compress_context",
     "estimate_tokens",
-    "select_tail",
-    "split_by_token",
     "LongTermMemory",
     "MemoryManager",
     "RAGPipeline",

@@ -8,8 +8,10 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from config import settings
 from execution.filesystem import VirtualFileSystem
 from models.router import ChatResult
+from models.stream import StreamResult
 from app.main import create_app
 
 
@@ -141,6 +143,38 @@ def test_multi_agent_stream_frontend_protocol(client):
     assert "agent_start" in types
     assert types[-1] == "done"
     assert "data: " in text and '"answer"' in text
+
+
+class StreamingFakeModel:
+    """Streams two text pieces; ainvoke would mask a broken streaming path."""
+
+    tier = "fake"
+
+    def model_name(self) -> str:
+        return "stream-fake"
+
+    async def raw_stream(self, messages, *, tools=None, on_text=None, **kwargs):
+        for piece in ("流式", "答案"):
+            if on_text:
+                on_text(piece)
+        return StreamResult(content="流式答案", finish_reason="stop")
+
+    async def ainvoke(self, messages, *, tools=None, **kwargs):
+        raise AssertionError("streaming model must not use ainvoke")
+
+
+def test_stream_text_deltas_arrive_incrementally_without_replay(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "harness_tool_mode", "fallback")
+    app = create_app(
+        model=StreamingFakeModel(), vfs=VirtualFileSystem(root=str(tmp_path))
+    )
+    with TestClient(app) as c:
+        events = _stream_events(c, {"message": "go"})
+
+    deltas = [e["delta"] for e in events if e["type"] == "text_delta"]
+    assert deltas == ["流式", "答案"]
+    assert events[-1]["type"] == "done"
+    assert events[-1]["answer"] == "流式答案"
 
 
 
@@ -442,6 +476,31 @@ def test_multi_agent_stream_events_have_turn_id(client):
     assert len(seqs) == len(tracked)
 
 
+class FailingModel:
+    """模型调用即抛错，用于验证错误回合落库。"""
+
+    tier = "fake"
+
+    async def ainvoke(self, messages, *, tools=None, **kwargs):
+        raise RuntimeError("provider exploded")
+
+
+def test_stream_error_persists_error_bubble(tmp_path):
+    app = create_app(
+        model=FailingModel(), vfs=VirtualFileSystem(root=str(tmp_path))
+    )
+    with TestClient(app) as c:
+        events = _stream_events(c, {"message": "go"})
+        assert events[-1]["type"] == "error"
+        sid = events[-1]["session_id"]
+        msgs = c.get(f"/api/sessions/{sid}/messages").json()
+        assert [m["role"] for m in msgs] == ["user", "assistant"]
+        assert msgs[0]["content"] == "go"
+        assert msgs[1]["data"]["is_error"] is True
+        assert msgs[1]["data"]["error_info"]["errorType"]
+        assert msgs[1]["content"]
+
+
 def test_history_replays_user_and_assistant(client):
     sid = _sid_after_turn(client)
     msgs = client.get(f"/api/sessions/{sid}/messages").json()
@@ -540,6 +599,43 @@ def test_stream_emits_model_switched_first(client):
     assert events[0]["type"] == "model_switched"
     assert events[0]["model_ref"]["id"] == "deepseek/deepseek-v4-flash"
     assert events[-1]["type"] == "done"
+
+
+def test_enqueue_prompt_preserves_model(client):
+    sid = client.post("/api/sessions", json={}).json()["id"]
+    client.post(
+        f"/api/sessions/{sid}/prompts",
+        json={"prompt": {"message": "排队任务", "model": "m-next"}, "client_msg_id": "q-model"},
+    )
+    ctx = client.app.state.platform
+    sess = ctx.sessions.get(sid)
+    assert sess.prompts[-1]["model"] == "m-next"
+
+
+def test_queued_prompt_switches_model_before_its_turn(client):
+    sid = client.post("/api/sessions", json={}).json()["id"]
+    ctx = client.app.state.platform
+    ctx.sessions.update(sid, model="m-old")
+    calls: list[tuple[str, str]] = []
+
+    async def fake_switch(session_id: str, target: str, *, force: bool = False):
+        # 回合内切换必须带 force 绕开门禁；外部 PATCH 仍能看到 cancels 在途标记。
+        assert force is True
+        assert session_id in ctx.cancels
+        calls.append((session_id, target))
+        ctx.sessions.update(session_id, model=target)
+        return {}
+
+    ctx.switch_model = fake_switch
+    client.post(
+        f"/api/sessions/{sid}/prompts",
+        json={"prompt": {"message": "排队任务", "model": "m-new"}, "client_msg_id": "q1"},
+    )
+    events = _stream_events(client, {"message": "go", "conversation_id": sid})
+    assert calls == [(sid, "m-new")]
+    switched = [e for e in events if e["type"] == "model_switched"]
+    assert switched[-1]["model_ref"]["id"] == "m-new"
+    assert events[-1]["model"] == "m-new"
 
 
 def test_stream_turn_done_drains_queued_prompt(client):

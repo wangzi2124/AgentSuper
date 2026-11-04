@@ -201,12 +201,17 @@ async def caption_image(data_b64: str, mime_type: str = "", filename: str = "") 
 
 
 async def describe_image(data_b64: str, mime_type: str = "", filename: str = "") -> str:
-    """caption（视觉 LLM）→ OCR → 空串，逐级降级。"""
+    """OCR → caption（视觉 LLM）→ 空串，逐级降级。
+
+    OCR 优先：截图/文档图的可读文字比模型描述更精确、更便宜。只有 OCR
+    未启用或没提取到文字时，才回落到视觉 LLM 描述（``image_vlm_caption``）。
+    """
+    text = ocr_image(data_b64, filename)
+    if text:
+        return text
     if settings.image_vlm_caption:
-        cap = await caption_image(data_b64, mime_type, filename)
-        if cap:
-            return cap
-    return ocr_image(data_b64, filename)
+        return await caption_image(data_b64, mime_type, filename)
+    return ""
 
 
 async def enrich_image_files(files: list | None) -> list:

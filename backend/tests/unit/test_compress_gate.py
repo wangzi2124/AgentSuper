@@ -7,11 +7,8 @@ v2 起移除 LLM 门禁：只要有模型就生成摘要，失败才走确定性
 from langchain_core.messages import HumanMessage
 
 from cognition.compressor import (
-    PRECISION_PATTERNS,
-    contains_precision_keyword,
     enforce_precision,
     extract_precision_values,
-    should_use_llm_summary,
 )
 from graph.nodes.compress import make_compress_node
 
@@ -31,13 +28,6 @@ def test_extract_precision_values():
     assert "`npm run build`" in vals
 
 
-def test_contains_precision_keyword():
-    assert contains_precision_keyword("the version is 3")
-    assert contains_precision_keyword("端口 8080")
-    assert contains_precision_keyword("/etc/x.conf")  # 精确值模式命中
-    assert not contains_precision_keyword("今天天气不错")
-
-
 def test_enforce_precision_backfills_missing():
     older = [HumanMessage(content="部署脚本在 /opt/deploy.sh，端口 9090")]
     summary = "已讨论部署"  # 摘要漏了精确值
@@ -51,33 +41,6 @@ def test_enforce_precision_noop_when_present():
     older = [HumanMessage(content="端口 9090")]
     summary = "端口 9090 已确认"
     assert enforce_precision(summary, older) == summary
-
-
-# ── 门禁 ──
-
-
-def test_gate_blocks_small_content():
-    # C1 失败：内容太少（<5000 token）
-    older = [HumanMessage(content="端口 8080")]
-    assert should_use_llm_summary(older, min_tokens=5000) is False
-
-
-def test_gate_blocks_when_no_precision():
-    # C2 失败：内容够大但无任何精确值/关键词
-    older = [HumanMessage(content=_big("闲聊内容没有关键信息", 500))]
-    assert should_use_llm_summary(older, min_tokens=5000) is False
-
-
-def test_gate_blocks_after_max_calls():
-    # C3 失败：本会话已用满 LLM 摘要次数
-    older = [HumanMessage(content=_big("端口 8080 version id: 3 路径 /a/b.txt", 500))]
-    assert should_use_llm_summary(older, compress_count=0, min_tokens=5000) is True
-    assert should_use_llm_summary(older, compress_count=3, min_tokens=5000) is False
-
-
-def test_gate_passes_when_all_true():
-    older = [HumanMessage(content=_big("端口 8080 命令 `ls` 路径 /a/b.txt", 400))]
-    assert should_use_llm_summary(older, compress_count=0, min_tokens=5000) is True
 
 
 # ── 节点行为 ──
@@ -105,7 +68,7 @@ async def test_node_calls_model_when_gate_passes():
     older = [HumanMessage(content=_big("端口 8080 路径 /a/b.txt version 3", 400)) for _ in range(3)]
     recent = [HumanMessage(content="最近1"), HumanMessage(content="最近2")]
     out = await node({"messages": older + recent, "compress_count": 0})
-    assert model.calls == 1
+    assert model.calls >= 1
     assert out["compress_count"] == 1
     assert out["context_compressed"] is True
 

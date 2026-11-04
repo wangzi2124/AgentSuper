@@ -234,14 +234,18 @@
   // 九、上下文压缩
   // ══════════════════════════════════════════════════════════════════════════
 
-  // 压缩时保留的最近原文 token（opencode v2 keep.tokens）。
-  // 示例：15000；调大保留更多原文，调小更省上下文。
-  "compaction_keep_tokens": 15000,
+  // 压缩时保留的最近原文 token。
+  // 0 = 按窗口公式 clamp(25% × usable, 2000, 8000)；>0 = 显式覆盖。
+  "compaction_keep_tokens": 0,
 
-  // 自动压缩预留窗口：百分比或绝对 token。
-  // "15%" = max(15% × 模型窗口, 16000)；也可写 32000 这样的绝对值。
-  // 示例："15%"
+  // 自动压缩预留窗口：绝对 token 覆盖；百分比为旧格式（新公式忽略）。
   "compaction_buffer": "15%",
+
+  // 保留最近几轮原文；0/负数 = 不保留 tail（对齐 opencode）。
+  "compaction_tail_turns": 2,
+
+  // 压缩最小收益（token）；0 = 按 usable 的 5% 计算。
+  "compaction_min_gain_tokens": 0,
 
   // 单条工具输出的 token 上限。
   // 示例：8000；想压低上下文可设 4000。
@@ -250,6 +254,14 @@
   // 是否在上下文超过可用窗口时自动压缩。
   // 示例：true
   "compaction_auto": true,
+
+  // 确定性修剪：先回收旧工具输出，再决定是否调用摘要模型。
+  "compaction_prune": true,
+  "compaction_prune_protect_tokens": 40000,
+  "compaction_prune_minimum_tokens": 20000,
+
+  // 单张图片的 token 估算（按块计数，不按 base64 长度）。
+  "image_token_estimate": 1600,
 
   // ══════════════════════════════════════════════════════════════════════════
   // 九点五、聊天附件
@@ -275,7 +287,8 @@
   // 示例：256
   "image_thumbnail_px": 256,
 
-  // 是否对图片做 OCR 提取文字（截图/文档图）。
+  // 是否对图片做 OCR 提取文字（截图/文档图）；启用时优先 OCR。
+  // OCR 未提取到文字时，若 image_vlm_caption=true 再回落到视觉描述。
   // 示例：false 关闭；true 开启（需要 tesseract）。
   "image_use_ocr": false,
 
@@ -290,7 +303,8 @@
   // OCR 语言。示例：chi_sim+eng（简体中文 + 英文）
   "ocr_languages": "chi_sim+eng",
 
-  // 是否用视觉 LLM 为图片生成描述（caption）后注入文本模型。
+  // 是否用视觉 LLM 为图片生成描述（caption）作为 OCR 的兜底。
+  // 仅在 image_use_ocr=false 或 OCR 没提取到文字时执行。
   // 示例：主模型是纯文本 DeepSeek 时保持 true。
   "image_vlm_caption": true,
 
@@ -368,6 +382,10 @@
   // 只对未显式声明 token_budget 的工具生效；示例：100000。
   "tool_default_token_budget": 0,
 
+  // 同一轮内并行执行的工具调用上限（写工具/shell 仍串行）。
+  // 示例：10；本地磁盘慢或工具共享状态时可降到 2~4。
+  "tool_concurrency": 10,
+
   // ══════════════════════════════════════════════════════════════════════════
   // 十四、权限 / 工作区
   // ══════════════════════════════════════════════════════════════════════════
@@ -401,6 +419,10 @@
   // 是否在传输层自动裁剪 prompt 以适配 Ollama 窗口。
   // 示例：true 开启；false 回退旧行为。
   "ollama_context_guard": true,
+
+  // 本地 Ollama 模型驻留时长（随每条请求下发 keep_alive）。
+  // 示例："30m"；"0" 表示请求结束即卸载；-1 表示常驻。
+  "ollama_keep_alive": "30m",
 
   // Ollama 服务地址。
   // 示例：http://localhost:11434

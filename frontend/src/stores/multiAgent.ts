@@ -23,15 +23,16 @@ import {
   deleteSessionFromCache,
 } from '../api/session-cache'
 import {
-  interruptSession, revertSession, deleteSessionMessage, updateSession as apiUpdateSession,
+  interruptSession, revertSession, deleteSessionMessage,
   forkSession as apiForkSession, compactSession as apiCompactSession, getSessionStatus as apiGetSessionStatus,
-  getSessionMessages,
   type SessionStatus,
 } from '../api/sessions'
 import { loadModelCache, saveModelCache } from '../api/model-cache'
 import { classifyNetworkError } from '../api/errors'
 import { useHarnessTurn } from '../harness/useHarnessTurn'
 import { usePermissionStore } from './permission'
+import { useSessionModelStore, SESSION_MODEL_DRAFT_KEY } from './sessionModel'
+import { useModelSwitchStore } from './modelSwitch'
 
 function genId(): string {
   try { return crypto.randomUUID() }
@@ -62,10 +63,20 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const activeSessionId = ref<string | undefined>(undefined)
   const conversations = ref<ConversationMeta[]>([])
   const routingStatus = ref<string>('')
-  const selectedModel = ref<string>(SUPPORTED_MODELS[0].value)
   // [模型目录] 选择器由后端 GET /api/models 动态驱动；SUPPORTED_MODELS 仅为离线兜底。
   const models = ref<ModelInfo[]>([])
   const defaultModelId = ref<string>('')
+  const sessionModel = useSessionModelStore()
+  const modelSwitch = useModelSwitchStore()
+  const sessionModelKey = computed(() => activeSessionId.value || SESSION_MODEL_DRAFT_KEY)
+  // 选择先写 desired；空闲会话后台 PATCH，发送前 wait 复用结果。
+  const selectedModel = computed<string>({
+    get: () => sessionModel.desired(sessionModelKey.value)
+      || sessionModel.active(sessionModelKey.value)
+      || defaultModelId.value
+      || SUPPORTED_MODELS[0].value,
+    set: (value: string) => sessionModel.select(sessionModelKey.value, value),
+  })
   // [模型管理] 轻量模型（内部轻任务：子任务分类/会话标题/计划摘要）
   const smallModelId = ref<string>('')
   const smallModelInfo = computed<ModelInfo | null>(() =>
@@ -267,9 +278,13 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     try {
       const detail = await getConversation(id, 'multi-agent')
       session.conversationTitle = detail.title
-      // [模型切换] 打开会话时同步为其模型（opencode 会话默认模型语义）；目录里没有则保持当前选择
-      if (detail.model?.id && modelOptions.value.some(m => m.value === detail.model!.id)) {
-        selectedModel.value = detail.model!.id
+      // [模型切换] 服务端模型只作为 active 兜底；本地 desired 优先（opencode 按会话偏好）。
+      if (detail.model?.id) {
+        sessionModel.setActive(id, detail.model.id)
+        const local = sessionModel.desired(id)
+        if (local && modelOptions.value.length && !modelOptions.value.some(m => m.value === local)) {
+          sessionModel.revert(id)
+        }
       }
       const serverMessages: MultiAgentMessage[] = detail.messages.map(m => ({
         id: m.id,
@@ -288,6 +303,10 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         // [C8] 计划文件路径（plan Agent 落盘产物）——历史回放也要能看到「查看计划」入口
         plan_path: (m as any).plan_path || undefined,
         partial_error: (m as any).partial_error ?? null,
+        // [错误持久化] 后端把失败回合落库为带 error_info 的 assistant 消息，
+        // 刷新/切换会话后错误气泡仍然可见。
+        isError: !!((m as any).is_error),
+        errorInfo: (m as any).error_info || undefined,
         timestamp: new Date(),
       }))
       // [#11 双真相源] 在线时服务端是唯一真相源：后端在回合开始即落库 user 消息、
@@ -364,7 +383,9 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
 
   function newChat() {
     routingStatus.value = ''
+    const current = selectedModel.value
     activeSessionId.value = undefined
+    sessionModel.select(SESSION_MODEL_DRAFT_KEY, current)
   }
 
   // --- 错误分类 ---
@@ -513,6 +534,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       }
     }
     delete sessions.value[sessionId]
+    sessionModel.copy(sessionId, serverId)
     if (activeSessionId.value === sessionId) activeSessionId.value = serverId
     if (autoRetrySessionId.value === sessionId) autoRetrySessionId.value = serverId
   }
@@ -663,9 +685,10 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             if (
               t === 'agent_start' || t === 'agent_step' || t === 'agent_done' ||
               t === 'agent_error' || t === 'context_truncated' ||
-              t === 'text_delta' || t === 'replay_gap'
+              t === 'model_switched' || t === 'text_delta' || t === 'replay_gap'
             ) {
               assistantMsg.agents = mergeAgents(reduced.agents)
+              if (reduced.model) assistantMsg.model = reduced.model
               if (t === 'text_delta') assistantMsg.content = reduced.assistantContent
               return
             }
@@ -675,11 +698,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
             if (t === 'queued') {
               session.streamPhase = 'queued'
               session.queuePosition = event.queue_position ?? null
-              return
-            }
-            if (t === 'model_switched') {
-              const ref = event.model_ref
-              if (ref?.id) assistantMsg.model = ref.name || ref.id
               return
             }
             if (t === 'permission_request') {
@@ -709,12 +727,17 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
               const errorInfo = classifySSEError(event)
               assistantMsg.errorInfo = errorInfo
               assistantMsg.content = formatErrorMessage(errorInfo)
+              if (event.error_type === 'ModelSwitchError') {
+                sessionModel.revert(sessionKey)
+                setNotice(`切换模型失败：${event.detail || event.error || errorInfo.message}`)
+              }
               persistSession(sessionKey)
               if (errorInfo.retryable) startAutoRetry(sessionKey, lastUserText(session))
               completed = true
               return
             }
             if (t === 'done' || t === 'turn_done') {
+              if (event.model) sessionModel.setActive(sessionKey, event.model)
               // 重放时，同一 drain 序列里已结束的回合可能已从历史加载：按
               // assistant_msg_id 对齐，丢弃重放占位，避免刷新后出现重复气泡。
               const dup = event.assistant_msg_id
@@ -873,19 +896,24 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       sessionId = genId()
       getOrCreateSession(sessionId)
       activeSessionId.value = sessionId
+      // 新会话继承 composer 的 draft 选择；draft 仍保留给下一个新会话。
+      sessionModel.copy(SESSION_MODEL_DRAFT_KEY, sessionId)
     }
 
     const session = sessions.value[sessionId]
     if (!session) return false
+    // 后台切换仍在跑时等待它，避免与新回合的 target_model 切换并发。
+    if (session.conversationId) await modelSwitch.wait(sessionId)
     // [队列] 执行中（或本会话还有待处理任务）再次发送 → 不再拒绝，改为「追加排队任务」
     // （对齐 opencode：执行中仍可发消息；顺序 = 新→旧 LIFO，后端当前轮结束后 drain）。
     // pendingPrompts 用 ?. 兜底：历史缓存/测试里手工构造的 session 对象可能没有该字段。
     if (session.loading || session.streamPhase !== 'idle' || (session.pendingPrompts?.length ?? 0) > 0) {
       return enqueueWhileBusy(sessionId, session, text, files, voice)
     }
+    const requestedModel = selectedModel.value
     // [S6] 发送前校验模型/目录有效性，避免带无效 model 触发后端 404
-    if (!modelOptions.value.some(m => m.value === selectedModel.value)) {
-      setNotice(`当前模型不可用：${selectedModel.value}，请重新选择`)
+    if (!modelOptions.value.some(m => m.value === requestedModel)) {
+      setNotice(`当前模型不可用：${requestedModel}，请重新选择`)
       return false
     }
     if (suppressRetryReset) {
@@ -937,7 +965,18 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     // [S5] 走防抖（非终态写，done/error 的终态 persistSession 会清 timer 兜底覆盖）
     schedulePersist(sessionId)
 
-    const reqData = { message: text, conversation_id: session.conversationId, model: selectedModel.value, use_vector_db: useVectorDb.value, client_msg_id: messageClientId, files: files && files.length ? files : undefined, voice: voice || undefined, agent_mode: agentMode.value !== 'default' ? agentMode.value : undefined }
+    const reqData = {
+      message: text,
+      conversation_id: session.conversationId,
+      model: requestedModel,
+      // 已有会话：模型随本轮下发，后端在回合开始前切换（opencode per-message model）。
+      target_model: session.conversationId ? requestedModel : undefined,
+      use_vector_db: useVectorDb.value,
+      client_msg_id: messageClientId,
+      files: files && files.length ? files : undefined,
+      voice: voice || undefined,
+      agent_mode: agentMode.value !== 'default' ? agentMode.value : undefined,
+    }
     const controller = new AbortController()
     session.abortController = controller
     const signal = controller.signal
@@ -962,11 +1001,13 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           event.type === 'agent_done' ||
           event.type === 'agent_error' ||
           event.type === 'context_truncated' ||
+          event.type === 'model_switched' ||
           event.type === 'text_delta'
         ) {
           if (event.type === 'agent_start') routingStatus.value = ''
           agentsMap = reduced.agents
           assistantMsg.agents = Object.values(agentsMap)
+          if (reduced.model) assistantMsg.model = reduced.model
           if (event.type === 'text_delta') {
             assistantMsg.content = reduced.assistantContent
           }
@@ -981,18 +1022,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         if (event.type === 'queued') {
           session.streamPhase = 'queued'
           session.queuePosition = event.queue_position ?? null
-          return
-        }
-
-        // [model_switched] 会话模型被切换。必须排在下面的 running 转换**之前**：
-        // 后端在队列检查之前就发这个事件，若在此处落到转换逻辑会先把
-        // streamPhase 置为 running 并清空 queuePosition，随后 queued 事件再改回来 →
-        // 排队请求的表头闪一下。这里提前 return 即可（同时消掉该事件此前的静默丢弃）。
-        if (event.type === 'model_switched') {
-          const ref = event.model_ref
-          if (ref?.id) {
-            assistantMsg.model = ref.name || ref.id
-          }
           return
         }
 
@@ -1022,12 +1051,20 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
           const errorInfo = classifySSEError(event)
           assistantMsg.errorInfo = errorInfo
           assistantMsg.content = formatErrorMessage(errorInfo)
+          // 回合开始前切换失败：服务端仍保留旧模型，UI 也回滚到 active。
+          if (event.error_type === 'ModelSwitchError') {
+            if (sessionModel.desired(sessionId) === requestedModel) {
+              sessionModel.revert(sessionId)
+            }
+            setNotice(`切换模型失败：${event.detail || event.error || errorInfo.message}`)
+          }
           persistSession(sessionId)
           // 自动重试：仅对可重试错误且未超过最大次数
           if (errorInfo.retryable && autoRetrySessionId.value === sessionId) {
             startAutoRetry(sessionId, text)
           }
         } else if (event.type === 'done' || event.type === 'turn_done') {
+          if (event.model) sessionModel.setActive(sessionId, event.model)
           // [队列] turn_done = 本回合完成但还有排队任务（同一条 SSE 流继续跑下一个回合）；
           // done = 队列已空，断流收尾。两者共用同一套「回合收尾」逻辑。
           const moreComing = event.type === 'turn_done'
@@ -1142,6 +1179,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         session.conversationId,
         {
           message: text,
+          // 排队任务也记住入队时的模型；后端在它开始执行前切换。
+          model: selectedModel.value,
           files: files && files.length ? files : undefined,
           voice: voice || undefined,
           agent_mode: agentMode.value !== 'default' ? agentMode.value : undefined,
@@ -1149,7 +1188,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
         messageClientId,
       )
       userMsg.queuePromptId = row?.id || messageClientId
-      session.pendingPrompts = [...(session.pendingPrompts ?? []), { id: userMsg.queuePromptId, message: text }]
+      session.pendingPrompts = [...(session.pendingPrompts ?? []), { id: userMsg.queuePromptId, message: text, model: selectedModel.value }]
       await persistSession(sessionId)
       return true
     } catch (e) {
@@ -1288,74 +1327,38 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       if (serverId) { try { await apiDeleteConversation(serverId) } catch (e) { console.error('Failed to delete:', e) } }
       await deleteSessionFromCache(serverId)
       if (serverId !== activeSessionId.value) await deleteSessionFromCache(activeSessionId.value)
+      if (serverId) sessionModel.forget(serverId)
+      if (activeSessionId.value) sessionModel.forget(activeSessionId.value)
+      if (serverId) modelSwitch.forget(serverId)
+      if (activeSessionId.value) modelSwitch.forget(activeSessionId.value)
       delete sessions.value[activeSessionId.value]
       activeSessionId.value = undefined
       loadConversations()
     }
   }
 
-  // [模型切换] 选择器变更 → PATCH 会话默认模型（opencode switchModel 持久化语义）。
-  // 已存在会话必须等服务端门禁/迁移成功后再改 UI；失败保留旧模型并提示。
+  // [模型切换] opencode 语义：选择只写本地 desired，零等待、不 PATCH。
+  // 已有会话在下一条消息带 target_model，由后端在回合开始前切换；
+  // 切换失败会发 ModelSwitchError，send/attachTurn 再把 desired 回滚到 active。
   async function persistSelectedModel(target?: string): Promise<boolean> {
     const model = target || selectedModel.value
-    // 参考 opencode FAST_BOOT：provider 目录未就绪前不 set，失败显式报错。
-    await loadModels(true)
     if (!modelOptions.value.some(o => o.value === model)) {
       setNotice(`模型目录未就绪或模型不存在：${model}`)
       return false
     }
-    const s = activeSessionId.value ? sessions.value[activeSessionId.value] : undefined
-    // 新会话尚未落库（只有本地 id）：只改本地选择，等服务端创建会话时再继承。
-    if (!s || !s.conversationId) {
-      selectedModel.value = model
-      return true
+    selectedModel.value = model
+    setNotice('')
+    const sessionKey = activeSessionId.value
+    const session = sessionKey ? sessions.value[sessionKey] : undefined
+    if (sessionKey && session?.conversationId && !session.loading && session.streamPhase === 'idle') {
+      void modelSwitch.enqueue(sessionKey, model, session.conversationId).then(result => {
+        if (result.status !== 'failed') return
+        const error = result.error as { message?: unknown } | undefined
+        const detail = error?.message != null ? String(error.message) : String(result.error || '未知错误')
+        setNotice(`切换模型失败：${detail}`)
+      })
     }
-    const sessionId = s.conversationId
-    const previous = selectedModel.value
-    // 完整性校验以**服务端切换前后**为准：本地缓存可能因 undo/排队/重试而滞后，
-    // 拿它当基准会把「本地脏数据」误判成切换丢消息并触发回滚。
-    let serverBefore: Awaited<ReturnType<typeof getSessionMessages>> | null = null
-    try {
-      serverBefore = await getSessionMessages(sessionId)
-    } catch {
-      serverBefore = null
-    }
-    try {
-      setNotice('正在切换模型，历史加载中…')
-      const providerID = model.split('/')[0]
-      await apiUpdateSession(sessionId, { model: { id: model, providerID } })
-      // §3.1 消息完整性：服务端切换前后对比，未压缩消息不得丢失。
-      if (serverBefore) {
-        try {
-          const after = await getSessionMessages(sessionId)
-          const afterIds = new Set(after.map(m => m.id))
-          const afterContents = new Set(after.map(m => m.content || ''))
-          const lost = serverBefore.filter(m => {
-            if (m.is_compacted) return false
-            // 空内容消息（工具占位/摘要占位）不作为丢失依据：内容无法比对
-            if (!m.content) return false
-            return !afterIds.has(m.id) && !afterContents.has(m.content)
-          })
-          if (lost.length) {
-            await apiUpdateSession(sessionId, {
-              model: { id: previous, providerID: previous.split('/')[0] },
-            })
-            setNotice('消息丢失，已回滚模型切换')
-            return false
-          }
-        } catch {
-          // 历史拉取失败不阻断切换；本地列表原地保留。
-        }
-      }
-      selectedModel.value = model
-      setNotice('')
-      await loadConversations()
-      return true
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setNotice(`切换模型失败：${msg}`)
-      return false
-    }
+    return true
   }
 
   return {
