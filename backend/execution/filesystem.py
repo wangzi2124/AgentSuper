@@ -9,6 +9,7 @@ Agent 的读写操作映射到隔离工作目录：
 from __future__ import annotations
 
 import contextvars
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,29 @@ from typing import Iterable
 
 MAX_OUTPUT_CHARS = 50_000
 GREP_MAX_RESULTS = 100
+_MSYS_DRIVE_RE = re.compile(r"^/([A-Za-z])(?:/|$)")
+_DRIVE_ONLY_RE = re.compile(r"^([A-Za-z]):$")
+
+
+def normalize_tool_path(path: str) -> str:
+    """Accept POSIX/MSYS drive paths (``/e/foo``) on Windows as ``E:\\foo``.
+
+    Models often translate "E 盘" to ``/e/``; Windows ``Path`` would treat that
+    as an anchored relative path and produce ``<cwd>\\e\\...``. Normalize at the
+    VFS/permission seam so every file tool shares the same interpretation.
+    """
+    raw = str(path or "").strip()
+    if os.name != "nt" or not raw:
+        return path
+    drive_only = _DRIVE_ONLY_RE.match(raw)
+    if drive_only:
+        return f"{drive_only.group(1).upper()}:\\"
+    match = _MSYS_DRIVE_RE.match(raw)
+    if not match:
+        return path
+    rest = raw[2:].lstrip("/\\").replace("/", "\\")
+    drive = match.group(1).upper()
+    return f"{drive}:\\{rest}" if rest else f"{drive}:\\"
 
 # 本回合允许的额外根目录（会话临时目录 + 程序内部数据目录 + 用户「工作目录白名单」）。
 # 由 API 层按会话注入，随 contextvar 传播到图节点任务；
@@ -111,7 +135,7 @@ class VirtualFileSystem:
         return _active_root_var.get() or self.root
 
     def _resolve(self, path: str) -> Path:
-        p = (self.active_root / path).resolve()
+        p = (self.active_root / normalize_tool_path(path)).resolve()
         if not self._within(p):
             raise PermissionError(f"路径越界: {path}")
         return p
@@ -124,7 +148,7 @@ class VirtualFileSystem:
         `add_allowed_root` 对 contextvar 的就地更新 —— 再查一次边界会把合法的外部写入误判为
         「路径越界」并让整轮 SSE 以 error 收尾（文件其实已落盘）。故对亲身写过的路径直读。
         """
-        return (self.active_root / path).resolve()
+        return (self.active_root / normalize_tool_path(path)).resolve()
 
     @staticmethod
     def _under(p: Path, root: Path) -> bool:
@@ -143,7 +167,7 @@ class VirtualFileSystem:
         （allowed_roots）均自动放行；其余路径一律需人工审批。
         """
         try:
-            p = (self.active_root / path).resolve()
+            p = (self.active_root / normalize_tool_path(path)).resolve()
         except (OSError, RuntimeError):
             return False
         return self._within(p)

@@ -1,13 +1,17 @@
 """L1 单元测试：VirtualFileSystem（agent.md §10.2 / §5.1）。"""
 
+import os
+
 import pytest
 
 from execution.filesystem import (
     VirtualFileSystem,
     bounded,
+    normalize_tool_path,
     reset_allowed_roots,
     set_allowed_roots,
 )
+from execution.tools.file_tools import glob_files
 
 
 @pytest.fixture
@@ -101,3 +105,44 @@ def test_bounded_keeps_head_and_tail():
     assert out.startswith("A")
     assert out.endswith("C")
     assert "已省略" in out
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MSYS drive paths are Windows-only")
+def test_normalize_tool_path_msys_drive():
+    assert normalize_tool_path("/e/") == "E:\\"
+    assert normalize_tool_path("/e/foo/bar.txt") == r"E:\foo\bar.txt"
+    assert normalize_tool_path("e:") == "E:\\"
+    assert normalize_tool_path("E:\\foo") == "E:\\foo"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MSYS drive paths are Windows-only")
+def test_file_tools_accept_msys_drive_path(vfs, tmp_path):
+    vfs.write_file("a.txt", "hello")
+    posix = tmp_path.as_posix()
+    msys_root = f"/{posix[0].lower()}{posix[2:]}"
+
+    assert vfs.is_allowed(f"{msys_root}/a.txt") is True
+    assert vfs.ls(msys_root) == "a.txt"
+    assert vfs.read_file(f"{msys_root}/a.txt") == "hello"
+    assert "a.txt" in vfs.grep("hello", msys_root)
+    assert glob_files(vfs, "*.txt", msys_root) == "a.txt"
+
+    vfs.write_file(f"{msys_root}/b.txt", "created")
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "created"
+    vfs.rollback(1)
+    assert not (tmp_path / "b.txt").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MSYS drive paths are Windows-only")
+def test_permission_abs_path_normalizes_msys_drive(vfs, tmp_path):
+    from app.deps import PlatformContext
+
+    posix = tmp_path.as_posix()
+    msys_root = f"/{posix[0].lower()}{posix[2:]}"
+
+    class _Ctx:
+        pass
+
+    ctx = _Ctx()
+    ctx.vfs = vfs
+    assert PlatformContext._abs_for_permission(ctx, msys_root) == tmp_path.resolve()

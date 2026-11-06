@@ -1895,7 +1895,9 @@ class PlatformContext:
         """把工具参数路径解析为绝对路径（相对路径按 VFS 根解析，与文件工具一致）。"""
         from pathlib import Path
 
-        p = Path(str(path_str)).expanduser()
+        from execution.filesystem import normalize_tool_path
+
+        p = Path(normalize_tool_path(str(path_str))).expanduser()
         if not p.is_absolute():
             p = self.vfs.active_root / p
         try:
