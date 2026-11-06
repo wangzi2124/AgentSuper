@@ -73,6 +73,35 @@ def test_prune_protects_skill_tool_output():
     assert records[0]["tokens"] > 0
 
 
+def test_prune_protects_load_skill_tool_output():
+    messages = [
+        {"role": "user", "content": "u1"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c2", "function": {"name": "read_file", "arguments": "{}"}}],
+        },
+        {"role": "tool", "content": "y" * 100_000, "tool_call_id": "c2"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "c1", "function": {"name": "load_skill_tdd", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "content": "x" * 100_000, "tool_call_id": "c1"},
+        {"role": "user", "content": "u2"},
+        {"role": "user", "content": "u3"},
+    ]
+    records: list[dict] = []
+    out = prune_tool_outputs(
+        messages, protect_tokens=0, minimum_tokens=0, tail_turns=1, records=records
+    )
+    assert out[2]["content"].startswith("[tool output pruned")
+    assert out[4]["content"] == "x" * 100_000
+    assert records and records[0]["index"] == 2
+
+
 def test_strip_media_blocks_for_overflow_retry():
     from graph.nodes.base import _strip_media_blocks
 

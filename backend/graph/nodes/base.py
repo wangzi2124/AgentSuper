@@ -813,7 +813,11 @@ async def run_tool_loop(
             before = len(convo)
             tokens_before = 0
             try:
-                from cognition.context_budget import preserve_recent_budget
+                from cognition.context_budget import (
+                    MAX_PRESERVE_TOKENS,
+                    MIN_GAIN_TOKENS,
+                    preserve_recent_budget,
+                )
                 from harness.compression import (
                     CompactionPolicy,
                     ContextCompactor,
@@ -824,7 +828,7 @@ async def run_tool_loop(
                 keep = (
                     preserve_recent_budget(context_usable_tokens)
                     if context_usable_tokens > 0
-                    else 8_000
+                    else MAX_PRESERVE_TOKENS
                 )
                 result_c = await ContextCompactor().compress(
                     convo,
@@ -833,7 +837,7 @@ async def run_tool_loop(
                         reason="overflow",
                         threshold=1,
                         keep_tokens=keep,
-                        min_gain_tokens=1_024,
+                        min_gain_tokens=MIN_GAIN_TOKENS,
                     ),
                 )
                 if result_c.triggered:

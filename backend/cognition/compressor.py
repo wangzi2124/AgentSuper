@@ -122,7 +122,7 @@ def build_compress_prompt(existing_summary: str, serialized: str) -> str:
 
 # 精确值模式（§1.5 PRECISION_PATTERNS）：文件路径 / 长数字（ID、端口）/ 反引号命令。
 PRECISION_PATTERNS = [
-    r"[/\\][\w./\\-]+\.\w{2,4}",   # 文件路径（含 Windows 反斜杠）
+    r"(?:[A-Za-z]:)?[/\\][\w./\\-]+\.\w{2,4}",   # 文件路径（含 Windows 盘符/反斜杠）
     r"\b\d{4,}\b",                 # 长数字（ID、端口、token 计数）
     r"`[^`]+`",                    # 反引号命令
 ]
@@ -130,12 +130,18 @@ PRECISION_PATTERNS = [
 _PRECISION_BACKFILL_MAX = 20
 
 
+def normalize_precision_text(text: str) -> str:
+    """折叠 JSON 序列化产生的重复反斜杠，供精确值比较/回填。"""
+    return re.sub(r"\\{2,}", r"\\", str(text or ""))
+
+
 def extract_precision_values(text: str) -> list[str]:
     """按 PRECISION_PATTERNS 从原文提取精确值（去重、保序）。"""
     found: list[str] = []
     seen: set[str] = set()
+    normalized = normalize_precision_text(text)
     for pat in PRECISION_PATTERNS:
-        for m in re.findall(pat, text or ""):
+        for m in re.findall(pat, normalized):
             if m not in seen:
                 seen.add(m)
                 found.append(m)
@@ -147,9 +153,10 @@ def enforce_precision(summary: str, older_messages: Sequence[Any]) -> str:
 
     从被压缩原文提取精确值，凡摘要里缺失的追加到 `[精确值补充]` 段。
     """
-    original = serialize_messages(older_messages)
+    original = normalize_precision_text(serialize_messages(older_messages))
     critical = extract_precision_values(original)
-    missing = [t for t in critical if t and t not in (summary or "")]
+    normalized_summary = normalize_precision_text(summary)
+    missing = [t for t in critical if t and t not in normalized_summary]
     if not missing:
         return summary
     backfill = "\n".join(f"- {t}" for t in missing[:_PRECISION_BACKFILL_MAX])

@@ -199,6 +199,11 @@ _PRUNE_STUB_PREFIX = "[tool output pruned"
 _PRUNE_PROTECTED_TOOLS = frozenset({"skill"})
 
 
+def _is_protected_tool(tool_name: str, protected_tools: frozenset[str]) -> bool:
+    """Skill bodies are injected via ``load_skill_*``; never prune them."""
+    return tool_name in protected_tools or tool_name.startswith("load_skill_")
+
+
 def prune_stub(tool_name: str = "", tokens: int = 0, path: str = "") -> str:
     """Canonical stub text; used by both the pruner and the history rebuild."""
     if tool_name:
@@ -288,7 +293,7 @@ def prune_tool_outputs(
             msg.get("tool_name")
             or tool_name_by_id.get(msg.get("tool_call_id"), "")
         )
-        if tool_name in protected_tools:
+        if _is_protected_tool(tool_name, protected_tools):
             continue
         content = msg.get("content") or ""
         if content.startswith(_PRUNE_STUB_PREFIX):

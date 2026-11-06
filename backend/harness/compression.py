@@ -437,6 +437,7 @@ async def compress_messages(
         build_fallback_summary,
         enforce_precision,
         extract_precision_values,
+        normalize_precision_text,
         serialize_messages,
     )
 
@@ -489,7 +490,9 @@ async def compress_messages(
         summary = build_fallback_summary(older, existing_summary)
 
     summary = enforce_precision(summary, older)
-    preserved = f"{summary}\n{serialize_messages(recent, strip_media=True)}"
+    preserved = normalize_precision_text(
+        f"{summary}\n{serialize_messages(recent, strip_media=True)}"
+    )
     facts = extract_precision_values(serialize_messages(msgs, strip_media=True))
     missing = [fact for fact in facts if fact not in preserved]
     if missing and require_precision:

@@ -323,7 +323,7 @@ class CompactionCheckpoint:
 
 - `session_messages(type='compaction')` 是 checkpoint 的权威记录；`epoch.snapshot` 是查询缓存，可在任意时刻由最新 compaction 行重建。
 - `graph state` 的 `context_summary` / `context_tail_start_id` 只在单轮内使用；跨轮一律从 DB 重建。
-- `history.load` 删除或改为内部调用 `rebuild_view`，不再保留第二套过滤规则。
+- `history.load` 已删除；模型视角统一由 `CompactionCheckpoint.rebuild_view` 构建，不再保留第二套过滤规则。
 - `tail_start_id` 找不到时 **不再回退 `start=0`**：按 `tail_start_seq`（新字段）定位；两者都缺失则视为 checkpoint 损坏，`repair` 重建或忽略该 checkpoint 并告警。禁止把全量历史接在摘要后面。
 
 **写入事务**
@@ -400,7 +400,7 @@ class ContextView:
     estimate: TokenEstimate
 ```
 
-- `PlatformContext.rebuild_history` → `CompactionCheckpoint.rebuild_view`。
+- `PlatformContext.rebuild_context_view` → `CompactionCheckpoint.rebuild_view`（返回 `ContextView`）。
 - `initial_state(history_messages=view.messages, context_summary=view.summary)`；graph state 中不再保留 `context_tail_start_id` 的跨轮权威性。
 - `execute._conversation_history` 直接消费 `state.messages`；删除“先跳过 `[历史摘要]` 再插入摘要”的重复逻辑。
 - `session_messages`（前端回放）仍从 DB 读取；压缩卡由 checkpoint 行生成，不再依赖 graph state 的 `compaction_event`。
@@ -508,7 +508,7 @@ stateDiagram-v2
 | --- | --- | --- | --- |
 | P0 | 新增 `ContextMeter`，router / guard / budget 接线；保留旧估算 | `CONTEXT_METER_V2` | 关开关回旧函数 |
 | P1 | `ContextCompactor.plan/compress` 落地；四个 adapter 切过去；旧函数保留 deprecated | `CONTEXT_COMPACTOR_V3` | 关开关回 `compress_messages` |
-| P2 | `CompactionCheckpoint` + `ContextView`；删除 `resolve_context_binding` 特判；`history.load` 收敛 | `CONTEXT_CHECKPOINT_V3` | 关开关回 `rebuild_model_messages` |
+| P2 | `CompactionCheckpoint` + `ContextView`；`resolve_context_binding` 特判已移除；`history.load` 已删除 | `CONTEXT_CHECKPOINT_V3` | 关开关回 `rebuild_model_messages` |
 | P3 | `ToolOutputPruner` 接线 + 持久化 prune 元数据 | `CONTEXT_PRUNE_V2` | 关开关停止 prune |
 | P4 | 溢出恢复持久化 + 摘要请求分段/去媒体 | `CONTEXT_OVERFLOW_V2` | 关开关回临时压缩 |
 | P5 | 删除 `compress_context` / `split_by_token` / `select_tail` / `should_use_llm_summary` 与对应旧测试；更新 AGENTS / 设计文档 | — | 由前四步保证 |

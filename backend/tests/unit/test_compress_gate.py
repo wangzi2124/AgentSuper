@@ -4,6 +4,10 @@ v2 起移除 LLM 门禁：只要有模型就生成摘要，失败才走确定性
 摘要生成后纯规则回填精确值（确定性保证）。
 """
 
+from __future__ import annotations
+
+import json
+
 from langchain_core.messages import HumanMessage
 
 from cognition.compressor import (
@@ -41,6 +45,32 @@ def test_enforce_precision_noop_when_present():
     older = [HumanMessage(content="端口 9090")]
     summary = "端口 9090 已确认"
     assert enforce_precision(summary, older) == summary
+
+
+def test_enforce_precision_ignores_json_escaped_windows_path():
+    path = r"E:\AgentSuper\backend\harness\compression.py"
+    older = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": path}),
+                    },
+                }
+            ],
+        }
+    ]
+    summary = f"重点文件 {path}，尚未修改。"
+
+    assert enforce_precision(summary, older) == summary
+    assert path in extract_precision_values(
+        json.dumps({"path": path})
+    )
 
 
 # ── 节点行为 ──
