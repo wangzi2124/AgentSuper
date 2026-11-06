@@ -77,20 +77,39 @@ def parse_tool_calls(text: str) -> tuple[list[HarnessToolCall], str]:
     calls: list[HarnessToolCall] = []
     spans: list[tuple[int, int]] = []
     names = list(_NAME_RE.finditer(text))
+    last_end = 0
     for i, m in enumerate(names):
         name = m.group(1).strip()
         if not name:
             continue
         block_end = names[i + 1].start() if i + 1 < len(names) else len(text)
+        prefix = text[last_end:m.start()]
+        _, pre_args, pre_start = _split_trailing_json(prefix)
         args_m = _ARGS_RE.search(text, m.end(), block_end)
         if not args_m:
-            calls.append(
-                HarnessToolCall(name=name, arguments="{}", error="缺少参数定界符")
-            )
-            spans.append((m.start(), m.end()))
+            if pre_args is not None:
+                calls.append(
+                    HarnessToolCall(
+                        name=name,
+                        arguments=_dumps(pre_args),
+                        parsed=pre_args,
+                    )
+                )
+                spans.append((last_end + pre_start, m.end()))
+            else:
+                calls.append(
+                    HarnessToolCall(name=name, arguments="{}", error="缺少参数定界符")
+                )
+                spans.append((m.start(), m.end()))
+            last_end = m.end()
             continue
         raw = args_m.group(1).strip() or "{}"
         parsed = parse_arguments(raw)
+        span_start = m.start()
+        if pre_args is not None and (not raw or raw == "{}"):
+            raw = _dumps(pre_args)
+            parsed = pre_args
+            span_start = last_end + pre_start
         error = "" if parsed is not None else "参数不是合法 JSON"
         calls.append(
             HarnessToolCall(
@@ -100,7 +119,8 @@ def parse_tool_calls(text: str) -> tuple[list[HarnessToolCall], str]:
                 error=error,
             )
         )
-        spans.append((m.start(), args_m.end()))
+        spans.append((span_start, args_m.end()))
+        last_end = args_m.end()
 
     cleaned = text
     for start, end in reversed(spans):
@@ -112,3 +132,33 @@ def _dumps(value: dict) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False)
+
+
+def _split_trailing_json(text: str) -> tuple[str, dict | None, int]:
+    """Split a trailing JSON object from text.
+
+    Some reasoning models emit arguments before the fallback function marker:
+
+        {"path": "E:/Tool/llama3"}
+        ꊰ▸ls◂ꊰ
+        ꊰ▹{}◃ꊰ
+
+    Returns ``(prefix, value, start)``; ``value`` is None when no object ends
+    the text. ``start`` is the object offset in the original string.
+    """
+    import json
+
+    stripped = text.rstrip()
+    if not stripped.endswith("}"):
+        return text, None, len(text)
+    decoder = json.JSONDecoder()
+    for start in range(len(stripped) - 1, -1, -1):
+        if stripped[start] != "{":
+            continue
+        try:
+            value, end = decoder.raw_decode(stripped[start:])
+        except ValueError:
+            continue
+        if end == len(stripped) - start and isinstance(value, dict):
+            return text[:start].rstrip(), value, start
+    return text, None, len(text)

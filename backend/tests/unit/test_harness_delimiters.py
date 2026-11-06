@@ -64,3 +64,22 @@ def test_tool_result_does_not_look_like_call():
     calls, cleaned = parse_tool_calls(text)
     assert calls == []
     assert cleaned == text
+
+
+def test_args_before_marker_are_recovered():
+    text = (
+        '{"path": "E:/Tool/llama3"}\n'
+        + NAME_OPEN
+        + "ls"
+        + NAME_CLOSE
+        + "\n"
+        + ARGS_OPEN
+        + "{}"
+        + ARGS_CLOSE
+    )
+    calls, cleaned = parse_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == "ls"
+    assert calls[0].parsed == {"path": "E:/Tool/llama3"}
+    assert calls[0].error == ""
+    assert cleaned == ""

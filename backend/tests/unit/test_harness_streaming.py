@@ -54,6 +54,28 @@ def test_bad_json_gives_error_call():
     assert events[0]["call"].error
 
 
+def test_args_before_marker_are_recovered():
+    p = StreamToolCallParser()
+    events = p.feed('{"path": "E:/Tool/llama3"}\n')
+    assert events == []
+    events = p.feed(f"{NAME_OPEN}ls{NAME_CLOSE}\n{ARGS_OPEN}{{}}{ARGS_CLOSE}")
+    assert len(events) == 1
+    assert events[0]["type"] == "tool_call"
+    assert events[0]["call"].name == "ls"
+    assert events[0]["call"].parsed == {"path": "E:/Tool/llama3"}
+    assert events[0]["call"].error == ""
+    assert p.finalize() == []
+
+
+def test_split_args_before_marker_are_recovered():
+    p = StreamToolCallParser()
+    assert p.feed('{"path":') == []
+    assert p.feed(' "E:/Tool/llama3"}\n') == []
+    events = p.feed(f"{NAME_OPEN}ls{NAME_CLOSE}\n{ARGS_OPEN}{{}}{ARGS_CLOSE}")
+    assert len(events) == 1
+    assert events[0]["call"].parsed == {"path": "E:/Tool/llama3"}
+
+
 def test_plain_stream_text_is_flushed():
     p = StreamToolCallParser()
     assert p.feed("hello") == [{"type": "text", "text": "hello"}]

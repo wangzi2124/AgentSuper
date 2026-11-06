@@ -15,6 +15,7 @@ from .delimiters import (
     NAME_CLOSE,
     NAME_OPEN,
     HarnessToolCall,
+    _split_trailing_json,
     parse_arguments,
 )
 
@@ -34,6 +35,55 @@ class StreamToolCallParser:
         self._buf = ""
         self._state = "text"
         self._name = ""
+        self._pending_text = ""
+
+    def _looks_like_pending_json(self, text: str) -> bool:
+        import json
+
+        stripped = text.lstrip()
+        if not stripped.startswith("{"):
+            return False
+        try:
+            _, end = json.JSONDecoder().raw_decode(stripped)
+        except ValueError:
+            # Incomplete JSON may still be the arguments emitted before the
+            # function marker; hold it instead of leaking a partial object.
+            return True
+        tail = stripped[end:].strip()
+        return not tail or NAME_OPEN.startswith(tail)
+
+    def _finish_call(
+        self,
+        raw: str,
+        parsed: dict | None,
+        error: str = "",
+    ) -> list[dict[str, Any]]:
+        if not raw or raw == "{}":
+            prefix, value, _ = _split_trailing_json(self._pending_text)
+            if value is not None:
+                self._pending_text = prefix
+                raw = _dump(value)
+                parsed = value
+                error = ""
+        events: list[dict[str, Any]] = []
+        if self._pending_text:
+            events.append({"type": "text", "text": self._pending_text})
+            self._pending_text = ""
+        if parsed is not None:
+            raw = _dump(parsed)
+        events.append(
+            {
+                "type": "tool_call",
+                "call": HarnessToolCall(
+                    name=self._name,
+                    arguments=raw,
+                    parsed=parsed,
+                    error=error,
+                ),
+            }
+        )
+        self._name = ""
+        return events
 
     def feed(self, chunk: str) -> list[dict[str, Any]]:
         if chunk:
@@ -43,12 +93,13 @@ class StreamToolCallParser:
             if self._state == "text":
                 idx = self._buf.find(NAME_OPEN)
                 if idx >= 0:
-                    if idx:
-                        events.append({"type": "text", "text": self._buf[:idx]})
+                    self._pending_text += self._buf[:idx]
                     self._buf = self._buf[idx + len(NAME_OPEN):]
                     self._state = "name"
                     continue
                 keep = _partial_suffix_len(self._buf, NAME_OPEN)
+                if self._looks_like_pending_json(self._buf):
+                    break
                 if len(self._buf) > keep:
                     cut = len(self._buf) - keep
                     events.append({"type": "text", "text": self._buf[:cut]})
@@ -75,15 +126,8 @@ class StreamToolCallParser:
                     self._state = "args"
                     continue
                 if stripped.startswith(NAME_OPEN):
-                    events.append(
-                        {
-                            "type": "tool_call",
-                            "call": HarnessToolCall(
-                                name=self._name,
-                                arguments="{}",
-                                error="缺少参数定界符",
-                            ),
-                        }
+                    events.extend(
+                        self._finish_call("{}", {}, "缺少参数定界符")
                     )
                     self._state = "text"
                     continue
@@ -100,16 +144,12 @@ class StreamToolCallParser:
                     break
                 raw = self._buf[:idx].strip() or "{}"
                 parsed = parse_arguments(raw)
-                events.append(
-                    {
-                        "type": "tool_call",
-                        "call": HarnessToolCall(
-                            name=self._name,
-                            arguments=raw if parsed is None else _dump(parsed),
-                            parsed=parsed,
-                            error="" if parsed is not None else "参数不是合法 JSON",
-                        ),
-                    }
+                events.extend(
+                    self._finish_call(
+                        raw,
+                        parsed,
+                        "" if parsed is not None else "参数不是合法 JSON",
+                    )
                 )
                 self._buf = self._buf[idx + len(ARGS_CLOSE):]
                 self._state = "text"
@@ -119,9 +159,13 @@ class StreamToolCallParser:
     def finalize(self) -> list[dict[str, Any]]:
         """流结束时释放纯文本；未闭合的调用块按“未完成”丢弃。"""
         events: list[dict[str, Any]] = []
-        if self._state == "text" and self._buf:
-            events.append({"type": "text", "text": self._buf})
+        if self._state == "text":
+            if self._pending_text:
+                events.append({"type": "text", "text": self._pending_text})
+            if self._buf:
+                events.append({"type": "text", "text": self._buf})
         self._buf = ""
+        self._pending_text = ""
         self._state = "text"
         self._name = ""
         return events
