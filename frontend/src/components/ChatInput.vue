@@ -69,7 +69,7 @@ const pttRecorder = new PressToTalkRecorder()
 const pttHolding = ref(false)
 const pttSeconds = ref(0)
 let pttTimer: number | null = null
-let pttUploading = false
+const pttUploading = ref(false)
 
 // ── 统一麦克风按钮：点击=语音转文字，长按=按住说话 ──
 let micPointerDownTime = 0
@@ -77,7 +77,7 @@ let micLongPressTimer: number | null = null
 const MIC_LONG_PRESS_MS = 300
 
 function micPointerDown() {
-  if (props.loading || pttUploading) return
+  if (props.loading || pttUploading.value) return
   if (pttHolding.value) return
   if (listening.value) {
     // [fix] 正在听写：布防「单击=停止」，但不启动长按（避免与实时采集抢麦）。
@@ -152,7 +152,7 @@ async function endPtt() {
   if (!r) return
   if (r.duration < 1) { showToast('说话时间太短，请按久一点'); return }
   if (props.loading) { showToast('正在处理，请稍候再发送'); return }
-  pttUploading = true
+  pttUploading.value = true
   try {
     // 先转写音频，再上传——让模型看到语音内容
     let transcript = ''
@@ -168,7 +168,7 @@ async function endPtt() {
   } catch {
     showToast('语音上传失败')
   } finally {
-    pttUploading = false
+    pttUploading.value = false
   }
 }
 
@@ -1080,6 +1080,12 @@ const textareaRef = ref<HTMLTextAreaElement>()
           <button class="slash-use-btn" @click="slashUseDetail">填入输入框</button>
         </div>
       </div>
+    </div>
+
+    <!-- 语音发送中：录音结束到转写/上传完成之间给出明确进度 -->
+    <div v-if="pttUploading" class="voice-send-status" role="status" aria-live="polite">
+      <span class="voice-send-spinner"></span>
+      语音发送中…
     </div>
 
     <!-- Gemini 风格大圆角输入卡 -->

@@ -6,6 +6,32 @@ align-items: stretch;
 padding: 10px clamp(12px, 3vw, 32px) calc(14px + env(safe-area-inset-bottom, 0px));
 background: transparent;
 }
+/* 语音发送中状态：录音已结束，正在转写/上传 */
+.voice-send-status {
+width: fit-content;
+max-width: 800px;
+margin: 0 auto 6px;
+display: flex;
+align-items: center;
+gap: 8px;
+padding: 6px 12px;
+border: 1px solid var(--border);
+border-radius: 999px;
+background: var(--surface-elevated);
+color: var(--text-secondary);
+font-size: 12px;
+}
+.voice-send-spinner {
+width: 12px;
+height: 12px;
+border: 2px solid color-mix(in srgb, var(--text-secondary, #64748b) 25%, transparent);
+border-top-color: var(--primary, #4f46e5);
+border-radius: 50%;
+animation: voice-send-spin 0.8s linear infinite;
+}
+@keyframes voice-send-spin {
+to { transform: rotate(360deg); }
+}
 /* 底部输入卡：大圆角、默认 800px 限宽居中（DeepSeek 式底部输入），窄屏自适应收缩 */
 .input-card {
 width: 100%;
