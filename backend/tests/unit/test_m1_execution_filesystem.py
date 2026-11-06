@@ -111,6 +111,7 @@ def test_bounded_keeps_head_and_tail():
 def test_normalize_tool_path_msys_drive():
     assert normalize_tool_path("/e/") == "E:\\"
     assert normalize_tool_path("/e/foo/bar.txt") == r"E:\foo\bar.txt"
+    assert normalize_tool_path("/E/Program%20Files/AI_Tools") == r"E:\Program Files\AI_Tools"
     assert normalize_tool_path("e:") == "E:\\"
     assert normalize_tool_path("E:\\foo") == "E:\\foo"
 

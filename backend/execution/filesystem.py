@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import unquote
 
 MAX_OUTPUT_CHARS = 50_000
 GREP_MAX_RESULTS = 100
@@ -31,6 +32,8 @@ def normalize_tool_path(path: str) -> str:
     raw = str(path or "").strip()
     if os.name != "nt" or not raw:
         return path
+    if "%" in raw:
+        raw = unquote(raw)
     drive_only = _DRIVE_ONLY_RE.match(raw)
     if drive_only:
         return f"{drive_only.group(1).upper()}:\\"
