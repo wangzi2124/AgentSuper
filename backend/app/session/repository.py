@@ -761,7 +761,7 @@ def revert_to_message(session_id: str, message_id: str) -> int:
     """撤销到指定消息（对齐 opencode revert.ts）。
 
     删除该消息之后的所有消息及其 message_parts；若纪元水位越过撤销点则回滚，
-    避免 history.load 把已被撤销的消息继续纳入模型视角。
+    避免已被撤销的消息重新进入模型视角。
 
     Returns:
         deleted 的消息条数。

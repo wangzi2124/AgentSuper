@@ -47,7 +47,7 @@
 | `Executor` | §3.2 | `backend/execution/` | `test_m4_tools.py` | ✅ | — |
 | `HookBus` | §3.2 | `backend/harness/hooks.py` | `test_harness_hooks.py` | ✅ | `ModelBefore/After` 仍为预留 |
 | `ContextHarness` | §3.2 | `backend/harness/context.py` | `test_harness_context.py`、`test_tool_history.py` | ✅ | — |
-| `Compactor` | §3.2 | `backend/cognition/compressor.py`、`backend/harness/compression.py` | `test_m2_compressor.py`、`test_compress_gate.py`、`test_harness_compression.py` | ✅ | 生产路径统一走 `compress_messages` / `compress_graph_messages` / `tail_snapshot`；仅保留测试注入的 legacy compressor 分支 |
+| `Compactor` | §3.2 | `backend/cognition/compressor.py`、`backend/harness/compression.py` | `test_m2_compressor.py`、`test_compress_gate.py`、`test_harness_compression.py` | ✅ | 生产路径统一走 `compress_messages` / `tail_snapshot`；auto 图节点经 `ContextCompactor` + `CompactionPolicy.for_auto`，仅保留测试注入的 legacy compressor 分支 |
 | `MemoryStore` | §3.2 | `backend/graph/nodes/memory.py` | `test_m2_memory.py` | ✅ | — |
 | `RAG Pipeline` | §3.2 | `backend/rag/`、`graph/nodes/rag.py` | `test_m2_rag.py`、`test_rag_grade_13_4.py` | ✅ | — |
 | `BudgetLedger` | §3.2 | `backend/harness/budget.py` | `test_budget.py` | 🟠 | 调用后扣费，不是设计要求的“调用前预扣”；无 `budget_exceeded` 事件 |
@@ -396,7 +396,7 @@
 | G-04 | `ResultPolicy` 接入 `run_tool_loop`（头尾保留/落盘/续读） | §6.5 / §10 | — | ✅ 已完成 |
 | G-05 | 子 Agent/并行 worker 工具历史是否回写父级 | §4.6 | — | ✅ 不适用：设计 §4.6 要求子 Agent 上下文隔离，不回写父级 |
 | G-06 | `HarnessError` 接入 SSE 错误响应（retryable/status/error_type） | §5.6 / §13 | G-02 | ✅ 已完成 |
-| G-07 | 压缩三实现收敛（图节点/切换/手动 compact） | §7 / §12 P2 | G-02 | ✅ 已完成（`compress_graph_messages` + `compress_messages` + `tail_snapshot`） |
+| G-07 | 压缩三实现收敛（图节点/切换/手动 compact） | §7 / §12 P2 | G-02 | ✅ 已完成（`compress_messages` + `tail_snapshot`；graph/switch/manual 共用 `ContextCompactor`） |
 | G-08 | `turn_id` 覆盖 multi-agent compat SSE | §5.5 | — | ✅ 已完成 |
 | G-09 | `ModelProfile` 真正接入 ToolAdapter（catalog+override+TTL） | §5.2 / §6 | — | ✅ 已完成（`build_profile` + `ToolAdapter.profile`） |
 | G-10 | 新增 `tests/contract`，补齐 CT-* | §11.4 | — | ✅ 已完成 |
@@ -444,7 +444,7 @@
 | 阶段 | 结果 | 关键证据 |
 | --- | --- | --- |
 | L1 | G-02 / G-07 | `harness/switch.py`、`harness/compression.py`；模型切换/压缩回归通过 |
-| L2 | G-07 残留 | `compress_graph_messages` 收敛图节点 gate/切分；`tail_snapshot` 统一 compact |
+| L2 | G-07 残留 | 图节点经 `ContextCompactor` + `CompactionPolicy.for_auto` 收敛 gate/切分；`tail_snapshot` 统一 compact |
 | L3 | G-01 / G-03 / G-04 | `_stream_step` 流式回退执行；`harness/schema.py` 15 上限；ResultPolicy 接线 |
 | L4 | G-06 / G-08 / G-10 | 错误 SSE 分类/脱敏；compat `turn_id`；`tests/contract` |
 | L5 | G-13 / G-14 / G-15 | SwitchService 失败回滚、伪造调用、覆盖率工具与 90% 门槛 |

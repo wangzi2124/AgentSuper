@@ -18,6 +18,12 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Install dependencies
         run: uv pip install --system -r requirements.txt
+      - name: Guard against nested backend tree
+        run: |
+          if [ -e backend ]; then
+            echo "Unexpected nested source tree at backend/backend"
+            exit 1
+          fi
       - name: Unit + contract + integration
         run: python -m pytest tests/unit tests/contract tests/integration -q
       - name: Reliability + security

@@ -12,6 +12,7 @@ import time
 import typing
 from typing import Any, Awaitable, Callable
 
+from cognition.context_budget import prune_gate_for
 from cognition.tool_output import bound_tool_output
 from execution.quota import get_quota
 from execution.tool_registry import ToolDefinition, ToolRegistry
@@ -661,49 +662,13 @@ def _maybe_prune_tool_outputs(
     if usable_tokens <= 0 or not convo:
         return convo
     try:
-        from config import settings
+        from cognition.tool_output import PrunePolicy, ToolOutputPruner
 
-        if not getattr(settings, "compaction_prune", True):
-            return convo
-        from cognition.context_meter import get_meter
-        from cognition.tool_output import prune_tool_outputs
-
-        estimated = get_meter().estimate(
-            convo, model_id=model_id, use_cache=True
-        ).total
-        if estimated < int(usable_tokens * 0.7):
-            return convo
-        protect = getattr(settings, "compaction_prune_protect_tokens", 40_000)
-        minimum = getattr(settings, "compaction_prune_minimum_tokens", 20_000)
-        records: list[dict[str, Any]] = []
-        pruned = prune_tool_outputs(
-            convo,
-            protect_tokens=40_000 if protect is None else int(protect),
-            minimum_tokens=20_000 if minimum is None else int(minimum),
-            tail_turns=2,
-            records=records,
-        )
-        if session_id and records:
-            from app.session import repository
-
-            for record in records:
-                index = int(record.get("index") or 0)
-                if index >= len(convo):
-                    continue
-                message = convo[index]
-                message_id = message.get("_id") if isinstance(message, dict) else None
-                if not message_id:
-                    continue
-                try:
-                    repository.mark_tool_pruned(
-                        session_id,
-                        str(message_id),
-                        str(record.get("path") or ""),
-                        int(record.get("tokens") or 0),
-                    )
-                except Exception:  # noqa: BLE001 - metadata write is best-effort
-                    logger.warning("persist prune metadata failed", exc_info=True)
-        return pruned
+        policy = PrunePolicy.from_settings(gate_tokens=prune_gate_for(usable_tokens))
+        result = ToolOutputPruner(
+            session_id=session_id, model_id=model_id
+        ).prune(convo, policy)
+        return result.messages
     except Exception:  # noqa: BLE001 - prune 失败不阻断请求
         logger.warning("tool output prune failed", exc_info=True)
         return convo
@@ -848,16 +813,16 @@ async def run_tool_loop(
             before = len(convo)
             tokens_before = 0
             try:
+                from cognition.context_budget import preserve_recent_budget
                 from harness.compression import (
                     CompactionPolicy,
                     ContextCompactor,
-                    _preserve_default,
                     estimate_messages,
                 )
 
                 tokens_before = estimate_messages(convo)
                 keep = (
-                    _preserve_default(context_usable_tokens)
+                    preserve_recent_budget(context_usable_tokens)
                     if context_usable_tokens > 0
                     else 8_000
                 )

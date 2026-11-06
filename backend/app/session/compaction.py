@@ -17,8 +17,6 @@ from .models import Message
 
 logger = logging.getLogger(__name__)
 
-_SUMMARY_PREFIX = "[历史摘要]"
-
 
 @dataclass(frozen=True)
 class Checkpoint:
@@ -61,13 +59,12 @@ class ContextView:
     tail_start_id: str | None = None
 
 
-def _is_summary_message(msg: Any) -> bool:
-    extra = getattr(msg, "additional_kwargs", None) or {}
-    if isinstance(extra, dict) and extra.get("compaction"):
-        content = getattr(msg, "content", "")
-        return isinstance(content, str) and content.startswith(_SUMMARY_PREFIX)
-    content = getattr(msg, "content", "")
-    return isinstance(content, str) and content.startswith(_SUMMARY_PREFIX)
+@dataclass(frozen=True)
+class DbView:
+    """Watermark applied to DB rows: checkpoint + the tail it preserves."""
+
+    checkpoint: Checkpoint | None
+    messages: list[Message]
 
 
 class CompactionCheckpoint:
@@ -146,6 +143,35 @@ class CompactionCheckpoint:
         return Checkpoint.from_message(session_id, msg)
 
     @staticmethod
+    def db_view(
+        session_id: str,
+        *,
+        hidden_ids: Optional[set[str]] = None,
+        baseline: Optional[int] = None,
+    ) -> DbView:
+        """Resolve the one watermark and return the tail DB rows it preserves."""
+        hidden = hidden_ids or set()
+        messages = [
+            m
+            for m in repository.list_conversation_messages(session_id)
+            if m.id not in hidden
+        ]
+        checkpoint = CompactionCheckpoint.latest(
+            session_id, hidden_ids=hidden, baseline=baseline
+        )
+        if checkpoint is None:
+            return DbView(None, messages)
+        start = 0
+        if checkpoint.tail_start_id:
+            for idx, msg in enumerate(messages):
+                if msg.id == checkpoint.tail_start_id:
+                    start = idx
+                    break
+            else:
+                start = len(messages)
+        return DbView(checkpoint, messages[start:])
+
+    @staticmethod
     def rebuild_view(
         session_id: str,
         *,
@@ -153,23 +179,15 @@ class CompactionCheckpoint:
         baseline: Optional[int] = None,
     ) -> ContextView:
         """Model view: ``[summary] + [tail messages]`` with old checkpoints hidden."""
-        from .projector import rebuild_model_messages
+        from .projector import to_lc_message
 
-        rendered = rebuild_model_messages(
+        db = CompactionCheckpoint.db_view(
             session_id, hidden_ids=hidden_ids, baseline=baseline
         )
-        summary = ""
-        tail: list[Any] = rendered
-        if rendered and _is_summary_message(rendered[0]):
-            content = str(getattr(rendered[0], "content", "") or "")
-            summary = content[len(_SUMMARY_PREFIX):].lstrip("\n")
-            tail = list(rendered[1:])
-        checkpoint = CompactionCheckpoint.latest(
-            session_id, hidden_ids=hidden_ids, baseline=baseline
-        )
+        checkpoint = db.checkpoint
         return ContextView(
-            summary=summary,
-            messages=tail,
+            summary=checkpoint.summary if checkpoint else "",
+            messages=[to_lc_message(m) for m in db.messages],
             checkpoint_seq=checkpoint.seq if checkpoint else None,
             tail_start_id=checkpoint.tail_start_id if checkpoint else None,
         )
@@ -215,4 +233,4 @@ class CompactionCheckpoint:
             logger.warning("compaction epoch repair failed for %s", session_id, exc_info=True)
 
 
-__all__ = ["Checkpoint", "CompactionCheckpoint", "ContextView"]
+__all__ = ["Checkpoint", "CompactionCheckpoint", "ContextView", "DbView"]

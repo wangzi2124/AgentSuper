@@ -145,7 +145,7 @@ async def test_e2e03_kb_answer_uses_retrieved_fact(tmp_path):
 @pytest.mark.asyncio
 async def test_e2e06_real_compression_preserves_fact():
     from langchain_core.messages import AIMessage, HumanMessage
-    from harness.compression import compress_graph_messages
+    from harness.compression import CompactionPolicy, ContextCompactor
 
     messages = []
     for i in range(30):
@@ -157,12 +157,15 @@ async def test_e2e06_real_compression_preserves_fact():
     model = TierModel(tier="auto", timeout=120)
     token = set_request_model(_MODEL)
     try:
-        out = await compress_graph_messages(
+        out = await ContextCompactor().compress(
             messages,
             existing_summary="",
             model=model,
-            compress_count=0,
-            keep_recent=2,
+            policy=CompactionPolicy.for_auto(
+                usable=0,
+                keep_recent=2,
+                legacy=True,
+            ),
         )
     finally:
         reset_request_model(token)

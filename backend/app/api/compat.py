@@ -907,7 +907,8 @@ async def _run_turn_body(
                     turn_attachments, sess.directory
                 )
                 await ctx.ensure_conversation(sess.id)
-                history = ctx.rebuild_history(sess.id)
+                view = ctx.rebuild_context_view(sess.id)
+                history = view.messages if view is not None else None
                 from ..session.projector import project_user_message
 
                 if history is not None:
@@ -935,8 +936,8 @@ async def _run_turn_body(
                     history_messages=history,
                     use_vector_db=bool(body.use_vector_db),
                     message_id=turn_user_msg_id,
-                    context_summary=binding.get("summary", ""),
-                    context_tail_start_id=binding.get("tail_start_id"),
+                    context_summary=(view.summary if view is not None else "") or binding.get("summary", ""),
+                    context_tail_start_id=(view.tail_start_id if view is not None else None) or binding.get("tail_start_id"),
                     context_bound=binding.get("active", False),
                     context_window_override=binding.get("context_window", 0),
                     compress_threshold_override=binding.get("compress_threshold", 0),

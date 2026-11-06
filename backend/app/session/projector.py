@@ -204,7 +204,7 @@ def project_checkpoint_messages(
     return written
 
 
-def _to_lc_message(msg: repository.Message) -> Any:
+def to_lc_message(msg: repository.Message) -> Any:
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
     data = msg.data or {}
@@ -254,51 +254,25 @@ def rebuild_model_messages(
     ``baseline`` 是压缩水位：撤销到压缩之前时基线回退，晚于基线的压缩行
     不再生效；``None`` 表示调用方不限制（测试/离线工具）。
     """
-    hidden = hidden_ids or set()
-    # 压缩不再物理删除历史；DB 重建由最新有效 compaction.tail_start_id
-    # 决定模型视角起点。
-    messages = [
-        m
-        for m in repository.list_conversation_messages(session_id)
-        if m.id not in hidden
-    ]
-    compaction = repository.latest_compaction(session_id, hidden_ids=hidden)
-    if (
-        compaction is not None
-        and baseline is not None
-        and baseline > 0
-        and int(compaction.seq or 0) > baseline
-    ):
-        compaction = None
-    if compaction is not None:
-        data = compaction.data or {}
-        summary = str(data.get("summary") or data.get("content") or "")
-        tail_start_id = data.get("tail_start_id")
-        start = 0
-        if tail_start_id:
-            for idx, msg in enumerate(messages):
-                if msg.id == str(tail_start_id):
-                    start = idx
-                    break
-            else:
-                start = len(messages)
-        else:
-            start = 0
-        tail = messages[start:]
-        view: list[Any] = []
-        if summary:
-            from langchain_core.messages import SystemMessage
+    from .compaction import CompactionCheckpoint
 
-            view.append(
-                SystemMessage(
-                    content=f"[历史摘要]\n{summary}",
-                    id=f"{session_id}_summary_{compaction.seq}",
-                    additional_kwargs={"compaction": True},
-                )
+    db = CompactionCheckpoint.db_view(
+        session_id, hidden_ids=hidden_ids, baseline=baseline
+    )
+    view: list[Any] = []
+    checkpoint = db.checkpoint
+    if checkpoint is not None and checkpoint.summary:
+        from langchain_core.messages import SystemMessage
+
+        view.append(
+            SystemMessage(
+                content=f"[历史摘要]\n{checkpoint.summary}",
+                id=f"{session_id}_summary_{checkpoint.seq}",
+                additional_kwargs={"compaction": True},
             )
-        view.extend(_to_lc_message(m) for m in tail)
-        return view
-    return [_to_lc_message(m) for m in messages]
+        )
+    view.extend(to_lc_message(m) for m in db.messages)
+    return view
 
 
 def conversation_ids(session_id: str) -> list[str]:
@@ -311,4 +285,5 @@ __all__ = [
     "project_user_message",
     "rebuild_model_messages",
     "stable_message_id",
+    "to_lc_message",
 ]

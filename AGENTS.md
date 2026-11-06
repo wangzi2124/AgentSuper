@@ -43,6 +43,7 @@ backend/
     tool_history.py         # 旧跨轮工具历史工具函数（注入已退役）
     context.py              # 旧模型视角装配（保留给回滚/测试）
     compression.py          # 压缩计划/摘要/精确值/tail
+    compression_agent.py    # 专用压缩 Agent（system prompt + 模型调用）
     switch.py               # SwitchService 状态机
     budget.py               # BudgetLedger
     schema.py               # ToolSchemaCache + 20 上限
@@ -50,7 +51,7 @@ backend/
     errors.py               # HarnessError / classify_error
     security.py             # 密钥脱敏
   models/                   # TierModel / LiteLLM / stream / catalog
-  cognition/                # compressor / token_counter / tool_output
+  cognition/                # compressor / context_budget / token_counter / tool_output
   execution/                # VFS / permission / tool_registry / tools
   observability/            # trace / metrics / cost
   prompts/                  # providers/{_shared,default,anthropic,gpt,gemini,kimi,trinity}.md, system/*.md, nodes/*.md
@@ -91,11 +92,12 @@ HTTP / SSE
 - **文件任务证据**：用户要求列目录/读文件，但本轮 `tool_trace` 为空时，禁止返回模型编造的文件清单；统一提示“先执行工具/换 tool-capable 模型”。
 - **聊天附件**：图片走多模态内联；PDF/Word/Excel 等落盘到会话工作区 `attachments/`，并生成可读的 `.extracted.txt`（超过 12k 字符按 6k 分片），模型用 `read_file`/`grep` 读全文；模型上下文只内联 `attachment_inline_max_chars_per_file` / `_total` 上限内的正文；聊天记录不再内联正文，前端「查看正文」走 `POST /api/attachments/extract`（上限 `attachment_extract_max_chars`）。图片附件对非视觉模型先 OCR（`image_use_ocr`），提取不到文字再回落视觉 caption（`image_vlm_caption`）；视觉模型直接内联 `image_url`，不走 OCR。DeepSeek 含图片的请求走 `openai/<model>` + DeepSeek `api_base`（litellm 的 `deepseek/` adapter 会丢 `image_url`）；纯文本/工具轮仍走 `deepseek/`。
 - **模型切换**：`harness/switch.py`。门禁 → 原文备份 → 摘要/精确值探针 → 原子写 epoch → 持久化 model；失败回滚。
-- **压缩（对齐 opencode v2）**：`harness/compression.py`。阈值 = `context_window - buffer`，`buffer` 来自 `compaction_buffer`（默认 `"15%"`，按 `max(15%×窗口, 16000)` 解析）；tail 按最近 user 轮 + `compaction_keep_tokens`（默认 15000），不按消息条数；摘要请求复用完整对话，8 段模板见 `prompts/nodes/compress.md`；移除 LLM 门禁，模型可用即生成摘要，失败/手动压缩失败降级确定性摘要；自动、手动 compact、模型切换共用同一核心；**不再物理删除历史**，只写 `context_summary` + `context_tail_start_id` 与 `session_messages(type=compaction)`；前端显示可折叠压缩卡。相关配置：`compaction_auto`、`compaction_keep_tokens`、`compaction_buffer`、`compress_model`、`compress_model_enabled`、`compress_max_tokens`。
+- **压缩（对齐 opencode v2）**：`harness/compression.py` 是统一门面；`harness/compression_agent.py` 是纯摘要、无工具的专用压缩 Agent（system prompt `prompts/system/compression_agent.md`，独立模型调用）。阈值 = `context_window - buffer`，`buffer` 来自 `compaction_buffer`（默认 `"15%"`，按 `max(15%×窗口, 16000)` 解析）；tail 默认保护最近 `compaction_tail_turns`（默认 2）个工具轮次，计数尾部由 `keep_recent` 驱动，`compaction_keep_tokens` 默认 0 表示使用 `ContextBudget` 的 preserve budget；摘要请求复用完整对话，8 段模板见 `prompts/nodes/compress.md`；移除 LLM 门禁，模型可用即生成摘要，失败/手动压缩失败降级确定性摘要；自动、手动 compact、模型切换共用 `ContextCompactor`/`compress_messages`；auto 图节点使用 `CompactionPolicy.for_auto`，不再有 `compress_graph_messages`；**不再物理删除历史**，只写 `context_summary` + `context_tail_start_id` 与 `session_messages(type=compaction)`；前端显示可折叠压缩卡。相关配置：`compaction_auto`、`compaction_keep_tokens`、`compaction_buffer`、`compaction_tail_turns`、`compaction_min_gain_tokens`、`compress_model`、`compress_model_enabled`、`compress_max_tokens`。
 - **会话真相源（v2）**：`session.db` 的 `session_messages`（含 `user/assistant/tool` 与 `message_parts`）是对话真相源；每轮结束由 `app/session/projector.py` 把 checkpoint 增量幂等投影进来，checkpoint 只做单轮运行时。投影按稳定消息 id 去重；assistant 的 `tool_calls` 落为 tool part，tool 结果回填 output；逻辑删除/撤销用 `hidden_ids` 墓碑，防止 checkpoint 重新投影复活；撤销到压缩点之前会同时隐藏该点之后的 compaction 行并清空 epoch 摘要/tail。
-- **模型视角重建**：回合前 `PlatformContext.rebuild_history` 从 DB 重建 `[最新 compaction 摘要] + [tail_start_id 之后原文]`，以 `Overwrite([...history, 当前 user])` 写入 state；tail 内保留原生 `assistant(tool_calls)` + `ToolMessage(tool_call_id)`，更早历史只进摘要。DB 无该会话时回退 checkpoint。
+- **模型视角重建**：回合前 `PlatformContext.rebuild_context_view` 从 DB 重建 `ContextView`（`[最新 compaction 摘要] + [tail_start_id 之后原文]`；`db_view` 与 LangChain message 视图共用一次构建），以 `Overwrite([...view.messages, 当前 user])` 写入 state；tail 内保留原生 `assistant(tool_calls)` + `ToolMessage(tool_call_id)`，更早历史只进摘要。DB 无该会话时回退 checkpoint。
 - **Token 估算**：`cognition/context_meter.py` 是唯一口径；按模型选择计数器（DeepSeek 原生 tokenizer；其它 provider/Ollama 用 tiktoken 代理）并维护校准 ratio，用消息 fingerprint + 工具 schema 哈希缓存。`execute` 节点写入 `state.context_system_tokens` / `context_tool_tokens`，`graph/routers._context_tokens` 用它们加上 messages（并读 `state.model`）判断压缩阈值；`models/context_guard.py`、`models/runtime.py`、`graph/nodes/base._maybe_prune_tool_outputs`、`harness/compression.estimate_messages` 也消费同一口径。不要新增第二套 tokenizer/估算分支。
 - **上下文视图**：`graph/nodes/execute._conversation_history` 直接消费已重建的 `state.messages`；跨轮 `tool_history` 回插已退役（模块保留但不再注入）。
+- **窗口预算口径**：`cognition/context_budget.py` 的 `ContextBudget.plan` 统一 output reserve、usable、preserve、min_gain、prune gate 与 Ollama transport reserve/slack；`harness/compression.py`、`models/context_guard.py`、`graph/nodes/base.py` 都消费它，不要再各写一套比例。
 - **溢出恢复**：`run_tool_loop` 捕获 `ContextOverflowError` 后先用 `harness.compression` 压缩对话并重试一次；摘要失败再降级剥媒体/裁剪。Ollama 仍由 `models/context_guard.py` 先行自动扩窗。
 - **Ollama prompt 适配**：`models/context_guard.py`，在 `TierModel` 传输层（`raw_invoke/raw_ainvoke/raw_stream`）执行。窗口 = 显式 override > `/api/ps` last-known > `OLLAMA_NUM_CTX`；输出预留 `max(512, 25%×窗口)`，估算裕量 `max(256, 8%×窗口)`；超预算先 `truncate_messages` + `sanitize_tool_messages`，保留 system + 最新 user；system+工具+当前 user 仍装不下时**自动扩展**：按所需最小窗口（2 的幂，上限 32768）随请求下发 `num_ctx`，让 Ollama 重载到更大窗口；只有超过自动上限才抛 `ContextOverflowError`。真实 `prompt_tokens` 按模型 EWMA 校准估算比；一次 overflow 会清窗口缓存、重探、重试一次。`OLLAMA_CONTEXT_GUARD=0` 关闭。
 - **治理**：`BudgetLedger`、`classify_error`、`retry_async`、`redact_secrets`、`ToolSchemaCache`。
@@ -188,7 +190,7 @@ npx vitest run tests/integration/
 - 原生路径：`tool_calls`；回退路径：定界符解析；两者都经 `normalize_history`。
 - 参数非法 → 错误作为工具结果回灌，不崩溃。
 - 未知工具/权限拒绝 → 明确错误文本，不执行。
-- 工具输出先过 `bound_tool_output`（头尾保留 + 落盘 `data/truncation/`），再进 `tool_history`。
+- 工具输出先过 `bound_tool_output`（头尾保留 + 落盘 `data/truncation/`），再进 `tool_history`。存量回收统一走 `ToolOutputPruner.prune(messages, PrunePolicy)`；settings、meter 门禁、落盘、`data.prune` DB 元数据与幂等都在 implementation，caller 只看 `PruneResult`。
 
 ### 4.3 模型切换
 
@@ -221,7 +223,7 @@ npx vitest run tests/integration/
 - **`session_inputs`**：执行中追加任务走 `/api/sessions/{id}/prompts` 队列；旧单数 `/prompt` 已删除。
 - **权限**：无审批通道时 `require_approval` 工具一律拒绝；`.git` 路径永远拒绝；Shell 重定向目标要过写权限。
 - **工具名**：默认 registry 注册的是 `read_file` / `write_file` / `edit_file` / `ls` / `grep` / `glob` / `append_file` / `delete_file` / `create_directory` / `shell_exec` / `task`，以及内置联网/天气 `web_search` / `web_fetch` / `http_request` / `get_weather`；`http_request` 需人工审批。插件工具名以加载器注册结果为准，不要硬编码旧前缀。`backend/plugins` 下的内置插件仍存在，按同名 `.enabled` 文件启用（当前 11 个启用）；与内置工具同名时保留内置工具。`/api/plugins` 路由已挂载，前端「插件管理」页可启停。
-- **压缩**：`cognition/compressor.py` 是 canonical；`harness/compression.py` 是统一门面。不要再新增第三套压缩逻辑。
+- **压缩**：`cognition/compressor.py` 是 canonical；`harness/compression.py` 是统一门面；`harness/compression_agent.py` 是纯摘要 Agent。不要再新增第三套压缩逻辑。
 - **自动压缩/手动 compact**：`ContextHarness` + `tail_snapshot` 语义；手动 compact 也要写 tail 起点。
 - **模型目录**：`models/catalog.py` 读取能力/窗口；`harness/capabilities.build_profile` 有 60s TTL，人工 override 优先。
 - **模型列表口径**：目录条目的只读 `origin`（`override` / `extra` / `provider` / `builtin` / `local`）是「模型管理 → 模型列表」的过滤依据；前端只展示前三类，内置与本机 Ollama 自动探测仅保留在下拉/聊天选择器。Provider 表格「模型数」同口径（`provider_models_source`）。`_provider_seen` 仅在内存记录本次探测实际返回的 ID（含已收录内置 ID），Provider 重建时离线/禁用即清空，不持久化；前端缓存 v2，v1 直接丢弃。要在列表里管理内置/本机模型，需手动添加，或配置一个非保留名的 ollama 类型 Provider。

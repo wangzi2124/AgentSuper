@@ -16,15 +16,12 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
+from cognition.context_budget import transport_split
 from cognition.token_counter import sanitize_tool_messages, truncate_messages
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-RESERVE_RATIO = 0.25
-RESERVE_MIN = 512
-SLACK_RATIO = 0.08
-SLACK_MIN = 256
 AUTO_MAX_WINDOW = 32768
 
 _OVERFLOW_HINTS = (
@@ -91,10 +88,8 @@ def resolve_window(model_id: str) -> int:
 
 def split_budget(window: int) -> tuple[int, int]:
     """Return ``(output_reserve, prompt_budget)`` for a window."""
-    window = max(0, int(window or 0))
-    reserve = max(RESERVE_MIN, int(window * RESERVE_RATIO))
-    slack = max(SLACK_MIN, int(window * SLACK_RATIO))
-    return reserve, max(0, window - reserve - slack)
+    reserve, _slack, prompt_budget = transport_split(window)
+    return reserve, prompt_budget
 
 
 def minimum_window(required: int) -> int:
@@ -104,8 +99,7 @@ def minimum_window(required: int) -> int:
         return 0
     window = required
     for _ in range(32):
-        reserve, _ = split_budget(window)
-        slack = max(SLACK_MIN, int(window * SLACK_RATIO))
+        reserve, slack, _ = transport_split(window)
         needed = required + reserve + slack
         if needed <= window:
             return window

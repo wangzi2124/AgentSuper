@@ -222,6 +222,7 @@ def prune_tool_outputs(
     minimum_tokens: int = 20_000,
     tail_turns: int = 2,
     records: list[dict] | None = None,
+    protected_tools: frozenset[str] = _PRUNE_PROTECTED_TOOLS,
 ) -> list[dict]:
     """回溯式清理已进入上下文的旧工具输出，腾出 token 预算。
 
@@ -287,7 +288,7 @@ def prune_tool_outputs(
             msg.get("tool_name")
             or tool_name_by_id.get(msg.get("tool_call_id"), "")
         )
-        if tool_name in _PRUNE_PROTECTED_TOOLS:
+        if tool_name in protected_tools:
             continue
         content = msg.get("content") or ""
         if content.startswith(_PRUNE_STUB_PREFIX):
@@ -323,3 +324,112 @@ def prune_tool_outputs(
             )
     logger.info("Pruned %d tool outputs (~%d tokens) to free context budget", len(candidates), pruned)
     return result
+
+
+@dataclass(frozen=True)
+class PrunePolicy:
+    protect_tokens: int = 40_000
+    minimum_tokens: int = 20_000
+    tail_turns: int = 2
+    protected_tools: frozenset[str] = _PRUNE_PROTECTED_TOOLS
+    gate_tokens: int = 0
+    enabled: bool = True
+
+    @classmethod
+    def from_settings(cls, *, gate_tokens: int = 0) -> "PrunePolicy":
+        try:
+            from config import settings
+
+            protect = getattr(settings, "compaction_prune_protect_tokens", 40_000)
+            minimum = getattr(settings, "compaction_prune_minimum_tokens", 20_000)
+            enabled = bool(getattr(settings, "compaction_prune", True))
+        except Exception:  # noqa: BLE001 - settings are optional in unit seams
+            return cls(gate_tokens=gate_tokens)
+        return cls(
+            protect_tokens=40_000 if protect is None else int(protect),
+            minimum_tokens=20_000 if minimum is None else int(minimum),
+            gate_tokens=gate_tokens,
+            enabled=enabled,
+        )
+
+
+@dataclass
+class PruneResult:
+    messages: list[dict]
+    records: list[dict] = field(default_factory=list)
+    pruned_tokens: int = 0
+    applied: bool = False
+
+
+@dataclass
+class ToolOutputPruner:
+    session_id: str = ""
+    model_id: str = ""
+    persist: bool = True
+
+    def prune(
+        self,
+        messages: list[dict],
+        policy: PrunePolicy | None = None,
+    ) -> PruneResult:
+        policy = policy or PrunePolicy.from_settings()
+        if not policy.enabled or not messages:
+            return PruneResult(messages=messages)
+        if policy.gate_tokens > 0:
+            from cognition.context_meter import get_meter
+
+            estimated = get_meter().estimate(
+                messages, model_id=self.model_id, use_cache=True
+            ).total
+            if estimated < policy.gate_tokens:
+                return PruneResult(messages=messages)
+        records: list[dict] = []
+        pruned = prune_tool_outputs(
+            messages,
+            protect_tokens=max(0, int(policy.protect_tokens)),
+            minimum_tokens=max(0, int(policy.minimum_tokens)),
+            tail_turns=max(0, int(policy.tail_turns)),
+            records=records,
+            protected_tools=policy.protected_tools,
+        )
+        result = PruneResult(
+            messages=pruned,
+            records=records,
+            pruned_tokens=sum(int(r.get("tokens") or 0) for r in records),
+            applied=bool(records),
+        )
+        if result.applied and self.persist and self.session_id:
+            self._persist(messages, records)
+        return result
+
+    def _persist(self, messages: list[dict], records: list[dict]) -> None:
+        try:
+            from app.session import repository
+        except Exception:  # noqa: BLE001 - offline/unit seams have no session DB
+            return
+        for record in records:
+            index = int(record.get("index") or 0)
+            if index >= len(messages):
+                continue
+            message = messages[index]
+            message_id = message.get("_id") if isinstance(message, dict) else None
+            if not message_id:
+                continue
+            try:
+                repository.mark_tool_pruned(
+                    self.session_id,
+                    str(message_id),
+                    str(record.get("path") or ""),
+                    int(record.get("tokens") or 0),
+                )
+            except Exception:  # noqa: BLE001 - metadata write is best-effort
+                logger.warning("persist prune metadata failed", exc_info=True)
+
+
+__all__ = [
+    "PrunePolicy",
+    "PruneResult",
+    "ToolOutputPruner",
+    "prune_stub",
+    "prune_tool_outputs",
+]

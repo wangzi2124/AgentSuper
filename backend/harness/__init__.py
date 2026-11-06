@@ -26,6 +26,7 @@ from .compression import (
     summarize_messages,
     tail_snapshot,
 )
+from .compression_agent import CompressionAgent
 from .context import assemble_model_view
 from .contracts import EventEnvelope, ModelProfileSnapshot, TurnContext, TurnResult
 from .errors import (
@@ -81,6 +82,7 @@ __all__ = [
     "BudgetExceededError",
     "BudgetLedger",
     "CompactionPolicy",
+    "CompressionAgent",
     "CompressionError",
     "CompressionPlan",
     "CompressionResult",

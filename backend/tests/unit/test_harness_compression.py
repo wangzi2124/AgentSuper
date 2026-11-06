@@ -8,9 +8,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 import harness.compression as compression
 from harness.compression import (
+    CompactionPolicy,
     CompressionError,
     CompressionPlan,
-    compress_graph_messages,
+    ContextCompactor,
     compress_messages,
     parse_buffer,
     select_tail_messages,
@@ -120,10 +121,11 @@ async def test_graph_compress_gate_true_uses_model_and_increments_count(monkeypa
     ]
     model = _FakeModel("graph summary")
 
-    out = await compress_graph_messages(
+    out = await compress_messages(
         messages,
         existing_summary="old",
         model=model,
+        threshold=0,
         compress_count=2,
         keep_recent=2,
     )
@@ -143,10 +145,12 @@ async def test_graph_compress_gate_false_backfills_without_model(monkeypatch):
         AIMessage(content="done", id="m2"),
         HumanMessage(content="tail", id="m3"),
     ]
-    out = await compress_graph_messages(
+    out = await compress_messages(
         messages,
         existing_summary="old",
         model=None,
+        threshold=0,
+        keep_tokens=0,
         compress_count=1,
         keep_recent=1,
     )
@@ -242,10 +246,44 @@ async def test_graph_compress_turn_mode_and_noop():
         HumanMessage(content="a /work/app.py", id="m1"),
         AIMessage(content="b", id="m2"),
     ]
-    out = await compress_graph_messages(
-        messages, keep_tokens=1, keep_recent=1, model=None
+    out = await compress_messages(
+        messages, threshold=0, keep_tokens=1, keep_recent=1, model=None
     )
     assert out.triggered is True
 
-    no_op = await compress_graph_messages([AIMessage(content="x")], keep_recent=1)
+    no_op = await compress_messages(
+        [AIMessage(content="x")], threshold=0, keep_tokens=0, keep_recent=1
+    )
     assert no_op.triggered is False
+
+
+def test_auto_policy_disables_second_gate_and_sizes_legacy_tail():
+    legacy = CompactionPolicy.for_auto(
+        usable=10_000, keep_recent=6, keep_tokens=0, legacy=True
+    )
+    assert legacy.threshold == 0
+    assert legacy.keep_tokens == 0
+    assert legacy.min_gain_tokens == 0
+    assert legacy.keep_recent == 6
+
+    turn_based = CompactionPolicy.for_auto(
+        usable=10_000, keep_recent=0, keep_tokens=0, legacy=False
+    )
+    assert turn_based.threshold == 0
+    assert turn_based.keep_tokens == 2_500
+    assert turn_based.min_gain_tokens == 1_024
+    assert turn_based.keep_recent == 0
+
+
+@pytest.mark.asyncio
+async def test_compactor_auto_legacy_keeps_recent_messages():
+    messages = [HumanMessage(content=f"m{i}", id=f"m{i}") for i in range(4)]
+    out = await ContextCompactor().compress(
+        messages,
+        policy=CompactionPolicy.for_auto(
+            usable=10_000, keep_recent=2, legacy=True
+        ),
+    )
+    assert out.triggered is True
+    assert out.recent == messages[-2:]
+    assert out.compress_count == 0

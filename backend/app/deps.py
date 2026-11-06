@@ -998,7 +998,8 @@ class PlatformContext:
 
         staged_attachments = stage_attachments(files, sess.directory if sess else None)
         await self.ensure_conversation(session_id)
-        history = self.rebuild_history(session_id)
+        view = self.rebuild_context_view(session_id)
+        history = view.messages if view is not None else None
         from .session.projector import project_user_message
 
         user_msg_id = message_id or f"um_{uuid.uuid4().hex[:12]}"
@@ -1013,8 +1014,8 @@ class PlatformContext:
                     message_id=user_msg_id,
                     staged_attachments=staged_attachments,
                     history_messages=history,
-                    context_summary=binding.get("summary", ""),
-                    context_tail_start_id=binding.get("tail_start_id"),
+                    context_summary=(view.summary if view is not None else "") or binding.get("summary", ""),
+                    context_tail_start_id=(view.tail_start_id if view is not None else None) or binding.get("tail_start_id"),
                     context_bound=binding.get("active", False),
                     context_window_override=binding.get("context_window", 0),
                     compress_threshold_override=binding.get("compress_threshold", 0),
@@ -1080,7 +1081,8 @@ class PlatformContext:
 
         staged_attachments = stage_attachments(files, sess.directory if sess else None)
         await self.ensure_conversation(session_id)
-        history = self.rebuild_history(session_id)
+        view = self.rebuild_context_view(session_id)
+        history = view.messages if view is not None else None
         from .session.projector import project_user_message
 
         user_msg_id = f"um_{uuid.uuid4().hex[:12]}"
@@ -1092,8 +1094,8 @@ class PlatformContext:
             staged_attachments=staged_attachments,
             history_messages=history,
             message_id=user_msg_id,
-            context_summary=binding.get("summary", ""),
-            context_tail_start_id=binding.get("tail_start_id"),
+            context_summary=(view.summary if view is not None else "") or binding.get("summary", ""),
+            context_tail_start_id=(view.tail_start_id if view is not None else None) or binding.get("tail_start_id"),
             context_bound=binding.get("active", False),
             context_window_override=binding.get("context_window", 0),
             compress_threshold_override=binding.get("compress_threshold", 0),
@@ -1214,8 +1216,8 @@ class PlatformContext:
         except Exception:  # noqa: BLE001 - 修复失败不阻断本轮
             logger.debug("compaction repair skipped for %s", session_id, exc_info=True)
 
-    def rebuild_history(self, session_id: str) -> list[Any]:
-        """从 session.db 重建历史模型视图（压缩水位已应用）。"""
+    def rebuild_context_view(self, session_id: str) -> Any | None:
+        """Rebuild the model view (summary + tail) from session.db in one pass."""
         from .session import repository as _repo
         from .session.compaction import CompactionCheckpoint
 
@@ -1229,7 +1231,7 @@ class PlatformContext:
             return None
         return CompactionCheckpoint.rebuild_view(
             session_id, hidden_ids=hidden, baseline=baseline
-        ).messages
+        )
 
     def messages(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         msgs = state.get("messages") if isinstance(state, dict) else None

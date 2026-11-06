@@ -150,16 +150,6 @@ class SessionService:
         self._authorized(user_id, session_id)
         return repository.list_messages(session_id, after_seq=after_seq, limit=limit)
 
-    def context(self, user_id: str, session_id: str) -> dict[str, Any]:
-        """模型视角上下文：epoch + 过滤后的历史（对齐 SessionRunner 的历史装载）。"""
-        self._authorized(user_id, session_id)
-        load = session_history.load(session_id)
-        return {
-            "session_id": session_id,
-            "epoch": load.epoch.model_dump() if load.epoch else None,
-            "history": [m.model_dump() for m in load.messages],
-        }
-
     def initialize_context(self, session_id: str, baseline: str, snapshot: dict) -> ContextEpoch:
         return session_history.initialize_epoch(session_id, baseline, snapshot)
 

@@ -14,6 +14,14 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from cognition.context_budget import (
+    MIN_PRESERVE_TOKENS,
+    ContextBudget,
+    min_gain_budget,
+    normalized_output,
+    preserve_recent_budget,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_KEEP_TOKENS = 15_000
@@ -22,12 +30,6 @@ DEFAULT_BUFFER_MIN = 16_000
 # 对齐 opencode compaction.ts:DEFAULT_TAIL_TURNS = 2。
 # <=0 表示「不保留 tail」（整段历史进入摘要），不再表示「不限轮数」。
 DEFAULT_TAIL_TURNS = 2
-
-# opencode overflow.ts: reserved = min(COMPACTION_BUFFER, maxOutputTokens)
-COMPACTION_BUFFER = 20_000
-MIN_USABLE_TOKENS = 2_048
-MIN_PRESERVE_TOKENS = 2_000
-MAX_PRESERVE_TOKENS = 8_000
 
 
 class CompressionError(RuntimeError):
@@ -86,15 +88,8 @@ def _keep_default(keep_tokens: int | None = None) -> int:
 
 
 def _normalized_output(window: int, max_output_tokens: int) -> int:
-    """Model output budget; rejects Ollama's "max_output == context" report.
-
-    opencode uses the provider's real max output.  Some local catalogs report
-    ``max_output_tokens == context_length``, which would reserve the entire
-    window and collapse ``usable``.  In that case fall back to a sane share.
-    """
-    if 0 < int(max_output_tokens) < int(window):
-        return int(max_output_tokens)
-    return min(8_192, max(2_048, int(window) // 4))
+    """Compatibility wrapper around ``cognition.context_budget``."""
+    return normalized_output(window, max_output_tokens)
 
 
 def _explicit_reserved() -> int:
@@ -114,11 +109,8 @@ def _explicit_reserved() -> int:
 
 
 def _preserve_default(usable: int) -> int:
-    """opencode preserveRecentBudget: clamp(25% × usable, 2k, 8k)."""
-    return min(
-        MAX_PRESERVE_TOKENS,
-        max(MIN_PRESERVE_TOKENS, int(max(0, usable) * 0.25)),
-    )
+    """Compatibility wrapper around ``cognition.context_budget``."""
+    return preserve_recent_budget(usable)
 
 
 def _min_gain_default(usable: int) -> int:
@@ -131,7 +123,7 @@ def _min_gain_default(usable: int) -> int:
         configured = 0
     if configured > 0:
         return configured
-    return max(1_024, int(max(0, usable) * 0.05))
+    return min_gain_budget(usable)
 
 
 def _segment_budget(model: Any | None) -> int:
@@ -150,10 +142,7 @@ def _segment_budget(model: Any | None) -> int:
         if window <= 0:
             return 8_000
         output = int(read_limits(model_id).get("max_output_tokens") or 0)
-        usable = max(
-            MIN_USABLE_TOKENS,
-            window - min(COMPACTION_BUFFER, _normalized_output(window, output)),
-        )
+        usable = ContextBudget.plan(window, max_output_tokens=output).usable
         return max(4_000, int(usable * 0.8))
     except Exception:  # noqa: BLE001
         return 8_000
@@ -193,16 +182,17 @@ class CompressionPlan:
                 _min_gain_default(usable),
             )
         output = _normalized_output(int(window), max_output_tokens)
-        reserved_tokens = (
-            int(reserved or 0)
-            or _explicit_reserved()
-            or min(COMPACTION_BUFFER, output)
+        reserved_tokens = int(reserved or 0) or _explicit_reserved()
+        budget = ContextBudget.plan(
+            int(window),
+            max_output_tokens=output,
+            reserved=reserved_tokens,
         )
-        usable = max(MIN_USABLE_TOKENS, int(window) - int(reserved_tokens))
+        usable = budget.usable
         keep = (
             int(preserve_recent_tokens or 0)
             or _keep_default(None)
-            or _preserve_default(usable)
+            or budget.preserve_recent
         )
         keep = max(MIN_PRESERVE_TOKENS, min(int(keep), usable))
         return cls(
@@ -369,8 +359,9 @@ async def summarize_messages(
     prepared tail still comes from ``messages``. ``full_messages`` is only used
     to build the prompt text; the deterministic fallback keeps using ``messages``.
     """
-    from cognition.compressor import build_compress_prompt, serialize_messages
+    from cognition.compressor import serialize_messages
     from cognition.token_counter import estimate_tokens
+    from .compression_agent import CompressionAgent
 
     msgs = [m for m in messages if not _is_summary_message(m)]
     if not msgs:
@@ -402,14 +393,14 @@ async def summarize_messages(
         if current:
             chunks.append(current)
 
+    agent = CompressionAgent(model)
     summary = existing_summary
     try:
         for chunk in chunks:
-            prompt = build_compress_prompt(
+            text = await agent.summarize(
                 summary, serialize_messages(chunk, strip_media=True)
             )
-            result = await model.ainvoke([{"role": "user", "content": prompt}])
-            summary = str(getattr(result, "content", "") or "").strip() or summary
+            summary = text or summary
     except Exception as exc:  # noqa: BLE001
         if raise_on_error:
             raise CompressionError(f"摘要生成失败：{exc}") from exc
@@ -425,16 +416,23 @@ async def compress_messages(
     *,
     existing_summary: str = "",
     model: Any | None = None,
-    threshold: int = 80_000,
+    threshold: int | None = 80_000,
     keep_tokens: int = DEFAULT_KEEP_TOKENS,
     tail_turns: int | None = None,
+    keep_recent: int | None = None,
+    compress_count: int = 0,
     segment_tokens: int = 0,
     require_precision: bool = False,
     raise_on_error: bool = False,
     require_llm: bool = False,
     min_gain_tokens: int = 0,
 ) -> CompressionResult:
-    """Compress a history (switch/manual path) with turn-based tail selection."""
+    """Compress a history through the single canonical seam.
+
+    ``threshold=None`` disables the pre-gate (callers that already decided to
+    compress, e.g. the graph auto node, pass ``0``); ``keep_recent`` selects the
+    legacy message-count tail and is only used when ``keep_tokens <= 0``.
+    """
     from cognition.compressor import (
         build_fallback_summary,
         enforce_precision,
@@ -444,17 +442,24 @@ async def compress_messages(
 
     msgs = [m for m in messages if not _is_summary_message(m)]
     total = estimate_messages(msgs)
-    if total <= threshold:
+    gate = int(threshold) if threshold is not None else None
+    if gate is not None and total <= gate:
         return CompressionResult(
             summary=existing_summary,
             recent=msgs,
             triggered=False,
             tokens=total,
-            threshold=threshold,
+            threshold=gate,
             keep_tokens=keep_tokens,
+            compress_count=compress_count,
         )
 
-    older, recent = select_tail_messages(msgs, keep_tokens, _tail_turns_default(tail_turns))
+    if keep_recent is not None and keep_recent > 0 and keep_tokens <= 0:
+        older, recent = msgs[:-keep_recent], msgs[-keep_recent:]
+    else:
+        older, recent = select_tail_messages(
+            msgs, keep_tokens, _tail_turns_default(tail_turns)
+        )
     older_tokens = estimate_messages(older)
     if not older or (min_gain_tokens > 0 and older_tokens < min_gain_tokens):
         return CompressionResult(
@@ -462,10 +467,12 @@ async def compress_messages(
             recent=msgs,
             triggered=False,
             tokens=total,
-            threshold=threshold,
+            threshold=int(gate or 0),
             keep_tokens=keep_tokens,
+            compress_count=compress_count,
         )
 
+    count = int(compress_count or 0)
     summary = existing_summary
     use_llm = require_llm or model is not None
     if use_llm:
@@ -477,6 +484,7 @@ async def compress_messages(
             raise_on_error=raise_on_error,
             full_messages=msgs,
         )
+        count += 1
     if not str(summary or "").strip():
         summary = build_fallback_summary(older, existing_summary)
 
@@ -492,79 +500,17 @@ async def compress_messages(
         recent=recent,
         triggered=True,
         tokens=total,
-        threshold=threshold,
+        threshold=int(gate or 0),
         keep_tokens=keep_tokens,
         tail_start_id=tail_start_id(recent),
         missing_precision=missing,
-    )
-
-
-async def compress_graph_messages(
-    messages: Sequence[Any],
-    *,
-    existing_summary: str = "",
-    model: Any | None = None,
-    compress_count: int = 0,
-    keep_recent: int = 6,
-    keep_tokens: int = 0,
-    tail_turns: int | None = None,
-    segment_tokens: int = 0,
-    require_llm: bool = False,
-    min_gain_tokens: int = 0,
-) -> CompressionResult:
-    """Graph-node compression with turn-based tail + deterministic fallback."""
-    from cognition.compressor import (
-        build_fallback_summary,
-        enforce_precision,
-    )
-
-    msgs = [m for m in messages if not _is_summary_message(m)]
-    total = estimate_messages(msgs)
-    if keep_tokens > 0 or tail_turns is not None or keep_recent <= 0:
-        older, recent = select_tail_messages(
-            msgs, _keep_default(keep_tokens), _tail_turns_default(tail_turns)
-        )
-    else:
-        older, recent = msgs[:-keep_recent], msgs[-keep_recent:]
-    older_tokens = estimate_messages(older)
-    if not older or (min_gain_tokens > 0 and older_tokens < min_gain_tokens):
-        return CompressionResult(
-            summary=existing_summary,
-            recent=msgs,
-            triggered=False,
-            tokens=total,
-            compress_count=compress_count,
-        )
-
-    count = int(compress_count or 0)
-    summary = existing_summary
-    use_llm = require_llm or model is not None
-    if use_llm:
-        summary = await summarize_messages(
-            older,
-            existing_summary,
-            model,
-            segment_tokens=segment_tokens,
-            full_messages=msgs,
-        )
-        count += 1
-    if not str(summary or "").strip():
-        summary = build_fallback_summary(older, existing_summary)
-    summary = enforce_precision(summary, older)
-    return CompressionResult(
-        summary=summary,
-        recent=recent,
-        triggered=True,
-        tokens=total,
-        keep_tokens=keep_tokens,
-        tail_start_id=tail_start_id(recent),
         compress_count=count,
     )
 
 
 @dataclass(frozen=True)
 class CompactionPolicy:
-    """Adapter-specific knobs; everything else comes from ``CompactionPlan``."""
+    """Adapter-specific knobs; everything else comes from ``CompressionPlan``."""
 
     reason: str = "auto"
     threshold: int | None = None
@@ -575,14 +521,46 @@ class CompactionPolicy:
     require_llm: bool = False
     require_precision: bool = False
     raise_on_error: bool = False
+    keep_recent: int | None = None
+    compress_count: int = 0
+
+    @classmethod
+    def for_auto(
+        cls,
+        *,
+        usable: int,
+        keep_recent: int,
+        keep_tokens: int = 0,
+        legacy: bool = False,
+        compress_count: int = 0,
+        segment_tokens: int = 0,
+    ) -> "CompactionPolicy":
+        """Build the graph auto policy.
+
+        ``usable`` only sizes the tail and min-gain budgets; the router already
+        decided to compress, so ``threshold=0`` disables a second gate.
+        """
+        resolved_keep = (
+            0
+            if legacy
+            else (int(keep_tokens) if keep_tokens > 0 else _preserve_default(usable))
+        )
+        return cls(
+            reason="auto",
+            threshold=0,
+            keep_tokens=resolved_keep,
+            min_gain_tokens=0 if legacy else _min_gain_default(usable),
+            keep_recent=keep_recent,
+            compress_count=compress_count,
+            segment_tokens=segment_tokens,
+        )
 
 
 class ContextCompactor:
-    """Public compression seam for manual / switch / overflow adapters.
+    """Public compression seam for auto / manual / switch / overflow adapters.
 
-    The graph node has one extra legacy knob (``keep_recent``) and uses
-    ``compress_graph_messages`` internally; every other caller goes through
-    ``plan`` + ``compress``.
+    Every caller resolves a ``CompactionPolicy`` (or injects one) and goes
+    through ``plan`` + ``compress``; there is no second compression entry.
     """
 
     def plan(
@@ -638,6 +616,8 @@ class ContextCompactor:
             threshold=threshold,
             keep_tokens=keep_tokens,
             tail_turns=tail_turns,
+            keep_recent=policy.keep_recent,
+            compress_count=policy.compress_count,
             segment_tokens=policy.segment_tokens,
             require_precision=policy.require_precision,
             raise_on_error=policy.raise_on_error,
@@ -652,7 +632,6 @@ __all__ = [
     "CompressionPlan",
     "CompressionResult",
     "ContextCompactor",
-    "compress_graph_messages",
     "compress_messages",
     "estimate_messages",
     "select_tail_messages",
