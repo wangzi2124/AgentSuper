@@ -272,3 +272,91 @@ def test_probe_ollama_type_provider_uses_tags_with_bearer(monkeypatch):
     assert extras[0]["id"] == "cloud-test/gemma4:31b"
     assert extras[0]["context_length"] == 131072
     assert extras[0]["capabilities"]["tool_use"] is True
+
+
+def test_probe_ollama_type_provider_uses_show_for_missing_tools(monkeypatch):
+    import json as _json
+    import urllib.request as _urlreq
+
+    seen: list[str] = []
+
+    class _Resp:
+        def __init__(self, body: dict) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return _json.dumps(self.body).encode("utf-8")
+
+    def fake_urlopen(req, timeout=0):
+        seen.append(req.full_url)
+        if req.full_url.endswith("/api/tags"):
+            return _Resp(
+                {
+                    "models": [
+                        {
+                            "name": "deepseek-r1:7b",
+                            "details": {"context_length": 131072},
+                            "capabilities": ["completion", "thinking"],
+                        }
+                    ]
+                }
+            )
+        return _Resp(
+            {
+                "capabilities": ["completion", "thinking", "tools"],
+                "model_info": {"qwen2.context_length": 131072},
+            }
+        )
+
+    monkeypatch.setattr(catalog, "local_endpoint_alive", lambda _base: True)
+    monkeypatch.setattr(_urlreq, "urlopen", fake_urlopen)
+    catalog._probe_cache.pop("ollama:cloud-show", None)
+
+    extras = catalog.probe_ollama_provider_models(
+        "cloud-show", "https://ollama.com", "secret", set(), force=True
+    )
+
+    assert "https://ollama.com/api/tags" in seen
+    assert "https://ollama.com/api/show" in seen
+    assert extras[0]["capabilities"]["tool_use"] is True
+    assert extras[0]["capabilities"]["reasoning"] is True
+    assert extras[0]["context_length"] == 131072
+
+
+def test_show_model_details_resolves_local_and_ollama_provider(monkeypatch):
+    calls: list[tuple[str, str, dict]] = []
+
+    def fake_show(base, model, *, headers=None, timeout=3.0):
+        calls.append((base, model, dict(headers or {})))
+        return {
+            "capabilities": {"tool_use": True, "vision": False, "reasoning": True},
+            "context_length": 131072,
+        }
+
+    monkeypatch.setattr(catalog, "_ollama_show_meta", fake_show)
+    monkeypatch.setattr(
+        catalog,
+        "read_providers",
+        lambda: {
+            "ollama-local": {
+                "type": "ollama",
+                "api_base": "http://localhost:11434",
+                "api_key": "secret",
+            }
+        },
+    )
+
+    local = catalog.show_model_details("ollama_chat/deepseek-r1:latest")
+    assert local["capabilities"]["tool_use"] is True
+    assert local["context_length"] == 131072
+
+    provider = catalog.show_model_details("ollama-local/deepseek-r1:7b")
+    assert provider["provider"] == "ollama-local"
+    assert calls[-1] == ("http://localhost:11434", "deepseek-r1:7b", {"Authorization": "Bearer secret"})
+    assert catalog.show_model_details("openai/gpt-4o") is None

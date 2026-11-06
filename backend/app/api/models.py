@@ -56,6 +56,15 @@ async def get_models_config():
     })
 
 
+@router.get("/models/show", dependencies=[Depends(require_admin)])
+async def show_model(model_id: str):
+    """编辑模型时从 Ollama ``POST /api/show`` 读取真实能力/窗口。"""
+    details = catalog.show_model_details(model_id)
+    if details is None:
+        return fail(message=f"无法从 Ollama /api/show 获取模型信息：{model_id}")
+    return ok(details)
+
+
 @router.post("/models/estimate-tokens")
 async def estimate_tokens(req: Request):
     """按官方 tokenizer 估算 token：{text?: str} 或 {messages: [...]}。"""

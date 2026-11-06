@@ -266,6 +266,86 @@ def _ollama_tags_url(api_base: Optional[str]) -> str:
     return f"{base}/api/tags" if base else ""
 
 
+def _capabilities_from(raw_caps: Any) -> Optional[dict[str, bool]]:
+    caps = set(raw_caps or [])
+    if not caps:
+        return None
+    return {
+        "tool_use": "tools" in caps,
+        "vision": "vision" in caps,
+        "reasoning": "thinking" in caps,
+    }
+
+
+def _show_context_length(show: dict[str, Any]) -> int:
+    info = show.get("model_info") or {}
+    for key, value in info.items():
+        if str(key).endswith(".context_length"):
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                continue
+    details = show.get("details") or {}
+    try:
+        return int(details.get("context_length") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ollama_show_meta(
+    base: str,
+    model: str,
+    *,
+    headers: Optional[dict[str, str]] = None,
+    timeout: float = 3.0,
+) -> Optional[dict[str, Any]]:
+    """Read authoritative capabilities from Ollama ``POST /api/show``."""
+    if not base or not model:
+        return None
+    import urllib.request
+
+    req_headers = {"User-Agent": "agentsuper/0.1", "Content-Type": "application/json"}
+    req_headers.update(headers or {})
+    try:
+        req = urllib.request.Request(
+            f"{base.rstrip('/')}/api/show",
+            data=json.dumps({"model": model}).encode("utf-8"),
+            headers=req_headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            show = json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 - old Ollama may not implement /api/show
+        return None
+    return {
+        "capabilities": _capabilities_from(show.get("capabilities")),
+        "context_length": _show_context_length(show),
+    }
+
+
+def show_model_details(model_id: str) -> Optional[dict[str, Any]]:
+    """Return Ollama ``/api/show`` details for a local or provider model."""
+    mid = str(model_id or "").strip()
+    if not mid:
+        return None
+    if is_ollama_model(mid):
+        base = _ollama_base_url()
+        model = get_ollama_model_name(mid)
+        headers: dict[str, str] = {}
+    else:
+        provider, sep, model = mid.partition("/")
+        reg = read_providers().get(provider) if sep else None
+        if not sep or not reg or _provider_type(reg) != "ollama":
+            return None
+        base = _ollama_native_base(reg.get("api_base"))
+        key = str(reg.get("api_key") or "").strip()
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+    meta = _ollama_show_meta(base, model, headers=headers)
+    if meta is None:
+        return None
+    return {"id": mid, "provider": mid.split("/", 1)[0], **meta}
+
+
 def _provider_type(reg: Optional[dict[str, Any]]) -> str:
     value = str((reg or {}).get("type") or "openai").strip().lower()
     return "ollama" if value == "ollama" else "openai"
@@ -375,18 +455,21 @@ def probe_ollama_models(known_ids: set[str], force: bool = False) -> list[dict[s
                 # 映射为本系统能力键：tools→tool_use、thinking→reasoning。老版 ollama 无该字段
                 # → None（未知）：未收录模型按默认关；已收录条目保留内置声明，不据此误降级。
                 raw_caps = set(m.get("capabilities") or [])
-                capabilities = {
-                    "tool_use": "tools" in raw_caps,
-                    "vision": "vision" in raw_caps,
-                    "reasoning": "thinking" in raw_caps,
-                } if raw_caps else None
-                # [真实窗口] 新版 ollama /api/tags 在 details.context_length 给出模型原生
-                # 窗口（如 qwen3.5:4b=262144）。老版本缺失 → 回退 32768/8192 保守值。
+                capabilities = _capabilities_from(raw_caps)
+                # [真实窗口] 新版 ollama /api/tags 的 details.context_length 给出模型原生
+                # 窗口（如 qwen3.5:4b=262144）。老版本缺失 -> 回退 32768/8192 保守值。
                 details = m.get("details") or {}
                 try:
                     native_ctx = int(details.get("context_length") or 0)
                 except (TypeError, ValueError):
                     native_ctx = 0
+                if not capabilities or not capabilities.get("tool_use"):
+                    shown = _ollama_show_meta(_ollama_base_url(), name)
+                    if shown:
+                        if shown.get("capabilities"):
+                            capabilities = shown["capabilities"]
+                        if native_ctx <= 0 and shown.get("context_length"):
+                            native_ctx = int(shown["context_length"])
                 context_length = native_ctx if native_ctx > 0 else 32768
                 # 已收录的内置/覆盖条目：不改条目结构，只记录真实能力/窗口，
                 # 交由 `_apply_ollama_native` 刷新过期的内置默认值（用户 override 优先）。
@@ -898,6 +981,7 @@ def probe_ollama_provider_models(provider_name: str, api_base: str, api_key: str
         _probe_cache[cache_key] = (now, [], set())
         _set_provider_seen(provider_name, set())
         return []
+    base = _ollama_native_base(api_base)
     if not local_endpoint_alive(_ollama_native_base(api_base)):
         _probe_cache[cache_key] = (now, [], set())
         _set_provider_seen(provider_name, set())
@@ -922,16 +1006,19 @@ def probe_ollama_provider_models(provider_name: str, api_base: str, api_key: str
                 continue
             family = name.split(":", 1)[0]
             raw_caps = set(m.get("capabilities") or [])
-            capabilities = {
-                "tool_use": "tools" in raw_caps,
-                "vision": "vision" in raw_caps,
-                "reasoning": "thinking" in raw_caps,
-            } if raw_caps else {"tool_use": True, "vision": False, "reasoning": False}
+            capabilities = _capabilities_from(raw_caps)
             details = m.get("details") or {}
             try:
                 native_ctx = int(details.get("context_length") or 0)
             except (TypeError, ValueError):
                 native_ctx = 0
+            if not capabilities or not capabilities.get("tool_use"):
+                shown = _ollama_show_meta(base, name, headers=headers)
+                if shown:
+                    if shown.get("capabilities"):
+                        capabilities = shown["capabilities"]
+                    if native_ctx <= 0 and shown.get("context_length"):
+                        native_ctx = int(shown["context_length"])
             context_length = native_ctx if native_ctx > 0 else 32768
             extras.append({
                 "id": full,

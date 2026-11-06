@@ -91,8 +91,23 @@ export interface TokenEstimate {
   method: string
 }
 
+export interface ModelShowDetails {
+  id: string
+  provider: string
+  capabilities: ModelCapabilities | null
+  context_length: number
+}
+
 export async function fetchModelsConfig(): Promise<ModelManagerConfig> {
   return apiRequest<ModelManagerConfig>('/api/models/config', { method: 'GET' }, true)
+}
+
+export async function fetchModelShow(modelId: string): Promise<ModelShowDetails> {
+  return apiRequest<ModelShowDetails>(
+    `/api/models/show?model_id=${encodeURIComponent(modelId)}`,
+    { method: 'GET' },
+    true,
+  )
 }
 
 // 按 DeepSeek V4 官方 tokenizer 估算 token（text 或 messages 二选一）

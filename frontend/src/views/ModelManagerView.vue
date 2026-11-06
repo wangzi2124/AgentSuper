@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useModelManagerStore } from '../stores/modelManager'
-import type { ModelInfo, ProviderInfo } from '../api/models'
+import { fetchModelShow, type ModelInfo, type ProviderInfo } from '../api/models'
 import { validateProviderForm } from '../utils/providerForm'
 import { managedModels } from '../utils/modelOrigin'
 
@@ -119,6 +119,8 @@ async function delProvider(p: ProviderInfo) {
 
 // ── 自定义模型编辑 ──
 const showModelForm = ref(false)
+const modelInspecting = ref(false)
+let modelInspectSeq = 0
 const modelForm = reactive<{
   id: string; name: string; provider: string; family: string; description: string;
   context_length: number; max_output_tokens: number;
@@ -160,11 +162,29 @@ watch(() => modelForm.id, (raw) => {
   applyModelForm(known)
 })
 
-function openModelForm(m?: ModelInfo) {
+async function openModelForm(m?: ModelInfo) {
   modelForm.id = m?.id || ''
   modelFormCatalogId.value = m?.id || ''
   applyModelForm(m)
   showModelForm.value = true
+  if (!m) return
+  const id = m.id
+  const seq = ++modelInspectSeq
+  modelInspecting.value = true
+  try {
+    const shown = await fetchModelShow(id)
+    if (seq !== modelInspectSeq || !showModelForm.value || modelForm.id.trim() !== id) return
+    if (shown.capabilities) {
+      modelForm.tool_use = shown.capabilities.tool_use
+      modelForm.vision = shown.capabilities.vision
+      modelForm.reasoning = shown.capabilities.reasoning
+    }
+    if (shown.context_length) modelForm.context_length = shown.context_length
+  } catch {
+    // 非 Ollama 模型没有 /api/show；保留目录里的编辑值。
+  } finally {
+    if (seq === modelInspectSeq) modelInspecting.value = false
+  }
 }
 
 async function submitModel() {
@@ -417,7 +437,10 @@ function capOf(m: ModelInfo) {
   <!-- 自定义模型编辑弹窗 -->
   <div v-if="showModelForm" class="overlay">
     <div class="dialog wide">
-      <div class="form-title">{{ modelForm.id.trim() && modelList.find(m => m.id === modelForm.id.trim()) ? '编辑模型' : '新增自定义模型' }}</div>
+      <div class="form-title">
+        {{ modelForm.id.trim() && modelList.find(m => m.id === modelForm.id.trim()) ? '编辑模型' : '新增自定义模型' }}
+        <span v-if="modelInspecting" class="hint">正在通过 Ollama /api/show 读取能力…</span>
+      </div>
       <div class="form-row">
         <label class="mm-field"><span>模型 ID（provider/model）</span>
           <input v-model="modelForm.id" class="ctrl" placeholder="ollama/qwen2.5-coder:latest" />
