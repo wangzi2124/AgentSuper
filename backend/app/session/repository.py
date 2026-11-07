@@ -66,8 +66,14 @@ def _row_to_session(row: sqlite3.Row) -> SessionInfo:
         tokens_reasoning=data["tokens_reasoning"],
         time_created=data["time_created"],
         time_updated=data["time_updated"],
+        time_busy=data.get("time_busy"),
+        time_idle=data.get("time_idle"),
+        time_viewed=data.get("time_viewed"),
         time_compacted=data["time_compacted"],
         time_archived=data["time_archived"],
+        outcome=data.get("outcome"),
+        metadata=json.loads(data.get("metadata") or "{}"),
+        revert_state=json.loads(data.get("revert_state") or "null"),
         hidden_ids=json.loads(data.get("hidden_ids") or "[]"),
         compact_baseline_seq=int(data.get("compact_baseline_seq") or 0),
     )
@@ -223,13 +229,17 @@ def list_sessions_by_status(status: str) -> list[SessionInfo]:
 def update_session(session_id: str, **fields: Any) -> SessionInfo:
     allowed = {"title", "archived", "agent", "model", "status", "cost", "directory",
                "tokens_input", "tokens_output", "tokens_cache_read", "tokens_cache_write",
-               "time_compacted", "time_archived", "hidden_ids", "compact_baseline_seq"}
+               "time_compacted", "time_archived", "hidden_ids", "compact_baseline_seq",
+               "outcome", "metadata", "revert_state", "time_busy", "time_idle",
+               "time_viewed"}
     sets, params = [], []
     for key, value in fields.items():
         if key not in allowed:
             continue
         if key == "model":
             value = _serialize_model(value)
+        if key in ("metadata", "revert_state") and not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False) if value is not None else None
         if key == "hidden_ids" and not isinstance(value, str):
             value = json.dumps(sorted(str(x) for x in value))
         if key == "archived":
@@ -251,6 +261,33 @@ def update_session(session_id: str, **fields: Any) -> SessionInfo:
     finally:
         conn.close()
     return require_session(session_id)
+
+
+def set_session_status(
+    session_id: str,
+    status: str,
+    *,
+    outcome: Optional[str] = None,
+    busy: Optional[int] = None,
+    idle: Optional[int] = None,
+) -> SessionInfo:
+    """更新会话状态与时间戳（v2 execution coordinator 用）。"""
+    fields: dict[str, Any] = {"status": status}
+    if outcome is not None or status == "idle":
+        fields["outcome"] = outcome
+    if busy is not None:
+        fields["time_busy"] = busy
+    if idle is not None:
+        fields["time_idle"] = idle
+    if status == "busy" and busy is None:
+        fields["time_busy"] = int(time.time() * 1000)
+    if status == "idle" and idle is None:
+        fields["time_idle"] = int(time.time() * 1000)
+    return update_session(session_id, **fields)
+
+
+def touch_session_viewed(session_id: str) -> SessionInfo:
+    return update_session(session_id, time_viewed=int(time.time() * 1000))
 
 
 def list_children(parent_id: str) -> list[SessionInfo]:
@@ -496,13 +533,14 @@ def upsert_message(
             (session_id, message_id),
         ).fetchone()
         if existing:
-            merged = dict(data)
             try:
                 old = json.loads(existing["data"] or "{}")
             except Exception:  # noqa: BLE001
                 old = {}
-            # Prune metadata is a projection-independent view transform; keep it
-            # when a later checkpoint projection rewrites the row.
+            # Keep projection-independent extras (voice/uploads/prune) when a
+            # later checkpoint projection rewrites the row.
+            merged = dict(old) if isinstance(old, dict) else {}
+            merged.update(data)
             if isinstance(old, dict) and isinstance(old.get("prune"), dict):
                 merged.setdefault("prune", old["prune"])
             conn.execute(
@@ -595,21 +633,40 @@ def compactions_after(session_id: str, seq: int) -> list[Message]:
         conn.close()
 
 
+def _part_from_row(row: sqlite3.Row) -> Part:
+    return Part(
+        id=row["id"],
+        session_id=row["session_id"],
+        message_id=row["message_id"],
+        type=row["type"],
+        ordinal=int(row["ordinal"] or 0),
+        data=json.loads(row["data"]),
+        time_created=int(row["time_created"]),
+        time_updated=row["time_updated"],
+    )
+
+
+def _next_part_ordinal(conn: Any, session_id: str, message_id: str) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(MAX(ordinal), -1) + 1 AS n FROM message_parts"
+        " WHERE session_id = ? AND message_id = ?",
+        (session_id, message_id),
+    ).fetchone()
+    return int(row["n"])
+
+
 def find_tool_part(session_id: str, message_id: str, tool_call_id: str) -> Optional[Part]:
     conn = _get_db()
     try:
         rows = conn.execute(
             "SELECT * FROM message_parts WHERE session_id = ? AND message_id = ?"
-            " AND type = 'tool' ORDER BY time_created, id",
+            " AND type = 'tool' ORDER BY ordinal, time_created, id",
             (session_id, message_id),
         ).fetchall()
         for r in rows:
             data = json.loads(r["data"])
             if str(data.get("tool_call_id") or "") == str(tool_call_id):
-                return Part(
-                    id=r["id"], session_id=r["session_id"], message_id=r["message_id"],
-                    type=r["type"], data=data, time_created=r["time_created"],
-                )
+                return _part_from_row(r)
         return None
     finally:
         conn.close()
@@ -640,15 +697,79 @@ def add_session_usage(session_id: str, input_tokens: int = 0, output_tokens: int
 def append_part(session_id: str, message_id: str, part_type: str, data: dict[str, Any]) -> Part:
     conn = _get_db()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         pid = new_id("prt_")
         now = int(time.time() * 1000)
+        ordinal = _next_part_ordinal(conn, session_id, message_id)
         conn.execute(
-            "INSERT INTO message_parts (id, session_id, message_id, type, data, time_created)"
-            " VALUES (?,?,?,?,?,?)",
-            (pid, session_id, message_id, part_type, json.dumps(data, ensure_ascii=False), now),
+            "INSERT INTO message_parts (id, session_id, message_id, type, ordinal, data, time_created, time_updated)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (pid, session_id, message_id, part_type, ordinal,
+             json.dumps(data, ensure_ascii=False), now, now),
         )
         conn.commit()
-        return Part(id=pid, session_id=session_id, message_id=message_id, type=part_type, data=data, time_created=now)
+        return Part(
+            id=pid, session_id=session_id, message_id=message_id, type=part_type,
+            ordinal=ordinal, data=data, time_created=now, time_updated=now,
+        )
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def upsert_part(
+    session_id: str,
+    message_id: str,
+    part_id: str,
+    part_type: str,
+    data: dict[str, Any],
+    *,
+    ordinal: Optional[int] = None,
+    time_created: Optional[int] = None,
+) -> Part:
+    """按稳定 part id 幂等写入（v2 projector 用）。"""
+    conn = _get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        now = int(time.time() * 1000)
+        row = conn.execute(
+            "SELECT * FROM message_parts WHERE session_id = ? AND id = ?",
+            (session_id, part_id),
+        ).fetchone()
+        if row is not None:
+            conn.execute(
+                "UPDATE message_parts SET type = ?, data = ?, time_updated = ?"
+                " WHERE session_id = ? AND id = ?",
+                (part_type, json.dumps(data, ensure_ascii=False), now, session_id, part_id),
+            )
+            conn.commit()
+            return Part(
+                id=row["id"], session_id=row["session_id"],
+                message_id=row["message_id"], type=part_type,
+                ordinal=int(row["ordinal"] or 0), data=data,
+                time_created=int(row["time_created"]), time_updated=now,
+            )
+        final_ordinal = (
+            int(ordinal) if ordinal is not None
+            else _next_part_ordinal(conn, session_id, message_id)
+        )
+        created = int(time_created) if time_created is not None else now
+        conn.execute(
+            "INSERT INTO message_parts (id, session_id, message_id, type, ordinal, data, time_created, time_updated)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (part_id, session_id, message_id, part_type, final_ordinal,
+             json.dumps(data, ensure_ascii=False), created, now),
+        )
+        conn.commit()
+        return Part(
+            id=part_id, session_id=session_id, message_id=message_id, type=part_type,
+            ordinal=final_ordinal, data=data, time_created=created, time_updated=now,
+        )
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -657,19 +778,17 @@ def list_parts(message_id: str) -> list[Part]:
     conn = _get_db()
     try:
         rows = conn.execute(
-            "SELECT * FROM message_parts WHERE message_id = ? ORDER BY time_created, id", (message_id,)
+            "SELECT * FROM message_parts WHERE message_id = ?"
+            " ORDER BY ordinal, time_created, id",
+            (message_id,),
         ).fetchall()
-        return [
-            Part(id=r["id"], session_id=r["session_id"], message_id=r["message_id"],
-                 type=r["type"], data=json.loads(r["data"]), time_created=r["time_created"])
-            for r in rows
-        ]
+        return [_part_from_row(r) for r in rows]
     finally:
         conn.close()
 
 
 def list_parts_for_messages(message_ids: list[str]) -> dict[str, list[Part]]:
-    """按消息批量加载 parts（保持每消息内 (time_created, id) 排序）。
+    """按消息批量加载 parts（保持每消息内 ordinal 排序）。
 
     分批查询：message_id 集合可能超过 SQLite 变量上限，按 _SQLITE_MAX_VARS 分片，
     避免长会话加载历史时报 too many SQL variables。
@@ -684,13 +803,11 @@ def list_parts_for_messages(message_ids: list[str]) -> dict[str, list[Part]]:
             placeholders = ",".join("?" * len(batch))
             rows = conn.execute(
                 f"SELECT * FROM message_parts WHERE message_id IN ({placeholders})"
-                " ORDER BY message_id, time_created, id",
+                " ORDER BY message_id, ordinal, time_created, id",
                 batch,
             ).fetchall()
             for r in rows:
-                p = Part(id=r["id"], session_id=r["session_id"], message_id=r["message_id"],
-                         type=r["type"], data=json.loads(r["data"]), time_created=r["time_created"])
-                out.setdefault(r["message_id"], []).append(p)
+                out.setdefault(r["message_id"], []).append(_part_from_row(r))
         return out
     finally:
         conn.close()
@@ -706,13 +823,17 @@ def update_part(session_id: str, part_id: str, data: dict[str, Any]) -> Optional
         ).fetchone()
         if not row:
             return None
+        now = int(time.time() * 1000)
         conn.execute(
-            "UPDATE message_parts SET data = ? WHERE session_id = ? AND id = ?",
-            (json.dumps(data, ensure_ascii=False), session_id, part_id),
+            "UPDATE message_parts SET data = ?, time_updated = ? WHERE session_id = ? AND id = ?",
+            (json.dumps(data, ensure_ascii=False), now, session_id, part_id),
         )
         conn.commit()
-        return Part(id=row["id"], session_id=row["session_id"], message_id=row["message_id"],
-                    type=row["type"], data=data, time_created=row["time_created"])
+        return Part(
+            id=row["id"], session_id=row["session_id"], message_id=row["message_id"],
+            type=row["type"], ordinal=int(row["ordinal"] or 0), data=data,
+            time_created=int(row["time_created"]), time_updated=now,
+        )
     finally:
         conn.close()
 
@@ -873,16 +994,17 @@ def admit_input(session_id: str, prompt: dict[str, Any], delivery: str = "steer"
         conn.execute("BEGIN IMMEDIATE")
         iid = input_id or new_id("in_")
         now = int(time.time() * 1000)
+        item_type = str(prompt.get("type") or "user")
         conn.execute(
-            "INSERT INTO session_inputs (id, session_id, prompt, delivery, admitted_seq, time_created)"
-            " VALUES (?,?,?,?,("
+            "INSERT INTO session_inputs (id, session_id, prompt, type, status, delivery, admitted_seq, time_created)"
+            " VALUES (?,?,?,?, 'pending', ?,("
             "  SELECT COALESCE(MAX(v), 0) + 1 FROM ("
             "    SELECT COALESCE(MAX(seq), 0) AS v FROM session_messages WHERE session_id = ?"
             "    UNION ALL"
             "    SELECT COALESCE(MAX(admitted_seq), 0) AS v FROM session_inputs WHERE session_id = ?"
             "  )"
             "),?)",
-            (iid, session_id, json.dumps(prompt, ensure_ascii=False), delivery,
+            (iid, session_id, json.dumps(prompt, ensure_ascii=False), item_type, delivery,
              session_id, session_id, now),
         )
         conn.commit()
@@ -896,18 +1018,26 @@ def promote_next(session_id: str) -> Optional[dict[str, Any]]:
     conn = _get_db()
     try:
         row = conn.execute(
-            "SELECT * FROM session_inputs WHERE session_id = ? AND promoted_seq IS NULL"
+            "SELECT * FROM session_inputs WHERE session_id = ? AND status = 'pending'"
             " ORDER BY (delivery = 'steer') DESC, admitted_seq ASC LIMIT 1",
             (session_id,),
         ).fetchone()
         if not row:
             return None
+        now = int(time.time() * 1000)
         conn.execute(
-            "UPDATE session_inputs SET promoted_seq = ? WHERE session_id = ? AND id = ?",
-            (row["admitted_seq"], session_id, row["id"]),
+            "UPDATE session_inputs SET promoted_seq = ?, status = 'delivered', time_delivered = ?"
+            " WHERE session_id = ? AND id = ?",
+            (row["admitted_seq"], now, session_id, row["id"]),
         )
         conn.commit()
-        return {"id": row["id"], "prompt": json.loads(row["prompt"]), "delivery": row["delivery"]}
+        return {
+            "id": row["id"],
+            "prompt": json.loads(row["prompt"]),
+            "delivery": row["delivery"],
+            "type": row["type"],
+            "status": "delivered",
+        }
     finally:
         conn.close()
 
@@ -923,7 +1053,7 @@ def promote_newest(session_id: str) -> Optional[dict[str, Any]]:
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT * FROM session_inputs WHERE session_id = ? AND promoted_seq IS NULL"
+            "SELECT * FROM session_inputs WHERE session_id = ? AND status = 'pending'"
             " ORDER BY (delivery = 'steer') DESC, admitted_seq DESC LIMIT 1",
             (session_id,),
         ).fetchone()
@@ -937,6 +1067,8 @@ def promote_newest(session_id: str) -> Optional[dict[str, Any]]:
             "id": row["id"],
             "prompt": json.loads(row["prompt"]),
             "delivery": row["delivery"],
+            "type": row["type"],
+            "status": "delivered",
             "enqueued_at": int(row["time_created"]),
         }
     finally:
@@ -948,8 +1080,8 @@ def list_inputs(session_id: str, limit: int = 50) -> list[dict[str, Any]]:
     conn = _get_db()
     try:
         rows = conn.execute(
-            "SELECT id, prompt, delivery, admitted_seq, time_created FROM session_inputs"
-            " WHERE session_id = ? AND promoted_seq IS NULL"
+            "SELECT id, prompt, delivery, type, status, admitted_seq, time_created FROM session_inputs"
+            " WHERE session_id = ? AND status = 'pending'"
             " ORDER BY (delivery = 'steer') DESC, admitted_seq DESC LIMIT ?",
             (session_id, int(limit)),
         ).fetchall()
@@ -958,6 +1090,8 @@ def list_inputs(session_id: str, limit: int = 50) -> list[dict[str, Any]]:
                 "id": r["id"],
                 "prompt": json.loads(r["prompt"]),
                 "delivery": r["delivery"],
+                "type": r["type"],
+                "status": r["status"],
                 "enqueued_at": int(r["time_created"]),
             }
             for r in rows
@@ -978,10 +1112,95 @@ def remove_input(session_id: str, input_id: str) -> bool:
         conn.close()
 
 
+def cancel_input(session_id: str, input_id: str) -> bool:
+    """v2：取消 inbox 项（保留行与状态，供事件审计）。"""
+    conn = _get_db()
+    try:
+        cur = conn.execute(
+            "UPDATE session_inputs SET status = 'cancelled'"
+            " WHERE session_id = ? AND id = ? AND status = 'pending'",
+            (session_id, input_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def list_inbox(session_id: str, *, include_resolved: bool = False) -> list[dict[str, Any]]:
+    """v2：列出 inbox 项（默认只返回 pending）。"""
+    conn = _get_db()
+    try:
+        sql = "SELECT * FROM session_inputs WHERE session_id = ?"
+        params: list[Any] = [session_id]
+        if not include_resolved:
+            sql += " AND status = 'pending'"
+        sql += " ORDER BY (delivery = 'steer') DESC, admitted_seq DESC"
+        rows = conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "session_id": r["session_id"],
+                "type": r["type"],
+                "status": r["status"],
+                "delivery": r["delivery"],
+                "prompt": json.loads(r["prompt"]),
+                "admitted_seq": int(r["admitted_seq"]),
+                "promoted_seq": int(r["promoted_seq"]) if r["promoted_seq"] is not None else None,
+                "time_created": int(r["time_created"]),
+                "time_delivered": int(r["time_delivered"]) if r["time_delivered"] is not None else None,
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_input(session_id: str, input_id: str) -> Optional[dict[str, Any]]:
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM session_inputs WHERE session_id = ? AND id = ?",
+            (session_id, input_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "type": row["type"],
+            "status": row["status"],
+            "delivery": row["delivery"],
+            "prompt": json.loads(row["prompt"]),
+            "admitted_seq": int(row["admitted_seq"]),
+            "promoted_seq": int(row["promoted_seq"]) if row["promoted_seq"] is not None else None,
+            "time_created": int(row["time_created"]),
+            "time_delivered": int(row["time_delivered"]) if row["time_delivered"] is not None else None,
+        }
+    finally:
+        conn.close()
+
+
+def update_input_delivery(session_id: str, input_id: str, delivery: str) -> bool:
+    if delivery not in ("steer", "queue"):
+        raise ValueError("invalid delivery")
+    conn = _get_db()
+    try:
+        cur = conn.execute(
+            "UPDATE session_inputs SET delivery = ?"
+            " WHERE session_id = ? AND id = ? AND status = 'pending'",
+            (delivery, session_id, input_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def has_pending(session_id: str, delivery: Optional[str] = None) -> bool:
     conn = _get_db()
     try:
-        sql = "SELECT 1 FROM session_inputs WHERE session_id = ? AND promoted_seq IS NULL"
+        sql = "SELECT 1 FROM session_inputs WHERE session_id = ? AND status = 'pending'"
         params: list[Any] = [session_id]
         if delivery:
             sql += " AND delivery = ?"
@@ -996,7 +1215,7 @@ def count_pending(session_id: str) -> int:
     conn = _get_db()
     try:
         row = conn.execute(
-            "SELECT COUNT(*) AS n FROM session_inputs WHERE session_id = ? AND promoted_seq IS NULL",
+            "SELECT COUNT(*) AS n FROM session_inputs WHERE session_id = ? AND status = 'pending'",
             (session_id,),
         ).fetchone()
         return int(row["n"])
@@ -1011,5 +1230,302 @@ def clear_inputs(session_id: str) -> int:
         cur = conn.execute("DELETE FROM session_inputs WHERE session_id = ?", (session_id,))
         conn.commit()
         return cur.rowcount
+    finally:
+        conn.close()
+
+
+# ── v2：权限 / 表单 ────────────────────────────────────────────────────────
+
+def _json_load(value: Any, default: Any) -> Any:
+    if value in (None, ""):
+        return default
+    try:
+        return json.loads(value) if isinstance(value, str) else value
+    except Exception:
+        return default
+
+
+def _permission_from_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "action": row["action"],
+        "resources": _json_load(row["resources"], []),
+        "save": _json_load(row["save"], []),
+        "metadata": _json_load(row["metadata"], {}),
+        "source": _json_load(row["source"], None),
+        "message": row["message"],
+        "status": row["status"],
+        "reply": row["reply"],
+        "time_created": int(row["time_created"]),
+        "time_resolved": int(row["time_resolved"]) if row["time_resolved"] is not None else None,
+    }
+
+
+def create_permission(
+    session_id: str,
+    request_id: str,
+    action: str,
+    resources: list[str],
+    *,
+    save: Optional[list[str]] = None,
+    metadata: Optional[dict[str, Any]] = None,
+    source: Optional[dict[str, Any]] = None,
+    message: Optional[str] = None,
+) -> dict[str, Any]:
+    conn = _get_db()
+    try:
+        now = int(time.time() * 1000)
+        conn.execute(
+            "INSERT INTO session_permissions"
+            " (id, session_id, action, resources, save, metadata, source, message, status, time_created)"
+            " VALUES (?,?,?,?,?,?,?,?, 'pending', ?)"
+            " ON CONFLICT(id) DO UPDATE SET"
+            " action=excluded.action, resources=excluded.resources, save=excluded.save,"
+            " metadata=excluded.metadata, source=excluded.source, message=excluded.message",
+            (
+                request_id, session_id, action,
+                json.dumps(resources, ensure_ascii=False),
+                json.dumps(save or [], ensure_ascii=False),
+                json.dumps(metadata or {}, ensure_ascii=False),
+                json.dumps(source, ensure_ascii=False) if source is not None else None,
+                message, now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM session_permissions WHERE id = ? AND session_id = ?",
+            (request_id, session_id),
+        ).fetchone()
+        return _permission_from_row(row)
+    finally:
+        conn.close()
+
+
+def list_permissions(session_id: str, *, status: Optional[str] = "pending") -> list[dict[str, Any]]:
+    conn = _get_db()
+    try:
+        sql = "SELECT * FROM session_permissions WHERE session_id = ?"
+        params: list[Any] = [session_id]
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY time_created ASC"
+        return [_permission_from_row(r) for r in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def reply_permission(session_id: str, request_id: str, reply: str) -> bool:
+    conn = _get_db()
+    try:
+        cur = conn.execute(
+            "UPDATE session_permissions SET status = 'replied', reply = ?, time_resolved = ?"
+            " WHERE session_id = ? AND id = ? AND status = 'pending'",
+            (reply, int(time.time() * 1000), session_id, request_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def save_permission_rule(user_id: str, action: str, resource: str, effect: str = "allow") -> None:
+    conn = _get_db()
+    try:
+        conn.execute(
+            "INSERT INTO session_permission_saved (id, user_id, action, resource, effect, time_created)"
+            " VALUES (?,?,?,?,?,?) ON CONFLICT(user_id, action, resource) DO UPDATE SET"
+            " effect=excluded.effect, time_created=excluded.time_created",
+            (new_id("psp_"), user_id, action, resource, effect, int(time.time() * 1000)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_saved_permissions(user_id: str) -> list[dict[str, Any]]:
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM session_permission_saved WHERE user_id = ? ORDER BY time_created",
+            (user_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"], "user_id": r["user_id"], "action": r["action"],
+                "resource": r["resource"], "effect": r["effect"],
+                "time_created": int(r["time_created"]),
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def _form_from_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "title": row["title"],
+        "fields": _json_load(row["fields"], []),
+        "state": row["state"],
+        "response": _json_load(row["response"], {}),
+        "time_created": int(row["time_created"]),
+        "time_updated": int(row["time_updated"]),
+    }
+
+
+def create_form(
+    session_id: str,
+    form_id: str,
+    fields: list[dict[str, Any]],
+    *,
+    title: str = "",
+) -> dict[str, Any]:
+    conn = _get_db()
+    try:
+        now = int(time.time() * 1000)
+        conn.execute(
+            "INSERT INTO session_forms (id, session_id, title, fields, state, response, time_created, time_updated)"
+            " VALUES (?,?,?,?, 'pending', '{}', ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET"
+            " title=excluded.title, fields=excluded.fields, time_updated=excluded.time_updated",
+            (form_id, session_id, title, json.dumps(fields, ensure_ascii=False), now, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM session_forms WHERE id = ? AND session_id = ?",
+            (form_id, session_id),
+        ).fetchone()
+        return _form_from_row(row)
+    finally:
+        conn.close()
+
+
+def list_forms(session_id: str, *, state: Optional[str] = None) -> list[dict[str, Any]]:
+    conn = _get_db()
+    try:
+        sql = "SELECT * FROM session_forms WHERE session_id = ?"
+        params: list[Any] = [session_id]
+        if state:
+            sql += " AND state = ?"
+            params.append(state)
+        sql += " ORDER BY time_created ASC"
+        return [_form_from_row(r) for r in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def reply_form(session_id: str, form_id: str, response: dict[str, Any]) -> bool:
+    conn = _get_db()
+    try:
+        cur = conn.execute(
+            "UPDATE session_forms SET state = 'replied', response = ?, time_updated = ?"
+            " WHERE session_id = ? AND id = ? AND state = 'pending'",
+            (json.dumps(response, ensure_ascii=False), int(time.time() * 1000), session_id, form_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def cancel_form(session_id: str, form_id: str) -> bool:
+    conn = _get_db()
+    try:
+        cur = conn.execute(
+            "UPDATE session_forms SET state = 'cancelled', time_updated = ?"
+            " WHERE session_id = ? AND id = ? AND state = 'pending'",
+            (int(time.time() * 1000), session_id, form_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+# ── v2：durable event outbox ────────────────────────────────────────────────
+
+def append_event(
+    event_id: str,
+    aggregate_id: str,
+    event_type: str,
+    data: dict[str, Any],
+    created: int,
+) -> int:
+    """原子追加 durable 事件并返回会话内 seq。"""
+    conn = _get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM event_outbox WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        seq = int(row["n"])
+        conn.execute(
+            "INSERT INTO event_outbox (id, aggregate_id, seq, type, data, created)"
+            " VALUES (?,?,?,?,?,?)",
+            (event_id, aggregate_id, seq, event_type, json.dumps(data, ensure_ascii=False), created),
+        )
+        conn.commit()
+        return seq
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def list_events(aggregate_id: str, after_seq: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM event_outbox WHERE aggregate_id = ? AND seq > ?"
+            " ORDER BY seq LIMIT ?",
+            (aggregate_id, int(after_seq), int(limit)),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"], "aggregate_id": r["aggregate_id"], "seq": int(r["seq"]),
+                "type": r["type"], "data": json.loads(r["data"]),
+                "created": int(r["created"]),
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+# ── v2：会话轮次快照（持久化）────────────────────────────────────────────
+
+def save_snapshot(session_id: str, message_id: str, descriptor: dict[str, Any]) -> None:
+    conn = _get_db()
+    try:
+        conn.execute(
+            "INSERT INTO session_snapshots (session_id, message_id, descriptor, time_created)"
+            " VALUES (?,?,?,?)"
+            " ON CONFLICT(session_id, message_id) DO UPDATE SET"
+            " descriptor=excluded.descriptor, time_created=excluded.time_created",
+            (
+                session_id,
+                message_id,
+                json.dumps(descriptor, ensure_ascii=False),
+                int(time.time() * 1000),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_snapshot(session_id: str, message_id: str) -> Optional[dict[str, Any]]:
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT descriptor FROM session_snapshots WHERE session_id = ? AND message_id = ?",
+            (session_id, message_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["descriptor"])
     finally:
         conn.close()

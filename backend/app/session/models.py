@@ -40,8 +40,14 @@ class SessionInfo(BaseModel):
     tokens_reasoning: int = 0
     time_created: int = 0
     time_updated: int = 0
+    time_busy: Optional[int] = None
+    time_idle: Optional[int] = None
+    time_viewed: Optional[int] = None
     time_compacted: Optional[int] = None
     time_archived: Optional[int] = None
+    outcome: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    revert_state: Optional[dict[str, Any]] = None
     # 逻辑删除集 / 压缩基线（平台层 SessionStore 落库用；重启水合回内存 Session）
     hidden_ids: list[str] = Field(default_factory=list)
     compact_baseline_seq: int = 0
@@ -70,8 +76,10 @@ class Part(BaseModel):
     session_id: str
     message_id: str
     type: str
+    ordinal: int = 0
     data: dict[str, Any] = Field(default_factory=dict)
     time_created: int = 0
+    time_updated: Optional[int] = None
 
 
 # ── Part data 结构（对齐 opencode Part 类型族）────────────────────────────

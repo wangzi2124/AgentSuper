@@ -142,6 +142,69 @@ def test_program_source_is_not_auto_allowed(client, tmp_path_factory):
         reset_allowed_roots(token)
 
 
+def test_create_session_can_bind_whitelisted_directory(client, tmp_path):
+    """新会话可在创建时绑定白名单目录（含子目录），之后仍不可改。"""
+    from execution.permission import PermissionManager, get_manager, set_manager
+
+    ctx = client.app.state.platform
+    old_manager = get_manager()
+    whitelisted = tmp_path / "project"
+    child = whitelisted / "packages" / "web"
+    child.mkdir(parents=True)
+    mgr = PermissionManager(
+        workspace=str(ctx.vfs.root),
+        whitelist_path=str(tmp_path / "data"),
+        external_default="ask",
+    )
+    mgr.add_workspace(str(whitelisted))
+    set_manager(mgr)
+    sid = None
+    try:
+        r = client.post("/api/sessions", json={"title": "bound", "directory": str(child)})
+        assert r.status_code == 200, r.text
+        info = r.json()
+        sid = info["id"]
+        assert Path(info["directory"]).resolve() == child.resolve()
+        assert ctx.sessions.get(sid).directory == str(child.resolve())
+        # 创建后 PATCH 仍不能改目录
+        other = tmp_path / "other"
+        other.mkdir()
+        patched = client.patch(f"/api/sessions/{sid}", json={"directory": str(other)})
+        assert patched.status_code == 200
+        assert Path(patched.json()["directory"]).resolve() == child.resolve()
+    finally:
+        if sid:
+            client.delete(f"/api/sessions/{sid}")
+        set_manager(old_manager)
+
+
+def test_create_session_rejects_directory_outside_whitelist(client, tmp_path):
+    from execution.permission import PermissionManager, get_manager, set_manager
+
+    ctx = client.app.state.platform
+    old_manager = get_manager()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    mgr = PermissionManager(
+        workspace=str(ctx.vfs.root),
+        whitelist_path=str(tmp_path / "data"),
+        external_default="ask",
+    )
+    set_manager(mgr)
+    try:
+        r = client.post("/api/sessions", json={"title": "rejected", "directory": str(outside)})
+        assert r.status_code == 400
+        assert r.json()["detail"] == "directory_not_allowed"
+        assert client.post(
+            "/api/sessions", json={"title": "relative", "directory": "relative/path"}
+        ).status_code == 400
+        assert client.post(
+            "/api/sessions", json={"title": "missing", "directory": str(tmp_path / "nope")}
+        ).status_code == 400
+    finally:
+        set_manager(old_manager)
+
+
 def test_workspace_api_lists_only_whitelist(client, tmp_path):
     """`/api/permission/workspaces` 只暴露用户白名单（不含程序主工作区）。"""
     from fastapi import FastAPI

@@ -80,6 +80,10 @@ sessions = Table(
     Column("model", Text(), nullable=True),
     Column("kind", String(32), nullable=False, server_default="chat"),
     Column("status", String(32), nullable=False, server_default="idle"),
+    Column("outcome", String(16), nullable=True),
+    Column("metadata", Text().with_variant(LONGTEXT(), "mysql"), nullable=False,
+           server_default="{}"),
+    Column("revert_state", Text().with_variant(LONGTEXT(), "mysql"), nullable=True),
     Column("cost", Float, nullable=False, server_default=text("0")),
     Column("tokens_input", BigInteger, nullable=False, server_default=text("0")),
     Column("tokens_output", BigInteger, nullable=False, server_default=text("0")),
@@ -88,6 +92,9 @@ sessions = Table(
     Column("tokens_reasoning", BigInteger, nullable=False, server_default=text("0")),
     Column("time_created", BigInteger, nullable=False),
     Column("time_updated", BigInteger, nullable=False),
+    Column("time_busy", BigInteger, nullable=True),
+    Column("time_idle", BigInteger, nullable=True),
+    Column("time_viewed", BigInteger, nullable=True),
     Column("time_compacted", BigInteger, nullable=True),
     Column("time_archived", BigInteger, nullable=True),
     # 平台层逻辑删除集（JSON 数组文本）与压缩基线（deps.SessionStore 落库/水合）
@@ -108,6 +115,7 @@ session_messages = Table(
     Column("type", String(32), nullable=False),
     Column("data", Text().with_variant(LONGTEXT(), "mysql"), nullable=False),
     Column("time_created", BigInteger, nullable=False),
+    Column("time_completed", BigInteger, nullable=True),
     UniqueConstraint("session_id", "id"),
     Index("idx_messages_session_time", "session_id", "time_created"),
 )
@@ -119,8 +127,10 @@ message_parts = Table(
            primary_key=True),
     Column("message_id", String(64), nullable=False),
     Column("type", String(32), nullable=False),
+    Column("ordinal", Integer, nullable=False, server_default=text("0")),
     Column("data", Text().with_variant(LONGTEXT(), "mysql"), nullable=False),
     Column("time_created", BigInteger, nullable=False),
+    Column("time_updated", BigInteger, nullable=True),
     Index("idx_parts_message", "message_id"),
 )
 
@@ -141,9 +151,90 @@ session_inputs = Table(
     Column("session_id", String(64), ForeignKey("sessions.id", ondelete="CASCADE"),
            primary_key=True),
     Column("prompt", Text().with_variant(LONGTEXT(), "mysql"), nullable=False),
+    Column("type", String(16), nullable=False, server_default="user"),
+    Column("status", String(16), nullable=False, server_default="pending"),
     Column("delivery", String(16), nullable=False, server_default="steer"),
     Column("admitted_seq", Integer, nullable=False),
     Column("promoted_seq", Integer, nullable=True),
+    Column("time_created", BigInteger, nullable=False),
+    Column("time_delivered", BigInteger, nullable=True),
+)
+
+# ── Web Chat v2：权限 / 表单 / schema 迁移标记 ─────────────────────────────
+
+session_permissions = Table(
+    "session_permissions", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("session_id", String(64), ForeignKey("sessions.id", ondelete="CASCADE"),
+           nullable=False),
+    Column("action", String(64), nullable=False),
+    Column("resources", Text().with_variant(LONGTEXT(), "mysql"), nullable=False,
+           server_default="[]"),
+    Column("save", Text().with_variant(LONGTEXT(), "mysql"), nullable=False,
+           server_default="[]"),
+    Column("metadata", Text().with_variant(LONGTEXT(), "mysql"), nullable=False,
+           server_default="{}"),
+    Column("source", Text().with_variant(LONGTEXT(), "mysql"), nullable=True),
+    Column("message", Text().with_variant(LONGTEXT(), "mysql"), nullable=True),
+    Column("status", String(16), nullable=False, server_default="pending"),
+    Column("reply", String(16), nullable=True),
+    Column("time_created", BigInteger, nullable=False),
+    Column("time_resolved", BigInteger, nullable=True),
+    Index("idx_permissions_session_status", "session_id", "status"),
+)
+
+session_permission_saved = Table(
+    "session_permission_saved", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("user_id", String(64), nullable=False),
+    Column("action", String(64), nullable=False),
+    Column("resource", Text().with_variant(LONGTEXT(), "mysql"), nullable=False),
+    Column("effect", String(16), nullable=False, server_default="allow"),
+    Column("time_created", BigInteger, nullable=False),
+    UniqueConstraint("user_id", "action", "resource"),
+    Index("idx_saved_permissions_user", "user_id"),
+)
+
+session_forms = Table(
+    "session_forms", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("session_id", String(64), ForeignKey("sessions.id", ondelete="CASCADE"),
+           nullable=False),
+    Column("title", Text(), nullable=False, server_default=""),
+    Column("fields", Text().with_variant(LONGTEXT(), "mysql"), nullable=False,
+           server_default="[]"),
+    Column("state", String(16), nullable=False, server_default="pending"),
+    Column("response", Text().with_variant(LONGTEXT(), "mysql"), nullable=False,
+           server_default="{}"),
+    Column("time_created", BigInteger, nullable=False),
+    Column("time_updated", BigInteger, nullable=False),
+    Index("idx_forms_session_state", "session_id", "state"),
+)
+
+schema_migrations = Table(
+    "schema_migrations", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("applied_at", BigInteger, nullable=False),
+)
+
+event_outbox = Table(
+    "event_outbox", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("aggregate_id", String(64), nullable=False),
+    Column("seq", Integer, nullable=False),
+    Column("type", String(64), nullable=False),
+    Column("data", Text().with_variant(LONGTEXT(), "mysql"), nullable=False),
+    Column("created", BigInteger, nullable=False),
+    UniqueConstraint("aggregate_id", "seq"),
+    Index("idx_event_outbox_aggregate", "aggregate_id", "seq"),
+)
+
+session_snapshots = Table(
+    "session_snapshots", metadata,
+    Column("session_id", String(64), ForeignKey("sessions.id", ondelete="CASCADE"),
+           primary_key=True),
+    Column("message_id", String(64), primary_key=True),
+    Column("descriptor", Text().with_variant(LONGTEXT(), "mysql"), nullable=False),
     Column("time_created", BigInteger, nullable=False),
 )
 
@@ -276,7 +367,9 @@ chain_logs = Table(
 SESSION_TABLES = (
     projects.name, workspaces.name, sessions.name, session_messages.name,
     message_parts.name, session_context_epoch.name, session_inputs.name,
-    session_tasks.name, auth_users.name,
+    session_tasks.name, auth_users.name, session_permissions.name,
+    session_permission_saved.name, session_forms.name, schema_migrations.name,
+    event_outbox.name, session_snapshots.name,
 )
 CATALOG_TABLES = (catalog_settings.name, providers.name, catalog_entries.name)
 CHAPTER_TABLES = (chapters.name,)

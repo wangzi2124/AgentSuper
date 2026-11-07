@@ -1,0 +1,34 @@
+{
+  "id": "ses_01J8Z3M4X5",
+  "parent_id": null,
+  "project_id": "prj_agentsuper",
+  "directory": "E:/AgentSuper",
+  "title": "契约测试会话",
+  "agent": "build",
+  "model": {
+    "id": "deepseek-v4-flash",
+    "provider_id": "deepseek",
+    "variant": null
+  },
+  "status": "idle",
+  "outcome": "succeeded",
+  "cost": 0.0012,
+  "tokens": {
+    "input": 120,
+    "output": 80,
+    "reasoning": 12,
+    "cache_read": 0,
+    "cache_write": 0
+  },
+  "time": {
+    "created": 1762500000000,
+    "updated": 1762500004800,
+    "busy": 1762500000100,
+    "idle": 1762500004800,
+    "viewed": 1762500002000,
+    "archived": null
+  },
+  "metadata": {
+    "source": "contract-fixture"
+  }
+}

@@ -1,0 +1,387 @@
+[
+  {
+    "id": "evt_connected",
+    "created": 1762500000000,
+    "type": "server.connected",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": { "version": "2.0.0" }
+  },
+  {
+    "id": "evt_created",
+    "created": 1762500000001,
+    "type": "session.created",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 1, "version": 2 },
+    "data": {
+      "session": {
+        "id": "ses_01J8Z3M4X5",
+        "parent_id": null,
+        "project_id": "prj_agentsuper",
+        "directory": "E:/AgentSuper",
+        "title": "契约测试会话",
+        "agent": "build",
+        "model": { "id": "deepseek-v4-flash", "provider_id": "deepseek", "variant": null },
+        "status": "idle",
+        "outcome": null,
+        "cost": 0.0,
+        "tokens": { "input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0 },
+        "time": { "created": 1762500000001, "updated": 1762500000001, "busy": null, "idle": null, "viewed": null, "archived": null },
+        "metadata": {}
+      }
+    }
+  },
+  {
+    "id": "evt_execution_started",
+    "created": 1762500000050,
+    "type": "session.execution.started",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 2, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5" }
+  },
+  {
+    "id": "evt_inbox_enqueued",
+    "created": 1762500000060,
+    "type": "session.inbox.enqueued",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 3, "version": 2 },
+    "data": {
+      "session_id": "ses_01J8Z3M4X5",
+      "inbox_id": "inbox_01",
+      "item": {
+        "type": "user",
+        "delivery": "queue",
+        "payload": {
+          "text": "继续检查前端目录",
+          "files": [],
+          "agents": [],
+          "skills": [],
+          "metadata": {}
+        }
+      }
+    }
+  },
+  {
+    "id": "evt_inbox_delivered",
+    "created": 1762500000070,
+    "type": "session.inbox.delivered",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 4, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "inbox_id": "inbox_01" }
+  },
+  {
+    "id": "evt_step_started",
+    "created": 1762500000100,
+    "type": "session.step.started",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 5, "version": 2 },
+    "data": {
+      "session_id": "ses_01J8Z3M4X5",
+      "assistant_message_id": "msg_asst_01",
+      "agent": "build",
+      "model": { "id": "deepseek-v4-flash", "provider_id": "deepseek", "variant": null },
+      "started": 1762500000100
+    }
+  },
+  {
+    "id": "evt_text_started",
+    "created": 1762500000200,
+    "type": "session.text.started",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 6, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "ordinal": 0 }
+  },
+  {
+    "id": "evt_text_delta",
+    "created": 1762500000210,
+    "type": "session.text.delta",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "ordinal": 0, "delta": "仓库包含 " }
+  },
+  {
+    "id": "evt_text_ended",
+    "created": 1762500000300,
+    "type": "session.text.ended",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 7, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "ordinal": 0, "text": "仓库包含 backend、frontend 和 docs。" }
+  },
+  {
+    "id": "evt_reasoning_started",
+    "created": 1762500000310,
+    "type": "session.reasoning.started",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 8, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "ordinal": 1 }
+  },
+  {
+    "id": "evt_reasoning_delta",
+    "created": 1762500000320,
+    "type": "session.reasoning.delta",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "ordinal": 1, "delta": "先列出目录。" }
+  },
+  {
+    "id": "evt_reasoning_ended",
+    "created": 1762500000330,
+    "type": "session.reasoning.ended",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 9, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "ordinal": 1, "text": "先列出目录。" }
+  },
+  {
+    "id": "evt_tool_input_started",
+    "created": 1762500000340,
+    "type": "session.tool.input.started",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 10, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "id": "call_001", "name": "ls" }
+  },
+  {
+    "id": "evt_tool_input_delta",
+    "created": 1762500000350,
+    "type": "session.tool.input.delta",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "id": "call_001", "delta": "{\"path\":\".\"}" }
+  },
+  {
+    "id": "evt_tool_input_ended",
+    "created": 1762500000360,
+    "type": "session.tool.input.ended",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 11, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "id": "call_001", "text": "{\"path\":\".\"}" }
+  },
+  {
+    "id": "evt_tool_called",
+    "created": 1762500000370,
+    "type": "session.tool.called",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 12, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "id": "call_001", "input": { "path": "." }, "executed": true }
+  },
+  {
+    "id": "evt_tool_progress",
+    "created": 1762500000380,
+    "type": "session.tool.progress",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": { "session_id": "ses_01J8Z3M4X5", "assistant_message_id": "msg_asst_01", "id": "call_001", "metadata": { "percent": 50 } }
+  },
+  {
+    "id": "evt_tool_success",
+    "created": 1762500000400,
+    "type": "session.tool.success",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 13, "version": 2 },
+    "data": {
+      "session_id": "ses_01J8Z3M4X5",
+      "assistant_message_id": "msg_asst_01",
+      "id": "call_001",
+      "content": [{ "type": "text", "text": "backend\nfrontend\ndocs" }],
+      "metadata": { "truncated": false },
+      "executed": true
+    }
+  },
+  {
+    "id": "evt_step_ended",
+    "created": 1762500000450,
+    "type": "session.step.ended",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 14, "version": 2 },
+    "data": {
+      "session_id": "ses_01J8Z3M4X5",
+      "assistant_message_id": "msg_asst_01",
+      "finish": "stop",
+      "cost": 0.0012,
+      "tokens": { "input": 120, "output": 80, "reasoning": 12, "cache_read": 0, "cache_write": 0 }
+    }
+  },
+  {
+    "id": "evt_execution_succeeded",
+    "created": 1762500000460,
+    "type": "session.execution.succeeded",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 15, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5" }
+  },
+  {
+    "id": "evt_idle",
+    "created": 1762500000470,
+    "type": "session.idle",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": { "session_id": "ses_01J8Z3M4X5", "outcome": "succeeded" }
+  },
+  {
+    "id": "evt_status",
+    "created": 1762500000480,
+    "type": "session.status",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": { "session_id": "ses_01J8Z3M4X5", "status": { "type": "idle" } }
+  },
+  {
+    "id": "evt_permission_asked",
+    "created": 1762500000490,
+    "type": "permission.asked",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": {
+      "id": "perm_01",
+      "session_id": "ses_01J8Z3M4X5",
+      "action": "edit",
+      "resources": ["E:/AgentSuper/frontend/src/App.vue"],
+      "save": ["session"],
+      "metadata": { "reason": "write" },
+      "source": { "type": "tool", "message_id": "msg_asst_01", "id": "call_002" },
+      "message": "允许修改 App.vue？"
+    }
+  },
+  {
+    "id": "evt_permission_replied",
+    "created": 1762500000500,
+    "type": "permission.replied",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": { "session_id": "ses_01J8Z3M4X5", "request_id": "perm_01", "reply": "once" }
+  },
+  {
+    "id": "evt_form_created",
+    "created": 1762500000510,
+    "type": "form.created",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": {
+      "id": "form_01",
+      "session_id": "ses_01J8Z3M4X5",
+      "title": "选择包管理器",
+      "fields": [{ "id": "pm", "type": "select", "label": "包管理器", "required": true, "options": ["npm", "pnpm", "bun"] }],
+      "state": "pending",
+      "response": {}
+    }
+  },
+  {
+    "id": "evt_form_replied",
+    "created": 1762500000520,
+    "type": "form.replied",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": { "session_id": "ses_01J8Z3M4X5", "form_id": "form_01", "response": { "pm": "pnpm" } }
+  },
+  {
+    "id": "evt_compaction_started",
+    "created": 1762500000530,
+    "type": "session.compaction.started",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 16, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "reason": "auto", "input_id": null }
+  },
+  {
+    "id": "evt_compaction_delta",
+    "created": 1762500000540,
+    "type": "session.compaction.delta",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": { "session_id": "ses_01J8Z3M4X5", "text": "用户要求检查仓库结构" }
+  },
+  {
+    "id": "evt_compaction_ended",
+    "created": 1762500000550,
+    "type": "session.compaction.ended",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 17, "version": 2 },
+    "data": {
+      "session_id": "ses_01J8Z3M4X5",
+      "reason": "auto",
+      "text": "用户要求检查仓库结构，已完成。",
+      "model": { "id": "deepseek-v4-flash", "provider_id": "deepseek", "variant": null },
+      "cost": 0.0001,
+      "tokens": { "input": 20, "output": 10, "reasoning": 0, "cache_read": 0, "cache_write": 0 }
+    }
+  },
+  {
+    "id": "evt_usage_updated",
+    "created": 1762500000560,
+    "type": "session.usage.updated",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": null,
+    "data": {
+      "session_id": "ses_01J8Z3M4X5",
+      "cost": 0.0013,
+      "tokens": { "input": 140, "output": 90, "reasoning": 12, "cache_read": 0, "cache_write": 0 }
+    }
+  },
+  {
+    "id": "evt_usage_recorded",
+    "created": 1762500000570,
+    "type": "session.usage.recorded",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 18, "version": 2 },
+    "data": {
+      "session_id": "ses_01J8Z3M4X5",
+      "source": "compaction",
+      "cost": 0.0001,
+      "tokens": { "input": 20, "output": 10, "reasoning": 0, "cache_read": 0, "cache_write": 0 }
+    }
+  },
+  {
+    "id": "evt_renamed",
+    "created": 1762500000580,
+    "type": "session.renamed",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 19, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "title": "仓库结构检查" }
+  },
+  {
+    "id": "evt_forked",
+    "created": 1762500000590,
+    "type": "session.forked",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 20, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "parent_id": "ses_parent", "boundary": "msg_asst_01" }
+  },
+  {
+    "id": "evt_revert_staged",
+    "created": 1762500000600,
+    "type": "session.revert.staged",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 21, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "revert": { "message_id": "msg_asst_01", "files": false } }
+  },
+  {
+    "id": "evt_revert_committed",
+    "created": 1762500000610,
+    "type": "session.revert.committed",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 22, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "revert": { "message_id": "msg_asst_01", "files": false } }
+  },
+  {
+    "id": "evt_model_selected",
+    "created": 1762500000620,
+    "type": "session.model.selected",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 23, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "model": { "id": "deepseek-v4-pro", "provider_id": "deepseek", "variant": null } }
+  },
+  {
+    "id": "evt_agent_selected",
+    "created": 1762500000630,
+    "type": "session.agent.selected",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 24, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "agent": "plan" }
+  },
+  {
+    "id": "evt_deleted",
+    "created": 1762500000640,
+    "type": "session.deleted",
+    "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 25, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5" }
+  }
+]

@@ -36,6 +36,7 @@ class SessionCreate(BaseModel):
     title: str = ""
     kind: str = "multi-agent"
     model: str | None = None
+    directory: str | None = None
 
 
 class SessionUpdate(BaseModel):
@@ -67,7 +68,7 @@ async def create_session(
     try:
         sess = ctx.sessions.create(
             title=body.title, user_id=_uid(x_user_id),
-            kind=body.kind, model=body.model,
+            kind=body.kind, model=body.model, directory=body.directory,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -150,17 +151,10 @@ async def delete_message(
 @router.get("/{session_id}/status")
 async def get_status(session_id: str, ctx: PlatformContext = Depends(get_context)) -> dict:
     sess = _must_get(ctx, session_id)
-    runner = ctx.get_runner(session_id)
-    active_turn = None
-    if runner is not None:
-        try:
-            active_turn = runner.active_turn_info()
-        except Exception:  # noqa: BLE001 - status must stay best-effort
-            active_turn = None
     return {
         "session_id": session_id,
         "status": sess.status,
-        "active_turn": active_turn,
+        "active_turn": None,
     }
 
 

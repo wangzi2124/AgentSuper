@@ -1,0 +1,104 @@
+/* opencode-web 风格桌面外壳：36px 顶栏 + 左侧工作区/会话栏 + 主内容 */
+.app-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--sidebar-bg);
+}
+.app-shell > .layout {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+/* ── Sidebar：紧凑、低饱和、无渐变 ── */
+.sidebar {
+  width: 300px;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+}
+.sidebar-header {
+  padding: 12px 12px 10px;
+  border-bottom: none;
+}
+.sidebar-header h1 {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: var(--text);
+}
+.sidebar-header p {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 1px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+.brand-row { gap: 9px; }
+.brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  box-shadow: none;
+}
+.sidebar.collapsed .sidebar-header { padding: 10px 0 8px; }
+
+/* 桌面会话标题已在顶栏标签中展示，隐藏聊天区重复头部；移动端不受影响 */
+.app-shell .chat-header { display: none; }
+
+/* 会话区占据主空间 */
+.sidebar-history {
+  flex: 1;
+  min-height: 0;
+  border-top: none;
+}
+
+/* 功能导航：紧凑底部列表 */
+.sidebar-nav.sidebar-features {
+  flex: 0 0 auto;
+  padding: 6px;
+  gap: 1px;
+  border-top: 1px solid var(--border-subtle);
+  max-height: 34vh;
+  overflow-y: auto;
+}
+.nav-section-title {
+  padding: 4px 8px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.nav-item {
+  gap: 7px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.nav-item:hover { background: var(--bg-subtle); color: var(--text); }
+.nav-item.active {
+  background: var(--bg-subtle);
+  color: var(--text);
+  font-weight: 500;
+  box-shadow: none;
+}
+.nav-icon { width: 16px; height: 16px; font-size: 0; opacity: 0.75; }
+.nav-item.active .nav-icon { opacity: 1; }
+.sidebar.collapsed .nav-item { padding: 7px; }
+.sidebar.collapsed .nav-section-title { display: none; }
+
+.sidebar-bottom:empty { display: none; }
+
+@media (max-width: 768px) {
+  .app-shell > .layout { display: block; }
+  .sidebar { width: var(--sidebar-width); }
+}

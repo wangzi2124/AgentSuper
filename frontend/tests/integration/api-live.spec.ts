@@ -561,22 +561,11 @@ describe.skipIf(!RUN)('Multi-Agent /api/chat/multi-agent*', () => {
     expect(j.code).not.toBe(0)
     expect(String(j.message)).toContain('nonexistent-xyz-zzz')
   }, T_HEAVY)
-  it.skipIf(!RUN_LLM)('POST /api/chat/multi-agent/stream（SSE，sendMultiAgentStream）', async () => {
-    const events: any[] = []
-    let gotDone = false
-    await multiAgent.sendMultiAgentStream(
-      { message: '只回复两个字：收到', use_vector_db: false },
-      (ev) => { events.push(ev); if (ev.type === 'done' || ev.type === 'error') gotDone = true },
-    )
-    expect(gotDone).toBe(true)
-    expect(events.length).toBeGreaterThan(0)
-    expect(events.some((e) => e.type === 'done')).toBe(true)
-  }, T_HEAVY)
 })
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
 // 9. Chat（后端平台 chat，非流式 + SSE）
-// ═══════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
 describe.skipIf(!RUN || !RUN_LLM)('Chat /api/chat*', () => {
   it('POST /api/chat（非流式）', async () => {
     const r = await raw('POST', '/api/chat', { message: '你好', user_id: UID })

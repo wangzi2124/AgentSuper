@@ -2,6 +2,7 @@
 import { onMounted, ref, onBeforeUnmount, watch, defineAsyncComponent, getCurrentInstance } from 'vue'
 import { useRoute } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
+import AppTitleBar from './components/AppTitleBar.vue'
 import { usePermissionStore } from './stores/permission'
 import { useThemeStore } from './stores/theme'
 import { useAuthStore } from './stores/auth'
@@ -55,10 +56,13 @@ onBeforeUnmount(() => mql?.removeEventListener?.('change', onViewportChange))
 
 <template>
   <MobileShell v-if="isMobile && mobileUiReady && route.name !== 'Login'" />
-  <div v-else class="layout">
-    <Sidebar v-if="route.name !== 'Login'" />
-    <main class="main">
-      <router-view />
-    </main>
+  <div v-else class="app-shell">
+    <AppTitleBar v-if="route.name !== 'Login'" />
+    <div class="layout">
+      <Sidebar v-if="route.name !== 'Login'" />
+      <main class="main">
+        <router-view />
+      </main>
+    </div>
   </div>
 </template>

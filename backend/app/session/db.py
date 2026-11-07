@@ -25,6 +25,8 @@ from config import settings
 from storage import backends, schema as storage_schema
 from storage.paths import data_path
 
+from .migrations import migrate_v2
+
 # 会话库路径：settings.session_db_path 可覆盖（测试隔离 / 自定义部署），
 # 缺省 session.db，落在统一数据根下。
 DB_PATH = data_path(settings.session_db_path, "session.db")
@@ -123,6 +125,7 @@ class _ConnectionPool:
         _ensure_column(conn, "sessions", "tokens_reasoning", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "sessions", "hidden_ids", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "sessions", "compact_baseline_seq", "INTEGER NOT NULL DEFAULT 0")
+        migrate_v2(conn)
         conn.commit()
         return conn
 
@@ -147,6 +150,7 @@ def _get_db(path: Optional[Path] = None):
         _ensure_column(conn, "sessions", "tokens_reasoning", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "sessions", "hidden_ids", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "sessions", "compact_baseline_seq", "INTEGER NOT NULL DEFAULT 0")
+        migrate_v2(conn)
         conn.commit()
         return conn
 

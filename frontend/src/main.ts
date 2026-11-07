@@ -4,6 +4,7 @@ import App from './App.vue'
 import router from './router'
 import { installApiFetch } from './api/base'
 import './styles/global.css'
+import './styles/shell.css'
 import './styles/mobile.css'
 
 // [部署] 安装 API base / 管理员令牌支持（VITE_API_BASE / VITE_ADMIN_TOKEN，

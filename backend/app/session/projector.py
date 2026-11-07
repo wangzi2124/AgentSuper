@@ -116,6 +116,7 @@ def project_user_message(
     message_id: str,
     text: str,
     files: Optional[list[Any]] = None,
+    voice: Optional[dict[str, Any]] = None,
 ) -> None:
     """在回合开始即落库当前 user 消息（进程中断也不丢用户输入）。"""
     try:
@@ -125,6 +126,8 @@ def project_user_message(
     data: dict[str, Any] = {"content": text}
     if files:
         data["files"] = [f for f in files if isinstance(f, dict)]
+    if voice:
+        data["voice"] = voice
     repository.upsert_message(session_id, message_id, "user", data)
 
 

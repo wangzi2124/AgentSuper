@@ -405,6 +405,8 @@ export interface MultiAgentChatRequest {
   voice?: VoiceMessageData
   /** Agent 模式：省略 = supervisor 路由，default = build，plan = 规划 */
   agent_mode?: string
+  /** 新会话绑定的工作目录（白名单绝对路径）；已有会话忽略。 */
+  directory?: string
 }
 
 export interface MultiAgentMessage {

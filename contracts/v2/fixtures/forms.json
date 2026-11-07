@@ -1,0 +1,22 @@
+[
+  {
+    "id": "form_01",
+    "session_id": "ses_01J8Z3M4X5",
+    "title": "选择包管理器",
+    "fields": [
+      {
+        "id": "pm",
+        "type": "select",
+        "label": "包管理器",
+        "required": true,
+        "options": [
+          "npm",
+          "pnpm",
+          "bun"
+        ]
+      }
+    ],
+    "state": "pending",
+    "response": {}
+  }
+]

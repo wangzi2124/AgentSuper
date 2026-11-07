@@ -1,0 +1,22 @@
+[
+  {
+    "id": "perm_01",
+    "session_id": "ses_01J8Z3M4X5",
+    "action": "edit",
+    "resources": [
+      "E:/AgentSuper/frontend/src/App.vue"
+    ],
+    "save": [
+      "session"
+    ],
+    "metadata": {
+      "reason": "write"
+    },
+    "source": {
+      "type": "tool",
+      "message_id": "msg_asst_01",
+      "id": "call_002"
+    },
+    "message": "允许修改 App.vue？"
+  }
+]

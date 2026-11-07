@@ -124,7 +124,7 @@ def _do_init(app):
         logger.info("Seeded bundled skills: %s", ", ".join(_seeded[:10]) + ("…" if len(_seeded) > 10 else ""))
 
     # 免审目录只有三类：会话默认临时目录、程序内部数据目录、用户「工作目录白名单」
-    # （持久化于 <data>/runtime_workspaces.json，前端「用户设置」维护）。
+    # （持久化于 <data>/runtime_workspaces.json，前端侧边栏「工作目录」维护）。
     # 文件工具的相对路径基准 = 项目 worktree（git 仓库根）；
     # 源码保护（app/plugins/skills/config/main.py 等）仍以 backend/ 为基准判定。⚠️ 仓库根
     # 不再自动免审，且白名单也压不过源码保护（写源码仍需逐次审批）。

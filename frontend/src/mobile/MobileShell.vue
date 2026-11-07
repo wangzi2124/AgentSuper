@@ -67,10 +67,44 @@ const mobileViews: Record<string, unknown> = {
   import { useMultiAgentStore } from '../stores/multiAgent'
   import { useThemeStore, BG_VARIANTS } from '../stores/theme'
   import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
+  import { usePermissionStore } from '../stores/permission'
+  import DirPickerModal from '../components/DirPickerModal.vue'
 
   const agent = useMultiAgentStore()
   const theme = useThemeStore()
   const chatSettings = useChatSettingsStore()
+  const perm = usePermissionStore()
+
+  // ── 工作目录（与桌面侧边栏同语义：选中目录后新会话绑定该目录） ──
+  const showWorkspaceSheet = ref(false)
+  const showMobileDirPicker = ref(false)
+  function openWorkspaceSheet() {
+    showMenu.value = false
+    perm.loadWorkspaces()
+    showWorkspaceSheet.value = true
+  }
+  function normalizePath(path?: string | null): string {
+    return String(path || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  }
+  function workspaceBaseName(path: string | null | undefined): string {
+    const parts = String(path || '').split(/[\\/]+/).filter(Boolean)
+    return parts[parts.length - 1] || String(path || '')
+  }
+  function chooseWorkspace(path: string | null) {
+    agent.setActiveDirectory(path)
+    showWorkspaceSheet.value = false
+    showToast(path ? `新会话将使用：${workspaceBaseName(path)}` : '新会话使用临时工作区')
+    router.push('/multi-agent')
+  }
+  async function addMobileWorkspace(path: string) {
+    showMobileDirPicker.value = false
+    try {
+      await perm.addWorkspace(path)
+      chooseWorkspace(path)
+    } catch (e: any) {
+      showToast(String(e?.message || '添加目录失败').replace(/^Add workspace error:\s*/, ''))
+    }
+  }
 
   // 清空会话：二次确认（3 秒未确认自动复位）
   const clearConfirm = ref(false)
@@ -132,7 +166,7 @@ const mobileViews: Record<string, unknown> = {
   }
 
   function saveSettings() {
-    // 工作目录不可修改：会话根固定为后端隔离临时目录，白名单在桌面「用户设置」维护。
+    // 工作目录在抽屉「工作目录」中选择；已有会话的根创建后不可修改。
     showSettingsForm.value = false
   }
 const currentView = computed(() => mobileViews[route.name as string] || null)
@@ -205,6 +239,15 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
                     <!-- @@CHAT_SETTINGS_ENTRY@@ -->
           <!-- ── 设置：与「功能导航」同款 drawer-item，点开弹出参数表单 ── -->
           <!-- <div class="drawer-group-label" style="margin-top: 16px">设置</div> -->
+
+          <div class="drawer-item workspace-item" @click="openWorkspaceSheet">
+            <div class="drawer-item-ico" style="background: rgba(16,185,129,.12); color: #10b981;">
+              <van-icon name="cluster-o" />
+            </div>
+            <span class="drawer-item-title">工作目录</span>
+            <span class="drawer-item-value">{{ agent.activeDirectory ? workspaceBaseName(agent.activeDirectory) : '临时' }}</span>
+            <van-icon name="arrow" class="drawer-item-arrow" />
+          </div>
 
           <div class="drawer-item settings-item" @click="openSettings">
             <div class="drawer-item-ico" style="background: rgba(109,94,241,.12); color: #6d5ef1;">
@@ -306,6 +349,49 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
       @cancel="showLangPicker = false"
     />
   </van-popup>
+
+  <van-popup v-model:show="showWorkspaceSheet" position="bottom" round>
+    <div class="settings-form">
+      <div class="settings-form-head">
+        <span class="settings-form-title">工作目录</span>
+        <van-icon name="cross" class="settings-form-close" @click="showWorkspaceSheet = false" />
+      </div>
+      <div class="settings-form-body">
+        <div class="ws-sheet-hint">选中目录后，新建会话将绑定该目录；已有会话的工作目录不可修改。</div>
+        <div class="ws-sheet-list">
+          <div
+            class="ws-sheet-item"
+            :class="{ active: !agent.activeDirectory }"
+            @click="chooseWorkspace(null)"
+          >
+            <span class="ws-sheet-name">临时工作区</span>
+            <span class="ws-sheet-path">未绑定目录的会话</span>
+            <van-icon v-if="!agent.activeDirectory" name="success" />
+          </div>
+          <div
+            v-for="w in perm.workspaces"
+            :key="w"
+            class="ws-sheet-item"
+            :class="{ active: normalizePath(agent.activeDirectory) === normalizePath(w) }"
+            @click="chooseWorkspace(w)"
+          >
+            <span class="ws-sheet-name">{{ workspaceBaseName(w) }}</span>
+            <span class="ws-sheet-path">{{ w }}</span>
+            <van-icon v-if="normalizePath(agent.activeDirectory) === normalizePath(w)" name="success" />
+          </div>
+        </div>
+        <van-button block round class="ws-sheet-add" @click="showMobileDirPicker = true">
+          添加工作目录
+        </van-button>
+      </div>
+    </div>
+  </van-popup>
+
+  <DirPickerModal
+    :show="showMobileDirPicker"
+    @close="showMobileDirPicker = false"
+    @select="addMobileWorkspace"
+  />
   </div>
 </template>
 
@@ -401,7 +487,35 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
 }
 .drawer-item-title { flex: 1; font-size: 14.5px; font-weight: 500; color: var(--text, #1e293b); }
 .drawer-item.current .drawer-item-title { color: var(--primary, #4f46e5); font-weight: 600; }
+.drawer-item-value {
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-secondary, #94a3b8);
+}
 .drawer-item-arrow { color: var(--text-secondary, #94a3b8); font-size: 14px; }
+
+/* ── 工作目录弹层 ── */
+.ws-sheet-hint { font-size: 12px; line-height: 1.5; color: var(--text-secondary, #94a3b8); margin-bottom: 10px; }
+.ws-sheet-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.ws-sheet-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px;
+  background: var(--bg-subtle, #f8fafc);
+  color: var(--text, #1e293b);
+  cursor: pointer;
+}
+.ws-sheet-item.active { border-color: var(--primary, #4f46e5); background: rgba(79, 70, 229, 0.08); }
+.ws-sheet-name { font-size: 14px; font-weight: 600; flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-sheet-path { flex: 1; min-width: 0; font-size: 11px; color: var(--text-secondary, #94a3b8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-sheet-item .van-icon { color: var(--primary, #4f46e5); }
+.ws-sheet-add { margin-top: 2px; }
 
 /* ───────── TabBar 激活态：渐变胶囊 ───────── */
 .tab-ico {

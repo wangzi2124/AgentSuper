@@ -1,0 +1,96 @@
+[
+  {
+    "type": "user",
+    "id": "msg_user_01",
+    "time_created": 1762500000100,
+    "text": "检查这个仓库的结构",
+    "files": [],
+    "agents": [],
+    "skills": [],
+    "metadata": {
+      "source": "web"
+    }
+  },
+  {
+    "type": "assistant",
+    "id": "msg_asst_01",
+    "time_created": 1762500000200,
+    "time_completed": 1762500004700,
+    "agent": "build",
+    "model": {
+      "id": "deepseek-v4-flash",
+      "provider_id": "deepseek",
+      "variant": null
+    },
+    "content": [
+      {
+        "type": "reasoning",
+        "text": "先列出顶层目录，再读取入口文件。"
+      },
+      {
+        "type": "tool",
+        "id": "call_001",
+        "name": "ls",
+        "time_created": 1762500000300,
+        "state": {
+          "status": "completed",
+          "input": {
+            "path": "."
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "backend\nfrontend\ndocs"
+            }
+          ],
+          "metadata": {
+            "truncated": false
+          }
+        }
+      },
+      {
+        "type": "text",
+        "text": "仓库包含 backend、frontend 和 docs 三个顶层目录。"
+      }
+    ],
+    "finish": "stop",
+    "cost": 0.0012,
+    "tokens": {
+      "input": 120,
+      "output": 80,
+      "reasoning": 12,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "error": null
+  },
+  {
+    "type": "compaction",
+    "id": "msg_comp_01",
+    "time_created": 1762500005000,
+    "status": "completed",
+    "reason": "auto",
+    "summary": "用户要求检查仓库结构，已完成顶层目录读取。",
+    "model": {
+      "id": "deepseek-v4-flash",
+      "provider_id": "deepseek",
+      "variant": null
+    },
+    "cost": 0.0001,
+    "tokens": {
+      "input": 20,
+      "output": 10,
+      "reasoning": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "error": null
+  },
+  {
+    "type": "idle",
+    "id": "msg_idle_01",
+    "time_created": 1762500005100,
+    "outcome": "succeeded",
+    "error": null
+  }
+]

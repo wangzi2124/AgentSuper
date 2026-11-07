@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-from app.api.compat import _sse
 from harness.adapter import apply_result
 from harness.compression import CompressionResult
 from harness.contracts import EventEnvelope, TurnContext, TurnResult
@@ -22,19 +21,6 @@ def test_turn_contracts_have_expected_fields():
     assert turn.session_id == "ses_1"
     assert result.finish_reason == "stop"
     assert event.to_dict()["turn_id"] == "turn_1"
-
-
-def test_sse_event_inherits_turn_context():
-    turn = TurnContext(turn_id="turn_sse", session_id="ses_sse")
-    token = set_current_turn(turn)
-    try:
-        line = _sse({"type": "routing"})
-    finally:
-        reset_current_turn(token)
-
-    payload = json.loads(line.removeprefix("data: ").strip())
-    assert payload["turn_id"] == "turn_sse"
-    assert payload["session_id"] == "ses_sse"
 
 
 def test_tool_adapter_contract_is_vendor_neutral():

@@ -18,12 +18,22 @@ const router = createRouter({
     {
       path: '/multi-agent',
       name: 'MultiAgent',
-      component: () => import('../views/MultiAgentView.vue'),
+      component: () => import('../views/V2ChatView.vue'),
     },
     {
       path: '/multi-agent/:id',
       name: 'MultiAgentConversation',
-      component: () => import('../views/MultiAgentView.vue'),
+      component: () => import('../views/V2ChatView.vue'),
+    },
+    {
+      path: '/v2/chat',
+      name: 'V2Chat',
+      component: () => import('../views/V2ChatView.vue'),
+    },
+    {
+      path: '/v2/chat/:id',
+      name: 'V2ChatConversation',
+      component: () => import('../views/V2ChatView.vue'),
     },
     {
       path: '/documents',

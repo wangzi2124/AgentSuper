@@ -1,8 +1,7 @@
-﻿import { defineStore } from 'pinia'
+import { defineStore } from 'pinia'
 import { ref, computed, reactive, watch, onScopeDispose } from 'vue'
 import type { MultiAgentMessage, AgentStreamData, MultiAgentSSEEvent, ChatError, FileContent, VoiceMessageData, QueuedPrompt } from '../types'
 import {
-  sendMultiAgentStream,
   restoreSnapshot as apiRestoreSnapshot,
   fetchTurnDiff as apiFetchTurnDiff,
 } from '../api/multiAgent'
@@ -29,7 +28,6 @@ import {
 } from '../api/sessions'
 import { loadModelCache, saveModelCache } from '../api/model-cache'
 import { classifyNetworkError } from '../api/errors'
-import { useHarnessTurn } from '../harness/useHarnessTurn'
 import { usePermissionStore } from './permission'
 import { useSessionModelStore, SESSION_MODEL_DRAFT_KEY } from './sessionModel'
 import { useModelSwitchStore } from './modelSwitch'
@@ -48,6 +46,8 @@ interface SessionState {
   messages: MultiAgentMessage[]
   conversationId: string | undefined
   conversationTitle: string
+  /** 会话工作目录（创建时绑定；已有会话以服务端为准） */
+  directory?: string
   loading: boolean
   abortController: AbortController | null
   streamPhase: 'idle' | 'queued' | 'running'
@@ -63,6 +63,20 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   const activeSessionId = ref<string | undefined>(undefined)
   const conversations = ref<ConversationMeta[]>([])
   const routingStatus = ref<string>('')
+  // [工作目录] 侧边栏当前选中的白名单目录；null = 全部会话。
+  // 新会话创建时以此为根（未选则后端回落隔离临时目录）。
+  const activeDirectory = ref<string | null>(null)
+  try {
+    const saved = localStorage.getItem('agentsuper:active-directory')
+    if (saved) activeDirectory.value = saved
+  } catch { /* ignore */ }
+  function setActiveDirectory(directory: string | null) {
+    activeDirectory.value = directory || null
+    try {
+      if (activeDirectory.value) localStorage.setItem('agentsuper:active-directory', activeDirectory.value)
+      else localStorage.removeItem('agentsuper:active-directory')
+    } catch { /* ignore */ }
+  }
   // [模型目录] 选择器由后端 GET /api/models 动态驱动；SUPPORTED_MODELS 仅为离线兜底。
   const models = ref<ModelInfo[]>([])
   const defaultModelId = ref<string>('')
@@ -147,8 +161,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   watch(useVectorDb, (v) => {
     try { localStorage.setItem(USE_VECTOR_DB_KEY, v ? '1' : '0') } catch { /* 隐私模式等忽略 */ }
   })
-  // 会话工作目录不可由前端指定：根固定为后端隔离的默认临时目录；
-  // 额外免审目录统一在「用户设置 → 工作目录白名单」维护。
+  // 新会话可绑定侧边栏选中的白名单目录（activeDirectory）；已有会话的根不可修改。
   // Agent 模式选择（对齐 opencode agent modes）：顶层命令只有 default(build)/plan；explore 由委派进入
   const agentMode = ref<'default' | 'plan'>('default')
 
@@ -268,16 +281,20 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     catch (e) { console.error('Failed to load conversations:', e) }
   }
 
-  async function loadConversation(id: string, autoResume = true) {
+  async function loadConversation(id: string, _autoResume = true) {
     const meta = conversations.value.find(c => c.id === id)
     const session = getOrCreateSession(id, meta?.title)
     session.conversationId = id
-    if (meta) session.conversationTitle = meta.title
+    if (meta) {
+      session.conversationTitle = meta.title
+      session.directory = meta.directory || session.directory
+    }
     // 会话正在流式 → 保留本地消息，不覆盖
     if (session.loading || session.streamPhase !== 'idle') { activeSessionId.value = id; return }
     try {
       const detail = await getConversation(id, 'multi-agent')
       session.conversationTitle = detail.title
+      session.directory = detail.directory || session.directory
       // [模型切换] 服务端模型只作为 active 兜底；本地 desired 优先（opencode 按会话偏好）。
       if (detail.model?.id) {
         sessionModel.setActive(id, detail.model.id)
@@ -315,9 +332,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       session.messages = serverMessages
       await saveSessionToCache(id, serverMessages, id, detail.title)
       activeSessionId.value = id
-      // [后台续流] 刷新/切回时后台可能仍在跑：有活动回合就自动接上，
-      // 断连不再等于取消。
-      if (autoResume) void resumeSession(id)
     } catch (e) {
       console.error('Failed to load conversation:', e)
       // 服务器获取失败（离线），退化为只读缓存
@@ -381,7 +395,8 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     }
   }
 
-  function newChat() {
+  function newChat(directory?: string | null) {
+    if (directory !== undefined) setActiveDirectory(directory)
     routingStatus.value = ''
     const current = selectedModel.value
     activeSessionId.value = undefined
@@ -636,246 +651,12 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
    * `/status`，仍在跑就再次续接，只有确认无活且无终态才退回报错/重试。
    * 本地 abort（离开页面/切换会话）只解绑，不取消后台任务。
    */
-  async function attachTurn(
-    sessionKey: string,
-    session: SessionState,
-    target: { turn_id: string; last_seq?: number },
-  ): Promise<void> {
-    const streamId = session.conversationId || sessionKey
-    session.attachedTurnId = target.turn_id
-    session.loading = true
-    session.streamPhase = 'running'
-    session.queuePosition = null
-    session.abortController?.abort()
-    const controller = new AbortController()
-    session.abortController = controller
-
-    const resumeNotice: AgentStreamData = {
-      agent_id: 'system',
-      agent_name: 'System',
-      status: 'completed',
-      content: '',
-      steps: [],
-      parts: [{ seq: 0, kind: 'notice', text: '已重新连接，任务在后台继续' }],
-    }
-    const mergeAgents = (agents: Record<string, AgentStreamData>): AgentStreamData[] => {
-      const list = Object.values(agents)
-      const system = list.find(a => a.agent_id === 'system')
-      return [system || resumeNotice, ...list.filter(a => a.agent_id !== 'system')]
-    }
-    let assistantMsg = ensureResumePlaceholder(session, target.turn_id, 0)
-    assistantMsg.agents = [resumeNotice]
-    let completed = false
-    let failures = 0
-    let handedOff = false
-
-    while (!controller.signal.aborted) {
-      const harness = useHarnessTurn()
-      let sawEvents = false
-      let fatal: ChatError | null = null
-      try {
-        await harness.resume(streamId, target, {
-          signal: controller.signal,
-          onEvent: (event, reduced) => {
-            if (controller.signal.aborted) return
-            // 服务端已切到新的 turn（旧回合结束后又来了新任务）：不污染当前重建。
-            if (event.turn_id && event.turn_id !== target.turn_id) return
-            sawEvents = true
-            const t = event.type
-            if (
-              t === 'agent_start' || t === 'agent_step' || t === 'agent_done' ||
-              t === 'agent_error' || t === 'context_truncated' ||
-              t === 'model_switched' || t === 'text_delta' || t === 'replay_gap'
-            ) {
-              assistantMsg.agents = mergeAgents(reduced.agents)
-              if (reduced.model) assistantMsg.model = reduced.model
-              if (t === 'text_delta') assistantMsg.content = reduced.assistantContent
-              return
-            }
-            if (event.conversation_id && !session.conversationId) {
-              session.conversationId = event.conversation_id
-            }
-            if (t === 'queued') {
-              session.streamPhase = 'queued'
-              session.queuePosition = event.queue_position ?? null
-              return
-            }
-            if (t === 'permission_request') {
-              usePermissionStore().handleIncoming({
-                id: event.request_id!,
-                path: event.path!,
-                operation: event.operation!,
-                tool_name: event.tool_name!,
-                tool_args: event.tool_args as Record<string, unknown>,
-                created_at: event.created_at || new Date().toISOString(),
-                expires_at: event.expires_at,
-              })
-              return
-            }
-            if (t === 'routing') {
-              routingStatus.value = event.detail || 'Routing...'
-              return
-            }
-            if (t === 'queue_drain') {
-              if (event.queue_size != null) session.queuePosition = event.queue_size
-              return
-            }
-            if (t === 'error') {
-              session.streamPhase = 'idle'
-              routingStatus.value = ''
-              assistantMsg.isError = true
-              const errorInfo = classifySSEError(event)
-              assistantMsg.errorInfo = errorInfo
-              assistantMsg.content = formatErrorMessage(errorInfo)
-              if (event.error_type === 'ModelSwitchError') {
-                sessionModel.revert(sessionKey)
-                setNotice(`切换模型失败：${event.detail || event.error || errorInfo.message}`)
-              }
-              persistSession(sessionKey)
-              if (errorInfo.retryable) startAutoRetry(sessionKey, lastUserText(session))
-              completed = true
-              return
-            }
-            if (t === 'done' || t === 'turn_done') {
-              if (event.model) sessionModel.setActive(sessionKey, event.model)
-              // 重放时，同一 drain 序列里已结束的回合可能已从历史加载：按
-              // assistant_msg_id 对齐，丢弃重放占位，避免刷新后出现重复气泡。
-              const dup = event.assistant_msg_id
-                ? session.messages.find(m => m.id === event.assistant_msg_id && m !== assistantMsg)
-                : undefined
-              if (dup) {
-                session.messages = session.messages.filter(m => m.id !== assistantMsg.id)
-                assistantMsg = dup
-              } else {
-                finalizeTurn(session, event, assistantMsg, reduced.agents)
-              }
-              if (t === 'done') {
-                completed = true
-                session.streamPhase = 'idle'
-                session.loading = false
-                routingStatus.value = ''
-                session.conversationId = event.conversation_id || session.conversationId
-                session.attachedTurnId = undefined
-                persistSession(sessionKey)
-                return
-              }
-              // 同一 drain 序列还有下一轮：新建占位继续接。
-              session.streamPhase = 'running'
-              routingStatus.value = ''
-              assistantMsg = ensureResumePlaceholder(session, target.turn_id, event.seq || 0)
-            }
-          },
-        })
-      } catch (err) {
-        // 断流：下一步用 /status 判断后台是否仍在执行。
-        if (err && typeof err === 'object' && 'statusCode' in err) {
-          fatal = err as ChatError
-        }
-      }
-      if (completed || controller.signal.aborted) break
-
-      // 服务端已没有可续接回合（404）：退回历史刷新，而不是报网络错误。
-      if (fatal?.statusCode === 404) {
-        session.loading = false
-        session.streamPhase = 'idle'
-        session.queuePosition = null
-        session.attachedTurnId = undefined
-        removeIfEmptyPlaceholder(session, assistantMsg)
-        await loadConversation(sessionKey, false)
-        break
-      }
-      if (fatal && fatal.retryable === false) {
-        // 403 等不可重试错误：直接收尾，不进入重试循环。
-        session.loading = false
-        session.streamPhase = 'idle'
-        session.queuePosition = null
-        session.attachedTurnId = undefined
-        assistantMsg.isError = true
-        assistantMsg.errorInfo = fatal
-        assistantMsg.content = formatErrorMessage(fatal)
-        persistSession(sessionKey)
-        break
-      }
-
-      const status = await apiGetSessionStatus(streamId).catch(() => null)
-      const active = status?.active_turn
-      if (active && active.turn_id === target.turn_id) {
-        failures = 0
-        await sleep(800)
-        continue
-      }
-      if (active) {
-        // 旧回合已结束、后台已开始新的 turn：以服务端历史为准并接上新回合。
-        session.loading = false
-        session.streamPhase = 'idle'
-        session.queuePosition = null
-        session.attachedTurnId = undefined
-        removeIfEmptyPlaceholder(session, assistantMsg)
-        await loadConversation(sessionKey, false)
-        handedOff = true
-        await resumeSession(sessionKey)
-        break
-      }
-
-      // 后台已无该回合：若事件日志里已有内容，说明回合结束，拉历史补齐权威结果。
-      if (sawEvents) {
-        session.loading = false
-        session.streamPhase = 'idle'
-        session.queuePosition = null
-        session.attachedTurnId = undefined
-        removeIfEmptyPlaceholder(session, assistantMsg)
-        await loadConversation(sessionKey, false)
-        break
-      }
-
-      failures += 1
-      if (failures >= 3) {
-        session.streamPhase = 'idle'
-        session.loading = false
-        session.queuePosition = null
-        assistantMsg.isError = true
-        const errorInfo: ChatError = {
-          type: 'network',
-          message: '网络连接中断，请检查网络后重试',
-          retryable: true,
-        }
-        assistantMsg.errorInfo = errorInfo
-        assistantMsg.content = formatErrorMessage(errorInfo)
-        persistSession(sessionKey)
-        if (autoRetrySessionId.value === sessionKey) startAutoRetry(sessionKey, lastUserText(session))
-        break
-      }
-      await sleep(1000)
-    }
-
-    if (session.abortController === controller) session.abortController = null
-    if (handedOff) return
-    if (!session.loading) return
-    session.loading = false
-    session.streamPhase = 'idle'
-    session.queuePosition = null
-    if (!completed) {
-      session.attachedTurnId = undefined
-      removeIfEmptyPlaceholder(session, assistantMsg)
-    }
+  async function attachTurn(): Promise<void> {
+    // Legacy turn SSE was removed; v2 event stream owns live turns.
   }
 
-  /** 查询会话是否有在途回合；有则自动订阅续流。返回是否接上了活动回合。 */
-  async function resumeSession(id: string): Promise<boolean> {
-    const session = sessions.value[id]
-    if (!session) return false
-    const serverId = session.conversationId || id
-    let status: SessionStatus | null = null
-    try {
-      status = await apiGetSessionStatus(serverId)
-    } catch {
-      return false
-    }
-    const active = status?.active_turn
-    if (!active) return false
-    if (session.attachedTurnId === active.turn_id && session.abortController) return true
-    await attachTurn(id, session, active)
-    return true
+  async function resumeSession(_id: string): Promise<boolean> {
+    return false
   }
 
   /** 仅解绑本地 SSE（离开页面/切换会话），后台任务继续执行。 */
@@ -890,266 +671,11 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
     session.queuePosition = null
   }
 
-  async function send(text: string, clientMsgId?: string, files?: FileContent[], voice?: VoiceMessageData): Promise<boolean> {
-    let sessionId = activeSessionId.value
-    if (!sessionId) {
-      sessionId = genId()
-      getOrCreateSession(sessionId)
-      activeSessionId.value = sessionId
-      // 新会话继承 composer 的 draft 选择；draft 仍保留给下一个新会话。
-      sessionModel.copy(SESSION_MODEL_DRAFT_KEY, sessionId)
-    }
-
-    const session = sessions.value[sessionId]
-    if (!session) return false
-    // 后台切换仍在跑时等待它，避免与新回合的 target_model 切换并发。
-    if (session.conversationId) await modelSwitch.wait(sessionId)
-    // [队列] 执行中（或本会话还有待处理任务）再次发送 → 不再拒绝，改为「追加排队任务」
-    // （对齐 opencode：执行中仍可发消息；顺序 = 新→旧 LIFO，后端当前轮结束后 drain）。
-    // pendingPrompts 用 ?. 兜底：历史缓存/测试里手工构造的 session 对象可能没有该字段。
-    if (session.loading || session.streamPhase !== 'idle' || (session.pendingPrompts?.length ?? 0) > 0) {
-      return enqueueWhileBusy(sessionId, session, text, files, voice)
-    }
-    const requestedModel = selectedModel.value
-    // [S6] 发送前校验模型/目录有效性，避免带无效 model 触发后端 404
-    if (!modelOptions.value.some(m => m.value === requestedModel)) {
-      setNotice(`当前模型不可用：${requestedModel}，请重新选择`)
-      return false
-    }
-    if (suppressRetryReset) {
-      // [S8] 自动重试重发：只清 timer，保留独立重试计数（在连发间持续累加）
-      if (autoRetryTimer) {
-        clearInterval(autoRetryTimer)
-        autoRetryTimer = null
-      }
-      retryCountdown.value = 0
-      suppressRetryReset = false
-    } else {
-      // 新的/手动发送：完整取消自动重试（含清零独立重试计数）
-      cancelAutoRetry()
-    }
-
-    let completed = false
-
-    // [S2] 幂等 id：重试时复用原 user 消息的 clientMsgId，首次发送则新生成
-    const messageClientId = clientMsgId ?? genId()
-    const userMsg: MultiAgentMessage = {
-      id: genId(), role: 'user', content: text, agents: [], timestamp: new Date(),
-      clientMsgId: messageClientId,
-      // [F8] 附件随消息落库，回显与重试时按原样重发
-      files: files && files.length ? files : undefined,
-      // [语音消息] 音频气泡随消息落库，回显与重试时按原样重发
-      voice: voice || undefined,
-    }
-    session.messages = [...session.messages, userMsg]
-    session.loading = true
-    session.streamPhase = 'queued'
-    session.queuePosition = null
-
-    // 首条消息立即用内容作标题（与后端 `body.message[:20]` 口径一致），
-    // 顶部标题 / 左侧历史即时可见，无需等 done 事件回传 title。
-    if (!session.conversationTitle) session.conversationTitle = text.slice(0, 20)
-
-    const assistantMsgId = genId()
-    let agentsMap: Record<string, AgentStreamData> = {}
-    let assistantMsg: MultiAgentMessage = reactive({
-      id: assistantMsgId, role: 'assistant', content: '', agents: [], timestamp: new Date(),
-      startedAt: Date.now(),
-    })
-    session.messages = [...session.messages, assistantMsg]
-
-    autoRetrySessionId.value = sessionId
-    retryMessageText.value = text
-
-    // 发送后立即持久化（SSE 中断也不丢失 user 消息）
-    // [S5] 走防抖（非终态写，done/error 的终态 persistSession 会清 timer 兜底覆盖）
-    schedulePersist(sessionId)
-
-    const reqData = {
-      message: text,
-      conversation_id: session.conversationId,
-      model: requestedModel,
-      // 已有会话：模型随本轮下发，后端在回合开始前切换（opencode per-message model）。
-      target_model: session.conversationId ? requestedModel : undefined,
-      use_vector_db: useVectorDb.value,
-      client_msg_id: messageClientId,
-      files: files && files.length ? files : undefined,
-      voice: voice || undefined,
-      agent_mode: agentMode.value !== 'default' ? agentMode.value : undefined,
-    }
-    const controller = new AbortController()
-    session.abortController = controller
-    const signal = controller.signal
-
-    try {
-      const harness = useHarnessTurn()
-      await harness.run(reqData, {
-        signal,
-        onSessionId: (sid) => {
-          if (!session.conversationId) {
-            session.conversationId = sid
-          }
-        },
-        onEvent: (event, turnState) => {
-        if (signal.aborted) return
-
-          const reduced = turnState
-
-        if (
-          event.type === 'agent_start' ||
-          event.type === 'agent_step' ||
-          event.type === 'agent_done' ||
-          event.type === 'agent_error' ||
-          event.type === 'context_truncated' ||
-          event.type === 'model_switched' ||
-          event.type === 'text_delta'
-        ) {
-          if (event.type === 'agent_start') routingStatus.value = ''
-          agentsMap = reduced.agents
-          assistantMsg.agents = Object.values(agentsMap)
-          if (reduced.model) assistantMsg.model = reduced.model
-          if (event.type === 'text_delta') {
-            assistantMsg.content = reduced.assistantContent
-          }
-          return
-        }
-
-        // 尽早记录服务器会话 id（后端在首个事件即注入），保证新会话也能被"停止"打断
-        if (event.conversation_id && !session.conversationId) {
-          session.conversationId = event.conversation_id
-        }
-
-        if (event.type === 'queued') {
-          session.streamPhase = 'queued'
-          session.queuePosition = event.queue_position ?? null
-          return
-        }
-
-        // 收到任何执行事件 → 运行阶段
-        if (session.streamPhase !== 'running') {
-          session.streamPhase = 'running'
-          session.queuePosition = null
-        }
-
-        if (event.type === 'routing') {
-          routingStatus.value = event.detail || 'Routing...'
-        } else if (event.type === 'permission_request') {
-          const permStore = usePermissionStore()
-          permStore.handleIncoming({
-            id: event.request_id!,
-            path: event.path!,
-            operation: event.operation!,
-            tool_name: event.tool_name!,
-            tool_args: event.tool_args as Record<string, unknown>,
-            created_at: event.created_at || new Date().toISOString(),
-            expires_at: event.expires_at,
-          })
-        } else if (event.type === 'error') {
-          session.streamPhase = 'idle'
-          routingStatus.value = ''
-          assistantMsg.isError = true
-          const errorInfo = classifySSEError(event)
-          assistantMsg.errorInfo = errorInfo
-          assistantMsg.content = formatErrorMessage(errorInfo)
-          // 回合开始前切换失败：服务端仍保留旧模型，UI 也回滚到 active。
-          if (event.error_type === 'ModelSwitchError') {
-            if (sessionModel.desired(sessionId) === requestedModel) {
-              sessionModel.revert(sessionId)
-            }
-            setNotice(`切换模型失败：${event.detail || event.error || errorInfo.message}`)
-          }
-          persistSession(sessionId)
-          // 自动重试：仅对可重试错误且未超过最大次数
-          if (errorInfo.retryable && autoRetrySessionId.value === sessionId) {
-            startAutoRetry(sessionId, text)
-          }
-        } else if (event.type === 'done' || event.type === 'turn_done') {
-          if (event.model) sessionModel.setActive(sessionId, event.model)
-          // [队列] turn_done = 本回合完成但还有排队任务（同一条 SSE 流继续跑下一个回合）；
-          // done = 队列已空，断流收尾。两者共用同一套「回合收尾」逻辑。
-          const moreComing = event.type === 'turn_done'
-          finalizeTurn(session, event, assistantMsg, agentsMap)
-          if (!moreComing) {
-            completed = true
-            session.streamPhase = 'idle'
-            routingStatus.value = ''
-            session.conversationId = event.conversation_id || session.conversationId
-            session.attachedTurnId = undefined
-            persistSession(sessionId)
-            migrateToServerId(sessionId)
-            cancelAutoRetry()
-            return
-          }
-          // 还有排队任务：把「排队中」的气泡转为已回答，并新建一个助手占位接下一个回合
-          for (const m of session.messages) {
-            if (m.role === 'user' && m.queued) {
-              m.queued = false
-              const pid = m.queuePromptId || m.clientMsgId
-              if (pid) {
-                session.pendingPrompts = (session.pendingPrompts ?? []).filter(p => p.id !== pid)
-                m.queuePromptId = undefined
-              }
-            }
-          }
-          session.streamPhase = 'running'
-          agentsMap = {}
-          assistantMsg = reactive({
-            id: genId(), role: 'assistant', content: '', agents: [], timestamp: new Date(),
-            startedAt: Date.now(),
-          })
-          session.messages = [...session.messages, assistantMsg]
-          persistSession(sessionId)
-        } else if (event.type === 'queue_drain') {
-          // [队列] 纯提示：当前轮之后还有 N 个排队任务（实际 drain 由 turn_done 驱动）
-          if (event.queue_size != null) {
-            session.queuePosition = event.queue_size
-          }
-        }
-        },
-      })
-    } catch (err: any) {
-      session.streamPhase = 'idle'
-      session.queuePosition = null
-      const isChatError = err && typeof err === 'object' && 'retryable' in err
-      const errorInfo: ChatError = isChatError ? err as ChatError : classifyNetworkError(err)
-      if (!signal.aborted) {
-        assistantMsg.isError = true; assistantMsg.errorInfo = errorInfo; assistantMsg.content = formatErrorMessage(errorInfo)
-        assistantMsg.agents = Object.values(agentsMap)
-        persistSession(sessionId)
-        // 失败/断连后也已拿到服务器 id：立刻迁移内存 key，避免后续
-        // loadConversation(serverId) 新建空会话把内容顶掉
-        migrateToServerId(sessionId)
-        // 自动重试：仅对可重试错误且未超过最大次数
-        if (errorInfo.retryable && autoRetrySessionId.value === sessionId) {
-          startAutoRetry(sessionId, text)
-        }
-      }
-    } finally {
-      routingStatus.value = ''
-      session.loading = false
-      session.streamPhase = 'idle'
-      session.queuePosition = null
-      if (session.abortController === controller) session.abortController = null
-      // [终态兜底] 队列 drain 在 turn_done 后断流（无后续 done）时，会残留一个空的
-      // 助手占位（turn_done 分支新建来接下个回合）。未收到终态 done 且该占位仍为空
-      // → 移除它，避免聊天框里挂一条永远「思考中」的空气泡。
-      if (!completed) {
-        const tail = session.messages[session.messages.length - 1]
-        if (
-          tail && tail.role === 'assistant' && !tail.isError &&
-          !tail.content && !(tail.agents && tail.agents.length) &&
-          !tail.files_changed?.length
-        ) {
-          session.messages = session.messages.slice(0, -1)
-          persistSession(sessionId)
-        }
-      }
-    }
-    return completed
+  async function send(_text: string, _clientMsgId?: string, _files?: FileContent[], _voice?: VoiceMessageData): Promise<boolean> {
+    setNotice('旧发送通道已移除，请使用 v2 会话')
+    return false
   }
 
-  // [队列] 执行中追加任务：落一条「排队中」用户消息 + POST /prompts。
-  // 后端在当前轮结束时按新→旧 drain；这里不建 SSE 流（复用正在跑的那条）。
   async function enqueueWhileBusy(
     sessionId: string,
     session: SessionState,
@@ -1362,7 +888,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   }
 
   return {
-    sessions, activeSessionId, conversations, routingStatus, selectedModel, useVectorDb,
+    sessions, activeSessionId, conversations, routingStatus, activeDirectory, setActiveDirectory, selectedModel, useVectorDb,
     models, modelOptions, defaultModelId, smallModelId, smallModelInfo, loadModels, persistSelectedModel,
     imageCaptionModelId, imageCaptionModelInfo, voiceModelSize,
     agentMode,

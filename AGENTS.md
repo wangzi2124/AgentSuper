@@ -8,7 +8,7 @@
 
 - **后端主链路**：`backend/app/main.py` → `backend/app/deps.py` → `backend/graph/main_graph.py` → `backend/graph/nodes/`
 - **Harness 层**：`backend/harness/`（工具协议、TurnHarness、压缩、切换、预算、错误、安全）
-- **前端主链路**：`frontend/src/views/MultiAgentView.vue` → `frontend/src/stores/multiAgent.ts` → `frontend/src/harness/`
+- **前端主链路**：`frontend/src/views/V2ChatView.vue` → `frontend/src/stores/multiAgent.ts`（仅会话列表/目录）+ `frontend/src/v2/`
 - **测试**：`backend/tests/`、`frontend/tests/`
 - 旧的 `backend/app/agent/**`、`backend/app/context/**`、`backend/scripts/**` **已删除**，不要按旧路径找代码。
 
@@ -19,8 +19,6 @@ backend/
   app/
     main.py                 # FastAPI 入口；挂载 /api、裸 /chat 契约、启动清理
     deps.py                 # PlatformContext：会话、图、切换、权限、并发
-    turn_runner.py          # 后台回合：有界事件日志、订阅重放、心跳、清理
-    live_turns.py           # 在途回合 sidecar 正文 + 启动对账
     api/                    # chat / compat / sessions / documents / models / ...
     session/                # session.db、history、service、repository、projector
   graph/
@@ -59,11 +57,10 @@ backend/
 
 frontend/
   src/
-    harness/                # events / adapter / reducer / useHarnessTurn
     stores/multiAgent.ts    # 会话、消息、队列、持久化；事件交给 harness
     api/multiAgent.ts       # SSE transport
-    views/MultiAgentView.vue
-    mobile/                 # MobileShell + 移动页；MobileChat 复用 MultiAgentView
+    views/V2ChatView.vue
+    mobile/                 # MobileShell + mobile pages; MobileChat reuses V2ChatView
     types/index.ts          # 共享 TS 类型
   tests/unit|integration
 ```
@@ -83,7 +80,7 @@ HTTP / SSE
   → synthesize → memory_store → END
 ```
 
-- **后台回合 / 断连续流**：`app/turn_runner.py`（有界事件日志 + 订阅者 + `turn_id/seq`）与 `app/live_turns.py`（sidecar 部分正文 + 启动对账）。`POST /api/chat/multi-agent/stream` 只创建/订阅 runner，执行在后台 task；断连、刷新、切路由不取消。`GET /api/chat/multi-agent/stream/{session_id}?after_seq=N` 重放并续流；`/api/sessions/{id}/status` 的 `active_turn` 用于重连判定。仅在停止/撤销/删除会话/进程关闭时 cancel。runner 结束保留 60s，超限丢最旧并推 `replay_gap`。
+- **后台回合 / 断连续流**：v2 使用 `app/session/coordinator.py` + `/api/v2/event`；旧 `/api/chat/multi-agent/stream` 与 `turn_runner` 已删除。
 - **TurnHarness**：`harness/kernel.py`。`PlatformContext.run/stream` 已接入；`turn_id` 通过 contextvar 传播。
 - **Model Runtime**：`models/runtime.py`（ADR-0001）。`TierModel` 只做 facade；endpoint/凭证、窗口、`num_ctx`/`think`、`keep_alive` 与预热都收在 `ModelRuntime.complete/stream/warm`，provider 差异由 `_OllamaAdapter` / `_ProviderAdapter`（云/兼容）承担。解析结果按回合 scope 缓存（`app/api/compat.py` 与 `set_current_turn` 成对 begin/end）；无 scope 的后台调用单次解析。`models/catalog.py` 保持声明式，provider/config 读取有写时失效的进程缓存。
 - **AgentLoop**：`run_tool_loop`。`graph/nodes/execute.py` 传 `stream=True`；native 与 fallback 都走 `ToolAdapter.stream()`，正文增量经 `push_event(text_delta)` 实时转 SSE；`app/api/compat._graph_events` 同时等待图节点与事件队列（不再靠 12s 心跳才 drain）。fallback 在 `ToolCallReady` 时提前执行工具；`models/stream.collect_stream` 只扣住疑似工具 JSON，普通正文逐块下发。空回复最多补答 2 次，之后收尾；不把 thinking 模型的 reasoning 冒充答案。
@@ -101,25 +98,27 @@ HTTP / SSE
 - **溢出恢复**：`run_tool_loop` 捕获 `ContextOverflowError` 后先用 `harness.compression` 压缩对话并重试一次；摘要失败再降级剥媒体/裁剪。Ollama 仍由 `models/context_guard.py` 先行自动扩窗。
 - **Ollama prompt 适配**：`models/context_guard.py`，在 `TierModel` 传输层（`raw_invoke/raw_ainvoke/raw_stream`）执行。窗口 = 显式 override > `/api/ps` last-known > `OLLAMA_NUM_CTX`；输出预留 `max(512, 25%×窗口)`，估算裕量 `max(256, 8%×窗口)`；超预算先 `truncate_messages` + `sanitize_tool_messages`，保留 system + 最新 user；system+工具+当前 user 仍装不下时**自动扩展**：按所需最小窗口（2 的幂，上限 32768）随请求下发 `num_ctx`，让 Ollama 重载到更大窗口；只有超过自动上限才抛 `ContextOverflowError`。真实 `prompt_tokens` 按模型 EWMA 校准估算比；一次 overflow 会清窗口缓存、重探、重试一次。`OLLAMA_CONTEXT_GUARD=0` 关闭。
 - **治理**：`BudgetLedger`、`classify_error`、`retry_async`、`redact_secrets`、`ToolSchemaCache`。
+- **Web Chat v2（完成）**：`backend/app/api/v2/` 提供 session/prompt/inbox/message/interrupt/compact/revert/fork/model/agent；`app/session/coordinator.py` 串行 drain durable inbox；`app/events/` 提供全局事件总线与 durable outbox，`GET /api/v2/event` 为 SSE。旧 turn SSE 已删除；轮次快照持久化在 `session_snapshots`。
 - **LiteLLM 调试**：`observability/litellm_debug.py`，默认 `litellm_debug=true`；启动时 `litellm._turn_on_debug()`，日志写 `data/logs/litellm-debug.log`（20MB×3 轮转，`redact_secrets` 过滤）。控制台仍保持 INFO；`LITELLM_DEBUG=0` 关闭。
 - **寒暄/自我介绍**：`filter`/`plan` 对 greeting/thanks/ack/test/intro 做全串锚定；intro 复用 `SELF_INTRO_MAIN`，命中即 `final_output`，零模型调用。不要用“包含介绍”这种宽匹配，避免误伤“介绍这个文件”。
 
 ### 2.2 前端（Harness 首版）
 
 ```text
-MultiAgentView
-  → multiAgent store (session/messages/queue/persistence/retry policy)
-  → useHarnessTurn (SSE lifecycle + adapter + reducer)
-  → /api/chat/multi-agent/stream
+V2ChatView
+  -> v2/sessionStore (session runtime + idempotent reducer)
+  -> v2/eventStream (single shared SSE)
+  -> /api/v2/session/* + /api/v2/event
 ```
 
+- **桌面外壳（opencode web 风格）**：`App.vue` = `AppTitleBar`（36px 顶栏）+ `Sidebar` + 主内容；移动端仍走 `MobileShell`，不渲染顶栏。
+- **标签页**：`stores/tabs.ts` + `AppTitleBar.vue`。所有功能页与会话页都作为可关闭标签打开；关闭当前页自动跳到相邻页（无标签回主页 `/multi-agent`）；标签持久化在 `agentsuper:app-tabs-v1`。主页 `/multi-agent` 不建标签，由顶栏主页按钮进入。
+- **用户设置**：`UserMenu.vue` 顶栏右上角触发；用户卡/昵称/头像/用量/背景色/`SettingsPanel` 全在其中，Sidebar 不再承载用户资料。
+- **侧边栏**：工作目录是第一入口。`MultiAgentChatHistory.vue` 直接按白名单目录分组并内嵌会话（可折叠、目录内新建会话、移出目录、临时会话组）；功能页放在底部紧凑导航（`config/navigation.ts`，已移除「多智能体」导航项）。添加目录弹窗 `DirPickerModal` 仍在工作目录标题右侧。
 - `frontend/src/harness/events.ts`：`HarnessEvent` / `TurnState`。
 - `frontend/src/harness/adapter.ts`：legacy 事件补 `turn_id`，缺 `seq` 保留 undefined。
 - `frontend/src/harness/reducer.ts`：`turn_id + seq` 去重、`step_id` 幂等 upsert、agent/text/permission/error/terminal。
-- `frontend/src/harness/useHarnessTurn.ts`：每轮 SSE + abort + reducer；store 负责队列、重试策略、IndexedDB。
-- `frontend/src/components/ConversationTimeline.vue`：opencode 式单一执行时间线；从 `message.agents[].parts` 派生，不改 store 消息结构。
-- `frontend/src/components/TimelineToolRow.vue`：紧凑工具行 + 展开参数/输出；`PermissionInlineCard.vue`：聊天内联审批。
-- `ChatInput.vue` 仍承载附件/语音/模型/Agent/排队逻辑，仅做紧凑 Composer 样式；不要为了视觉重写语音状态机。
+- `frontend/src/api/v2.ts` + `frontend/src/v2/`：Web Chat v2 前端基础（REST client、单连接 SSE、sessionRuntime、幂等事件 reducer）；`/multi-agent`、`/multi-agent/:id`、`/v2/chat` 已使用 `V2ChatView`，桌面与移动端共用。
 - **前端设计文档章节尚未补**；当前以代码与测试为准。
 
 ## 3. 开发命令
@@ -236,20 +235,20 @@ npx vitest run tests/integration/
 
 ## 6. 前端陷阱
 
-- **store 公共 API 不变**：`send`/`cancel`/`loadConversation`/`undoMessage` 等签名保持；内部事件处理走 `useHarnessTurn`。
-- **断线续接**：`loadConversation` 末尾触发 `resumeSession` → `/status.active_turn` 有值就 `attachTurn`（GET `after_seq=0` 全量重放，按 `turn_id+seq` 去重）；刷新/切路由只 `detachStream`，**不要**调 `interruptSession`。`useHarnessTurn.run` 每轮必须重置为 `'local'`。
+- **store 公共 API**：`loadConversation` 等会话元数据 API 保留；旧 `send/resume/attachTurn` 已移除，UI 使用 v2。
+- **断线续接**：由 `v2/eventStream` + `sessionRuntime` hydration 处理；不要重新启用旧 `resumeSession/attachTurn`。
 - **不要重置消息列表**：`model_switched` 只更新后续 turn 的模型；消息 key 用稳定 id。
 - **持久化**：`text_delta` 不写 IndexedDB；queued/done/turn_done/error 等阶段才写。服务端是唯一真相源，缓存只做离线回退。
 - **权限**：`permission_request` 归一化后交给 `PermissionStore`；不要塞回 reducer 里弹窗。
 - **排队**：`turn_done` 由 store 决定 drain/下一轮；controller 只产出终态。
-- **移动端**：`MobileChat` 复用 `MultiAgentView`；改聊天逻辑时先确认移动端不被破坏。
+- **移动端**：`MobileChat` 复用 `V2ChatView`；改聊天逻辑时先确认移动端不被破坏。
 - **模型列表过滤**：`ModelManagerView` 的表格/搜索/分页用 `utils/modelOrigin.ts` 过滤；默认/轻量/图片下拉与聊天选择器必须保持全量，不要把过滤下沉到 store。
-- **聊天表面**：主结构是 `ConversationTimeline` 的单一时间线；不要重新引入按 Agent 分块的 `MultiAgentResponse` 作为主渲染路径。
+- **Chat surface**: `V2ChatView` is the single timeline; do not reintroduce per-agent blocks as the main render path.
 - **只展示真实工具**：时间线过滤 `!step.tool_name` 的 Harness 图内节点（filter/plan/rag/execute_subagent 等）；不要渲染 `NODE_LABELS` 或 Agent 过滤 chips。
 - **工具步骤**：默认紧凑行，点击展开；不要默认展开所有参数/输出，避免长任务淹没最终答案。
 - **审批**：聊天页用 `PermissionInlineCard`，`Sidebar` 中的模态在 `/multi-agent` 路由隐藏；不要两套同时弹。
-- **上下文裁剪提示**：`context_truncated` → reducer 追加 `kind: 'notice'` 的 part → `ConversationTimeline` 内联一行；不要并进正文或弹窗。
-- **旧组件**：`MultiAgentResponse.vue` / `AgentPanel.vue` 仍保留给旧测试与回滚，但视图不再引用；验收通过前不要删。
+- **Context truncation notice**: `context_truncated` -> reducer notice part -> `V2ChatView` inline row; do not merge into the answer.
+- Legacy chat components (MultiAgentView / ConversationTimeline / MultiAgentResponse / AgentPanel / ChatInput) were removed after v2 became the default route.
 - **构建**：没有独立 lint script；`npm run build` 内含 `vue-tsc -b`。
 
 ## 7. 新增/修改时的落点
@@ -282,6 +281,8 @@ npx vitest run tests/integration/
 ## 9. 文档索引
 
 - `docs/harness-architecture-design.md`：Harness v2 设计（权威）
+- `docs/web-chat-v2-refactor-design.md`：Web Chat v2（durable inbox / message-part / global event）全量重构设计
+- `backend/app/contracts/v2.py` + `frontend/src/contracts/v2.ts`：Web Chat v2 契约；共享 fixtures 在 `contracts/v2/fixtures/`
 - `docs/harness-design-gap-matrix.md`：G-01~G-16、§13 验收、阶段记录
 - `docs/agent.md`、`agent-1.md`~`agent-4.md`：历史设计依据
 - `docs/codeact-sandbox-design.md`：CodeAct
@@ -290,17 +291,18 @@ npx vitest run tests/integration/
 
 ## 10. 会话工作区与权限（2026-10-27）
 
-- **默认工作区**：跨平台系统临时目录 `tempfile.gettempdir()/agentsuper/<session_id>`；Windows 为 `%TEMP%`，macOS 为 `$TMPDIR`，Linux 为 `/tmp`。**会话根不可修改**（`PATCH /api/sessions/{id}` 不再接受 `directory`），前端也不展示这条默认路径。
+- **默认工作区**：未指定目录时，会话根为跨平台系统临时目录 `tempfile.gettempdir()/agentsuper/<session_id>`；Windows 为 `%TEMP%`，macOS 为 `$TMPDIR`，Linux 为 `/tmp`。前端不展示这条默认路径。
+- **创建时可绑定白名单目录**：`POST /api/sessions` 与 `/api/chat/multi-agent(/stream)` 接受 `directory`；只允许用户白名单目录（含子目录）且必须已存在，后端用 `PermissionManager.resolve_bindable_directory` 校验。`PATCH /api/sessions/{id}` 仍不接受 `directory`：**创建后会话根不可修改**。
 - **免审范围（只有三类）**：
-  1. 会话默认临时目录（隐式，不显示）
+  1. 会话工作目录（默认为隔离临时目录；绑定白名单后即该目录，隐式）
   2. 程序内部数据目录：`data/{truncation,codeact,generated,voice,uploads,snapshots}`（隐式，不显示、不可删）
-  3. 用户「工作目录白名单」：`前端 用户设置 → 工作目录白名单` 手动增删，全局生效，持久化于 `data/runtime_workspaces.json`
+  3. 用户「工作目录白名单」：`前端 侧边栏 → 工作目录` 手动增删，全局生效，持久化于 `data/runtime_workspaces.json`；选中目录后新会话绑定该目录，会话历史按目录分组
 - **其余路径一律人工审批**：含 `backend/` 源码与 git 仓库根；`.git` 永远 deny；`.env*` / `*.db` / `permissions.json` 读需审批、写/执行直接拒绝。
 - **源码保护优先于白名单**：白名单里即使包含仓库根，写 `app/`、`plugins/`、`skills/`、`config/` 等受保护源码仍需逐次审批。
 - **`external_path_default` 已删除**：路径与命令决策不再读取它；免审只认上述三类。
 - **审批时长**：仅本回合；目录审批覆盖整棵子树；回合结束失效；不存在「允许并记住」，长期免审只能靠白名单。
 - **白名单 API**：`GET/POST/DELETE /api/permission/workspaces` 只操作白名单（不含程序主工作区）；添加要求绝对路径且目录已存在（`create=true` 可显式创建）；重复添加幂等；Windows 大小写不敏感去重。
 - **Shell**：默认 cwd 跟随会话 VFS 根；命令一律人工审批（本回合授权后同 base 命令可复用至回合结束）。
-- **目录变更**：不可变更；删除会话只清理自动 temp，不删用户目录。
-- **测试**：`backend/tests/integration/test_session_workspace_policy.py` 覆盖 temp 默认、目录不可改、白名单/内部目录免审、源码不自动放行；`backend/tests/unit/test_permission_whitelist.py` 覆盖白名单增删/校验/大小写去重。
+- **目录变更**：创建后不可变更；删除会话只清理自动 temp，不删用户目录。
+- **测试**：`backend/tests/integration/test_session_workspace_policy.py` 覆盖 temp 默认、创建时绑定白名单/拒绝越界目录、创建后目录不可改、白名单/内部目录免审、源码不自动放行；`backend/tests/unit/test_permission_whitelist.py` 覆盖白名单增删/校验/大小写去重。
 

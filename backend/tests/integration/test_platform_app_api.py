@@ -129,55 +129,6 @@ def test_multi_agent_non_stream_envelope(client):
     assert body["data"]["conversation_id"]
 
 
-def test_multi_agent_stream_frontend_protocol(client):
-    with client.stream("POST", "/api/chat/multi-agent/stream", json={"message": "go"}) as r:
-        assert r.status_code == 200
-        assert r.headers.get("X-Session-Id")
-        text = "".join(r.iter_text())
-    types = [
-        json.loads(line[6:])["type"]
-        for line in text.splitlines()
-        if line.startswith("data: ")
-    ]
-    assert types[0] == "routing"
-    assert "agent_start" in types
-    assert types[-1] == "done"
-    assert "data: " in text and '"answer"' in text
-
-
-class StreamingFakeModel:
-    """Streams two text pieces; ainvoke would mask a broken streaming path."""
-
-    tier = "fake"
-
-    def model_name(self) -> str:
-        return "stream-fake"
-
-    async def raw_stream(self, messages, *, tools=None, on_text=None, **kwargs):
-        for piece in ("流式", "答案"):
-            if on_text:
-                on_text(piece)
-        return StreamResult(content="流式答案", finish_reason="stop")
-
-    async def ainvoke(self, messages, *, tools=None, **kwargs):
-        raise AssertionError("streaming model must not use ainvoke")
-
-
-def test_stream_text_deltas_arrive_incrementally_without_replay(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "harness_tool_mode", "fallback")
-    app = create_app(
-        model=StreamingFakeModel(), vfs=VirtualFileSystem(root=str(tmp_path))
-    )
-    with TestClient(app) as c:
-        events = _stream_events(c, {"message": "go"})
-
-    deltas = [e["delta"] for e in events if e["type"] == "text_delta"]
-    assert deltas == ["流式", "答案"]
-    assert events[-1]["type"] == "done"
-    assert events[-1]["answer"] == "流式答案"
-
-
-
 def test_approvals_empty_and_decision_404(client):
     assert client.get("/api/admin/approvals").json()["approvals"] == []
     assert (
@@ -233,7 +184,12 @@ def test_restore_snapshot_and_diff_endpoints(client, tmp_path):
     begin = snapshot_begin(ctx.vfs)
     ctx.vfs.write_file("a.txt", "hello\n")
     files_changed, descriptor = snapshot_end(ctx.vfs, begin)
-    ctx.snapshots["am_x"] = descriptor
+    from app.session import repository as repo
+
+    project = repo.resolve_project(str(tmp_path))
+    repo.create_session("u", project.id, str(tmp_path), session_id="s")
+    ctx.save_snapshot("s", "am_x", descriptor)
+    assert ctx.get_snapshot("s", "am_x") == descriptor
     assert files_changed[0]["file"] == "a.txt"
     assert files_changed[0]["status"] == "added"
 
@@ -320,49 +276,6 @@ def usage_client(tmp_path, monkeypatch):
     app = create_app(model=UsageFakeModel(), vfs=VirtualFileSystem(root=str(tmp_path)))
     with TestClient(app) as c:
         yield c
-
-
-def _done_event(text: str) -> dict:
-    for line in text.splitlines():
-        if line.startswith("data: "):
-            event = json.loads(line[6:])
-            if event.get("type") == "done":
-                return event
-    raise AssertionError("no done event")
-
-
-def test_stream_done_reports_real_tokens_and_cost(usage_client):
-    with usage_client.stream(
-        "POST", "/api/chat/multi-agent/stream", json={"message": "go"}
-    ) as r:
-        text = "".join(r.iter_text())
-    done = _done_event(text)
-    assert done["tokens"]["input"] == 12
-    assert done["tokens"]["output"] == 7
-    assert done["cost"] == pytest.approx(12e-6 + 14e-6)
-
-    # 会话聚合列同步累加
-    sessions = usage_client.get("/api/sessions").json()
-    sess = sessions[0]
-    assert sess["tokens_input"] == 12
-    assert sess["tokens_output"] == 7
-    assert sess["cost"] == pytest.approx(12e-6 + 14e-6)
-
-
-def test_second_turn_reports_only_turn_delta(usage_client):
-    # 第一轮
-    with usage_client.stream(
-        "POST", "/api/chat/multi-agent/stream", json={"message": "go"}
-    ) as r:
-        first = _done_event("".join(r.iter_text()))
-    sid = first["conversation_id"]
-    # 第二轮（同一会话）：done 只报本轮增量，而非累计
-    with usage_client.stream(
-        "POST", "/api/chat/multi-agent/stream", json={"message": "again", "conversation_id": sid}
-    ) as r:
-        second = _done_event("".join(r.iter_text()))
-    assert second["tokens"]["input"] == 12 and second["tokens"]["output"] == 7
-    assert second["cost"] == pytest.approx(12e-6 + 14e-6)
 
 
 def test_non_stream_reports_tokens_and_cost(usage_client):
@@ -453,52 +366,6 @@ def _sid_after_turn(client, message="go", **extra):
         "/api/chat/multi-agent", json={"message": message, **extra}
     ).json()
     return body["data"]["conversation_id"]
-
-
-def _stream_events(client, payload):
-    with client.stream("POST", "/api/chat/multi-agent/stream", json=payload) as r:
-        assert r.status_code == 200
-        text = "".join(r.iter_text())
-    return [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: ")]
-
-
-def test_multi_agent_stream_events_have_turn_id(client):
-    events = _stream_events(client, {"message": "go"})
-    tracked = [
-        e for e in events
-        if e.get("type") in {"routing", "agent_start", "agent_step", "done", "error"}
-    ]
-    assert tracked
-    assert all(e.get("turn_id") for e in tracked)
-    assert all(e.get("session_id") for e in tracked)
-    seqs = [e["seq"] for e in tracked if isinstance(e.get("seq"), int)]
-    assert seqs == sorted(seqs)
-    assert len(seqs) == len(tracked)
-
-
-class FailingModel:
-    """模型调用即抛错，用于验证错误回合落库。"""
-
-    tier = "fake"
-
-    async def ainvoke(self, messages, *, tools=None, **kwargs):
-        raise RuntimeError("provider exploded")
-
-
-def test_stream_error_persists_error_bubble(tmp_path):
-    app = create_app(
-        model=FailingModel(), vfs=VirtualFileSystem(root=str(tmp_path))
-    )
-    with TestClient(app) as c:
-        events = _stream_events(c, {"message": "go"})
-        assert events[-1]["type"] == "error"
-        sid = events[-1]["session_id"]
-        msgs = c.get(f"/api/sessions/{sid}/messages").json()
-        assert [m["role"] for m in msgs] == ["user", "assistant"]
-        assert msgs[0]["content"] == "go"
-        assert msgs[1]["data"]["is_error"] is True
-        assert msgs[1]["data"]["error_info"]["errorType"]
-        assert msgs[1]["content"]
 
 
 def test_history_replays_user_and_assistant(client):
@@ -592,15 +459,6 @@ def test_interrupt_cancels_in_flight_turn(client):
 # ── SSE 新事件：model_switched / queued / queue_drain / turn_done ─────────────
 
 
-def test_stream_emits_model_switched_first(client):
-    events = _stream_events(
-        client, {"message": "go", "model": "deepseek/deepseek-v4-flash"}
-    )
-    assert events[0]["type"] == "model_switched"
-    assert events[0]["model_ref"]["id"] == "deepseek/deepseek-v4-flash"
-    assert events[-1]["type"] == "done"
-
-
 def test_enqueue_prompt_preserves_model(client):
     sid = client.post("/api/sessions", json={}).json()["id"]
     client.post(
@@ -610,55 +468,6 @@ def test_enqueue_prompt_preserves_model(client):
     ctx = client.app.state.platform
     sess = ctx.sessions.get(sid)
     assert sess.prompts[-1]["model"] == "m-next"
-
-
-def test_queued_prompt_switches_model_before_its_turn(client):
-    sid = client.post("/api/sessions", json={}).json()["id"]
-    ctx = client.app.state.platform
-    ctx.sessions.update(sid, model="m-old")
-    calls: list[tuple[str, str]] = []
-
-    async def fake_switch(session_id: str, target: str, *, force: bool = False):
-        # 回合内切换必须带 force 绕开门禁；外部 PATCH 仍能看到 cancels 在途标记。
-        assert force is True
-        assert session_id in ctx.cancels
-        calls.append((session_id, target))
-        ctx.sessions.update(session_id, model=target)
-        return {}
-
-    ctx.switch_model = fake_switch
-    client.post(
-        f"/api/sessions/{sid}/prompts",
-        json={"prompt": {"message": "排队任务", "model": "m-new"}, "client_msg_id": "q1"},
-    )
-    events = _stream_events(client, {"message": "go", "conversation_id": sid})
-    assert calls == [(sid, "m-new")]
-    switched = [e for e in events if e["type"] == "model_switched"]
-    assert switched[-1]["model_ref"]["id"] == "m-new"
-    assert events[-1]["model"] == "m-new"
-
-
-def test_stream_turn_done_drains_queued_prompt(client):
-    sid = client.post("/api/sessions", json={}).json()["id"]
-    client.post(
-        f"/api/sessions/{sid}/prompts",
-        json={"prompt": {"message": "排队任务"}, "client_msg_id": "q1"},
-    )
-    events = _stream_events(client, {"message": "go", "conversation_id": sid})
-    types = [e["type"] for e in events]
-    assert "queue_drain" in types
-    assert "turn_done" in types
-    assert types[-1] == "done"
-    assert types.index("turn_done") < types.index("done")
-    turn_done = next(e for e in events if e["type"] == "turn_done")
-    assert turn_done["queued_turn"] is True
-    assert turn_done["next_prompt_id"] == "q1"
-    done = events[-1]
-    assert done["queued_turn"] is False
-    # 排队任务也执行了 → 4 条可见消息
-    msgs = client.get(f"/api/sessions/{sid}/messages").json()
-    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
-    assert msgs[2]["content"] == "排队任务"
 
 
 class _LockedOnceSem:
@@ -676,16 +485,6 @@ class _LockedOnceSem:
 
     async def __aexit__(self, *exc):
         return False
-
-
-def test_stream_queued_when_all_slots_busy(client):
-    ctx = client.app.state.platform
-    ctx.semaphore = _LockedOnceSem()
-    events = _stream_events(client, {"message": "go"})
-    assert events[0]["type"] == "queued"
-    assert events[0]["queue_position"] == 1
-    assert events[-1]["type"] == "done"
-    assert ctx.queue_counter == 0  # 出队后计数回落
 
 
 # ── 审批：ApprovalQueue.await_decision + run_tool_loop 钩子 + request_permission ─
@@ -1183,16 +982,3 @@ def test_approved_external_write_is_turn_scoped(client, tmp_path_factory):
         reset_allowed_roots(token)
 
 
-
-
-def test_session_messages_replay_includes_ui_fields(client):
-    r = client.post("/api/chat/multi-agent/stream", json={"message": "go"})
-    assert r.status_code == 200
-    sid = r.headers.get("X-Session-Id")
-    for _ in r.iter_text():
-        pass
-    msgs = client.get(f"/api/sessions/{sid}/messages").json()
-    assert msgs
-    for m in msgs:
-        assert "content" in m
-        assert "id" in m

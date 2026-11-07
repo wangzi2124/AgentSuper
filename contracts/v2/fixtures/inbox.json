@@ -1,0 +1,40 @@
+[
+  {
+    "id": "inbox_01",
+    "session_id": "ses_01J8Z3M4X5",
+    "item": {
+      "type": "user",
+      "delivery": "queue",
+      "payload": {
+        "text": "继续检查前端目录",
+        "files": [],
+        "agents": [],
+        "skills": [],
+        "metadata": {
+          "source": "web"
+        }
+      }
+    },
+    "status": "pending",
+    "admitted_seq": 4,
+    "promoted_seq": null,
+    "time_created": 1762500005200,
+    "time_delivered": null
+  },
+  {
+    "id": "inbox_02",
+    "session_id": "ses_01J8Z3M4X5",
+    "item": {
+      "type": "compaction",
+      "delivery": "steer",
+      "payload": {
+        "reason": "manual"
+      }
+    },
+    "status": "pending",
+    "admitted_seq": 5,
+    "promoted_seq": null,
+    "time_created": 1762500005300,
+    "time_delivered": null
+  }
+]

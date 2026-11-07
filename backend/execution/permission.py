@@ -586,6 +586,25 @@ class PermissionManager:
         """
         return [str(w) for w in self.extra_workspaces]
 
+    def resolve_bindable_directory(self, path_str: str) -> Path:
+        """校验并返回可用于新会话根的目录。
+
+        新会话只允许绑定到用户白名单目录（含其子目录）：白名单是用户显式授权的
+        免审范围，不能通过请求体把会话根指到任意路径。目录必须已存在。
+        """
+        raw = str(path_str or "").strip().strip('"').strip("'")
+        if not raw:
+            raise ValueError("directory is required")
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            raise ValueError("directory must be an absolute path")
+        p = p.resolve()
+        if not p.is_dir():
+            raise ValueError(f"not a directory: {p}")
+        if not self._under_any(p, self.list_extra_workspaces()):
+            raise ValueError("directory_not_allowed")
+        return p
+
     def add_temp_approval(self, path_str: str):
         """临时授权指定路径，TTL 过期后自动失效。
 

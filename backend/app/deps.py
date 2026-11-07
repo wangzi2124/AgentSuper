@@ -610,10 +610,15 @@ class SessionStore:
         kind: str = "multi-agent",
         model: str | None = None,
         parent_id: str | None = None,
+        directory: str | None = None,
     ) -> Session:
         sid = session_id or f"ses_{uuid.uuid4().hex[:16]}"
-        # 会话根固定为隔离的默认临时目录；用户不能替换（白名单只管额外免审目录）。
-        resolved_directory = default_session_directory(sid)
+        # 创建时可绑定白名单目录（含子目录）；未指定则用隔离的默认临时目录。
+        # 绑定后不可再修改（PATCH 不接受 directory）。
+        if directory:
+            resolved_directory = str(get_manager().resolve_bindable_directory(directory))
+        else:
+            resolved_directory = default_session_directory(sid)
         sess = Session(
             id=sid,
             thread_id=sid,
@@ -647,6 +652,7 @@ class SessionStore:
         *,
         user_id: str = "anonymous",
         model: str | None = None,
+        directory: str | None = None,
     ) -> Session:
         if session_id and (sess := self.get(session_id)) is not None:
             # 工作目录不可变；仅补全历史会话缺失的默认临时目录。
@@ -656,7 +662,9 @@ class SessionStore:
                 sess.updated_at = time.time()
                 self.persist(session_id)
             return sess
-        return self.create(session_id=session_id, user_id=user_id, model=model)
+        return self.create(
+            session_id=session_id, user_id=user_id, model=model, directory=directory
+        )
 
     def list(
         self, *, user_id: str | None = None, kind: str | None = None
@@ -759,12 +767,9 @@ class PlatformContext:
     metrics: MetricsRecorder
     approvals: ApprovalQueue
     subagents: dict[str, Any] = field(default_factory=lambda: dict(SUBAGENTS))
-    # 轮次快照：assistant 消息 id → restore descriptor（供 restore-snapshot / diff）
-    snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 轮次快照由 session_snapshots 持久化，不再放进程内字典。
     # 在途回合取消标志（interrupt 置位；compat 流循环每步检查）
     cancels: dict[str, asyncio.Event] = field(default_factory=dict)
-    # 后台回合执行器（session_id → TurnRunner）：断连不取消，重连订阅同一事件日志
-    runners: dict[str, Any] = field(default_factory=dict)
     # 并发闸门（对齐 MAX_CONCURRENT_AGENTS）：超出并发时 SSE 发 `queued`
     max_concurrent: int = 4
     max_queue_size: int = 20
@@ -776,12 +781,21 @@ class PlatformContext:
     skill_loader: Any | None = None
     # 插件加载器（`/插件名` 斜杠注入；含用户自定义工具）；None = 未接线
     plugin_loader: Any | None = None
+    # Web Chat v2 执行协调器（Phase 2；Phase 3 接事件总线）
+    v2_coordinator: Any | None = None
+    # Web Chat v2 全局事件总线（Phase 3）
+    events: Any | None = None
 
     def __post_init__(self) -> None:
         if self.semaphore is None:
             self.semaphore = asyncio.Semaphore(max(1, int(self.max_concurrent)))
         self.turn_harness = TurnHarness(self._run_turn)
         self.stream_harness = TurnHarness(self._stream_turn)
+        from .events.bus import EventBus
+        from .session.coordinator import ExecutionCoordinator
+
+        self.events = EventBus()
+        self.v2_coordinator = ExecutionCoordinator(self)
 
     # ── 在途回合取消 ──────────────────────────────────────────────────────
     def begin_turn(self, session_id: str) -> asyncio.Event:
@@ -800,35 +814,11 @@ class PlatformContext:
         """请求取消在途回合；返回是否确有在途回合。"""
         event = self.cancels.get(session_id)
         if event is None:
-            runner = self.runners.get(session_id)
-            event = getattr(runner, "cancel_event", None) if runner is not None else None
-        if event is None:
             return False
         event.set()
         return True
 
     # ── 后台回合注册表 ──────────────────────────────────────────────────
-    def get_runner(self, session_id: str) -> Any | None:
-        return self.runners.get(session_id)
-
-    def register_runner(self, runner: Any) -> None:
-        self.runners[runner.session_id] = runner
-
-    def schedule_runner_cleanup(self, runner: Any, delay: float | None = None) -> None:
-        """回合结束后保留事件日志一小段时间（供晚到的重连重放），再释放。"""
-        from .turn_runner import RETENTION_SEC
-
-        wait = RETENTION_SEC if delay is None else max(0.0, float(delay))
-
-        def _drop() -> None:
-            if self.runners.get(runner.session_id) is runner:
-                self.runners.pop(runner.session_id, None)
-
-        try:
-            asyncio.get_running_loop().call_later(wait, _drop)
-        except RuntimeError:  # pragma: no cover - no loop (tests)
-            _drop()
-
     def session_model(self, session_id: str) -> str | None:
         """会话当前选中的模型 id（前端「模型管理」选择器写入；未选时为 None）。"""
         sess = self.sessions.get(session_id)
@@ -893,6 +883,16 @@ class PlatformContext:
         from storage.paths import data_path
 
         return str(data_path(None, "model_switches"))
+
+    def save_snapshot(self, session_id: str, message_id: str, descriptor: dict[str, Any]) -> None:
+        from .session import repository as repo
+
+        repo.save_snapshot(session_id, message_id, descriptor)
+
+    def get_snapshot(self, session_id: str, message_id: str) -> dict[str, Any] | None:
+        from .session import repository as repo
+
+        return repo.get_snapshot(session_id, message_id)
 
     async def switch_model(
         self, session_id: str, target: str, *, force: bool = False
@@ -1056,6 +1056,69 @@ class PlatformContext:
             use_vector_db=use_vector_db,
         ):
             yield item
+
+    async def stream_turn_events(
+        self,
+        question: str,
+        *,
+        session_id: str,
+        user_id: str = "anonymous",
+        files: list[Any] | None = None,
+        use_vector_db: bool = False,
+        message_id: str | None = None,
+        voice: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Run one turn and yield graph-level events (text delta/tool start/end).
+
+        This is the shared event source for v2 coordinator; it reuses compat's
+        event queue consumer without the legacy turn log.
+        """
+        from .api.compat import _graph_events
+        from .attachment_processor import stage_attachments
+        from .session.projector import project_user_message
+        from .skills.slash import apply_slash_skill
+
+        question, _skill = apply_slash_skill(
+            question, self.skill_loader, getattr(self, "plugin_loader", None)
+        )
+        binding = await self.resolve_context_binding(session_id)
+        sess = self.sessions.get(session_id)
+        staged_attachments = stage_attachments(files, sess.directory if sess else None)
+        await self.ensure_conversation(session_id)
+        view = self.rebuild_context_view(session_id)
+        history = view.messages if view is not None else None
+        user_msg_id = message_id or f"um_{uuid.uuid4().hex[:12]}"
+        if history is not None:
+            history = [m for m in history if getattr(m, "id", None) != user_msg_id]
+        project_user_message(session_id, user_msg_id, question, files, voice)
+        state = initial_state(
+            question, user_id, files=files, model=self.session_model(session_id),
+            use_vector_db=use_vector_db,
+            staged_attachments=staged_attachments,
+            history_messages=history,
+            message_id=user_msg_id,
+            context_summary=(view.summary if view is not None else "") or binding.get("summary", ""),
+            context_tail_start_id=(view.tail_start_id if view is not None else None) or binding.get("tail_start_id"),
+            context_bound=binding.get("active", False),
+            context_window_override=binding.get("context_window", 0),
+            compress_threshold_override=binding.get("compress_threshold", 0),
+            keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
+            session_id=session_id,
+        )
+        roots_token = set_allowed_roots(self.allowed_roots_for(session_id))
+        root_token = set_active_root(sess.directory if sess else "")
+        cancel = self.begin_turn(session_id)
+        try:
+            async for event in _graph_events(self, sess, state, [], cancel, {}):
+                yield event
+        finally:
+            self.end_turn(session_id)
+            reset_allowed_roots(roots_token)
+            reset_active_root(root_token)
+            clear_turn_command_approvals()
+            get_manager().clear_session_command_approvals(session_id)
+        await self.ensure_conversation(session_id)
+        self.sessions.touch(session_id)
 
     async def _stream_turn(
         self,

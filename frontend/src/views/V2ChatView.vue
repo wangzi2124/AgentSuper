@@ -1,0 +1,692 @@
+<script setup lang="ts">
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+
+import {
+  cancelInbox,
+  commitRevert,
+  compactSession,
+  createSession,
+  fetchTurnDiff,
+  forkSession,
+  interruptSession,
+  replyForm,
+  replyPermission,
+  restoreTurnSnapshot,
+  stageRevert,
+  switchSessionModel,
+  updateInboxDelivery,
+} from '../api/v2'
+import type { TurnDiff } from '../api/v2'
+import type {
+  AssistantMessage,
+  FileAttachment,
+  FormInfo,
+  InboxInfo,
+  MessagePart,
+  MessageV2,
+  PermissionRequest,
+  ToolPart,
+  VoiceAttachment,
+} from '../contracts/v2'
+import { uploadVoiceMessage } from '../api/voice'
+import { PressToTalkRecorder } from '../voice/recorder'
+import { useModelManagerStore } from '../stores/modelManager'
+import { useMultiAgentStore } from '../stores/multiAgent'
+import { useAuthStore } from '../stores/auth'
+import { useV2SessionStore } from '../v2/sessionStore'
+
+const route = useRoute()
+const router = useRouter()
+const v2 = useV2SessionStore()
+const models = useModelManagerStore()
+const legacy = useMultiAgentStore()
+const auth = useAuthStore()
+
+const draft = ref('')
+const sending = ref(false)
+const error = ref('')
+const fileInput = ref<HTMLInputElement | null>(null)
+const pendingFiles = ref<FileAttachment[]>([])
+const pendingVoice = ref<VoiceAttachment | null>(null)
+const recording = ref(false)
+const recordSeconds = ref(0)
+const voiceBusy = ref(false)
+const recorder = new PressToTalkRecorder()
+const scroller = ref<HTMLElement | null>(null)
+const formAnswers = ref<Record<string, Record<string, string>>>({})
+const activeDiff = ref<{ messageId: string; diff: TurnDiff } | null>(null)
+const diffLoading = ref(false)
+
+const sessionId = computed(() => String(route.params.id || ''))
+const runtime = computed(() => (sessionId.value ? v2.getRuntime(sessionId.value) : undefined))
+const messages = computed(() => runtime.value?.messages ?? [])
+const inbox = computed(() => runtime.value?.inbox ?? [])
+const permissions = computed(() => runtime.value?.permissions ?? [])
+const forms = computed(() => runtime.value?.forms ?? [])
+const status = computed(() => runtime.value?.status?.type ?? 'idle')
+const modelId = computed(() => runtime.value?.info?.model?.id || '')
+const effectiveModelId = computed(
+  () => modelId.value
+    || String(models.config?.default_model || '')
+    || models.modelOptions[0]?.value
+    || '',
+)
+const currentModel = computed(
+  () => models.modelOptions.find(model => model.value === effectiveModelId.value)
+    || models.modelOptions[0],
+)
+const currentModelLabel = computed(() => currentModel.value?.label || '默认模型')
+const currentModelDesc = computed(() => currentModel.value?.desc || '')
+const modelMenuOpen = ref(false)
+const modelTipVisible = ref(false)
+const userInitial = computed(() => (auth.displayName || 'U').slice(0, 1).toUpperCase())
+
+function hasImageAvatar(): boolean {
+  return !!auth.avatar && (auth.avatar.startsWith('data:') || auth.avatar.startsWith('http'))
+}
+const canSend = computed(
+  () =>
+    (draft.value.trim().length > 0 || pendingFiles.value.length > 0 || pendingVoice.value !== null) &&
+    !sending.value,
+)
+
+function scrollToBottom() {
+  void nextTick(() => {
+    if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+  })
+}
+
+watch(() => [messages.value.length, status.value], scrollToBottom)
+
+async function loadSession() {
+  const id = sessionId.value
+  if (!id) return
+  await v2.hydrate(id)
+  v2.setActive(id)
+}
+
+onMounted(() => {
+  v2.start()
+  void models.load()
+  void loadSession()
+})
+
+onBeforeUnmount(() => {
+  // One global stream stays alive across tabs; only clear view ownership.
+  recorder.cancelNow()
+  v2.setActive(null)
+})
+
+watch(() => route.params.id, () => {
+  error.value = ''
+  void loadSession()
+})
+
+async function send() {
+  const text = draft.value.trim()
+  if ((!text && !pendingFiles.value.length && !pendingVoice.value) || sending.value) return
+  sending.value = true
+  error.value = ''
+  try {
+    let id = sessionId.value
+    if (!id) {
+      const info = await createSession({
+        title: (text || '附件').slice(0, 24),
+        directory: legacy.activeDirectory || undefined,
+      })
+      id = info.id
+      v2.setInfo(id, info)
+      void legacy.loadConversations()
+      const name = route.name === 'MultiAgent' ? 'MultiAgentConversation' : 'V2ChatConversation'
+      await router.replace({ name, params: { id } })
+    }
+    const files = pendingFiles.value.slice()
+    const voice = pendingVoice.value
+    await v2.send(id, { text: text || voice?.text || '请查看附件', files, voice, resume: true })
+    draft.value = ''
+    pendingFiles.value = []
+    pendingVoice.value = null
+    scrollToBottom()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    sending.value = false
+  }
+}
+
+function chooseFiles() {
+  fileInput.value?.click()
+}
+
+function readFileData(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const value = String(reader.result || '')
+      resolve(value.includes(',') ? value.slice(value.indexOf(',') + 1) : value)
+    }
+    reader.onerror = () => reject(reader.error || new Error('读取文件失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function onFiles(event: Event) {
+  const input = event.target as HTMLInputElement
+  const selected = Array.from(input.files || [])
+  input.value = ''
+  const next = pendingFiles.value.slice()
+  for (const file of selected) {
+    if (file.size > 20 * 1024 * 1024) {
+      error.value = `${file.name} 超过 20MB`
+      continue
+    }
+    try {
+      next.push({
+        type: 'file',
+        uri: file.name,
+        name: file.name,
+        mime: file.type || 'application/octet-stream',
+        data: await readFileData(file),
+      })
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : String(err)
+    }
+  }
+  pendingFiles.value = next
+}
+
+function removeFile(index: number) {
+  pendingFiles.value = pendingFiles.value.filter((_, i) => i !== index)
+}
+
+async function toggleVoice() {
+  if (recording.value) {
+    await stopVoice()
+    return
+  }
+  try {
+    await recorder.start((frame) => {
+      recordSeconds.value = frame.seconds
+    })
+    recording.value = true
+    recordSeconds.value = 0
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '麦克风不可用'
+  }
+}
+
+async function stopVoice() {
+  const result = await recorder.stop()
+  recording.value = false
+  if (!result) return
+  if (result.duration < 1) {
+    error.value = '说话时间太短'
+    return
+  }
+  voiceBusy.value = true
+  try {
+    const up = await uploadVoiceMessage(
+      result.blob,
+      result.duration,
+      result.peaks,
+      '',
+      'voice.webm',
+    )
+    pendingVoice.value = {
+      id: up.id,
+      url: up.url,
+      duration: up.duration,
+      waveform: up.waveform,
+      text: up.text || '',
+    }
+    if (up.text && !draft.value.trim()) draft.value = up.text
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '语音上传失败'
+  } finally {
+    voiceBusy.value = false
+  }
+}
+
+async function stop() {
+  const id = sessionId.value
+  if (!id) return
+  try {
+    await interruptSession(id)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function compact() {
+  const id = sessionId.value
+  if (!id) return
+  try {
+    await compactSession(id)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function fork() {
+  const id = sessionId.value
+  if (!id) return
+  try {
+    const info = await forkSession(id)
+    v2.setInfo(info.id, info)
+    const name = route.name === 'V2ChatConversation' ? 'V2ChatConversation' : 'MultiAgentConversation'
+    await router.push({ name, params: { id: info.id } })
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function revertTo(messageId: string) {
+  const id = sessionId.value
+  if (!id) return
+  try {
+    await stageRevert(id, messageId)
+    await commitRevert(id)
+    await v2.hydrate(id)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function showDiff(messageId: string) {
+  const id = sessionId.value
+  if (!id) return
+  if (activeDiff.value?.messageId === messageId) {
+    activeDiff.value = null
+    return
+  }
+  diffLoading.value = true
+  try {
+    const diff = await fetchTurnDiff(id, messageId)
+    activeDiff.value = { messageId, diff }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    diffLoading.value = false
+  }
+}
+
+async function restoreFiles(messageId: string) {
+  const id = sessionId.value
+  if (!id) return
+  try {
+    const result = await restoreTurnSnapshot(id, messageId)
+    if (!result.restored) {
+      error.value = result.restored_files.length ? '部分文件未恢复' : '该轮没有可恢复的文件改动'
+      return
+    }
+    activeDiff.value = null
+    await v2.hydrate(id)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function answerPermission(request: PermissionRequest, decision: 'once' | 'always' | 'reject') {
+  const id = sessionId.value
+  if (!id) return
+  try {
+    await replyPermission(id, request.id, decision)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+function fieldValue(form: FormInfo, fieldId: string): string {
+  return formAnswers.value[form.id]?.[fieldId] ?? ''
+}
+
+function setFieldValue(form: FormInfo, fieldId: string, value: string) {
+  const answers = { ...(formAnswers.value[form.id] || {}), [fieldId]: value }
+  formAnswers.value = { ...formAnswers.value, [form.id]: answers }
+}
+
+async function submitForm(form: FormInfo) {
+  const id = sessionId.value
+  if (!id) return
+  try {
+    await replyForm(id, form.id, formAnswers.value[form.id] || {})
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function changeInbox(item: InboxInfo, delivery: 'steer' | 'queue') {
+  const id = sessionId.value
+  if (!id) return
+  try {
+    await updateInboxDelivery(id, item.id, delivery)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function removeInbox(item: InboxInfo) {
+  const id = sessionId.value
+  if (!id) return
+  try {
+    await cancelInbox(id, item.id)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function pickModel(value: string) {
+  modelMenuOpen.value = false
+  const id = sessionId.value
+  if (!id || !value || value === effectiveModelId.value) return
+  try {
+    const info = await switchSessionModel(id, { id: value, provider_id: '', variant: null })
+    v2.setInfo(id, info)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+
+function assistant(message: MessageV2): AssistantMessage | null {
+  return message.type === 'assistant' ? message : null
+}
+
+function textParts(message: MessageV2): MessagePart[] {
+  const value = assistant(message)
+  return value ? value.content : []
+}
+
+function toolPart(part: MessagePart): ToolPart | null {
+  return part.type === 'tool' ? part : null
+}
+
+function asTool(part: MessagePart): ToolPart {
+  return part as ToolPart
+}
+
+function onFieldSelect(form: FormInfo, fieldId: string, event: Event) {
+  setFieldValue(form, fieldId, (event.target as HTMLSelectElement).value)
+}
+
+function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
+  setFieldValue(form, fieldId, (event.target as HTMLInputElement).value)
+}
+
+function toolArgsText(part: ToolPart): string {
+  const state = part.state
+  if (state.status === 'streaming') return state.input || '\u751f\u6210\u53c2\u6570\u4e2d\u2026'
+  return JSON.stringify(state.input ?? {}, null, 2)
+}
+
+function toolResultText(part: ToolPart): string {
+  const state = part.state
+  if (state.status === 'streaming') return '\u751f\u6210\u53c2\u6570\u4e2d\u2026'
+  if (state.status === 'running') return '\u6267\u884c\u4e2d\u2026'
+  if (state.status === 'error') {
+    const content = (state.content || []).map(item => item.type === 'text' ? item.text : item.uri).join('\n')
+    return [state.error.message, content].filter(Boolean).join('\n')
+  }
+  const content = (state.content || []).map(item => item.type === 'text' ? item.text : item.uri).join('\n')
+  return content || '\u65e0\u8fd4\u56de\u5185\u5bb9'
+}
+</script>
+
+<template>
+  <div class="v2-chat">
+    <header class="v2-head">
+      <div class="v2-title">
+        <strong>{{ runtime?.info?.title || '新会话' }}</strong>
+        <span class="v2-status" :class="status">{{ status }}</span>
+      </div>
+      <div class="v2-head-actions">
+        <button
+          v-if="status === 'busy' || status === 'retry'"
+          class="v2-btn danger"
+          @click="stop"
+        >
+          停止
+        </button>
+      </div>
+    </header>
+
+    <p v-if="error" class="v2-error">{{ error }}</p>
+
+    <div ref="scroller" class="v2-messages">
+      <div v-if="!!sessionId && !messages.length && !runtime?.hydrated" class="v2-empty">载入会话…</div>
+      <div v-else-if="!messages.length" class="v2-empty-state">
+        <div class="empty-orb">
+          <div class="empty-orb-core">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M12 3v4M8 12h.01M16 12h.01M9 16h6"/></svg>
+          </div>
+          <div class="empty-orb-ring"></div>
+        </div>
+        <p class="empty-title">向智能助手提问</p>
+        <p class="empty-hint">知识库检索、代码编写、联网搜索一站完成</p>
+      </div>
+
+      <div
+        v-for="message in messages"
+        :key="message.id"
+        class="v2-message"
+        :class="message.type"
+      >
+        <template v-if="message.type === 'user'">
+          <div class="v2-avatar user">
+            <img v-if="hasImageAvatar()" class="avatar-img" :src="auth.avatar" alt="" />
+            <span v-else>{{ userInitial }}</span>
+          </div>
+          <div class="v2-user-message">
+            <div class="v2-bubble user">
+              <audio
+                v-if="message.voice"
+                class="v2-voice"
+                :src="message.voice.url"
+                controls
+              ></audio>
+              <span>{{ message.text }}</span>
+            </div>
+            <div class="v2-user-actions">
+              <button class="v2-revert" title="撤销到此消息" @click="revertTo(message.id)">撤销到此</button>
+            </div>
+          </div>
+        </template>
+
+        <template v-else-if="message.type === 'assistant'">
+          <div class="v2-avatar assistant">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M12 3v4M8 12h.01M16 12h.01M9 16h6"/></svg>
+          </div>
+          <div class="v2-assistant">
+            <template v-for="(part, index) in textParts(message)" :key="`${message.id}-${index}`">
+              <div v-if="part.type === 'text'" class="v2-bubble assistant">{{ part.text }}</div>
+              <div v-else-if="part.type === 'reasoning'" class="v2-reasoning">
+                <span>推理</span>
+                <p>{{ part.text }}</p>
+              </div>
+              <details v-else-if="toolPart(part)" class="v2-tool" :class="asTool(part).state.status">
+                <summary class="v2-tool-head">
+                  <span class="v2-tool-name">{{ asTool(part).name }}</span>
+                  <span class="v2-tool-state">{{ asTool(part).state.status }}</span>
+                </summary>
+                <div class="v2-tool-body">
+                  <div class="v2-tool-section">
+                    <span class="v2-tool-label">参数</span>
+                    <pre>{{ toolArgsText(asTool(part)) }}</pre>
+                  </div>
+                  <div class="v2-tool-section">
+                    <span class="v2-tool-label">返回</span>
+                    <pre>{{ toolResultText(asTool(part)) }}</pre>
+                  </div>
+                </div>
+              </details>
+            </template>
+            <div class="v2-message-actions">
+              <button class="v2-revert" title="查看本轮文件改动" @click="showDiff(message.id)">改动</button>
+            </div>
+            <div v-if="activeDiff?.messageId === message.id" class="v2-diff">
+              <div class="v2-diff-actions"><button @click="restoreFiles(message.id)">还原文件改动</button></div>
+              <div v-if="diffLoading" class="v2-diff-empty">生成 diff…</div>
+              <div v-else-if="!activeDiff.diff.files.length" class="v2-diff-empty">
+                本轮没有文件改动
+              </div>
+              <details v-for="file in activeDiff.diff.files" :key="file.file" open>
+                <summary>{{ file.file }}</summary>
+                <pre>{{ file.diff }}</pre>
+              </details>
+            </div>
+          </div>
+        </template>
+
+        <template v-else-if="message.type === 'compaction'">
+          <details class="v2-compaction">
+            <summary>上下文已压缩 · {{ message.reason }}</summary>
+            <p>{{ message.summary }}</p>
+          </details>
+        </template>
+
+        <template v-else-if="message.type === 'system'">
+          <div class="v2-system">{{ message.text }}</div>
+        </template>
+      </div>
+
+      <div v-if="inbox.length" class="v2-inbox">
+        <div class="v2-inbox-title">待发送 {{ inbox.length }}</div>
+        <div v-for="item in inbox" :key="item.id" class="v2-inbox-item">
+          <span class="v2-inbox-text">
+            {{ item.item.type === 'user' ? item.item.payload.text : item.item.type }}
+          </span>
+          <div class="v2-inbox-actions">
+            <button @click="changeInbox(item, 'steer')">插队</button>
+            <button @click="changeInbox(item, 'queue')">排队</button>
+            <button @click="removeInbox(item)">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="permissions.length" class="v2-cards">
+        <div v-for="request in permissions" :key="request.id" class="v2-permission">
+          <div class="v2-card-title">需要权限 · {{ request.action }}</div>
+          <p>{{ request.message || request.resources.join(', ') }}</p>
+          <div class="v2-card-actions">
+            <button @click="answerPermission(request, 'once')">允许一次</button>
+            <button @click="answerPermission(request, 'always')">总是允许</button>
+            <button class="danger" @click="answerPermission(request, 'reject')">拒绝</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="forms.length" class="v2-cards">
+        <div v-for="form in forms" :key="form.id" class="v2-form">
+          <div class="v2-card-title">{{ form.title || '请选择' }}</div>
+          <label v-for="field in form.fields" :key="field.id" class="v2-field">
+            <span>{{ field.label || field.id }}</span>
+            <select
+              v-if="field.options.length"
+              :value="fieldValue(form, field.id)"
+              @change="onFieldSelect(form, field.id, $event)"
+            >
+              <option value="">请选择</option>
+              <option v-for="option in field.options" :key="option" :value="option">{{ option }}</option>
+            </select>
+            <input
+              v-else
+              :value="fieldValue(form, field.id)"
+              @input="onFieldInput(form, field.id, $event)"
+            />
+          </label>
+          <div class="v2-card-actions">
+            <button @click="submitForm(form)">提交</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="chat-input">
+      <div class="input-card">
+        <div v-if="pendingFiles.length || pendingVoice" class="pending-files">
+          <span v-if="pendingVoice" class="msg-file-name">
+            语音 {{ pendingVoice.duration.toFixed(1) }}s
+            <button type="button" title="移除语音" @click="pendingVoice = null">×</button>
+          </span>
+          <span v-for="(file, index) in pendingFiles" :key="`${file.name}-${index}`" class="msg-file-name">
+            {{ file.name }}
+            <button type="button" title="移除附件" @click="removeFile(index)">×</button>
+          </span>
+        </div>
+        <textarea
+          v-model="draft"
+          rows="2"
+          placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+          @keydown.enter.exact.prevent="send"
+        ></textarea>
+        <div class="input-actions">
+          <input ref="fileInput" type="file" multiple hidden @change="onFiles" />
+          <button class="attach-btn" type="button" title="添加附件" @click="chooseFiles">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>
+          </button>
+          <button
+            class="mic-btn"
+            :class="{ recording }"
+            type="button"
+            :disabled="voiceBusy"
+            :title="recording ? '停止录音' : '语音输入'"
+            @click="toggleVoice"
+          >
+            <svg v-if="!recording" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 10.5a6.5 6.5 0 0 0 13 0M12 17v4.5M8.5 21.5h7"/></svg>
+            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+          <span v-if="recording" class="record-hint">{{ recordSeconds.toFixed(0) }}s</span>
+          <div
+            class="model-wrap"
+            @mouseenter="modelTipVisible = true"
+            @mouseleave="modelTipVisible = false"
+          >
+            <button
+              class="model-pill"
+              type="button"
+              :disabled="!models.modelOptions.length"
+              :title="currentModelDesc"
+              @click.stop="modelMenuOpen = !modelMenuOpen"
+            >
+              <span class="model-current">{{ currentModelLabel }}</span>
+              <svg class="model-chevron" :class="{ open: modelMenuOpen }" width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m4 6.5 4 4 4-4"/></svg>
+            </button>
+            <div v-if="modelMenuOpen" class="model-menu-mask" @click="modelMenuOpen = false"></div>
+            <div v-if="modelMenuOpen" class="model-menu">
+              <div class="model-menu-head">
+                <span>模型</span>
+                <b>{{ currentModelLabel }}</b>
+              </div>
+              <div class="model-menu-section">选择模型</div>
+              <button
+                v-for="option in models.modelOptions"
+                :key="option.value"
+                class="model-menu-item"
+                :class="{ active: option.value === effectiveModelId }"
+                type="button"
+                @click="pickModel(option.value)"
+              >
+                <span class="model-menu-text">
+                  <span class="model-menu-name">{{ option.label }}</span>
+                  <span class="model-menu-desc">{{ option.desc }}</span>
+                </span>
+                <svg v-if="option.value === effectiveModelId" class="check" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"/></svg>
+              </button>
+            </div>
+            <div v-if="modelTipVisible && !modelMenuOpen && currentModelDesc" class="model-tip">
+              <div class="model-tip-name">{{ currentModelLabel }}</div>
+              <span class="model-tip-desc">{{ currentModelDesc }}</span>
+            </div>
+          </div>
+          <span class="actions-spacer"></span>
+          <button class="send-btn" :disabled="!canSend" :title="sending ? '发送中' : '发送'" @click="send">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg>
+          </button>
+        </div>
+      </div>
+    </footer>
+  </div>
+</template>
+
+<style scoped src="../styles/v2Chat.css"></style>

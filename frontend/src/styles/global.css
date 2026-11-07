@@ -215,6 +215,7 @@ input, textarea { font-family: inherit; }
 .sidebar.collapsed .sidebar-collapse svg { transform: rotate(180deg); }
 .sidebar.collapsed .brand-text,
 .sidebar.collapsed .nav-label,
+.sidebar.collapsed .sidebar-workspaces,
 .sidebar.collapsed .sidebar-history,
 .sidebar.collapsed .user-meta,
 .sidebar.collapsed .user-edit,
