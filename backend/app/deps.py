@@ -1911,7 +1911,82 @@ class PlatformContext:
                     "expires_at": req.expires_at.isoformat(),
                 }
             )
-            decision = await legacy.await_decision(req.id)
+            # v2 通道：把审批同时写入 session_permissions 并推 permission.asked，
+            # 前端通过 /api/v2/session/{id}/permission/{rid}/reply 回复；
+            # 回复端点会调用本 manager.response() 唤醒 await_decision。
+            try:
+                from .events.emitter import emit_event as _emit_v2
+                from .session import repository as _repo
+
+                action = "shell" if command else ("read" if operation == "read" else "edit")
+                resources = keys if command else [approval_path]
+                metadata = {
+                    "tool": tool,
+                    "path": approval_path,
+                    "operation": operation,
+                }
+                _repo.create_permission(
+                    session_id,
+                    req.id,
+                    action,
+                    resources,
+                    save=list(resources),
+                    metadata=metadata,
+                    source={"type": "tool", "message_id": "", "id": tool},
+                    message=f"{tool} 需要 {operation} 权限：{approval_path}",
+                )
+                await _emit_v2(
+                    self,
+                    "permission.asked",
+                    {
+                        "id": req.id,
+                        "session_id": session_id,
+                        "action": action,
+                        "resources": resources,
+                        "save": list(resources),
+                        "metadata": metadata,
+                        "source": {"type": "tool", "message_id": "", "id": tool},
+                        "message": f"{tool} 需要 {operation} 权限：{approval_path}",
+                    },
+                    session_id=session_id,
+                )
+            except Exception:  # noqa: BLE001 - v2 通道失败不阻断审批
+                logger.warning("v2 permission bridge failed", exc_info=True)
+            # 同时等待两路：图内 legacy awaiter + v2 session_permissions 回复。
+            # 正常情况下 v2 reply 端点会调用 legacy.respond 唤醒；这里再轮询 DB 兜底，
+            # 避免进程/实例边界导致回复丢失而让工具被误拒绝。
+            legacy_task = asyncio.ensure_future(legacy.await_decision(req.id))
+            deadline = time.time() + max(1, int(getattr(legacy, "approval_timeout", 180)))
+            while not legacy_task.done():
+                done, _ = await asyncio.wait({legacy_task}, timeout=0.4)
+                if done:
+                    break
+                try:
+                    from .session import repository as _prepo
+
+                    row = next(
+                        (
+                            p
+                            for p in _prepo.list_permissions(session_id, status=None)
+                            if p.get("id") == req.id
+                        ),
+                        None,
+                    )
+                except Exception:  # noqa: BLE001
+                    row = None
+                if row is not None and row.get("status") == "replied":
+                    legacy.respond(
+                        req.id,
+                        "allowed" if row.get("reply") in ("once", "always") else "denied",
+                    )
+                    break
+                if time.time() >= deadline:
+                    break
+            if legacy_task.done():
+                decision = legacy_task.result()
+            else:
+                legacy_task.cancel()
+                decision = "expired"
             allowed = decision == "allowed"
             await self.approvals.decide(rid, allowed, reason=decision)
             if allowed:
@@ -1985,6 +2060,34 @@ class PlatformContext:
             try:
                 if legacy.classify_path(str(resolved)) == "system":
                     return "deny"
+            except Exception:  # noqa: BLE001
+                pass
+        # 有序权限规则（opencode `permissions`）：在 .git/系统硬拒绝之后、内置默认之前。
+        if legacy is not None:
+            try:
+                action = "read" if operation == "read" else "edit"
+                from pathlib import Path as _Path
+
+                resources = [str(resolved)]
+                for root in (
+                    getattr(self.vfs, "active_root", None),
+                    getattr(legacy, "workspace", None),
+                    getattr(legacy, "project_worktree", None),
+                ):
+                    if not root:
+                        continue
+                    try:
+                        rel = str(_Path(str(resolved)).relative_to(_Path(str(root))))
+                    except (ValueError, OSError):
+                        continue
+                    if rel and rel not in resources:
+                        resources.append(rel)
+                for item in legacy._rule_resources(Path(resolved)):
+                    if item not in resources:
+                        resources.append(item)
+                effect = legacy.rule_effect(action, resources)
+                if effect is not None:
+                    return effect
             except Exception:  # noqa: BLE001
                 pass
         if is_sensitive_path(str(resolved)):

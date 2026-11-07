@@ -398,6 +398,19 @@
   // 示例：日常 false；开发本系统自身时设 true。
   "allow_source_writes": false,
 
+  // 有序权限规则（对齐 opencode `permissions`）。按顺序匹配，最后一条命中生效。
+  // 每条：{ "action": "read|edit|shell|glob|grep|skill|subagent|websearch|webfetch|external_directory|*",
+  //        "resource": "通配模式（* 任意串、? 单字符）", "effect": "allow|deny|ask" }。
+  // 未命中任何规则时沿用内置默认（工作区内 allow、外部 ask、.git/系统 deny）。
+  // 示例：
+  //   [
+  //     { "action": "shell", "resource": "git status *", "effect": "allow" },
+  //     { "action": "shell", "resource": "rm *", "effect": "deny" },
+  //     { "action": "read", "resource": "*.env", "effect": "ask" },
+  //     { "action": "edit", "resource": "docs/*", "effect": "allow" }
+  //   ]
+  "permissions": [],
+
   // ══════════════════════════════════════════════════════════════════════════
   // 十五、思考模式 / Ollama
   // ══════════════════════════════════════════════════════════════════════════

@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import fnmatch
 import json
 import logging
 import os
@@ -18,6 +19,27 @@ logger = logging.getLogger(__name__)
 _MAX_TEMP_APPROVALS = 1000
 # TTL for temporary approvals in seconds (default: 5 minutes)
 _TEMP_APPROVAL_TTL = 300
+
+_PERMISSION_EFFECTS = ("allow", "deny", "ask")
+
+
+def _normalize_rule_value(value: str) -> str:
+    """规则匹配统一口径：反斜杠→斜杠，Windows 大小写不敏感。"""
+    return str(value or "").replace("\\", "/").lower()
+
+
+def wildcard_match(pattern: str, value: str) -> bool:
+    """opencode 风格通配：`*` 任意串（含 `/`），`?` 单字符；shell 的 `cmd *` 也匹配裸 `cmd`。"""
+    pat = _normalize_rule_value(pattern)
+    val = _normalize_rule_value(value)
+    if not pat:
+        return False
+    if fnmatch.fnmatchcase(val, pat):
+        return True
+    if pat.endswith(" *") and val == pat[:-2]:
+        return True
+    return False
+
 
 _manager: Optional["PermissionManager"] = None
 
@@ -267,6 +289,7 @@ class PermissionManager:
         approval_timeout: int = 3600,
         allow_source_writes: bool = False,
         project_worktree: str = "",
+        rules: Optional[list[dict]] = None,
     ):
         """初始化权限管理器，设置工作目录、白名单文件路径和额外工作区。
 
@@ -276,6 +299,15 @@ class PermissionManager:
         workspace（对齐 opencode 的 worktree 语义），便于多项目/仓库根读写；
         源码保护仍以 self.workspace（backend/）相对路径判定，不受其影响。
         """
+        # 有序权限规则：按配置顺序匹配，最后一条命中生效（对齐 opencode permissions）。
+        self.rules: list[dict] = [
+            dict(rule)
+            for rule in (rules or [])
+            if isinstance(rule, dict)
+            and str(rule.get("action") or "").strip()
+            and str(rule.get("resource") or "").strip()
+            and str(rule.get("effect") or "").strip().lower() in _PERMISSION_EFFECTS
+        ]
         self.workspace = Path(workspace).resolve() if workspace else Path.cwd()
         self.allow_source_writes = bool(allow_source_writes)
         self.project_worktree = str(Path(project_worktree).resolve()) if project_worktree else ""
@@ -347,12 +379,25 @@ class PermissionManager:
 
         return os.path.normcase(str(Path(path).resolve()))
 
-    def check_command(self, base_cmd: str, session_id: str = "") -> str:
-        """Command-level check; only current-turn approvals are honored.
+    def rule_effect(self, action: str, resources: list[str]) -> Optional[str]:
+        """按有序规则求最后一条命中的 effect（allow/deny/ask），无命中返回 None。"""
+        act = str(action or "").strip().lower()
+        effect: Optional[str] = None
+        for rule in self.rules:
+            rule_action = str(rule.get("action") or "").strip().lower()
+            if rule_action not in ("*", act):
+                continue
+            pattern = str(rule.get("resource") or "")
+            if any(wildcard_match(pattern, resource) for resource in resources):
+                effect = str(rule.get("effect") or "").strip().lower()
+        return effect if effect in _PERMISSION_EFFECTS else None
 
-        外部命令一律 ask（`EXTERNAL_PATH_DEFAULT` 不再参与决策）。
-        """
+    def check_command(self, base_cmd: str, session_id: str = "") -> str:
+        """Command-level check; ordered shell rules first, then current-turn approvals."""
         key = base_cmd.lower()
+        effect = self.rule_effect("shell", [base_cmd])
+        if effect is not None:
+            return effect
         if key in current_turn_command_approvals():
             return "allow"
         if session_id and key in self._turn_command_approvals.get(session_id, set()):
@@ -496,6 +541,26 @@ class PermissionManager:
                 continue
         return False
 
+    def _rule_resources(self, p: Path) -> list[str]:
+        """路径规则候选：绝对路径 + 相对各工作根的路径（对齐 Location 相对语义）。"""
+        resources = [str(p)]
+        roots = [self.workspace]
+        sw = current_session_workspace()
+        if sw:
+            roots.append(Path(sw))
+        if self.project_worktree:
+            roots.append(Path(self.project_worktree))
+        roots.extend(self.extra_workspaces)
+        for root in roots:
+            try:
+                rel = p.relative_to(root)
+            except (ValueError, OSError):
+                continue
+            text = str(rel)
+            if text and text not in resources:
+                resources.append(text)
+        return resources
+
     def check(self, path_str: str, operation: str) -> str:
         """检查指定路径的操作权限，返回allow/deny/ask。
 
@@ -510,6 +575,12 @@ class PermissionManager:
         cls = self.classify_path(path_str)
         if cls == "system":
             return "deny"
+        # 有序规则优先于内置默认（最后匹配生效），但 .git/系统路径的硬拒绝在上方。
+        effect = self.rule_effect(
+            "read" if operation == "read" else "edit", self._rule_resources(p)
+        )
+        if effect is not None:
+            return effect
         if cls == "workspace":
             if self._is_critical_read(p):
                 return "ask" if operation == "read" else "deny"

@@ -132,6 +132,7 @@ cd backend
 # 不要依赖 --reload（E: 盘热重载不可靠）；改代码后杀进程树再起。
 ```
 
+- **启动/重启服务必须报进度**：任何启动或重启后端（`uvicorn` / `taskkill` 后重起）都必须分步输出进度，并**每约 5 秒**轮询一次 `/api/auth/status` 直到就绪；禁止一次长时间等待且无反馈。后台跑测试脚本同理：先启动、再周期性读取日志汇报进度。
 - **配置来源**：`backend/config.example.json` → 复制为 `backend/config.json`（JSONC，已被 gitignore）。
   优先级：操作系统环境变量 > `config.json` > `config.py` 字段默认值；`.env` 文件不再读取。
 - **统一数据根**：所有运行数据走 `storage/paths.py`；`agentsuper_data` 空 = 平台用户目录（Windows `%LOCALAPPDATA%/agentsuper`、macOS `~/Library/Application Support/agentsuper`、Linux `~/.local/share/agentsuper`）。`cache/config/state/logs/bin` 默认跟随数据根；相对路径基于数据根，旧的 `data/` 前缀自动去除。首次启动若新根为空，会自动全量拷贝旧 `backend/data`（源保留，`agentsuper_migrate_legacy=false` 关闭）。

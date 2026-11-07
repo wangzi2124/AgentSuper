@@ -278,6 +278,10 @@ class Settings(BaseSettings):
     # ── 权限 / 工作区 ──
     permission_approval_timeout: int = 180
     allow_source_writes: bool = False
+    # 有序权限规则（对齐 opencode `permissions`）：每条 {action,resource,effect}，
+    # 动作如 read/edit/shell/glob/grep/skill/subagent/websearch/webfetch/external_directory；
+    # effect ∈ allow|deny|ask。按顺序匹配、最后一条命中生效；`*` 任意串、`?` 单字符。
+    permissions: list[dict[str, str]] = []
 
     # ── 思考模式 / Ollama ──
     deepseek_thinking: str = "disabled"

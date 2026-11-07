@@ -163,6 +163,7 @@ def _do_init(app):
         approval_timeout=settings.permission_approval_timeout,
         allow_source_writes=settings.allow_source_writes,
         project_worktree=project.worktree,
+        rules=list(getattr(settings, "permissions", None) or []),
     )
     set_perm_manager(perm_mgr)
 

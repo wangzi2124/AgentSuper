@@ -105,6 +105,14 @@ class _ConnectionPool:
         return _PooledConnection(self._open(), self if pooled else None)
 
     def release(self, conn: sqlite3.Connection) -> bool:
+        # 归还前清掉未提交事务：异常路径（如幂等 INSERT 冲突）跳过 commit 就
+        # close() 时，连接会带着打开的事务回池，导致下一个 BEGIN IMMEDIATE 报
+        # "cannot start a transaction within a transaction"。
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+        except Exception:  # noqa: BLE001 - 清理失败不阻断归还
+            pass
         with self._lock:
             if len(self._idle) >= self._max:
                 return False

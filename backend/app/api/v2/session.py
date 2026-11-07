@@ -78,6 +78,11 @@ class FormReplyV2(BaseModel):
     response: dict[str, Any] = Field(default_factory=dict)
 
 
+class CompactV2(BaseModel):
+    # 对齐 opencode：传入稳定 id 时，重复请求幂等；同一 id 不会重复压缩。
+    id: Optional[str] = None
+
+
 def _user_id(x_user_id: str | None) -> str:
     return x_user_id or "anonymous"
 
@@ -620,16 +625,24 @@ async def list_messages(
 @router.post("/session/{session_id}/compact")
 async def compact(
     session_id: str,
+    body: CompactV2 | None = None,
     ctx: PlatformContext = Depends(get_context),
 ) -> dict[str, Any]:
     _must_get(ctx, session_id)
-    input_id = f"cmp_{uuid.uuid4().hex[:12]}"
-    repo.admit_input(
-        session_id,
-        {"type": "compaction", "reason": "manual"},
-        delivery="steer",
-        input_id=input_id,
-    )
+    input_id = (body.id if body and body.id else "") or f"cmp_{uuid.uuid4().hex[:12]}"
+    try:
+        repo.admit_input(
+            session_id,
+            {"type": "compaction", "reason": "manual"},
+            delivery="steer",
+            input_id=input_id,
+        )
+    except sqlite3.IntegrityError:
+        # 同一 id 重复请求：幂等返回既有项（不重复入队/不重复压缩）。
+        existing = repo.get_input(session_id, input_id)
+        if existing is None:
+            raise
+        return {"data": _inbox_item_v2(existing)}
     item = repo.get_input(session_id, input_id)
     if item is None:
         raise HTTPException(status_code=500, detail="compaction admission failed")
@@ -812,9 +825,18 @@ async def reply_permission(
     body: PermissionReplyV2,
     ctx: PlatformContext = Depends(get_context),
 ) -> None:
-    sess = _must_get(ctx, session_id)
+    sess =     _must_get(ctx, session_id)
     if not repo.reply_permission(session_id, request_id, body.decision):
         raise HTTPException(status_code=404, detail="permission request not found")
+    # 唤醒图内 `execution.permission.await_decision`（v2 审批桥接）。
+    try:
+        from execution.permission import get_manager as _get_exec_manager
+
+        _get_exec_manager().respond(
+            request_id, "allowed" if body.decision in ("once", "always") else "denied"
+        )
+    except Exception:  # noqa: BLE001 - 无对应等待者时忽略
+        pass
     if body.decision == "always":
         request = next(
             (p for p in repo.list_permissions(session_id, status=None) if p["id"] == request_id),
