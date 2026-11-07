@@ -9,7 +9,7 @@ import {
   listPermissions,
   prompt as promptApi,
 } from '../api/v2'
-import type { InboxInfo, PromptInput, SessionInfoV2, V2Event } from '../contracts/v2'
+import type { InboxInfo, PromptInput, SessionInfoV2, UserMessage, V2Event } from '../contracts/v2'
 import { getV2EventStream } from './eventStream'
 import {
   applyV2Event,
@@ -136,7 +136,25 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     const inbox = runtime.inbox.slice()
     if (index >= 0) inbox[index] = item
     else inbox.push(item)
-    setRuntime({ ...runtime, inbox })
+    // 立即把用户消息放进时间线（与历史消息同一套渲染），否则发送后到回合结束
+    // hydration 之前看不到自己这条消息，样式也与上方的用户消息不一致。
+    const messages = runtime.messages.slice()
+    if (item.item.type === 'user' && !messages.some((msg) => msg.id === item.id)) {
+      const payload = item.item.payload
+      const user: UserMessage = {
+        type: 'user',
+        id: item.id,
+        time_created: item.time_created || Date.now(),
+        text: body.text || payload.text,
+        files: body.files ?? payload.files,
+        agents: body.agents ?? payload.agents,
+        skills: body.skills ?? payload.skills,
+        metadata: body.metadata ?? payload.metadata,
+        voice: body.voice ?? null,
+      }
+      messages.push(user)
+    }
+    setRuntime({ ...runtime, inbox, messages })
     return item
   }
 

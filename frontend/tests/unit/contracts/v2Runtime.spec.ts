@@ -75,6 +75,15 @@ describe('v2 runtime reducer', () => {
     expect(runtime.status.type).toBe('idle')
   })
 
+  it('drops the optimistic user message when its inbox item is cancelled', () => {
+    const runtime = emptyRuntime('s1')
+    runtime.messages.push({ type: 'user', id: 'in1', time_created: 1, text: 'hi' })
+    const next = applyV2Event(runtime, evt('session.inbox.cancelled', {
+      session_id: 's1', inbox_id: 'in1',
+    }))
+    expect(next.messages.find(message => message.id === 'in1')).toBeUndefined()
+  })
+
   it('surfaces execution failures and clears them on the next run', () => {
     let runtime = emptyRuntime('s1')
     runtime = applyV2Event(runtime, evt('session.execution.failed', {

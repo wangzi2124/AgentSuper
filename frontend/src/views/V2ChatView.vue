@@ -34,7 +34,9 @@ import { PressToTalkRecorder } from '../voice/recorder'
 import { useModelManagerStore } from '../stores/modelManager'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { useAuthStore } from '../stores/auth'
+import { useSkillStore } from '../stores/skills'
 import { useV2SessionStore } from '../v2/sessionStore'
+import type { Skill } from '../types'
 
 const route = useRoute()
 const router = useRouter()
@@ -42,6 +44,7 @@ const v2 = useV2SessionStore()
 const models = useModelManagerStore()
 const legacy = useMultiAgentStore()
 const auth = useAuthStore()
+const skillStore = useSkillStore()
 
 const draft = ref('')
 const sending = ref(false)
@@ -58,6 +61,10 @@ const formAnswers = ref<Record<string, Record<string, string>>>({})
 const activeDiff = ref<{ messageId: string; diff: TurnDiff } | null>(null)
 const diffLoading = ref(false)
 const copiedId = ref('')
+const composerRef = ref<HTMLTextAreaElement | null>(null)
+const slashDismissed = ref(false)
+const slashActive = ref(0)
+const slashListRef = ref<HTMLElement | null>(null)
 
 const sessionId = computed(() => String(route.params.id || ''))
 const runtime = computed(() => (sessionId.value ? v2.getRuntime(sessionId.value) : undefined))
@@ -100,6 +107,127 @@ function scrollToBottom() {
 }
 
 watch(() => [messages.value.length, status.value], scrollToBottom)
+
+// ── `/` 技能选择器 ────────────────────────────────────────────────
+// 在行首或空白之后输入 `/` 弹出技能列表；选中后把 `/技能名 ` 写回输入框，
+// 发送时后端 `apply_slash_skill` 会加载该技能正文并注入模型上下文。
+const slashTrigger = computed(() => {
+  const value = draft.value
+  for (let i = value.length - 1; i >= 0; i--) {
+    if (value[i] !== '/') continue
+    const prev = i > 0 ? value[i - 1] : ''
+    if (prev && !/\s/.test(prev)) continue
+    if (value[i + 1] === '/') continue
+    return i
+  }
+  return -1
+})
+const slashRest = computed(() => {
+  const i = slashTrigger.value
+  return i >= 0 ? draft.value.slice(i + 1) : ''
+})
+const slashChosen = computed(() => {
+  const rest = slashRest.value
+  const space = rest.search(/\s/)
+  if (space < 0) return false
+  const token = rest.slice(0, space)
+  if (!token) return true
+  return skillStore.skills.some((skill) => skill.name === token)
+})
+const slashOpen = computed(
+  () => !slashDismissed.value && slashTrigger.value >= 0 && !slashChosen.value,
+)
+const slashQuery = computed(() => {
+  const rest = slashRest.value
+  const space = rest.search(/\s/)
+  return (space < 0 ? rest : rest.slice(0, space)).trim().toLowerCase()
+})
+const slashFiltered = computed(() => {
+  const query = slashQuery.value
+  const available = skillStore.skills.filter((skill) => skill.enabled)
+  if (!query) return available
+  return available.filter(
+    (skill) =>
+      skill.name.toLowerCase().includes(query)
+      || (skill.description || '').toLowerCase().includes(query),
+  )
+})
+
+watch(slashOpen, (open) => {
+  if (!open) return
+  slashActive.value = 0
+  if (!skillStore.initialized) void skillStore.fetchAll()
+  void nextTick(() => {
+    if (slashListRef.value) slashListRef.value.scrollTop = 0
+  })
+})
+watch(slashFiltered, () => {
+  slashActive.value = 0
+})
+watch(draft, () => {
+  slashDismissed.value = false
+})
+
+function ensureSlashActiveVisible() {
+  const list = slashListRef.value
+  if (!list) return
+  const el = list.children[slashActive.value] as HTMLElement | undefined
+  if (!el) return
+  const listRect = list.getBoundingClientRect()
+  const elRect = el.getBoundingClientRect()
+  if (elRect.top < listRect.top) list.scrollTop -= listRect.top - elRect.top
+  else if (elRect.bottom > listRect.bottom) list.scrollTop += elRect.bottom - listRect.bottom
+}
+
+function slashMove(step: number) {
+  const count = slashFiltered.value.length
+  if (!count) return
+  slashActive.value = (slashActive.value + step + count) % count
+  void nextTick(ensureSlashActiveVisible)
+}
+
+function slashUse(skill: Skill) {
+  const i = slashTrigger.value
+  const prefix = i >= 0 ? draft.value.slice(0, i) : ''
+  draft.value = `${prefix}/${skill.name} `
+  slashDismissed.value = false
+  void nextTick(() => {
+    composerRef.value?.focus()
+    scrollToBottom()
+  })
+}
+
+function onComposerKeydown(event: KeyboardEvent) {
+  if (slashOpen.value) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      slashMove(1)
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      slashMove(-1)
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      slashDismissed.value = true
+      return
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
+      const item = slashFiltered.value[slashActive.value]
+      if (item) {
+        event.preventDefault()
+        slashUse(item)
+        return
+      }
+    }
+  }
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    void send()
+  }
+}
 
 async function loadSession() {
   const id = sessionId.value
@@ -655,6 +783,28 @@ function toolResultText(part: ToolPart): string {
 
     <footer class="chat-input">
       <div class="input-card">
+        <div v-if="slashOpen" class="slash-panel">
+          <div class="slash-head">
+            <span class="slash-title">技能</span>
+            <span class="slash-tip">输入筛选 · ↑↓ 选择 · Enter 插入 · Esc 关闭</span>
+          </div>
+          <div v-if="skillStore.loading && !slashFiltered.length" class="slash-empty">加载中…</div>
+          <div v-else-if="!slashFiltered.length" class="slash-empty">没有匹配的技能</div>
+          <div v-else ref="slashListRef" class="slash-list">
+            <button
+              v-for="(skill, index) in slashFiltered"
+              :key="skill.name"
+              type="button"
+              class="slash-item"
+              :class="{ active: index === slashActive }"
+              @mousemove="slashActive = index"
+              @click="slashUse(skill)"
+            >
+              <span class="slash-name">/{{ skill.name }}</span>
+              <span class="slash-desc">{{ skill.description || '暂无描述' }}</span>
+            </button>
+          </div>
+        </div>
         <div v-if="pendingFiles.length || pendingVoice" class="pending-files">
           <span v-if="pendingVoice" class="msg-file-name">
             语音 {{ pendingVoice.duration.toFixed(1) }}s
@@ -666,10 +816,11 @@ function toolResultText(part: ToolPart): string {
           </span>
         </div>
         <textarea
+          ref="composerRef"
           v-model="draft"
           rows="2"
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-          @keydown.enter.exact.prevent="send"
+          placeholder="输入消息，Enter 发送，Shift+Enter 换行；输入 / 选择技能"
+          @keydown="onComposerKeydown"
         ></textarea>
         <div class="input-actions">
           <input ref="fileInput" type="file" multiple hidden @change="onFiles" />

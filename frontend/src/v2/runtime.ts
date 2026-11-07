@@ -257,8 +257,12 @@ export function applyV2Event(
       break
     }
     case 'session.inbox.delivered':
+      removeInbox(next, event.data.inbox_id)
+      break
     case 'session.inbox.cancelled':
       removeInbox(next, event.data.inbox_id)
+      // 取消的输入不会落库；同时移除发送时乐观插入的用户消息。
+      next.messages = next.messages.filter((message) => message.id !== event.data.inbox_id)
       break
     case 'session.inbox.delivery.changed': {
       const index = next.inbox.findIndex((item) => item.id === event.data.inbox_id)
