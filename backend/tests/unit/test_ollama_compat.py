@@ -157,6 +157,24 @@ def test_ollama_type_provider_api_maps_to_native_chat(monkeypatch):
     assert creds["litellm_model"] == "ollama_chat/gemma4:31b"
 
 
+def test_provider_api_uses_entry_provider_when_id_prefix_mismatches(monkeypatch):
+    """id 前缀与注册 Provider 名不一致时，按条目的 provider 解析（切模型后无回复的回归）。"""
+    monkeypatch.setattr(
+        catalog,
+        "read_providers",
+        lambda: {"ollama-local": {"type": "ollama", "api_base": "http://localhost:11434", "api_key": ""}},
+    )
+    monkeypatch.setattr(
+        catalog,
+        "lookup",
+        lambda mid: {"id": mid, "provider": "ollama-local"},
+    )
+    creds = catalog.provider_api("ollama-llocal/qwen3.5:4b")
+    assert creds["is_ollama"] is True
+    assert creds["litellm_model"] == "ollama_chat/qwen3.5:4b"
+    assert creds["api_base"] == "http://localhost:11434"
+
+
 def test_ollama_type_provider_config_hint_requires_key_for_cloud(monkeypatch):
     monkeypatch.setattr(
         catalog,

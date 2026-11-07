@@ -8,6 +8,7 @@ import type {
   PermissionRequest,
   SessionInfoV2,
   SessionStatusState,
+  StructuredError,
   ToolPart,
   V2Event,
 } from '../contracts/v2'
@@ -20,6 +21,7 @@ export interface V2SessionRuntime {
   inbox: InboxInfo[]
   permissions: PermissionRequest[]
   forms: FormInfo[]
+  error: StructuredError | null
   hydrated: boolean
   seenEventIds: string[]
 }
@@ -35,6 +37,7 @@ export function emptyRuntime(id: string): V2SessionRuntime {
     inbox: [],
     permissions: [],
     forms: [],
+    error: null,
     hydrated: false,
     seenEventIds: [],
   }
@@ -56,6 +59,7 @@ function clone(runtime: V2SessionRuntime): V2SessionRuntime {
     inbox: runtime.inbox.slice(),
     permissions: runtime.permissions.slice(),
     forms: runtime.forms.slice(),
+    error: runtime.error,
     seenEventIds: runtime.seenEventIds.slice(),
   }
 }
@@ -211,6 +215,7 @@ export function applyV2Event(
       break
     case 'session.execution.started':
       next.status = { type: 'busy' }
+      next.error = null
       if (next.info) next.info = { ...next.info, status: 'busy' }
       break
     case 'session.execution.succeeded':
@@ -226,6 +231,7 @@ export function applyV2Event(
       break
     case 'session.execution.failed':
       next.status = { type: 'idle' }
+      next.error = event.data.error
       if (next.info) next.info = { ...next.info, status: 'idle', outcome: 'failed' }
       break
     case 'session.retry.scheduled':

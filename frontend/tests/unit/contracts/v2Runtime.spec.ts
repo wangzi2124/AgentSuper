@@ -74,6 +74,18 @@ describe('v2 runtime reducer', () => {
     runtime = applyV2Event(runtime, evt('session.idle', { session_id: 's1', outcome: 'succeeded' }))
     expect(runtime.status.type).toBe('idle')
   })
+
+  it('surfaces execution failures and clears them on the next run', () => {
+    let runtime = emptyRuntime('s1')
+    runtime = applyV2Event(runtime, evt('session.execution.failed', {
+      session_id: 's1',
+      error: { type: 'execution_error', message: 'LLM Provider NOT provided' },
+    }))
+    expect(runtime.status.type).toBe('idle')
+    expect(runtime.error?.message).toBe('LLM Provider NOT provided')
+    runtime = applyV2Event(runtime, evt('session.execution.started', { session_id: 's1' }))
+    expect(runtime.error).toBeNull()
+  })
 })
 
 describe('v2 SSE parser', () => {

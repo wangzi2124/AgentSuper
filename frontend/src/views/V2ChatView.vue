@@ -65,6 +65,7 @@ const inbox = computed(() => runtime.value?.inbox ?? [])
 const permissions = computed(() => runtime.value?.permissions ?? [])
 const forms = computed(() => runtime.value?.forms ?? [])
 const status = computed(() => runtime.value?.status?.type ?? 'idle')
+const executionError = computed(() => runtime.value?.error?.message || '')
 const modelId = computed(() => runtime.value?.info?.model?.id || '')
 const effectiveModelId = computed(
   () => modelId.value
@@ -451,7 +452,7 @@ function toolResultText(part: ToolPart): string {
       </div>
     </header>
 
-    <p v-if="error" class="v2-error">{{ error }}</p>
+    <p v-if="error || executionError" class="v2-error">{{ error || executionError }}</p>
 
     <div ref="scroller" class="v2-messages">
       <div v-if="!!sessionId && !messages.length && !runtime?.hydrated" class="v2-empty">载入会话…</div>

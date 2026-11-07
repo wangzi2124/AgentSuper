@@ -1126,7 +1126,16 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key,
                 "is_ollama": False, "litellm_model": None, "provider_type": "openai", "options": None}
     provider = mid.split("/", 1)[0] if "/" in mid else ""
-    reg = read_providers().get(provider)
+    # 自定义模型条目自带 `provider` 字段；模型 id 前缀可能因手工录入/历史配置而
+    # 与注册表里的 Provider 名不一致（例如 id `ollama-llocal/x` 而 provider `ollama-local`）。
+    # 前缀命中注册表优先；否则回落到条目声明的 provider，避免把模型 id 原样丢给
+    # litellm 触发 “LLM Provider NOT provided”（表现为切模型后没有任何回复）。
+    entry = lookup(mid) or {}
+    declared = str(entry.get("provider") or "").strip()
+    providers = read_providers()
+    reg = providers.get(provider)
+    if reg is None and declared and declared != provider:
+        reg = providers.get(declared)
     # 注册表中显式声明 type=ollama 的 Provider（如 Ollama Cloud）：走原生 /api/chat，
     # 但模型 id 保持 `{provider}/{name}`，避免与本地 ollama/、ollama_chat/ 前缀冲突。
     if reg and _provider_type(reg) == "ollama":
@@ -1185,12 +1194,10 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     # litellm_vision_patch.install_litellm_reasoning_patch（修「思考模式多轮流式报错」）。
     # adaptive → 不显式下发（options=None），交服务端默认。
     options = None
-    provider = mid.split("/", 1)[0] if "/" in mid else ""
     if provider == "deepseek" and read_capabilities(mid).get("reasoning"):
         _tt = _normalize_deepseek_thinking(getattr(settings, "deepseek_thinking", "disabled"))
         if _tt in ("enabled", "disabled"):
             options = {"thinking": {"type": _tt}}
-    reg = read_providers().get(provider)
     if reg:
         return {"api_base": reg.get("api_base") or settings.llm_api_base,
                 "api_key": reg.get("api_key") or settings.llm_api_key,
