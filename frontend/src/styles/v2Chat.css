@@ -120,9 +120,21 @@
   opacity: 0;
 }
 .v2-message-actions { display: flex; gap: 8px; align-self: flex-start; }
-.v2-message-actions .v2-revert { opacity: 0; }
-.v2-assistant:hover .v2-revert { opacity: 1; }
+.v2-message-actions .v2-revert,
+.v2-message-actions .v2-copy { opacity: 0; }
+.v2-assistant:hover .v2-revert,
+.v2-assistant:hover .v2-copy { opacity: 1; }
 .v2-revert:hover { color: var(--danger); }
+.v2-copy {
+  align-self: flex-start;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 0;
+  opacity: 0;
+}
+.v2-copy:hover { color: var(--primary); }
 .v2-diff {
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
@@ -264,7 +276,10 @@
   margin: 0 auto 18px;
   animation: fadeSlideUp 0.35s var(--ease);
 }
-.v2-message.user { flex-direction: row-reverse; }
+.v2-message.user {
+  flex-direction: row-reverse;
+  justify-content: flex-start; /* row-reverse 下 flex-start = 贴右，用户消息与 AI 分列两侧 */
+}
 .v2-avatar {
   width: 34px;
   height: 34px;
@@ -500,9 +515,11 @@
   max-width: 78%;
 }
 .v2-user-message .v2-bubble.user { max-width: 100%; }
-.v2-user-actions { display: flex; justify-content: flex-end; margin-top: 2px; }
-.v2-user-actions .v2-revert { opacity: 0; }
-.v2-message.user:hover .v2-user-actions .v2-revert { opacity: 1; }
+.v2-user-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+.v2-user-actions .v2-revert,
+.v2-user-actions .v2-copy { opacity: 0; }
+.v2-message.user:hover .v2-user-actions .v2-revert,
+.v2-message.user:hover .v2-user-actions .v2-copy { opacity: 1; }
 
 /* tool row: summary + expandable args/result */
 .v2-tool summary { list-style: none; cursor: pointer; }
@@ -693,6 +710,11 @@
   .v2-messages { padding: 14px 12px 8px; }
   .input-card { max-width: none; border-radius: 22px; padding: 12px 13px 10px; }
   .model-menu { width: min(300px, calc(100vw - 24px)); min-width: 0; }
+  /* 触屏无 hover：消息操作（复制/撤销/改动）常显 */
+  .v2-message-actions .v2-revert,
+  .v2-message-actions .v2-copy,
+  .v2-user-actions .v2-revert,
+  .v2-user-actions .v2-copy { opacity: 1; }
 }
 .feature-wrap { position: relative; display: inline-flex; }
 .feature-menu { width: 260px; min-width: 260px; }

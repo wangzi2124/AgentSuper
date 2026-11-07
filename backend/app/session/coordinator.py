@@ -293,6 +293,20 @@ class ExecutionCoordinator:
         _files_changed, descriptor = snapshot_end(self.ctx.vfs, snap_begin)
         self.ctx.save_snapshot(session_id, assistant_id, descriptor)
         final = "".join(text_chunks) or str((final_state or {}).get("final_output") or "")
+        if final and not text_started:
+            # 短路径（寒暄/固定回复/非流式模型）没有 text_delta，直接补发开始+结束，
+            # 否则前端在回合期间看不到任何 assistant 记录，只能等 hydration。
+            await emit_event(
+                self.ctx,
+                "session.text.started",
+                {
+                    "session_id": session_id,
+                    "assistant_message_id": assistant_id,
+                    "ordinal": 0,
+                },
+                session_id=session_id,
+            )
+            text_started = True
         if text_started:
             await emit_event(
                 self.ctx,

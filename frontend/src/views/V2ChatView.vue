@@ -57,6 +57,7 @@ const scroller = ref<HTMLElement | null>(null)
 const formAnswers = ref<Record<string, Record<string, string>>>({})
 const activeDiff = ref<{ messageId: string; diff: TurnDiff } | null>(null)
 const diffLoading = ref(false)
+const copiedId = ref('')
 
 const sessionId = computed(() => String(route.params.id || ''))
 const runtime = computed(() => (sessionId.value ? v2.getRuntime(sessionId.value) : undefined))
@@ -328,6 +329,49 @@ async function restoreFiles(messageId: string) {
   }
 }
 
+function messageText(message: MessageV2): string {
+  if (message.type === 'user') return message.text || ''
+  if (message.type === 'assistant') {
+    return message.content
+      .filter((part): part is Extract<MessagePart, { type: 'text' }> => part.type === 'text')
+      .map((part) => part.text)
+      .join('\n\n')
+  }
+  return ''
+}
+
+async function writeClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const area = document.createElement('textarea')
+  area.value = text
+  area.style.position = 'fixed'
+  area.style.opacity = '0'
+  document.body.appendChild(area)
+  area.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    document.body.removeChild(area)
+  }
+}
+
+async function copyMessage(message: MessageV2) {
+  const text = messageText(message)
+  if (!text) return
+  try {
+    await writeClipboard(text)
+    copiedId.value = message.id
+    window.setTimeout(() => {
+      if (copiedId.value === message.id) copiedId.value = ''
+    }, 1500)
+  } catch {
+    error.value = '复制失败'
+  }
+}
+
 async function answerPermission(request: PermissionRequest, decision: 'once' | 'always' | 'reject') {
   const id = sessionId.value
   if (!id) return
@@ -489,6 +533,9 @@ function toolResultText(part: ToolPart): string {
               <span>{{ message.text }}</span>
             </div>
             <div class="v2-user-actions">
+              <button class="v2-copy" title="复制这条消息" @click="copyMessage(message)">
+                {{ copiedId === message.id ? '已复制' : '复制' }}
+              </button>
               <button class="v2-revert" title="撤销到此消息" @click="revertTo(message.id)">撤销到此</button>
             </div>
           </div>
@@ -523,6 +570,9 @@ function toolResultText(part: ToolPart): string {
               </details>
             </template>
             <div class="v2-message-actions">
+              <button class="v2-copy" title="复制这条回复" @click="copyMessage(message)">
+                {{ copiedId === message.id ? '已复制' : '复制' }}
+              </button>
               <button class="v2-revert" title="查看本轮文件改动" @click="showDiff(message.id)">改动</button>
             </div>
             <div v-if="activeDiff?.messageId === message.id" class="v2-diff">

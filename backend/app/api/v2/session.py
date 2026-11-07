@@ -536,10 +536,21 @@ async def update_inbox(
     ctx: PlatformContext = Depends(get_context),
 ) -> dict[str, Any]:
     _must_get(ctx, session_id)
-    repo.update_input_delivery(session_id, inbox_id, body.delivery)
+    changed = repo.update_input_delivery(session_id, inbox_id, body.delivery)
     item = repo.get_input(session_id, inbox_id)
     if item is None:
         raise HTTPException(status_code=404, detail="inbox item not found")
+    if changed:
+        await emit_event(
+            ctx,
+            "session.inbox.delivery.changed",
+            {
+                "session_id": session_id,
+                "inbox_id": inbox_id,
+                "delivery": body.delivery,
+            },
+            session_id=session_id,
+        )
     return {"data": _inbox_item_v2(item)}
 
 
