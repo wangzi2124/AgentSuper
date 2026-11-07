@@ -506,6 +506,7 @@ export interface ToolCalledData {
   session_id: string
   assistant_message_id: string
   id: string
+  name?: string
   input: Record<string, unknown>
   executed: boolean
 }
@@ -513,12 +514,14 @@ export interface ToolProgressData {
   session_id: string
   assistant_message_id: string
   id: string
+  name?: string
   metadata: Record<string, unknown>
 }
 export interface ToolSuccessData {
   session_id: string
   assistant_message_id: string
   id: string
+  name?: string
   content: ToolContent[]
   metadata: Record<string, unknown>
   executed: boolean
@@ -527,6 +530,7 @@ export interface ToolFailedData {
   session_id: string
   assistant_message_id: string
   id: string
+  name?: string
   error: StructuredError
   content: ToolContent[]
   metadata: Record<string, unknown>

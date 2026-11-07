@@ -753,7 +753,9 @@ class _OllamaAdapter(_CloudAdapter):
         if not (endpoint.get("is_ollama") or _is_ollama(mid)):
             return False
         base = _ollama_native_base(endpoint.get("api_base")) or _ollama_base_url()
-        name = _model_name(mid)
+        # 自定义 Provider 的模型 id 前缀不一定是 ollama/ollama_chat（例如
+        # `ollama-llocal/qwen`），端点已解析出真正的 litellm_model，用它取模型名。
+        name = _model_name(str(endpoint.get("litellm_model") or mid))
         keep_alive = _keep_alive_value()
         payload: dict[str, Any] = {"model": name, "prompt": "", "stream": False}
         if keep_alive is not None:

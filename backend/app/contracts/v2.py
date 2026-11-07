@@ -582,6 +582,7 @@ class ToolCalledData(StrictModel):
     session_id: str
     assistant_message_id: str
     id: str
+    name: str = ""
     input: dict[str, Any]
     executed: bool = False
 
@@ -590,6 +591,7 @@ class ToolProgressData(StrictModel):
     session_id: str
     assistant_message_id: str
     id: str
+    name: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -597,6 +599,7 @@ class ToolSuccessData(StrictModel):
     session_id: str
     assistant_message_id: str
     id: str
+    name: str = ""
     content: list[ToolContent] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     executed: bool = True
@@ -606,6 +609,7 @@ class ToolFailedData(StrictModel):
     session_id: str
     assistant_message_id: str
     id: str
+    name: str = ""
     error: StructuredError
     content: list[ToolContent] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

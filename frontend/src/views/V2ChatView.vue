@@ -64,7 +64,9 @@ const copiedId = ref('')
 const composerRef = ref<HTMLTextAreaElement | null>(null)
 const slashDismissed = ref(false)
 const slashActive = ref(0)
+const slashSearch = ref('')
 const slashListRef = ref<HTMLElement | null>(null)
+const slashSearchRef = ref<HTMLInputElement | null>(null)
 
 const sessionId = computed(() => String(route.params.id || ''))
 const runtime = computed(() => (sessionId.value ? v2.getRuntime(sessionId.value) : undefined))
@@ -138,6 +140,8 @@ const slashOpen = computed(
   () => !slashDismissed.value && slashTrigger.value >= 0 && !slashChosen.value,
 )
 const slashQuery = computed(() => {
+  const typed = slashSearch.value.trim()
+  if (typed) return typed.toLowerCase()
   const rest = slashRest.value
   const space = rest.search(/\s/)
   return (space < 0 ? rest : rest.slice(0, space)).trim().toLowerCase()
@@ -156,9 +160,11 @@ const slashFiltered = computed(() => {
 watch(slashOpen, (open) => {
   if (!open) return
   slashActive.value = 0
+  slashSearch.value = ''
   if (!skillStore.initialized) void skillStore.fetchAll()
   void nextTick(() => {
     if (slashListRef.value) slashListRef.value.scrollTop = 0
+    slashSearchRef.value?.focus()
   })
 })
 watch(slashFiltered, () => {
@@ -186,15 +192,46 @@ function slashMove(step: number) {
   void nextTick(ensureSlashActiveVisible)
 }
 
+function closeSlash() {
+  slashDismissed.value = true
+  slashSearch.value = ''
+  void nextTick(() => composerRef.value?.focus())
+}
+
 function slashUse(skill: Skill) {
   const i = slashTrigger.value
   const prefix = i >= 0 ? draft.value.slice(0, i) : ''
   draft.value = `${prefix}/${skill.name} `
-  slashDismissed.value = false
+  slashDismissed.value = true
+  slashSearch.value = ''
   void nextTick(() => {
     composerRef.value?.focus()
     scrollToBottom()
   })
+}
+
+function onSlashSearchKeydown(event: KeyboardEvent) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    slashMove(1)
+    return
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    slashMove(-1)
+    return
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeSlash()
+    return
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    const item = slashFiltered.value[slashActive.value]
+    if (item) slashUse(item)
+    return
+  }
 }
 
 function onComposerKeydown(event: KeyboardEvent) {
@@ -211,7 +248,7 @@ function onComposerKeydown(event: KeyboardEvent) {
     }
     if (event.key === 'Escape') {
       event.preventDefault()
-      slashDismissed.value = true
+      closeSlash()
       return
     }
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -783,11 +820,20 @@ function toolResultText(part: ToolPart): string {
 
     <footer class="chat-input">
       <div class="input-card">
+        <div v-if="slashOpen" class="slash-mask" @click="closeSlash"></div>
         <div v-if="slashOpen" class="slash-panel">
           <div class="slash-head">
             <span class="slash-title">技能</span>
-            <span class="slash-tip">输入筛选 · ↑↓ 选择 · Enter 插入 · Esc 关闭</span>
+            <button class="slash-close" type="button" title="关闭" @click="closeSlash">✕</button>
           </div>
+          <input
+            ref="slashSearchRef"
+            v-model="slashSearch"
+            class="slash-search"
+            type="text"
+            placeholder="搜索技能…（↑↓ 选择，Enter 插入，Esc 关闭）"
+            @keydown="onSlashSearchKeydown"
+          />
           <div v-if="skillStore.loading && !slashFiltered.length" class="slash-empty">加载中…</div>
           <div v-else-if="!slashFiltered.length" class="slash-empty">没有匹配的技能</div>
           <div v-else ref="slashListRef" class="slash-list">

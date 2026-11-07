@@ -185,6 +185,22 @@ def _session_v2(ctx: PlatformContext, session_id: str) -> dict[str, Any]:
     }
 
 
+def _file_attachment_v2(raw: Any) -> dict[str, Any] | None:
+    """把聊天附件的内部 legacy 形状（filename/mime_type）归一为契约 FileAttachment。"""
+    if not isinstance(raw, dict):
+        return None
+    uri = raw.get("uri") or raw.get("filename") or raw.get("name")
+    if not uri:
+        return None
+    return {
+        "type": "file",
+        "uri": str(uri),
+        "name": str(raw.get("name") or raw.get("filename") or uri),
+        "mime": raw.get("mime") or raw.get("mime_type"),
+        "data": raw.get("data"),
+    }
+
+
 def _inbox_item_v2(item: dict[str, Any]) -> dict[str, Any]:
     payload = item.get("prompt") or {}
     if item.get("type") == "compaction":
@@ -198,7 +214,11 @@ def _inbox_item_v2(item: dict[str, Any]) -> dict[str, Any]:
             "type": "user",
             "payload": {
                 "text": payload.get("message") or payload.get("text") or "",
-                "files": payload.get("files") or [],
+                "files": [
+                    ref
+                    for ref in (_file_attachment_v2(f) for f in (payload.get("files") or []))
+                    if ref is not None
+                ],
                 "agents": payload.get("agents") or [],
                 "skills": payload.get("skills") or [],
                 "metadata": payload.get("metadata") or {},
