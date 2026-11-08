@@ -14,6 +14,8 @@ from typing import Any, Awaitable, Callable
 
 from cognition.context_budget import prune_gate_for
 from cognition.tool_output import bound_tool_output
+from execution.access import policy_block
+from execution.formatters import format_tool_output
 from execution.quota import get_quota
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from execution.tools.file_tools import (
@@ -455,6 +457,7 @@ async def _execute_tool_call(
     sem: asyncio.Semaphore | None = None,
     workspace_lock: _AsyncRWLock | None = None,
     permission_lock: asyncio.Lock | None = None,
+    allowed: set[str] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
     parsed_args, arg_error = call_argument_error(tc)
     args: dict[str, Any] = parsed_args or {}
@@ -475,11 +478,24 @@ async def _execute_tool_call(
 
     async def _run() -> str:
         nonlocal args
+        if allowed is not None and tc.name not in allowed:
+            return f"错误：工具 {tc.name} 不在当前 Agent 允许的工具范围内"
         if td is None:
             return f"错误：未知工具 {tc.name}"
         if arg_error:
             return f"错误：{arg_error}"
+        from extensions.hooks import get_hook_bus
+
+        bus = get_hook_bus()
+        hooked = await bus.emit(
+            "tool.execute.before",
+            {"tool": tc.name, "args": args, "agent_id": agent_id},
+        )
+        args = hooked.get("args", args) if isinstance(hooked.get("args"), dict) else args
         args = run_pre_tool(tc.name, args)
+        blocked = policy_block(tc.name)
+        if blocked:
+            return f"已阻止执行工具 {tc.name}（{blocked}）"
         if td.require_approval:
             hook = _permission_hook_var.get()
             if hook is None:
@@ -492,7 +508,14 @@ async def _execute_tool_call(
             if not approved:
                 return f"已拒绝执行工具 {tc.name}（用户未授权）"
         output = await _execute_with_quota(td, tc, args, get_quota(registry))
-        return run_post_tool(tc.name, args, output)
+        output = run_post_tool(tc.name, args, output)
+        after = await bus.emit(
+            "tool.execute.after",
+            {"tool": tc.name, "args": args, "output": output, "agent_id": agent_id},
+        )
+        if isinstance(after.get("output"), str):
+            output = after["output"]
+        return output
 
     async def _guarded() -> str:
         # Writers/shell take the exclusive side; file reads/searches take the
@@ -541,7 +564,9 @@ async def _execute_tool_call(
         }
     )
     trace = {"name": tc.name, "args": args, "output": output}
-    history = make_tool_result_message(call_id, tc.name, output)
+    history = make_tool_result_message(
+        call_id, tc.name, format_tool_output(tc.name, args, str(output))
+    )
     return output, trace, history
 
 
@@ -595,6 +620,7 @@ async def _stream_step(
     sem: asyncio.Semaphore | None = None,
     workspace_lock: _AsyncRWLock | None = None,
     permission_lock: asyncio.Lock | None = None,
+    allowed_tools: set[str] | None = None,
 ) -> tuple[Any, dict[str, tuple[Any, str, dict[str, Any], dict[str, Any]]]]:
     from harness.tool_adapter import Done, TextDelta, ToolCallReady
 
@@ -629,6 +655,7 @@ async def _stream_step(
                             sem=sem,
                             workspace_lock=workspace_lock,
                             permission_lock=permission_lock,
+                            allowed=allowed_tools,
                         )
                     )
             elif isinstance(event, Done):
@@ -714,6 +741,7 @@ async def run_tool_loop(
     context_usable_tokens: int = 0,
     on_compaction: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     session_id: str = "",
+    allowed_tools: set[str] | None = None,
 ) -> dict[str, Any]:
     """LLM 工具调用循环，返回 {text, rounds, tool_trace, tool_history, usage}。
 
@@ -726,6 +754,8 @@ async def run_tool_loop(
 
     tool_adapter = adapter or get_tool_adapter(model)
     tool_defs = build_tool_defs(registry, scope)
+    if allowed_tools is not None:
+        tool_defs = [spec for spec in tool_defs if spec.get("function", {}).get("name") in allowed_tools]
     max_parallel_tools = max(1, int(getattr(_settings, "tool_concurrency", 10) or 10))
     convo = [dict(m) for m in messages]
     requires_tool_evidence = _needs_tool_evidence(messages)
@@ -798,6 +828,7 @@ async def run_tool_loop(
                         sem=round_sem,
                         workspace_lock=workspace_lock,
                         permission_lock=permission_lock,
+                        allowed_tools=allowed_tools,
                     )
             else:
                 with trace_span("llm.call", rounds=rounds):
@@ -1018,6 +1049,7 @@ async def run_tool_loop(
                         sem=round_sem,
                         workspace_lock=workspace_lock,
                         permission_lock=permission_lock,
+                        allowed=allowed_tools,
                     )
                 )
         try:

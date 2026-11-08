@@ -736,9 +736,28 @@ def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
                 "且必须以字母或数字开头（如 vllm / ollama-cloud / my_provider）"
             )
     entry = dict(providers.get(name) or {})
-    for k in ("label", "api_base", "api_key", "enabled", "type"):
+    for k in (
+        "label",
+        "api_base",
+        "api_key",
+        "enabled",
+        "type",
+        "package",
+        "compatibility",
+        "timeout",
+        "headers",
+        "body",
+    ):
         if k in data and data[k] is not None:
             entry[k] = data[k]
+    for key in ("headers", "body"):
+        if key in entry and not isinstance(entry[key], dict):
+            raise ValueError(f"Provider {key} 必须是 JSON 对象")
+    if entry.get("timeout") not in (None, ""):
+        try:
+            entry["timeout"] = max(1.0, float(entry["timeout"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Provider timeout 必须是数字（秒）") from exc
     label = str(entry.get("label") or "").strip()
     if not label:
         raise ValueError("Provider Label（显示名称）不能为空")
@@ -875,7 +894,8 @@ def set_defaults(default_model: Optional[str] = None, small_model: Optional[str]
 def _strip_unknown_fields(entry: dict) -> dict:
     """只保留目录条目已知字段，避免把前端 UI 噪音字段写进 overrides。"""
     known = {"id", "provider", "family", "name", "description", "capabilities",
-             "context_length", "limits", "cost", "default", "tokenizer", "thinking"}
+             "context_length", "limits", "cost", "default", "tokenizer", "thinking",
+             "variants"}
     return {k: v for k, v in entry.items() if k in known and v is not None}
 
 
@@ -1122,6 +1142,13 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     """
     from config import settings
     mid = normalize_model(model_id)
+    if "#" in str(mid or ""):
+        from .variants import apply_variant, find_variant, split_variant
+
+        base, variant = split_variant(mid)
+        base_result = provider_api(base)
+        definition = find_variant(read_providers(), lookup(base) or {}, base, variant)
+        return apply_variant(base_result, definition, variant=variant)
     if not mid:
         return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key,
                 "is_ollama": False, "litellm_model": None, "provider_type": "openai", "options": None}
@@ -1199,10 +1226,18 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         if _tt in ("enabled", "disabled"):
             options = {"thinking": {"type": _tt}}
     if reg:
-        return {"api_base": reg.get("api_base") or settings.llm_api_base,
-                "api_key": reg.get("api_key") or settings.llm_api_key,
-                "is_ollama": False, "litellm_model": None,
-                "provider_type": _provider_type(reg), "options": options}
+        result = {
+            "api_base": reg.get("api_base") or settings.llm_api_base,
+            "api_key": reg.get("api_key") or settings.llm_api_key,
+            "is_ollama": False,
+            "litellm_model": None,
+            "provider_type": _provider_type(reg),
+            "options": options,
+        }
+        for key in ("headers", "body", "timeout", "package", "compatibility"):
+            if reg.get(key) not in (None, "", {}):
+                result[key] = reg[key]
+        return result
     return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key,
             "is_ollama": False, "litellm_model": None, "provider_type": "openai", "options": options}
 

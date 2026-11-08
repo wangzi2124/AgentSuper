@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import SettingsPanel from './SettingsPanel.vue'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore, BG_VARIANTS } from '../stores/theme'
+import { applyCustomTheme, checkContrast, saveCustomTheme, validateTheme } from '../themes/custom'
 import { fetchStats, fetchUsage, type UserUsage } from '../api/monitor'
 import type { MonitorStats } from '../types'
 
@@ -78,8 +79,28 @@ function resetAvatar() {
   auth.setAvatar('')
 }
 
-function onAvatarFile(e: Event) {
+async function onThemeFile(e: Event) {
   const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    const parsed = JSON.parse(await file.text())
+    const result = validateTheme(parsed)
+    if (!result.theme) {
+      window.alert(result.error || '主题格式无效')
+      return
+    }
+    applyCustomTheme(result.theme)
+    saveCustomTheme(result.theme)
+    const warnings = checkContrast(result.theme)
+    if (warnings.length) window.alert(warnings.join('\n'))
+  } catch {
+    window.alert('主题 JSON 解析失败')
+  }
+}
+
+function onAvatarFile(e: Event) {  const input = e.target as HTMLInputElement
   const file = input.files?.[0]
   input.value = ''
   if (!file) return
@@ -236,6 +257,10 @@ onBeforeUnmount(() => {
             @click="theme.setBg(v.value)"
           ><span></span></button>
         </div>
+        <label class="pp-preset pp-upload" title="导入主题 JSON" style="margin-top: 8px">
+          导入主题
+          <input type="file" accept="application/json,.json" style="display:none" @change="onThemeFile" />
+        </label>
       </div>
 
       <SettingsPanel @close="close" />

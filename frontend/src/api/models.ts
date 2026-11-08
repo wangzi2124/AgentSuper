@@ -31,6 +31,7 @@ export interface ModelInfo {
   default?: boolean
   // Ollama 思考模式：enabled / disabled / adaptive（空 = 跟随全局 OLLAMA_THINKING）
   thinking?: string
+  variants?: Record<string, Record<string, unknown>>
   // 后端只读来源标注（builtin/local 不进入模型列表；provider 时附带 origin_provider）
   origin?: ModelOrigin
   origin_provider?: string
@@ -72,6 +73,11 @@ export interface ProviderInfo {
   api_key: string
   enabled: boolean
   type?: 'openai' | 'ollama'
+  package?: string
+  compatibility?: string
+  timeout?: number
+  headers?: Record<string, string>
+  body?: Record<string, unknown>
   models: ModelInfo[]
 }
 

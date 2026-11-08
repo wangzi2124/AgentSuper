@@ -71,8 +71,9 @@ async function saveDefaults() {
 const showProviderForm = ref(false)
 // 正在编辑已有 Provider（而非新增）：此时前缀不可改
 const providerIsEdit = ref(false)
-const providerForm = reactive<{ name: string; label: string; api_base: string; api_key: string; enabled: boolean; type: 'openai' | 'ollama' }>({
+const providerForm = reactive<{ name: string; label: string; api_base: string; api_key: string; enabled: boolean; type: 'openai' | 'ollama'; package: string; compatibility: string; timeout: string; headers: string; body: string }>({
   name: '', label: '', api_base: '', api_key: '', enabled: true, type: 'openai',
+  package: 'openai', compatibility: '', timeout: '', headers: '', body: '',
 })
 
 function openProviderForm(p?: ProviderInfo) {
@@ -83,6 +84,11 @@ function openProviderForm(p?: ProviderInfo) {
   providerForm.api_key = p?.api_key || ''
   providerForm.enabled = p?.enabled ?? true
   providerForm.type = p?.type === 'ollama' ? 'ollama' : 'openai'
+  providerForm.package = p?.package || (providerForm.type === 'ollama' ? 'ollama' : 'openai')
+  providerForm.compatibility = p?.compatibility || ''
+  providerForm.timeout = p?.timeout ? String(p.timeout) : ''
+  providerForm.headers = p?.headers ? JSON.stringify(p.headers, null, 2) : ''
+  providerForm.body = p?.body ? JSON.stringify(p.body, null, 2) : ''
   showProviderForm.value = true
 }
 async function submitProvider() {
@@ -106,7 +112,27 @@ async function submitProvider() {
   providerForm.label = validated.label
   providerForm.name = validated.name
   // 仅在保存成功时关闭弹窗：失败时保留用户输入，否则错误 toast 容易被错过
-  const ok = await mm.updateProvider(validated.name, { label: validated.label, api_base: providerForm.api_base, api_key: providerForm.api_key, enabled: providerForm.enabled, type: providerForm.type })
+  let headers: Record<string, string> | undefined
+  let body: Record<string, unknown> | undefined
+  try {
+    headers = providerForm.headers.trim() ? JSON.parse(providerForm.headers) : undefined
+    body = providerForm.body.trim() ? JSON.parse(providerForm.body) : undefined
+  } catch {
+    mm.setError('headers / body 必须是合法 JSON')
+    return
+  }
+  const ok = await mm.updateProvider(validated.name, {
+    label: validated.label,
+    api_base: providerForm.api_base,
+    api_key: providerForm.api_key,
+    enabled: providerForm.enabled,
+    type: providerForm.type,
+    package: providerForm.package.trim() || (providerForm.type === 'ollama' ? 'ollama' : 'openai'),
+    compatibility: providerForm.compatibility.trim(),
+    timeout: providerForm.timeout.trim() ? Number(providerForm.timeout) : 0,
+    headers,
+    body,
+  })
   if (ok) showProviderForm.value = false
 }
 async function toggleProvider(p: ProviderInfo) {
@@ -125,12 +151,12 @@ const modelForm = reactive<{
   id: string; name: string; provider: string; family: string; description: string;
   context_length: number; max_output_tokens: number;
   input_price: number; output_price: number; cache_read_price: number; cache_write_price: number;
-  tool_use: boolean; vision: boolean; reasoning: boolean; thinking: string;
+  tool_use: boolean; vision: boolean; reasoning: boolean; thinking: string; variants: string;
 }>({
   id: '', name: '', provider: 'ollama', family: '', description: '',
   context_length: 32768, max_output_tokens: 8192,
   input_price: 0, output_price: 0, cache_read_price: 0, cache_write_price: 0,
-  tool_use: true, vision: false, reasoning: false, thinking: '',
+  tool_use: true, vision: false, reasoning: false, thinking: '', variants: '',
 })
 
 function applyModelForm(m?: ModelInfo) {
@@ -148,6 +174,7 @@ function applyModelForm(m?: ModelInfo) {
   modelForm.vision = m?.capabilities?.vision ?? false
   modelForm.reasoning = m?.capabilities?.reasoning ?? false
   modelForm.thinking = m?.thinking || ''
+  modelForm.variants = m?.variants ? JSON.stringify(m.variants, null, 2) : ''
 }
 
 // 重新添加内置/已探测模型时，按 id 自动带出目录参数，避免用表单默认值覆盖真实窗口/能力。
@@ -189,6 +216,13 @@ async function openModelForm(m?: ModelInfo) {
 
 async function submitModel() {
   if (!modelForm.id.trim()) return
+  let variants: Record<string, unknown> | undefined
+  try {
+    variants = modelForm.variants.trim() ? JSON.parse(modelForm.variants) : undefined
+  } catch {
+    mm.setError('variants 必须是合法 JSON')
+    return
+  }
   const entry: Partial<ModelInfo> & { id: string } = {
     id: modelForm.id.trim(),
     name: modelForm.name.trim() || modelForm.id.trim(),
@@ -199,6 +233,7 @@ async function submitModel() {
     limits: { max_output_tokens: Number(modelForm.max_output_tokens) || 8192 },
     capabilities: { tool_use: modelForm.tool_use, vision: modelForm.vision, reasoning: modelForm.reasoning },
     thinking: modelForm.thinking || undefined,
+    variants: variants as Record<string, Record<string, unknown>> | undefined,
     cost: {
       input_per_1m: Number(modelForm.input_price) || 0,
       output_per_1m: Number(modelForm.output_price) || 0,
@@ -409,6 +444,27 @@ function capOf(m: ModelInfo) {
           </select>
         </label>
       </div>
+      <div class="form-row">
+        <label class="mm-field"><span>package</span>
+          <input v-model="providerForm.package" class="ctrl" placeholder="openai / anthropic / google" />
+        </label>
+        <label class="mm-field"><span>compatibility</span>
+          <input v-model="providerForm.compatibility" class="ctrl" placeholder="可选" />
+        </label>
+        <label class="mm-field"><span>timeout（秒）</span>
+          <input v-model="providerForm.timeout" class="ctrl" type="number" min="1" placeholder="默认" />
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="mm-field mm-wide"><span>headers（JSON）</span>
+          <textarea v-model="providerForm.headers" class="ctrl" rows="3" placeholder='{"X-Custom": "1"}' />
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="mm-field mm-wide"><span>body（JSON，合并到请求体）</span>
+          <textarea v-model="providerForm.body" class="ctrl" rows="3" placeholder='{"some_flag": true}' />
+        </label>
+      </div>
       <p v-if="providerForm.type === 'ollama'" class="hint provider-prefix-hint">
         Ollama 类型会用 <code>/api/tags</code> 自动探测模型，并通过原生 <code>/api/chat</code> 调用。
         云端填 <code>https://ollama.com</code> + API Key；本地填 <code>http://localhost:11434</code>（key 可留空）。
@@ -484,6 +540,11 @@ function capOf(m: ModelInfo) {
         </label>
       </div>
       <p class="hint">开启思考时 Ollama 只输出 reasoning_content、正文为空（会拖累工具循环），非必要勿开；仅对 Ollama 模型生效。</p>
+      <div class="form-row">
+        <label class="mm-field mm-wide"><span>variants（JSON，如 {"fast": {"settings": {"think": false}}}）</span>
+          <textarea v-model="modelForm.variants" class="ctrl" rows="3" placeholder='{"fast": {"settings": {}, "headers": {}, "body": {}}}' />
+        </label>
+      </div>
       <div class="form-footer">
         <button class="btn" :disabled="mm.saving" @click="showModelForm = false">取消</button>
         <button class="btn btn-primary mm-save-btn" :disabled="mm.saving" @click="submitModel">

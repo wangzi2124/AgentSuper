@@ -230,6 +230,30 @@ def _attachment_content(
     images = [f for f in items if is_image_file(f)]
     if not images:
         return text
+    from config import settings as _settings
+
+    limit = int(getattr(_settings, "image_max_bytes", 0) or 0)
+    oversized: list[str] = []
+    if limit > 0:
+        kept = []
+        for image in images:
+            data = str(image.get("data") or "")
+            size = max(0, len(data) * 3 // 4 - data.count("=", -2))
+            if size > limit:
+                oversized.append(str(image.get("filename") or "图片"))
+            else:
+                kept.append(image)
+        images = kept
+    if oversized:
+        text += f"\n（以下图片超过 {limit} 字节上限，未发送：{'、'.join(oversized)}）"
+    if not images:
+        return text
+    from .image_processor import normalize_image
+
+    images = [
+        {**image, "data": normalize_image(str(image.get("data") or ""))}
+        for image in images
+    ]
     if not _vision_capable(model):
         captions = [
             f"- {str(f.get('filename') or '图片')}: {f.get('_caption')}"
@@ -282,6 +306,10 @@ def initial_state(
     compress_threshold_override: int = 0,
     keep_recent_tokens_override: int = 0,
     session_id: str = "",
+    instructions: str = "",
+    agent: str = "",
+    workspace: str = "",
+    model_override: str = "",
 ) -> dict[str, Any]:
     """构造一轮的输入状态。
 
@@ -391,6 +419,10 @@ def initial_state(
         "context_tool_tokens": 0,
         "rag_context": "",
         "attachment_context": attachment_context,
+        "instructions": instructions,
+        "agent": agent,
+        "workspace": workspace,
+        "model_override": model_override,
         "compaction_event": {},
         "rag_done": False,
         "use_vector_db": bool(use_vector_db),
@@ -799,7 +831,10 @@ class PlatformContext:
 
     # ── 在途回合取消 ──────────────────────────────────────────────────────
     def begin_turn(self, session_id: str) -> asyncio.Event:
-        """登记一个在途回合的取消标志（interrupt 借此中断）。"""
+        """登记一轮在途回合的取消标志（interrupt 可中断）。"""
+        warming = getattr(self, "warming", None)
+        if warming is not None:
+            warming.note_activity()
         event = asyncio.Event()
         self.cancels[session_id] = event
         return event
@@ -823,6 +858,115 @@ class PlatformContext:
         """会话当前选中的模型 id（前端「模型管理」选择器写入；未选时为 None）。"""
         sess = self.sessions.get(session_id)
         return getattr(sess, "model", None) if sess is not None else None
+
+    def session_agent(self, session_id: str) -> str:
+        sess = self.sessions.get(session_id)
+        return str(getattr(sess, "agent", "") or "") if sess is not None else ""
+
+    def session_workspace(self, session_id: str) -> str:
+        sess = self.sessions.get(session_id)
+        directory = getattr(sess, "directory", None) if sess is not None else None
+        return str(directory or default_session_directory(session_id))
+
+    def skill_loader_for(self, session_id: str):
+        """Per-workspace skill loader so project `.claude/.agents` skills load."""
+        try:
+            from app.skills.discovery import merge_dirs, workspace_skill_dirs
+            from app.skills.loader import SkillLoader
+
+            workspace = self.session_workspace(session_id)
+            cache = getattr(self, "_skill_loader_cache", None)
+            if cache is None:
+                cache = {}
+                self._skill_loader_cache = cache
+            if workspace in cache:
+                return cache[workspace]
+            extras = merge_dirs(
+                self.skill_loader.extra_dir_strings(),
+                workspace_skill_dirs(workspace),
+            )
+            loader = SkillLoader(
+                str(self.skill_loader.skills_dir),
+                create=False,
+                extra_dirs=extras,
+                bundled_names=set(self.skill_loader.bundled_names),
+            )
+            loader.load_all()
+            cache[workspace] = loader
+            return loader
+        except Exception:  # noqa: BLE001
+            logger.warning("project skill loader failed, using global", exc_info=True)
+            return self.skill_loader
+
+    def instruction_blocks(self, session_id: str) -> list[Any]:
+        """Resolve instruction blocks for this session's workspace (never raises)."""
+        try:
+            from prompts.instructions import get_instruction_resolver
+
+            sess = self.sessions.get(session_id)
+            workspace = (
+                getattr(sess, "directory", None)
+                if sess is not None and getattr(sess, "directory", None)
+                else default_session_directory(session_id)
+            )
+            return get_instruction_resolver().resolve(
+                workspace, self.session_model(session_id) or ""
+            )
+        except Exception:  # noqa: BLE001 - instructions must not break a turn
+            logger.warning("instruction resolve failed", exc_info=True)
+            return []
+
+    def instructions_text(self, session_id: str) -> str:
+        """Render this turn's instructions for the graph state."""
+        return self._instructions_text(session_id)
+
+    def turn_instructions(self, session_id: str, question: str) -> str:
+        """Instructions plus references selected with ``@ref:<name>``."""
+        import re
+
+        text = self._instructions_text(session_id)
+        names = re.findall(r"@ref:([\w./\\-]+)", question or "")
+        if names:
+            try:
+                from references import selection_text
+
+                sess = self.sessions.get(session_id)
+                workspace = getattr(sess, "directory", None) if sess is not None else None
+                block = selection_text(workspace, list(dict.fromkeys(names)))
+                if block:
+                    text = f"{text}\n\n{block}" if text else block
+            except Exception:  # noqa: BLE001
+                logger.debug("reference selection unavailable", exc_info=True)
+        return text
+
+    def _instructions_text(self, session_id: str) -> str:
+        from prompts.assembly import render_instructions
+
+        text = render_instructions(self.instruction_blocks(session_id))
+        try:
+            from mcp.runtime import get_mcp_runtime
+
+            runtime = get_mcp_runtime()
+            sess = self.sessions.get(session_id)
+            workspace = getattr(sess, "directory", None) if sess is not None else None
+            if runtime.workspace is None or runtime.workspace == (workspace or ""):
+                mcp_text = runtime.instructions()
+                if mcp_text:
+                    text = f"{text}\n\n{mcp_text}" if text else mcp_text
+        except Exception:  # noqa: BLE001
+            logger.debug("mcp instructions unavailable", exc_info=True)
+        try:
+            from references import reference_instructions
+
+            sess = self.sessions.get(session_id)
+            workspace = getattr(sess, "directory", None) if sess is not None else None
+            ref_text = reference_instructions(workspace)
+            if ref_text:
+                ref_block = f"[引用目录]\n{ref_text}"
+                text = f"{text}\n\n{ref_block}" if text else ref_block
+        except Exception:  # noqa: BLE001
+            logger.debug("reference instructions unavailable", exc_info=True)
+        return text
 
     def context_binding(self, session_id: str) -> dict[str, Any]:
         """读取本会话的模型切换上下文绑定（摘要 + 近期原文起点）。
@@ -978,16 +1122,23 @@ class PlatformContext:
         message_id: str | None = None,
     ) -> dict[str, Any]:
         """TurnHarness runner: execute one graph turn and return its final state."""
+        from .session.context import set_session_context
+
+        set_session_context(session_id, self)
         # `/技能名`：本轮强制加载技能正文（找不到/未启用则原样发送）
         from .skills.slash import apply_slash_skill
 
         question, _skill = apply_slash_skill(
-            question, self.skill_loader, getattr(self, "plugin_loader", None)
+            question, self.skill_loader_for(session_id), getattr(self, "plugin_loader", None),
+            workspace=getattr(self.sessions.get(session_id), "directory", None),
         )
+        from .commands.context import consume_command_override
+
+        command_override = consume_command_override()
         token = set_allowed_roots(self.allowed_roots_for(session_id))
         sess_for_root = self.sessions.get(session_id)
         root_token = set_active_root(sess_for_root.directory if sess_for_root else "")
-        model = self.session_model(session_id)
+        model = command_override.get("model") or self.session_model(session_id)
         binding = await self.resolve_context_binding(session_id)
         model_token = set_request_model(model)
         sess = self.sessions.get(session_id)
@@ -1021,6 +1172,10 @@ class PlatformContext:
                     compress_threshold_override=binding.get("compress_threshold", 0),
                     keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
                     session_id=session_id,
+                    instructions=self.turn_instructions(session_id, question),
+                    agent=command_override.get("agent") or self.session_agent(session_id),
+                    workspace=self.session_workspace(session_id),
+            model_override=command_override.get("model") or "",
                 ),
                 config={"configurable": {"thread_id": session_id}},
             )
@@ -1075,12 +1230,19 @@ class PlatformContext:
         """
         from .api.compat import _graph_events
         from .attachment_processor import stage_attachments
+        from .session.context import set_session_context
         from .session.projector import project_user_message
         from .skills.slash import apply_slash_skill
 
+        set_session_context(session_id, self)
+
         question, _skill = apply_slash_skill(
-            question, self.skill_loader, getattr(self, "plugin_loader", None)
+            question, self.skill_loader_for(session_id), getattr(self, "plugin_loader", None),
+            workspace=getattr(self.sessions.get(session_id), "directory", None),
         )
+        from .commands.context import consume_command_override
+
+        command_override = consume_command_override()
         binding = await self.resolve_context_binding(session_id)
         sess = self.sessions.get(session_id)
         staged_attachments = stage_attachments(files, sess.directory if sess else None)
@@ -1104,6 +1266,10 @@ class PlatformContext:
             compress_threshold_override=binding.get("compress_threshold", 0),
             keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
             session_id=session_id,
+            instructions=self.turn_instructions(session_id, question),
+            agent=command_override.get("agent") or self.session_agent(session_id),
+            workspace=self.session_workspace(session_id),
+            model_override=command_override.get("model") or "",
         )
         roots_token = set_allowed_roots(self.allowed_roots_for(session_id))
         root_token = set_active_root(sess.directory if sess else "")
@@ -1135,9 +1301,13 @@ class PlatformContext:
         from .skills.slash import apply_slash_skill
 
         question, _skill = apply_slash_skill(
-            question, self.skill_loader, getattr(self, "plugin_loader", None)
+            question, self.skill_loader_for(session_id), getattr(self, "plugin_loader", None),
+            workspace=getattr(self.sessions.get(session_id), "directory", None),
         )
-        model = self.session_model(session_id)
+        from .commands.context import consume_command_override
+
+        command_override = consume_command_override()
+        model = command_override.get("model") or self.session_model(session_id)
         binding = await self.resolve_context_binding(session_id)
         sess = self.sessions.get(session_id)
         from .attachment_processor import stage_attachments
@@ -1164,6 +1334,10 @@ class PlatformContext:
             compress_threshold_override=binding.get("compress_threshold", 0),
             keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
             session_id=session_id,
+            instructions=self.turn_instructions(session_id, question),
+            agent=command_override.get("agent") or self.session_agent(session_id),
+            workspace=self.session_workspace(session_id),
+            model_override=command_override.get("model") or "",
         )
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))
@@ -1696,13 +1870,22 @@ class PlatformContext:
                 plan=plan,
                 # 手动压缩至少把更早的一轮折进摘要，避免“点了压缩但全在 tail 里”无操作。
                 policy=CompactionPolicy(
-                    reason="manual", threshold=0, tail_turns=1, min_gain_tokens=0
+                    reason="manual",
+                    threshold=0,
+                    keep_tokens=0,
+                    tail_turns=1,
+                    min_gain_tokens=0,
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - 手动压缩失败时保留原历史
             logger.warning("manual compaction failed: %s", exc)
             return {"compacted": False, "baseline": sess.compact_baseline_seq, "error": str(exc)}
         if not result.triggered or not result.summary.strip():
+            logger.info(
+                "manual compaction not triggered: messages=%d tokens=%d",
+                len(raw),
+                tokens_before,
+            )
             return {"compacted": False, "baseline": sess.compact_baseline_seq}
 
         event = {

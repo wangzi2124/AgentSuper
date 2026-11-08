@@ -121,6 +121,19 @@ V2ChatView
 - `frontend/src/api/v2.ts` + `frontend/src/v2/`：Web Chat v2 前端基础（REST client、单连接 SSE、sessionRuntime、幂等事件 reducer）；`/multi-agent`、`/multi-agent/:id`、`/v2/chat` 已使用 `V2ChatView`，桌面与移动端共用。
 - **前端设计文档章节尚未补**；当前以代码与测试为准。
 
+### 2.3 opencode 能力层（G-01…G-06）
+
+- **指令**：`prompts/instructions.py` 统一发现 global/向上/project/嵌套/config/URL，`PlatformContext.instruction_blocks/instructions_text` 每轮解析；`compose_system(instructions=...)` 只追加在稳定头之后。API `GET /api/instructions` 只回元数据。
+- **命令**：`app/commands/registry.py` 发现 `~/.config/agentsuper/commands` 与 `<ws>/.agentsuper/commands`，支持嵌套名、`$ARGUMENTS`/`$1..$9`/`@file`/`files`；`slash.py` 先解析命令再技能/插件；API `GET /api/v2/commands`；前端斜杠面板合并命令。
+- **格式化**：`execution/formatters/`（spec/builtin/checks/service），仅 `write_file`/`edit_file` 后运行，`shell=False`、超时、首成功即停；事件 `formatter_applied`/`formatter_failed`。
+- **MCP**：`mcp/{config,client,runtime}.py` 真 stdio/HTTP JSON-RPC；工具名 `mcp_<server>_<tool>`；API `/api/v2/mcp` 含 CRUD、tools/resources/read/instructions、reload、connect/disconnect；OAuth 明确 501。
+- **Agents**：`agents/registry.py` 支持全局/项目 Markdown、嵌套 ID、mode/model/system/tools/permission/steps/hidden/color/disabled；`resolver.py` 回退 `build`；内置 build/plan/general/explore/compaction，title/summary 显式 disabled；会话 agent 影响 execute 的 prompt/tools/model/steps 与工具权限。
+- **策略**：`policy/engine.py` 来源优先级 global<project<agent<managed、最后命中生效；`execution/actions.py` 统一动作，`policy_block` 在工具执行前硬拦；API `GET /api/v2/policies`。
+- **前端入口**：`/agent-settings`（Agents/命令/策略/指令/引用/配置）与 `/mcp`；导航见 `config/navigation.ts`。
+- **扩展治理**：`references/`（本地/Git 引用，异步 clone）；`net/egress.py`（统一代理/CA/超时）；`harness/warming.py`（空闲保活）；`execution/tools/websearch_policy.py`（provider/随机/429 冷却）；`models/variants.py`（`#variant` 合并）；`models/local_discovery.py`（LM Studio/vLLM）；`extensions/hooks.py`（插件 hook bus）；`execution/tools/patch_tools.py`（unified diff）；`execution/tools/question_tools.py`（`ask_question` durable form）；`execution/uri.py`（`file://#Lx-Ly`）。
+- **明确不做/保留差异**：JS/TS 插件、browser/execute/worktree 工具、`always` 审批、background/native compaction；见 `docs/adr/0002-browser-execute-tools.md`、`docs/adr/0003-js-plugins-and-native-compaction.md`。
+- **新增 API**：`/api/v2/references`、`/api/v2/config`（PATCH/rollback）、`/api/v2/network`、`/api/v2/websearch`、`/v1/chat/completions`。
+
 ## 3. 开发命令
 
 ### 3.1 后端

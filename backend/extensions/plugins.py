@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 import inspect
+import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -20,6 +21,10 @@ class Plugin:
         enabled: bool = True,
         functions: Optional[Dict[str, Callable]] = None,
         functions_meta: Optional[Dict[str, dict]] = None,
+        options: Optional[dict] = None,
+        permissions: Optional[list] = None,
+        hooks: Optional[Dict[str, Callable]] = None,
+        manifest_path: str = "",
     ):
         self.name = name
         self.version = version
@@ -28,6 +33,10 @@ class Plugin:
         self.enabled = enabled
         self.functions = functions or {}
         self.functions_meta = functions_meta or {}
+        self.options = options or {}
+        self.permissions = permissions or []
+        self.hooks = hooks or {}
+        self.manifest_path = manifest_path
 
     def to_dict(self) -> dict:
         """将插件信息序列化为字典格式。"""
@@ -38,6 +47,10 @@ class Plugin:
             "module_path": self.module_path,
             "enabled": self.enabled,
             "functions": list(self.functions.keys()),
+            "options": dict(self.options),
+            "permissions": list(self.permissions),
+            "hooks": list(self.hooks.keys()),
+            "manifest_path": self.manifest_path,
         }
 
 
@@ -51,6 +64,11 @@ class PluginLoader:
 
     def load_all(self) -> List[Plugin]:
         """扫描插件目录并加载所有有效的Python插件文件。"""
+        from .hooks import get_hook_bus
+
+        bus = get_hook_bus()
+        for plugin in self._plugins.values():
+            bus.unregister_owner(plugin.name)
         self._plugins.clear()
         for f in self.plugins_dir.glob("*.py"):
             if f.name.startswith("_"):
@@ -73,6 +91,25 @@ class PluginLoader:
             name = getattr(module, "PLUGIN_NAME", module_name)
             version = getattr(module, "PLUGIN_VERSION", "0.1.0")
             description = getattr(module, "PLUGIN_DESCRIPTION", "")
+            manifest_path = ""
+            manifest: dict = {}
+            for candidate in (path.with_suffix(".json"), path.parent / "plugin.json"):
+                if candidate.is_file():
+                    try:
+                        manifest = json.loads(candidate.read_text(encoding="utf-8-sig"))
+                        manifest_path = str(candidate)
+                        break
+                    except (OSError, ValueError):
+                        manifest = {}
+            if manifest:
+                name = str(manifest.get("name") or name)
+                version = str(manifest.get("version") or version)
+                description = str(manifest.get("description") or description)
+            options = dict(getattr(module, "PLUGIN_OPTIONS", {}) or manifest.get("options") or {})
+            permissions = list(
+                getattr(module, "PLUGIN_PERMISSIONS", []) or manifest.get("permissions") or []
+            )
+            hooks = dict(getattr(module, "PLUGIN_HOOKS", {}) or {})
 
             functions: Dict[str, Callable] = {}
             functions_meta: Dict[str, dict] = {}
@@ -102,6 +139,17 @@ class PluginLoader:
             enabled_file = self.plugins_dir / f"{module_name}.enabled"
             enabled = enabled_file.exists()
 
+            from .hooks import get_hook_bus
+
+            bus = get_hook_bus()
+            for event, fn in hooks.items():
+                if callable(fn):
+                    try:
+                        bus.register(event, name, fn)
+                    except ValueError as exc:
+                        logger.warning("plugin %s hook rejected: %s", name, exc)
+            bus.set_enabled(name, enabled)
+
             return Plugin(
                 name=name,
                 version=version,
@@ -110,6 +158,10 @@ class PluginLoader:
                 enabled=enabled,
                 functions=functions,
                 functions_meta=functions_meta,
+                options=options,
+                permissions=permissions,
+                hooks=hooks,
+                manifest_path=manifest_path,
             )
         except Exception as e:
             logger.warning("Failed to load plugin %s: %s", path.name, e)
@@ -129,6 +181,9 @@ class PluginLoader:
         if not plugin:
             return False
         plugin.enabled = enabled
+        from .hooks import get_hook_bus
+
+        get_hook_bus().set_enabled(plugin.name, enabled)
         enabled_file = self.plugins_dir / f"{Path(plugin.module_path).stem}.enabled"
         if enabled:
             enabled_file.touch()
@@ -139,6 +194,15 @@ class PluginLoader:
     def get_enabled_plugins(self) -> List[Plugin]:
         """获取所有已启用的插件列表。"""
         return [p for p in self._plugins.values() if p.enabled]
+
+    def unload(self, name: str) -> bool:
+        plugin = self._plugins.pop(name, None)
+        if plugin is None:
+            return False
+        from .hooks import get_hook_bus
+
+        get_hook_bus().unregister_owner(plugin.name)
+        return True
 
     def call_function(self, plugin_name: str, func_name: str, **kwargs) -> Any:
         """调用指定插件中的函数，插件不存在或已禁用时抛出异常。"""

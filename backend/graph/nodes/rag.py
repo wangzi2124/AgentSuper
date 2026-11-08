@@ -169,9 +169,14 @@ def make_grade_node(
         if grade_model is None:
             return {"rag_relevant": True}
         question = _last_user_text(state)
+        from agents.roles import role_prompt
+
+        custom = role_prompt("rag", "")
         prompt = GRADE_PROMPT.format(
             context=context[:GRADE_CONTEXT_CHARS], question=question
         )
+        if custom:
+            prompt = f"{custom}\n\n{prompt}"
         try:
             verdict = _invoke(grade_model, prompt).strip().lower()
         except Exception as e:  # noqa: BLE001
@@ -194,14 +199,17 @@ def make_rewrite_node(
     def _rewrite_prompt(question: str) -> str:
         try:
             from prompts.loader import PromptLoader
+            from agents.roles import role_prompt
 
+            custom = role_prompt("rag", "")
             # PromptLoader.load 自身会把 {{var}} 归一为 $var 并 safe_substitute，
             # 必须**通过 kwargs 传变量**；再手工 replace 是无效的（此时已是 $ 形式）。
-            return PromptLoader().load(
+            prompt = PromptLoader().load(
                 "nodes/rag_rewrite.md",
                 conversation_history="(无可用的历史上下文)",
                 user_query=question,
             )
+            return f"{custom}\n\n{prompt}" if custom else prompt
         except Exception:  # noqa: BLE001
             return REWRITE_FALLBACK_PROMPT.format(question=question)
 

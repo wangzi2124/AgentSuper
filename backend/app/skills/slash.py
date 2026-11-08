@@ -7,7 +7,7 @@ from typing import Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_SLASH_RE = re.compile(r"^\s*/([\w\-\u4e00-\u9fff]+)\s*(.*)$", re.DOTALL)
+_SLASH_RE = re.compile(r"^\s*/([\w\-/\u4e00-\u9fff]+)\s*(.*)$", re.DOTALL)
 _EMPTY_HINT_SKILL = "（用户只输入了技能命令，未附带具体请求。请先按该技能的工作流，向用户确认必要信息。）"
 _EMPTY_HINT_PLUGIN = "（用户只输入了插件命令，未附带具体请求。请根据插件说明，协助用户合理使用该插件提供的能力。）"
 
@@ -54,9 +54,38 @@ def apply_slash_skill(question: str, loader: Any = None, plugin_loader: Any = No
 
     m = _SLASH_RE.match(question or "")
     if not m:
+        direct = re.match(r"^\s*@([\w\-/]+)\s+(.*)$", question or "", re.DOTALL)
+        if direct and loader is not None:
+            name = direct.group(1)
+            rest = direct.group(2).strip()
+            try:
+                skill = loader.get(name)
+                body = loader.get_skill_body(name) or ""
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("direct skill lookup failed: %s", exc)
+                skill, body = None, ""
+            if skill is not None and getattr(skill, "enabled", True) and body.strip():
+                injected = "[技能指令：" + name + "]\n" + body.strip() + "\n[技能指令结束]\n\n用户请求：\n" + rest
+                return injected, name
         return question, None
     name = m.group(1)
     rest = (m.group(2) or "").strip()
+
+    # Commands are explicit user-defined workflows and are resolved before
+    # skills/plugins so `/name` is never assumed to be a skill (G-02).
+    workspace = kwargs.get("workspace")
+    try:
+        from app.commands import load_commands
+
+        command = load_commands(workspace).get(name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("slash command lookup failed: %s", exc)
+        command = None
+    if command is not None:
+        from app.commands.context import set_command_override
+
+        set_command_override(command.agent, command.model)
+        return command.render(rest, workspace), name
 
     if loader is not None:
         try:

@@ -105,8 +105,10 @@ def _do_init(app):
     # 开箱即有可用空库，不再出现「目录不存在」WARNING。
     from app.skills.loader import SkillLoader
     from app.skills import registry as skills_registry
+    from app.skills.discovery import global_skill_dirs, merge_dirs
 
     _managed, _extras = skills_registry.load_sources()
+    _extras = merge_dirs(_extras, global_skill_dirs())
     # 内置技能播种进受管库：幂等/非破坏/尊重删除（详见 registry.seed_bundled）
     _seeded = skills_registry.seed_bundled(_managed)
     skill_loader = SkillLoader(

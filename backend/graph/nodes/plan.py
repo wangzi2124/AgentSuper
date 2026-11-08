@@ -202,9 +202,14 @@ def make_plan_node(
         usage: dict[str, Any] = {}
         raw_content = ""
         try:
-            prompt = PromptLoader().load("nodes/plan.md", content=request)
-            res = await model.ainvoke([{"role": "user", "content": prompt}])
-            usage = usage_from_result(res, getattr(model, "tier", None))
+            from agents.roles import apply_role_model, role_prompt
+
+            base_prompt = PromptLoader().load("nodes/plan.md", content=request)
+            custom = role_prompt("plan", "")
+            prompt = f"{custom}\n\n{base_prompt}" if custom else base_prompt
+            active_model = apply_role_model("plan", model)
+            res = await active_model.ainvoke([{"role": "user", "content": prompt}])
+            usage = usage_from_result(res, getattr(active_model, "tier", None))
             raw_content = getattr(res, "content", "") or ""
             specs = parse_task_specs(raw_content)
         except Exception as exc:  # noqa: BLE001

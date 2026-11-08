@@ -25,7 +25,7 @@ def _registry(tmp_path):
 
 
 def test_subagents_have_whitelists():
-    assert set(SUBAGENTS) == {"research", "code", "file"}
+    assert {"research", "code", "file", "general", "explore"} <= set(SUBAGENTS)
     # research 只读：不含写类工具
     assert "write_file" not in SUBAGENTS["research"].tools
     assert "shell_exec" in SUBAGENTS["code"].tools

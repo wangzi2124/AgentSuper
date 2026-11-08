@@ -672,7 +672,7 @@ class _CloudAdapter:
     def supports_overflow_retry(self, endpoint: dict[str, Any]) -> bool:
         return False
 
-    async def warm(self, endpoint: dict[str, Any]) -> bool:
+    async def warm(self, endpoint: dict[str, Any], prompt: str = "") -> bool:
         return False
 
 
@@ -748,7 +748,7 @@ class _OllamaAdapter(_CloudAdapter):
     def supports_overflow_retry(self, endpoint: dict[str, Any]) -> bool:
         return _is_ollama(str(endpoint.get("model") or ""))
 
-    async def warm(self, endpoint: dict[str, Any]) -> bool:
+    async def warm(self, endpoint: dict[str, Any], prompt: str = "") -> bool:
         mid = str(endpoint.get("model") or "")
         if not (endpoint.get("is_ollama") or _is_ollama(mid)):
             return False
@@ -757,7 +757,11 @@ class _OllamaAdapter(_CloudAdapter):
         # `ollama-llocal/qwen`），端点已解析出真正的 litellm_model，用它取模型名。
         name = _model_name(str(endpoint.get("litellm_model") or mid))
         keep_alive = _keep_alive_value()
-        payload: dict[str, Any] = {"model": name, "prompt": "", "stream": False}
+        payload: dict[str, Any] = {
+            "model": name,
+            "prompt": str(prompt or ""),
+            "stream": False,
+        }
         if keep_alive is not None:
             payload["keep_alive"] = keep_alive
         try:
@@ -833,30 +837,42 @@ class ModelRuntime:
             }
             self._endpoint_cache = result
             return result
-        mid = ensure_provider(self._direct_model(), settings.llm_api_base)
+        from .variants import split_variant
+
+        raw_model = self._direct_model()
+        base_model, variant = split_variant(raw_model)
+        mid = ensure_provider(base_model, settings.llm_api_base)
         try:
             from .catalog import provider_api
 
-            creds = provider_api(mid)
+            creds = provider_api(raw_model)
+        except ValueError:
+            raise
         except Exception as exc:  # noqa: BLE001 - catalog must not break a call
             logger.warning("provider_api(%s) failed, using config fallback: %s", mid, exc)
             creds = {}
         if _is_ollama(mid) or creds.get("is_ollama"):
             result = {
-                "model": mid,
+                "model": raw_model,
                 "litellm_model": creds.get("litellm_model"),
                 "api_base": creds.get("api_base"),
                 "api_key": creds.get("api_key") or "ollama",
                 "options": creds.get("options"),
+                "headers": creds.get("headers"),
+                "body": creds.get("body"),
+                "variant": variant,
                 "is_ollama": True,
             }
         else:
             result = {
-                "model": mid,
+                "model": raw_model,
                 "litellm_model": creds.get("litellm_model"),
                 "api_base": creds.get("api_base") or settings.llm_api_base,
                 "api_key": creds.get("api_key") or settings.llm_api_key,
                 "options": creds.get("options"),
+                "headers": creds.get("headers"),
+                "body": creds.get("body"),
+                "variant": variant,
                 "is_ollama": bool(creds.get("is_ollama")),
             }
         self._endpoint_cache = result
@@ -865,8 +881,11 @@ class ModelRuntime:
     def _provider_kwargs(self, endpoint: dict[str, Any]) -> dict[str, Any]:
         try:
             from .catalog import litellm_extra_kwargs
+            from .variants import apply_overrides_to_kwargs
 
-            return litellm_extra_kwargs(endpoint)
+            kwargs = litellm_extra_kwargs(endpoint)
+            apply_overrides_to_kwargs(endpoint, kwargs)
+            return kwargs
         except Exception as exc:  # noqa: BLE001
             logger.warning("litellm_extra_kwargs failed: %s", exc)
             return {}
@@ -875,6 +894,12 @@ class ModelRuntime:
         return _adapter_for(endpoint).is_local(endpoint)
 
     def _timeout_for(self, endpoint: dict[str, Any]) -> int:
+        configured = endpoint.get("timeout")
+        if configured:
+            try:
+                return max(1, int(float(configured)))
+            except (TypeError, ValueError):
+                pass
         return _adapter_for(endpoint).timeout(endpoint, self.timeout)
 
     def _max_tokens_for(
@@ -973,9 +998,20 @@ class ModelRuntime:
         return self._transport_kwargs(messages, tools)
 
     # ── transport ──────────────────────────────────────────────────
+    def _assert_provider_allowed(self) -> None:
+        try:
+            from execution.access import policy_block_for
+
+            blocked = policy_block_for("provider.use", self._direct_model())
+        except Exception:  # noqa: BLE001 - policy must not crash provider resolution
+            blocked = None
+        if blocked:
+            raise PermissionError(f"已阻止调用模型 provider（{blocked}）")
+
     def complete(
         self, messages: list[Any], *, tools: list[dict] | None = None, **kwargs: Any
     ) -> ChatResult:
+        self._assert_provider_allowed()
         call_kwargs, endpoint, fit = self._transport_kwargs(messages, tools)
         call_kwargs.update(kwargs)
         try:
@@ -1068,6 +1104,7 @@ class ModelRuntime:
         disable_thinking: bool = False,
         **extra: Any,
     ) -> Any:
+        self._assert_provider_allowed()
         try:
             return await self._stream_once(
                 messages, tools, on_text, disable_thinking, extra
@@ -1089,10 +1126,10 @@ class ModelRuntime:
         endpoint = self._endpoint()
         return _adapter_for(endpoint).is_local(endpoint)
 
-    async def warm(self) -> bool:
+    async def warm(self, prompt: str = "") -> bool:
         """Load a local Ollama model with the current keep_alive (best effort)."""
         endpoint = self._endpoint()
-        return await _adapter_for(endpoint).warm(endpoint)
+        return await _adapter_for(endpoint).warm(endpoint, prompt)
 
 
 def _warm_sync(base: str, payload: dict[str, Any]) -> None:

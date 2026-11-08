@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { applyCustomTheme, loadActiveCustomTheme } from '../themes/custom'
 
 const STORAGE_KEY = 'agent_super_theme'
 const BG_STORAGE_KEY = 'agent_super_bg'
@@ -58,6 +59,10 @@ export const useThemeStore = defineStore('theme', () => {
     try { bgSaved = localStorage.getItem(BG_STORAGE_KEY) } catch { /* noop */ }
     bgVariant.value = BG_VARIANTS.some(v => v.value === bgSaved) ? (bgSaved as string) : 'deep-space'
     applyBg(bgVariant.value)
+    try {
+      const custom = loadActiveCustomTheme()
+      if (custom) applyCustomTheme(custom)
+    } catch { /* noop */ }
   }
 
   function toggle() {

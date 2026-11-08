@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useSkillStore } from '../stores/skills'
 import type { Skill } from '../types'
 import DirPickerModal from '../components/DirPickerModal.vue'
+import { fetchWithTimeout } from '../api/fetch'
 
 const skillStore = useSkillStore()
 
@@ -11,6 +12,32 @@ const busy = ref(false)
 const error = ref('')
 const notice = ref('')
 const search = ref('')
+const catalogUrl = ref('')
+const catalogBusy = ref(false)
+
+async function installCatalog() {
+  const url = catalogUrl.value.trim()
+  if (!url) return
+  catalogBusy.value = true
+  error.value = ''
+  notice.value = ''
+  try {
+    const res = await fetchWithTimeout('/api/v2/skills/catalog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    })
+    const body = await res.json().catch(() => null)
+    if (!res.ok) throw new Error(body?.detail || `${res.status} ${res.statusText}`)
+    notice.value = `已安装：${(body.installed || []).join(', ') || '无'}`
+    if (body.errors?.length) error.value = body.errors.join('; ')
+    await skillStore.fetchAll()
+  } catch (err) {
+    error.value = String((err as Error).message || err)
+  } finally {
+    catalogBusy.value = false
+  }
+}
 
 // ── 新建 / 编辑弹窗 ──
 const editor = ref(false)
@@ -241,6 +268,10 @@ async function handleDelete() {
       </div>
       <div class="src-actions">
         <button class="btn" :disabled="busy" @click="showDirPicker = true">+ 追加外部技能文件夹</button>
+        <input v-model="catalogUrl" class="ctrl search" placeholder="技能 catalog URL（JSON）" />
+        <button class="btn" :disabled="catalogBusy" @click="installCatalog">
+          {{ catalogBusy ? '安装中…' : '从 URL 安装' }}
+        </button>
       </div>
     </div>
 

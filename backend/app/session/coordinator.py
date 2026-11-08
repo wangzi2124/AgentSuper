@@ -115,6 +115,9 @@ class ExecutionCoordinator:
     async def _run_item(self, session_id: str, item: dict[str, Any]) -> None:
         from . import repository as repo
         from app.events.emitter import emit_event
+        from app.session.context import set_session_context
+
+        set_session_context(session_id, self.ctx)
 
         repo.set_session_status(session_id, "busy")
         self.ctx.sessions.update(session_id, status="busy")

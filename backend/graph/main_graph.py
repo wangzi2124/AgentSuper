@@ -76,6 +76,16 @@ def default_registry(
 
     register_web_tools(registry)
     register_weather_tools(registry)
+    from execution.tools.question_tools import ask_question
+
+    registry.register_function(
+        ask_question,
+        name="ask_question",
+        description=(ask_question.__doc__ or "").strip(),
+        scope="global",
+        require_approval=False,
+        mutating=False,
+    )
     if with_shell:
         registry.register_function(
             shell_exec,

@@ -30,9 +30,11 @@ class CompressionAgent:
     def system_prompt(self) -> str:
         if self._system_prompt is None:
             try:
+                from agents.roles import role_prompt
                 from prompts.loader import build_agent_prompt, model_id_of
 
-                self._system_prompt = build_agent_prompt(
+                custom = role_prompt("compress", "")
+                self._system_prompt = custom or build_agent_prompt(
                     self.agent_type, model_id_of(self.model)
                 )
             except Exception as exc:  # noqa: BLE001 - prompt failure must not block

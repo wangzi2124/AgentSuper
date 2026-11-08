@@ -73,6 +73,32 @@ def parse_jsonc(text: str) -> Any:
     return json.loads(_strip_jsonc(text.lstrip("\ufeff")))
 
 
+def config_file_path() -> Path:
+    return Path(__file__).parent / "config.json"
+
+
+def persist_settings(values: dict[str, Any]) -> Path:
+    """Persist runtime setting overrides into backend/config.json.
+
+    The file is JSONC on input; the rewritten file is plain JSON (comments are
+    intentionally not preserved) so the next process start reads the same values.
+    """
+    path = config_file_path()
+    raw: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = parse_jsonc(path.read_text(encoding="utf-8-sig"))
+            if isinstance(loaded, dict):
+                raw = loaded
+        except Exception:
+            raw = {}
+    raw.update(values)
+    path.write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return path
+
+
 class JsonConfigSettingsSource(PydanticBaseSettingsSource):
     """读取 backend/config.json（JSONC）。文件缺失/损坏时返回空字典。"""
 
@@ -235,6 +261,10 @@ class Settings(BaseSettings):
     attachment_inline_max_chars_total: int = 12_000
     # 「查看正文」接口单次返回的字符上限。
     attachment_extract_max_chars: int = 200_000
+    # G-16: 内联图片大小上限（base64 解码后字节）；超限不发送并提示。
+    image_max_bytes: int = 20 * 1024 * 1024
+    # 内联前若最长边超过该值则等比缩小（0 = 不缩放）。
+    image_max_dimension: int = 4096
 
     # ── 图片 / OCR / 视觉描述桥 ──
     image_thumbnail_px: int = 256
@@ -283,6 +313,25 @@ class Settings(BaseSettings):
     # effect ∈ allow|deny|ask。按顺序匹配、最后一条命中生效；`*` 任意串、`?` 单字符。
     permissions: list[dict[str, str]] = []
 
+    # 配置级硬策略（对齐 opencode G-06）：每条 {action,resource,effect}，
+    # action 如 provider.use/tool.use/mcp.use/skill.use/websearch.use；
+    # effect ∈ allow|deny。deny 不可被审批放宽，审批后仍会二次校验。
+    policies: list[dict[str, str]] = []
+
+    # ── 项目指令（AGENTS.md / instructions，对齐 opencode G-01）──
+    # 关闭后不发现/注入任何指令文件。
+    instructions_enabled: bool = True
+    # 额外指令源：文件、glob、`~/`、绝对路径或 http(s) URL。
+    instructions: list[str] = []
+    # 单轮指令注入的字符硬上限（0 = 不按字符限制）。
+    instructions_max_chars: int = 16_000
+    # 单轮指令注入的 token 上限（复用 cognition/context_meter.py，0 = 不限）。
+    instructions_max_tokens: int = 4_000
+
+    # 写入/编辑后的格式化器（对齐 opencode G-03）：false=关闭；true=全部内置；
+    # 对象可带 items[{name,command,extensions,environment,disabled,requires}] 与 disabled。
+    formatter: bool | dict[str, Any] = False
+
     # ── 思考模式 / Ollama ──
     deepseek_thinking: str = "disabled"
     ollama_thinking: str = "disabled"
@@ -292,6 +341,8 @@ class Settings(BaseSettings):
     # 本地 Ollama 模型驻留时长（litellm 顶层 keep_alive）；默认 30m，
     # 避免空闲 5 分钟卸载后下一条消息承担冷加载。
     ollama_keep_alive: str = "30m"
+    # G-11: true 或 {prompt, interval, duration}；空闲时保活本地模型。
+    warming: bool | dict[str, Any] = False
     # Ollama 服务地址（目录未注册时兜底）。
     ollama_host: str = "http://localhost:11434"
     # 显式 Ollama API base（优先级高于 ollama_host；为空则用 ollama_host）。
@@ -349,8 +400,25 @@ class Settings(BaseSettings):
     # ── 联网工具 / SSRF ──
     tavily_api_key: str = ""
     bing_api_key: str = ""
+    # G-13: auto|random|tavily|bing|duckduckgo；无 key 的 provider 自动排除。
+    websearch_provider: str = "auto"
+    websearch_enabled: bool = True
+    # 429/限流后的冷却秒数（0 = 不冷却）。
+    websearch_cooldown_seconds: float = 60.0
     # true 时放行内网地址（仅本地调试；协议/格式校验仍生效）。
     ssrf_allow_internal: bool = False
+
+    # ── 统一出站（G-12）──
+    egress_proxy: str = ""
+    egress_no_proxy: str = ""
+    egress_ca_bundle: str = ""
+    egress_verify: bool = True
+    egress_timeout_seconds: float = 20.0
+
+    # ── 本地模型发现（G-08）──
+    local_discovery_enabled: bool = True
+    lmstudio_api_base: str = ""
+    vllm_api_base: str = ""
 
     # ── 跨模型工具调用 Harness ──
     # 全局强制工具调用路径：native | fallback；空 = 按模型目录能力探测。
@@ -373,7 +441,13 @@ class Settings(BaseSettings):
     harness_ollama_tools_model: str = "ollama/qwen2.5:3b"
     harness_ollama_text_model: str = "ollama/deepseek-r1:latest"
 
-    @field_validator("cors_origins", "harness_native_models", "harness_fallback_models", mode="before")
+    @field_validator(
+        "cors_origins",
+        "harness_native_models",
+        "harness_fallback_models",
+        "instructions",
+        mode="before",
+    )
     @classmethod
     def _coerce_str_list(cls, value: Any) -> list[str]:
         return _as_str_list(value)

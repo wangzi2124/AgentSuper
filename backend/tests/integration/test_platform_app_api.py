@@ -49,7 +49,7 @@ def test_admin_tools_and_agents(client):
     names = {t["name"] for t in tools["tools"]}
     assert {"read_file", "write_file"}.issubset(names)
     agents = client.get("/api/admin/agents").json()["agents"]
-    assert {a["name"] for a in agents} == {"research", "code", "file"}
+    assert {a["name"] for a in agents} >= {"research", "code", "file", "general", "explore"}
 
 
 def test_admin_prompts_and_metrics(client):

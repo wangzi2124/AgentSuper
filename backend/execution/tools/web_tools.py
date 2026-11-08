@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -68,7 +67,11 @@ def web_fetch(
         else:
             import httpx
 
-            resp = httpx.get(url, timeout=timeout, follow_redirects=True)
+            from net.egress import httpx_client_kwargs
+
+            kwargs = httpx_client_kwargs()
+            kwargs.pop("timeout", None)
+            resp = httpx.get(url, timeout=timeout, follow_redirects=True, **kwargs)
             resp.raise_for_status()
             text = resp.text
     except Exception as e:  # noqa: BLE001
@@ -134,10 +137,12 @@ def http_request(
         req_headers.setdefault("Content-Type", content_type or "application/json")
 
     req = urllib.request.Request(url, data=data, headers=req_headers, method=m)
-    ctx = ssl.create_default_context()
+    from net.egress import urllib_opener
+
+    opener = urllib_opener()
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             status = getattr(resp, "status", None) or resp.getcode()
             resp_headers = dict(resp.headers)
             resp_body = resp.read().decode("utf-8", errors="replace")
@@ -177,7 +182,9 @@ def http_request(
 
 def _duckduckgo_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
     """DuckDuckGo HTML 端点（免费、无需 API key）。"""
-    ctx = ssl.create_default_context()
+    from net.egress import urllib_opener
+
+    opener = urllib_opener()
     params = urllib.parse.urlencode({"q": query})
     req = urllib.request.Request(
         "https://html.duckduckgo.com/html/",
@@ -188,7 +195,7 @@ def _duckduckgo_search(query: str, max_results: int = 5) -> list[dict[str, str]]
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         },
     )
-    with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+    with opener.open(req, timeout=15) as resp:
         html = resp.read().decode("utf-8", errors="ignore")
 
     results: list[dict[str, str]] = []
@@ -252,8 +259,9 @@ def _bing_search(query: str, max_results: int) -> list[dict[str, str]]:
         url,
         headers={"Ocp-Apim-Subscription-Key": api_key, "User-Agent": _UA},
     )
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
+    from net.egress import urllib_opener
+
+    with urllib_opener().open(req, timeout=15) as resp:
         data = json.loads(resp.read())
     return [
         {
@@ -266,32 +274,11 @@ def _bing_search(query: str, max_results: int) -> list[dict[str, str]]:
 
 
 def _default_searcher(query: str, top_k: int) -> str:
-    """默认检索后端：Tavily → Bing → DuckDuckGo（按可用密钥择优）。"""
-    engines: list[tuple[str, Callable[[str, int], list[dict[str, str]]]]] = []
-    if settings.tavily_api_key:
-        engines.append(("tavily", _tavily_search))
-    if settings.bing_api_key:
-        engines.append(("bing", _bing_search))
-    engines.append(("duckduckgo", _duckduckgo_search))
+    """默认检索：按 G-13 策略选择 provider、失败回退、429 冷却。"""
+    from .websearch_policy import search
 
-    errors: list[str] = []
-    for name, fn in engines:
-        try:
-            results = fn(query, top_k)
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{name}: {e}")
-            continue
-        if results:
-            lines = [f"Web search results for: {query}", f"Engine: {name}", ""]
-            for i, r in enumerate(results, 1):
-                lines.append(f"{i}. {r.get('title', '')}")
-                lines.append(f"   URL: {r.get('url', '')}")
-                lines.append(f"   {r.get('content', '')}")
-                lines.append("")
-            return "\n".join(lines).strip()
-        errors.append(f"{name}: no results")
-
-    return f"❌ 检索失败：{'; '.join(errors) or 'unknown error'}"
+    text, _provider = search(query, top_k)
+    return text
 
 
 def web_search(
@@ -352,6 +339,8 @@ def register_web_tools(
     `web_search`/`web_fetch` 只读放行；`http_request` 标记需人工审批。
     """
     tools = make_web_tools(searcher=searcher)
+    if not bool(getattr(settings, "websearch_enabled", True)):
+        tools.pop("web_search", None)
     registered: list[str] = []
     for name, fn in tools.items():
         if names is not None and name not in names:

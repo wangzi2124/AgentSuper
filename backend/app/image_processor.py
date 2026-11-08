@@ -26,6 +26,30 @@ def _pil_available() -> bool:
     return True
 
 
+def normalize_image(data_b64: str, max_dim: int | None = None) -> str:
+    """Downscale oversized images before inlining (G-16)."""
+    if not _pil_available():
+        return data_b64
+    limit = int(max_dim or getattr(settings, "image_max_dimension", 4096) or 4096)
+    if limit <= 0:
+        return data_b64
+    try:
+        import io as _io
+
+        from PIL import Image
+
+        raw = base64.b64decode(data_b64 or "", validate=False)
+        img = Image.open(_io.BytesIO(raw))
+        if max(img.size) <= limit:
+            return data_b64
+        img.thumbnail((limit, limit), Image.LANCZOS)
+        buf = _io.BytesIO()
+        img.convert("RGB").save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:  # noqa: BLE001
+        return data_b64
+
+
 def make_thumbnail(data_b64: str, px: int | None = None) -> str:
     """256px 缩略图 base64（回显用，避免传原图）。Pillow 缺失或失败时返回原图。"""
     if not _pil_available():

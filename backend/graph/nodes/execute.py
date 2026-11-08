@@ -191,7 +191,26 @@ def make_execute_node(
     _extra_system = extra_system
 
     async def execute_node(state: dict[str, Any]) -> dict[str, Any]:
-        model = _model if _model is not None else resolve_model(state, default_tier="medium")
+        agent_def = None
+        try:
+            from agents.registry import load_registry
+            from agents.resolver import AgentResolver
+
+            agent_def = AgentResolver(
+                load_registry(state.get("workspace") or None)
+            ).primary(str(state.get("agent") or "") or None)
+        except Exception:  # noqa: BLE001 - agent resolution is advisory
+            agent_def = None
+        agent_id = agent_def.name if agent_def is not None else "build"
+        allowed_tools = set(agent_def.tools) if agent_def is not None and agent_def.tools else None
+
+        model = _model
+        if model is None and state.get("model_override"):
+            model = TierModel(tier="auto", model_override=str(state.get("model_override")))
+        if model is None and agent_def is not None and agent_def.model:
+            model = TierModel(tier=agent_def.tier, model_override=agent_def.model)
+        if model is None:
+            model = resolve_model(state, default_tier="medium")
         registry = _registry
         plan = [dict(t) for t in (state.get("task_plan") or [])]
         pending = [t for t in plan if t.get("status") != "done"]
@@ -201,6 +220,9 @@ def make_execute_node(
         task = pending[0]
         user_blocks = _multimodal_user_content(state)
         image_turn = bool(user_blocks) and _has_image_block(user_blocks)
+        extra_system = _extra_system
+        if agent_def is not None and agent_def.prompt_body.strip():
+            extra_system = f"{extra_system}\n\n{agent_def.prompt_body.strip()}".strip()
         # Stable head first; vision/memory/RAG/skills are turn-specific and stay
         # after it so provider prefix caching is not invalidated by volatile text.
         sys_text = compose_system(
@@ -210,9 +232,16 @@ def make_execute_node(
             vision_prefix=VISION_SYSTEM_PREFIX if image_turn else "",
             memory=(state.get("memory_context") or "").strip(),
             rag=(state.get("rag_context") or "").strip(),
-            extra=_extra_system,
+            extra=extra_system,
+            instructions=(state.get("instructions") or "").strip(),
         )
         tool_defs = build_tool_defs(registry, scope) if registry is not None else []
+        if allowed_tools is not None:
+            tool_defs = [
+                spec
+                for spec in tool_defs
+                if spec.get("function", {}).get("name") in allowed_tools
+            ]
         try:
             from cognition.context_meter import get_meter
 
@@ -254,18 +283,27 @@ def make_execute_node(
         async def _on_compaction(event: dict[str, Any]) -> None:
             compaction_events.append(event)
 
-        result = await run_tool_loop(
-            model,
-            messages,
-            registry,
-            scope=scope,
-            agent_id="build",
-            budget=BudgetLedger.from_state(state),
-            stream=True,
-            context_usable_tokens=int(state.get("compress_threshold") or 0),
-            on_compaction=_on_compaction,
-            session_id=str(state.get("session_id") or ""),
+        from execution.access import reset_agent_policy, set_agent_policy, statements_from_permission
+
+        policy_token = set_agent_policy(
+            statements_from_permission(agent_def.permission if agent_def is not None else None)
         )
+        try:
+            result = await run_tool_loop(
+                model,
+                messages,
+                registry,
+                scope=scope,
+                agent_id=agent_id,
+                budget=BudgetLedger.from_state(state),
+                stream=True,
+                context_usable_tokens=int(state.get("compress_threshold") or 0),
+                on_compaction=_on_compaction,
+                session_id=str(state.get("session_id") or ""),
+                allowed_tools=allowed_tools,
+            )
+        finally:
+            reset_agent_policy(policy_token)
 
         task_id = task.get("id", "t?")
         for t in plan:

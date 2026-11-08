@@ -723,7 +723,7 @@
   background: color-mix(in srgb, var(--primary) 10%, transparent);
 }
 .model-menu-action.active svg { color: var(--primary); }
-/* ©¤©¤ ÊäÈë '/' ¼¼ÄÜÑ¡ÔñÆ÷ ©¤©¤ */
+/* ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ '/' ï¿½ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ */
 .input-card { position: relative; }
 .slash-panel {
   position: absolute;
@@ -766,6 +766,44 @@
   font-family: 'JetBrains Mono', Consolas, monospace;
   color: var(--primary);
 }
+.slash-kind {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.ref-picker { position: relative; display: inline-flex; }
+.ref-menu {
+  position: absolute;
+  left: 0;
+  bottom: 36px;
+  width: 280px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 6px;
+  z-index: 30;
+}
+.ref-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.ref-item:hover { background: var(--bg); }
+.ref-item span, .ref-item small { color: var(--text-secondary); font-size: 11px; }
+.ref-empty { padding: 8px; color: var(--text-secondary); font-size: 12px; }
 .slash-desc {
   font-size: 11px;
   color: var(--text-secondary);

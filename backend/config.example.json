@@ -279,6 +279,12 @@
   // 示例：200000。
   "attachment_extract_max_chars": 200000,
 
+  // G-16: 内联图片大小上限（解码后字节）；超限图片不发送给模型。
+  "image_max_bytes": 20971520,
+
+  // G-16: 内联前最长边上限（像素）；0 = 不缩放。
+  "image_max_dimension": 4096,
+
   // ══════════════════════════════════════════════════════════════════════════
   // 十、图片 / OCR / 视觉描述桥
   // ══════════════════════════════════════════════════════════════════════════
@@ -411,8 +417,35 @@
   //   ]
   "permissions": [],
 
+  // 配置级硬策略（opencode G-06）：{ "action": "tool.use|provider.use|mcp.use|skill.use|websearch.use|*",
+  //   "resource": "通配模式", "effect": "allow|deny" }。
+  // deny 是硬拒绝，审批无法放宽；未命中默认 allow。
+  "policies": [],
+
   // ══════════════════════════════════════════════════════════════════════════
-  // 十五、思考模式 / Ollama
+  // 十五、项目指令（AGENTS.md / instructions，对齐 opencode G-01）
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 是否发现并注入项目指令文件（全局 + 工作区向上逐级 AGENTS.md + 配置项 + 按需嵌套）。
+  "instructions_enabled": true,
+
+  // 额外指令源：文件、glob、`~/`、绝对路径或 http(s) URL；相对路径基于会话工作目录。
+  // 示例：["docs/team-guide.md", "packages/*/AGENTS.md", "https://example.com/rules.md"]
+  "instructions": [],
+
+  // 单轮指令注入的字符硬上限（0 = 不按字符限制）。
+  "instructions_max_chars": 16000,
+
+  // 单轮指令注入的 token 上限（复用 cognition/context_meter.py，0 = 不限）。
+  "instructions_max_tokens": 4000,
+
+  // 写入/编辑后的格式化器（opencode G-03）：false=关闭；true=全部内置；
+  // 对象：{ "enabled": true, "items": [{ "name": "ruff", "command": ["ruff", "format"],
+  //   "extensions": [".py"], "environment": {}, "requires": ["ruff"] }], "disabled": [] }
+  "formatter": false,
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 十六、思考模式 / Ollama
   // ══════════════════════════════════════════════════════════════════════════
 
   // DeepSeek V4 思考开关。
@@ -436,6 +469,9 @@
   // 本地 Ollama 模型驻留时长（随每条请求下发 keep_alive）。
   // 示例："30m"；"0" 表示请求结束即卸载；-1 表示常驻。
   "ollama_keep_alive": "30m",
+
+  // G-11 空闲保活：true 或 {prompt, interval, duration}（秒）。
+  "warming": false,
 
   // Ollama 服务地址。
   // 示例：http://localhost:11434
@@ -577,9 +613,32 @@
   // 示例：0123456789abcdef0123456789abcdef
   "bing_api_key": "",
 
+  // 搜索 provider 选择：auto（按 tavily→bing→duckduckgo）/ random / 具体名称。
+  "websearch_provider": "auto",
+
+  // false 时不注册 web_search 工具（web_fetch 不受影响）。
+  "websearch_enabled": true,
+
+  // 429/限流后的冷却秒数；0 = 不冷却。
+  "websearch_cooldown_seconds": 60.0,
+
   // 是否允许出站请求访问内网/环回地址。
   // 示例：false（默认拦截）；仅本地调试设 true。
   "ssrf_allow_internal": false,
+
+  // 统一出站代理（空 = 读取 HTTP(S)_PROXY 环境变量）。
+  "egress_proxy": "",
+
+  // 代理排除列表（空 = 读取 NO_PROXY）。
+  "egress_no_proxy": "",
+  "egress_ca_bundle": "",
+  "egress_verify": true,
+  "egress_timeout_seconds": 20.0,
+
+  // 本地 OpenAI 兼容端点发现（空 = 默认端口）。
+  "local_discovery_enabled": true,
+  "lmstudio_api_base": "",
+  "vllm_api_base": "",
 
   // ══════════════════════════════════════════════════════════════════════════
   // 二十一、跨模型工具调用 Harness

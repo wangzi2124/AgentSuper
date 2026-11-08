@@ -22,6 +22,42 @@ def _rel(vfs: VirtualFileSystem, path: Path) -> str:
         return path.as_posix()
 
 
+def _note_access(vfs: VirtualFileSystem, path: str) -> None:
+    """Register a touched path so nested AGENTS.md can load next turn (G-01)."""
+    try:
+        from prompts.instructions import get_instruction_resolver
+
+        get_instruction_resolver().note_access(path, vfs.active_root)
+    except Exception:  # noqa: BLE001 - instruction tracking is best-effort
+        pass
+
+
+def _after_mutation(vfs: VirtualFileSystem, path: str) -> None:
+    """Run configured formatters after a real file mutation (G-03)."""
+    try:
+        from ..formatters import apply_formatters
+
+        result = apply_formatters(vfs.raw_path(path), vfs.active_root)
+        if result is None or result.status not in ("success", "failed"):
+            return
+        try:
+            from graph.events import push_event
+
+            push_event(
+                {
+                    "type": "formatter_applied" if result.status == "success" else "formatter_failed",
+                    "path": path,
+                    "formatter": result.formatter,
+                    "duration_ms": round(result.duration * 1000, 3),
+                    "output": result.output,
+                }
+            )
+        except Exception:  # noqa: BLE001 - events are optional outside a graph turn
+            pass
+    except Exception:  # noqa: BLE001 - formatting must never break a write
+        pass
+
+
 def glob_files(vfs: VirtualFileSystem, pattern: str, path: str = ".") -> str:
     """按 glob 模式递归匹配文件名。
 
@@ -87,40 +123,76 @@ def make_file_tools(vfs: VirtualFileSystem) -> dict[str, Callable[..., Any]]:
     """返回工具名 → 绑定函数 的字典（不含 scope）。"""
 
     def read_file(path: str) -> str:
-        """读取工作区内文本文件的内容（输出有界）。"""
-        return vfs.read_file(path)
+        """读取工作区内文本文件的内容（输出有界）；支持 file:// 与行范围。"""
+        from execution.uri import parse_file_uri, slice_lines
+
+        start = end = 0
+        try:
+            parsed = parse_file_uri(path)
+        except ValueError as exc:
+            return f"错误：{exc}"
+        if parsed is not None:
+            path, start, end = parsed.path, parsed.start, parsed.end
+        _note_access(vfs, path)
+        text = vfs.read_file(path)
+        if start and not text.startswith("错误："):
+            text = slice_lines(text, start, end)
+        return text
 
     def write_file(path: str, content: str) -> str:
         """写入文件（覆盖或新建），内容以 UTF-8 保存。"""
-        return vfs.write_file(path, content)
+        _note_access(vfs, path)
+        out = vfs.write_file(path, content)
+        _after_mutation(vfs, path)
+        return out
 
     def edit_file(path: str, old_text: str, new_text: str) -> str:
         """在文件中精确替换首次出现的文本（需完全匹配，含空白）。"""
-        return vfs.edit_file(path, old_text, new_text)
+        _note_access(vfs, path)
+        out = vfs.edit_file(path, old_text, new_text)
+        _after_mutation(vfs, path)
+        return out
 
     def ls(path: str = ".") -> str:
-        """列出目录内容（子目录以 `/` 结尾）。"""
+        """列出目录内容（目录以 `/` 结尾）；支持 file:// 目录 URI。"""
+        from execution.uri import parse_file_uri
+
+        try:
+            parsed = parse_file_uri(path)
+        except ValueError as exc:
+            return f"错误：{exc}"
+        if parsed is not None:
+            path = parsed.path
+        _note_access(vfs, path)
         return vfs.ls(path)
 
     def grep(pattern: str, path: str = ".") -> str:
         """用正则递归搜索文件内容，返回 `文件:行号: 内容`。"""
+        _note_access(vfs, path)
         return vfs.grep(pattern, path)
 
     def glob(pattern: str, path: str = ".") -> str:
         """按 glob 模式递归匹配文件名（如 `**/*.py`）。"""
+        _note_access(vfs, path)
         return glob_files(vfs, pattern, path)
 
     def append(path: str, content: str) -> str:
         """向文件末尾追加内容（不存在则新建）。"""
+        _note_access(vfs, path)
         return append_file(vfs, path, content)
 
     def delete(path: str) -> str:
         """删除工作区内文件（可回滚）。"""
+        _note_access(vfs, path)
         return delete_file(vfs, path)
 
     def create_directory(path: str) -> str:
         """在工作区内创建目录（含父目录）。用于新建空文件夹，避免走 shell 审批。"""
         return vfs.mkdir(path)
+
+    from .patch_tools import make_patch_tools
+
+    patch_tools = make_patch_tools(vfs)
 
     return {
         "read_file": read_file,
@@ -132,11 +204,12 @@ def make_file_tools(vfs: VirtualFileSystem) -> dict[str, Callable[..., Any]]:
         "append_file": append,
         "delete_file": delete,
         "create_directory": create_directory,
+        **patch_tools,
     }
 
 
 WRITE_TOOLS = frozenset({
-    "write_file", "edit_file", "append_file", "delete_file", "create_directory",
+    "write_file", "edit_file", "append_file", "delete_file", "create_directory", "apply_patch",
 })
 # 读工具同样过审批门控：沙箱/允许根内由 `ctx.request_permission` 自动放行（零弹窗），
 # 越界读取才询问用户。此前读工具 `require_approval=False`，越界直接抛 "路径越界"，

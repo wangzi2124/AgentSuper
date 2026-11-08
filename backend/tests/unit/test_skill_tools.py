@@ -64,7 +64,7 @@ def test_parse_slash_command():
     assert parse_slash_command("/docx 帮我改文档") == "docx"
     assert parse_slash_command("  /novel-writing") == "novel-writing"
     assert parse_slash_command("你好") is None
-    assert parse_slash_command("/etc/hosts 是什么") == "etc"
+    assert parse_slash_command("/etc/hosts 是什么") == "etc/hosts"
 
 
 def test_slash_injects_skill_body_and_strips_prefix():
@@ -116,3 +116,17 @@ def test_skills_load_from_disk(tmp_path):
     loader = SkillLoader(str(tmp_path / "skills"), create=True, extra_dirs=[str(source)])
     loader.load_all()
     assert loader.get("docx") is not None
+
+
+def test_direct_skill_at_prefix():
+    loader = _Loader([_Skill('docx')], {'docx': 'DOCX BODY'})
+    out, name = apply_slash_skill('@docx fix this', loader)
+    assert name == 'docx'
+    assert 'DOCX BODY' in out and 'fix this' in out
+
+
+def test_discovery_merge_dedupes(tmp_path):
+    from app.skills.discovery import merge_dirs
+    d = tmp_path / 'skills'
+    d.mkdir()
+    assert merge_dirs([str(d)], [str(d)]) == [str(d)]

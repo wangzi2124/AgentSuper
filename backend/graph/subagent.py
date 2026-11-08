@@ -16,9 +16,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from execution.access import reset_agent_policy, set_agent_policy, statements_from_permission
 from execution.tool_registry import ToolRegistry
-from models.router import get_model
+from models.router import TierModel, get_model
 from prompts.loader import PromptLoader, model_id_of
+from agents.registry import AgentDef, AgentRegistry, load_registry
 
 from .events import push_event
 from .nodes.base import run_tool_loop
@@ -38,8 +40,13 @@ class SubAgent:
     tools: tuple[str, ...] = ()
     max_rounds: int = 6
     description: str = ""
+    prompt_body: str = ""
+    model: str = ""
+    permission: dict[str, Any] = field(default_factory=dict)
 
     def system_prompt(self, model: Any | None = None) -> str:
+        if self.prompt_body.strip():
+            return self.prompt_body.strip()
         try:
             agent_type = self.prompt_path.rsplit("/", 1)[-1].removesuffix(".md")
             return PromptLoader().build_agent_prompt(agent_type, model_id_of(model))
@@ -48,29 +55,26 @@ class SubAgent:
             return f"你是 {self.name} 子 Agent，请完成分配的子任务。"
 
 
-SUBAGENTS: dict[str, SubAgent] = {
-    "research": SubAgent(
-        name="research",
-        prompt_path="system/research_agent.md",
-        tier="medium",
-        tools=("read_file", "ls", "grep"),
-        description="信息检索与文档分析专家（只读工具）。",
-    ),
-    "code": SubAgent(
-        name="code",
-        prompt_path="system/code_agent.md",
-        tier="complex",
-        tools=("read_file", "write_file", "edit_file", "ls", "grep", "shell_exec"),
-        description="代码编写、调试与沙箱执行专家。",
-    ),
-    "file": SubAgent(
-        name="file",
-        prompt_path="system/file_agent.md",
-        tier="simple",
-        tools=("read_file", "write_file", "edit_file", "ls", "grep"),
-        description="工作区文件读写/编辑/检索专家。",
-    ),
-}
+def _to_subagent(defn: AgentDef) -> SubAgent:
+    return SubAgent(
+        name=defn.name,
+        prompt_path=defn.prompt_path,
+        tier=defn.tier,
+        tools=defn.tools,
+        max_rounds=defn.max_rounds,
+        description=defn.description,
+        prompt_body=defn.prompt_body,
+        model=defn.model,
+        permission=dict(defn.permission),
+    )
+
+
+def _load_subagents() -> dict[str, SubAgent]:
+    registry = load_registry()
+    return {agent.name: _to_subagent(agent) for agent in registry.list(mode="subagent")}
+
+
+SUBAGENTS: dict[str, SubAgent] = _load_subagents()
 
 
 async def run_subagent(
@@ -106,14 +110,18 @@ async def run_subagent(
         }
     )
     try:
-        result = await run_tool_loop(
-            model,
-            messages,
-            scoped,
-            scope=SUBTASK_SCOPE,
-            max_rounds=spec.max_rounds,
-            agent_id=spec.name,
-        )
+        token = set_agent_policy(statements_from_permission(spec.permission))
+        try:
+            result = await run_tool_loop(
+                model,
+                messages,
+                scoped,
+                scope=SUBTASK_SCOPE,
+                max_rounds=spec.max_rounds,
+                agent_id=spec.name,
+            )
+        finally:
+            reset_agent_policy(token)
     except Exception as exc:
         push_event(
             {
@@ -145,19 +153,31 @@ async def run_subagent(
 def make_runner(
     registry: ToolRegistry,
     *,
+    agents: AgentRegistry | None = None,
     model_factory: Callable[[SubAgent], Any] | None = None,
 ) -> Callable[..., Any]:
     """构造 `runner(agent, task, context="") -> dict`，供 task 工具与并行节点复用。"""
+    agent_registry = agents
 
     def _factory(spec: SubAgent) -> Any:
-        return model_factory(spec) if model_factory is not None else get_model(spec.tier)
+        if model_factory is not None:
+            return model_factory(spec)
+        if spec.model:
+            return TierModel(tier=spec.tier, model_override=spec.model)
+        return get_model(spec.tier)
 
     async def runner(agent: str, task: str, context: str = "") -> dict[str, Any]:
-        spec = SUBAGENTS.get(agent)
+        if agent_registry is not None:
+            defn = agent_registry.get(agent)
+            spec = _to_subagent(defn) if defn is not None and defn.is_subagent else None
+            available = ", ".join(agent_registry.subagents())
+        else:
+            spec = SUBAGENTS.get(agent)
+            available = ", ".join(SUBAGENTS)
         if spec is None:
             return {
                 "agent": agent,
-                "text": f"错误：未知子 Agent '{agent}'（可用：{', '.join(SUBAGENTS)}）",
+                "text": f"错误：未知子 Agent '{agent}'（可用：{available}）",
                 "rounds": 0,
                 "usage": {},
             }

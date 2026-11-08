@@ -18,6 +18,8 @@ import {
   updateInboxDelivery,
 } from '../api/v2'
 import type { TurnDiff } from '../api/v2'
+import { listCommands, type SlashCommandInfo } from '../api/commands'
+import { listReferences, type ReferenceItem } from '../api/references'
 import type {
   AssistantMessage,
   FileAttachment,
@@ -36,7 +38,7 @@ import { useMultiAgentStore } from '../stores/multiAgent'
 import { useAuthStore } from '../stores/auth'
 import { useSkillStore } from '../stores/skills'
 import { useV2SessionStore } from '../v2/sessionStore'
-import type { Skill } from '../types'
+
 
 const route = useRoute()
 const router = useRouter()
@@ -77,8 +79,10 @@ const forms = computed(() => runtime.value?.forms ?? [])
 const status = computed(() => runtime.value?.status?.type ?? 'idle')
 const executionError = computed(() => runtime.value?.error?.message || '')
 const modelId = computed(() => runtime.value?.info?.model?.id || '')
+const pendingModel = ref('')
 const effectiveModelId = computed(
   () => modelId.value
+    || pendingModel.value
     || String(models.config?.default_model || '')
     || models.modelOptions[0]?.value
     || '',
@@ -91,6 +95,25 @@ const currentModelLabel = computed(() => currentModel.value?.label || '默认模
 const currentModelDesc = computed(() => currentModel.value?.desc || '')
 const modelMenuOpen = ref(false)
 const modelTipVisible = ref(false)
+const referenceItems = ref<ReferenceItem[]>([])
+const referenceMenuOpen = ref(false)
+
+async function ensureReferences() {
+  try {
+    referenceItems.value = (await listReferences(sessionId.value || null)).filter(
+      (item) => !item.hidden,
+    )
+  } catch {
+    referenceItems.value = []
+  }
+}
+
+function useReference(name: string) {
+  referenceMenuOpen.value = false
+  const prefix = draft.value && !draft.value.endsWith(' ') ? ' ' : ''
+  draft.value = `${draft.value}${prefix}@ref:${name} `
+  void nextTick(() => composerRef.value?.focus())
+}
 const userInitial = computed(() => (auth.displayName || 'U').slice(0, 1).toUpperCase())
 
 function hasImageAvatar(): boolean {
@@ -128,13 +151,41 @@ const slashRest = computed(() => {
   const i = slashTrigger.value
   return i >= 0 ? draft.value.slice(i + 1) : ''
 })
+interface SlashItem {
+  name: string
+  description: string
+  kind: 'skill' | 'command'
+}
+const commandItems = ref<SlashCommandInfo[]>([])
+const commandsLoading = ref(false)
+const slashAll = computed<SlashItem[]>(() => [
+  ...skillStore.skills
+    .filter((skill) => skill.enabled)
+    .map((skill) => ({ name: skill.name, description: skill.description || '', kind: 'skill' as const })),
+  ...commandItems.value.map((command) => ({
+    name: command.name,
+    description: command.description || (command.agent ? `Agent: ${command.agent}` : ''),
+    kind: 'command' as const,
+  })),
+])
+async function ensureCommands() {
+  if (commandsLoading.value) return
+  commandsLoading.value = true
+  try {
+    commandItems.value = await listCommands(sessionId.value || null)
+  } catch {
+    commandItems.value = []
+  } finally {
+    commandsLoading.value = false
+  }
+}
 const slashChosen = computed(() => {
   const rest = slashRest.value
   const space = rest.search(/\s/)
   if (space < 0) return false
   const token = rest.slice(0, space)
   if (!token) return true
-  return skillStore.skills.some((skill) => skill.name === token)
+  return slashAll.value.some((item) => item.name === token)
 })
 const slashOpen = computed(
   () => !slashDismissed.value && slashTrigger.value >= 0 && !slashChosen.value,
@@ -148,12 +199,12 @@ const slashQuery = computed(() => {
 })
 const slashFiltered = computed(() => {
   const query = slashQuery.value
-  const available = skillStore.skills.filter((skill) => skill.enabled)
+  const available = slashAll.value
   if (!query) return available
   return available.filter(
-    (skill) =>
-      skill.name.toLowerCase().includes(query)
-      || (skill.description || '').toLowerCase().includes(query),
+    (item) =>
+      item.name.toLowerCase().includes(query)
+      || (item.description || '').toLowerCase().includes(query),
   )
 })
 
@@ -162,6 +213,7 @@ watch(slashOpen, (open) => {
   slashActive.value = 0
   slashSearch.value = ''
   if (!skillStore.initialized) void skillStore.fetchAll()
+  void ensureCommands()
   void nextTick(() => {
     if (slashListRef.value) slashListRef.value.scrollTop = 0
     slashSearchRef.value?.focus()
@@ -198,10 +250,10 @@ function closeSlash() {
   void nextTick(() => composerRef.value?.focus())
 }
 
-function slashUse(skill: Skill) {
+function slashUse(item: SlashItem) {
   const i = slashTrigger.value
   const prefix = i >= 0 ? draft.value.slice(0, i) : ''
-  draft.value = `${prefix}/${skill.name} `
+  draft.value = `${prefix}/${item.name} `
   slashDismissed.value = true
   slashSearch.value = ''
   void nextTick(() => {
@@ -276,6 +328,7 @@ async function loadSession() {
 onMounted(() => {
   v2.start()
   void models.load()
+  void ensureReferences()
   void loadSession()
 })
 
@@ -301,8 +354,12 @@ async function send() {
       const info = await createSession({
         title: (text || '附件').slice(0, 24),
         directory: legacy.activeDirectory || undefined,
+        model: pendingModel.value
+          ? { id: pendingModel.value, provider_id: '', variant: null }
+          : null,
       })
       id = info.id
+      pendingModel.value = ''
       v2.setInfo(id, info)
       void legacy.loadConversations()
       const name = route.name === 'MultiAgent' ? 'MultiAgentConversation' : 'V2ChatConversation'
@@ -588,8 +645,13 @@ async function removeInbox(item: InboxInfo) {
 
 async function pickModel(value: string) {
   modelMenuOpen.value = false
+  if (!value) return
   const id = sessionId.value
-  if (!id || !value || value === effectiveModelId.value) return
+  if (!id) {
+    pendingModel.value = value
+    return
+  }
+  if (value === effectiveModelId.value) return
   try {
     const info = await switchSessionModel(id, { id: value, provider_id: '', variant: null })
     v2.setInfo(id, info)
@@ -651,6 +713,15 @@ function toolResultText(part: ToolPart): string {
         <span class="v2-status" :class="status">{{ status }}</span>
       </div>
       <div class="v2-head-actions">
+        <button
+          v-if="sessionId"
+          class="v2-btn"
+          :disabled="status === 'busy' || status === 'retry'"
+          title="立即压缩上下文"
+          @click="compact"
+        >
+          压缩
+        </button>
         <button
           v-if="status === 'busy' || status === 'retry'"
           class="v2-btn danger"
@@ -823,7 +894,7 @@ function toolResultText(part: ToolPart): string {
         <div v-if="slashOpen" class="slash-mask" @click="closeSlash"></div>
         <div v-if="slashOpen" class="slash-panel">
           <div class="slash-head">
-            <span class="slash-title">技能</span>
+            <span class="slash-title">技能与命令</span>
             <button class="slash-close" type="button" title="关闭" @click="closeSlash">✕</button>
           </div>
           <input
@@ -831,23 +902,24 @@ function toolResultText(part: ToolPart): string {
             v-model="slashSearch"
             class="slash-search"
             type="text"
-            placeholder="搜索技能…（↑↓ 选择，Enter 插入，Esc 关闭）"
+            placeholder="搜索技能或命令…（↑↓ 选择，Enter 插入，Esc 关闭）"
             @keydown="onSlashSearchKeydown"
           />
-          <div v-if="skillStore.loading && !slashFiltered.length" class="slash-empty">加载中…</div>
-          <div v-else-if="!slashFiltered.length" class="slash-empty">没有匹配的技能</div>
+          <div v-if="(skillStore.loading || commandsLoading) && !slashFiltered.length" class="slash-empty">加载中…</div>
+          <div v-else-if="!slashFiltered.length" class="slash-empty">没有匹配的技能或命令</div>
           <div v-else ref="slashListRef" class="slash-list">
             <button
-              v-for="(skill, index) in slashFiltered"
-              :key="skill.name"
+              v-for="(item, index) in slashFiltered"
+              :key="`${item.kind}-${item.name}`"
               type="button"
               class="slash-item"
               :class="{ active: index === slashActive }"
               @mousemove="slashActive = index"
-              @click="slashUse(skill)"
+              @click="slashUse(item)"
             >
-              <span class="slash-name">/{{ skill.name }}</span>
-              <span class="slash-desc">{{ skill.description || '暂无描述' }}</span>
+              <span class="slash-name">/{{ item.name }}</span>
+              <span v-if="item.kind === 'command'" class="slash-kind">命令</span>
+              <span class="slash-desc">{{ item.description || '暂无描述' }}</span>
             </button>
           </div>
         </div>
@@ -873,6 +945,25 @@ function toolResultText(part: ToolPart): string {
           <button class="attach-btn" type="button" title="添加附件" @click="chooseFiles">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>
           </button>
+          <div class="ref-picker">
+            <button class="attach-btn" type="button" title="插入引用" @click="referenceMenuOpen = !referenceMenuOpen">
+              @
+            </button>
+            <div v-if="referenceMenuOpen" class="ref-menu">
+              <button
+                v-for="item in referenceItems"
+                :key="item.name"
+                type="button"
+                class="ref-item"
+                @click="useReference(item.name)"
+              >
+                <strong>{{ item.name }}</strong>
+                <span>{{ item.kind }} · {{ item.status }}</span>
+                <small>{{ item.description }}</small>
+              </button>
+              <div v-if="!referenceItems.length" class="ref-empty">未配置引用</div>
+            </div>
+          </div>
           <button
             class="mic-btn"
             :class="{ recording }"

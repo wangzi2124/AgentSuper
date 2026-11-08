@@ -28,7 +28,7 @@ from app.auth import AuthMiddleware  # noqa: E402
 from observability.chainlog import ChainLogMiddleware  # noqa: E402
 from observability.monitor import RequestLogMiddleware, get_recent_stats, get_stats  # noqa: E402
 
-from .api import admin, attachments, chat, compat, sessions, v2  # noqa: E402
+from .api import admin, attachments, chat, commands, compat, instructions, openai_compat, sessions, v2  # noqa: E402
 from .deps import build_context  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -326,9 +326,41 @@ def create_app(
             app.state, "plugin_loader", None
         )
         app.state.platform = build_context(**options, checkpointer=checkpointer)
+        # MCP servers (G-04): connect configured stdio/http servers and register
+        # their tools. No config = no-op; failures are surfaced on /api/v2/mcp.
+        try:
+            from mcp.runtime import get_mcp_runtime
+
+            await get_mcp_runtime().reload(None, app.state.platform.registry)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MCP startup reload failed: %s", exc)
+        warming_stop = None
+        warming_task = None
+        try:
+            from harness.warming import WarmingScheduler, build_runtime_warmer, parse_config
+            from config import settings as _settings
+
+            warming_config = parse_config(getattr(_settings, "warming", False))
+            if warming_config.enabled and getattr(_settings, "llm_model", ""):
+                scheduler = WarmingScheduler(
+                    build_runtime_warmer(str(_settings.llm_model)), warming_config
+                )
+                warming_stop = asyncio.Event()
+                warming_task = asyncio.create_task(scheduler.run(warming_stop))
+                app.state.platform.warming = scheduler
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("warming startup failed: %s", exc)
         try:
             yield
         finally:
+            if warming_stop is not None:
+                warming_stop.set()
+            if warming_task is not None:
+                warming_task.cancel()
+                try:
+                    await warming_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
             platform = getattr(app.state, "platform", None)
             pending: list[asyncio.Task] = []
             coordinator = getattr(platform, "v2_coordinator", None)
@@ -340,6 +372,12 @@ def create_app(
                 task.cancel()
             if include_app:
                 await _shutdown_app_runtime(app)
+            try:
+                from mcp.runtime import get_mcp_runtime
+
+                await get_mcp_runtime().close()
+            except Exception:  # noqa: BLE001
+                pass
             await aclose_checkpointer()
 
     app = FastAPI(
@@ -376,8 +414,11 @@ def create_app(
     app.include_router(v2.router, prefix="/api")
     app.include_router(admin.router, prefix="/api")
     app.include_router(attachments.router, prefix="/api/attachments", tags=["Attachments"])
+    app.include_router(instructions.router, prefix="/api", tags=["Instructions"])
+    app.include_router(commands.router, prefix="/api", tags=["Commands"])
     # agent.md §9 约定裸 `/chat` + `/chat/stream`（非 /api 前缀）；与 /api/chat* 同一实现。
     app.include_router(chat.router)
+    app.include_router(openai_compat.router)
 
     # ── 统一异常 → {code,message,data,detail} ──
     @app.exception_handler(ApiError)

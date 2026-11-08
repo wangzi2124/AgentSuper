@@ -81,6 +81,16 @@ const router = createRouter({
       component: () => import('../views/ModelManagerView.vue'),
     },
     {
+      path: '/agent-settings',
+      name: 'AgentSettings',
+      component: () => import('../views/AgentSettingsView.vue'),
+    },
+    {
+      path: '/mcp',
+      name: 'McpSettings',
+      component: () => import('../views/McpSettingsView.vue'),
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',
       component: () => import('../views/NotFoundView.vue'),
