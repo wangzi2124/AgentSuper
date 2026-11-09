@@ -756,7 +756,7 @@ function toolResultText(part: ToolPart): string {
         <template v-if="message.type === 'user'">
           <div class="v2-avatar user">
             <img v-if="hasImageAvatar()" class="avatar-img" :src="auth.avatar" alt="" />
-            <span v-else>{{ userInitial }}</span>
+            <span v-else>{{ auth.avatar || userInitial }}</span>
           </div>
           <div class="v2-user-message">
             <div class="v2-bubble user">
