@@ -1,4 +1,4 @@
-"""Local OpenAI-compatible endpoint discovery (G-08: LM Studio / vLLM)."""
+﻿"""Local OpenAI-compatible endpoint discovery (G-08: LM Studio / vLLM)."""
 
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ _TTL = 60.0
 
 
 def _endpoints() -> dict[str, str]:
-    from config import settings
+    from config import get_settings
 
-    lmstudio = str(getattr(settings, "lmstudio_api_base", "") or "").strip()
-    vllm = str(getattr(settings, "vllm_api_base", "") or "").strip()
+    lmstudio = str(getattr(get_settings(), "lmstudio_api_base", "") or "").strip()
+    vllm = str(getattr(get_settings(), "vllm_api_base", "") or "").strip()
     return {
         "lmstudio": lmstudio or DEFAULT_ENDPOINTS["lmstudio"],
         "vllm": vllm or DEFAULT_ENDPOINTS["vllm"],
@@ -61,9 +61,9 @@ def probe_endpoint(provider: str, base: str, *, timeout: float = 2.0) -> list[di
 
 def discover_local(*, force: bool = False) -> list[dict[str, Any]]:
     global _CACHE
-    from config import settings
+    from config import get_settings
 
-    if not bool(getattr(settings, "local_discovery_enabled", True)):
+    if not bool(getattr(get_settings(), "local_discovery_enabled", True)):
         return []
     now = time.monotonic()
     if not force and _CACHE is not None and now - _CACHE[0] < _TTL:

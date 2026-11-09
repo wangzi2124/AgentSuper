@@ -43,6 +43,7 @@ class SubAgent:
     prompt_body: str = ""
     model: str = ""
     permission: dict[str, Any] = field(default_factory=dict)
+    request: dict[str, Any] = field(default_factory=dict)
 
     def system_prompt(self, model: Any | None = None) -> str:
         if self.prompt_body.strip():
@@ -66,6 +67,7 @@ def _to_subagent(defn: AgentDef) -> SubAgent:
         prompt_body=defn.prompt_body,
         model=defn.model,
         permission=dict(defn.permission),
+        request=dict(defn.request),
     )
 
 
@@ -110,6 +112,8 @@ async def run_subagent(
         }
     )
     try:
+        from agents.registry import request_kwargs
+
         token = set_agent_policy(statements_from_permission(spec.permission))
         try:
             result = await run_tool_loop(
@@ -119,6 +123,7 @@ async def run_subagent(
                 scope=SUBTASK_SCOPE,
                 max_rounds=spec.max_rounds,
                 agent_id=spec.name,
+                request_params=request_kwargs(spec.request),
             )
         finally:
             reset_agent_policy(token)

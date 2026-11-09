@@ -13,13 +13,23 @@ class _Session:
     model = "old"
 
 
+class _SessionStore:
+    def __init__(self) -> None:
+        self._items = {"ses_test": _Session()}
+        self.created: list[dict] = []
+
+    def get(self, session_id):
+        return self._items.get(session_id)
+
+    def create(self, **kwargs):
+        self.created.append(kwargs)
+        return _Session()
+
+
 class _Ctx:
     def __init__(self) -> None:
-        self.sessions = {"ses_test": _Session()}
+        self.sessions = _SessionStore()
         self.switched = []
-
-    def create(self, **_kwargs):
-        return _Session()
 
     async def switch_model(self, session_id, model):
         self.switched.append((session_id, model))
@@ -65,6 +75,25 @@ def test_stream(monkeypatch):
         text = "".join(res.iter_text())
     assert '"content": "hello"' in text
     assert "data: [DONE]" in text
+
+
+def test_creates_session_via_session_store(monkeypatch):
+    ctx = _Ctx()
+    monkeypatch.setattr(openai_compat, "get_context", lambda request: ctx)
+    app = FastAPI()
+    app.include_router(openai_compat.router)
+    client = TestClient(app)
+
+    res = client.post(
+        "/v1/chat/completions",
+        headers={"X-User-Id": "u-1"},
+        json={"model": "m1", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert res.status_code == 200
+    assert ctx.sessions.created == [
+        {"title": "OpenAI API", "user_id": "u-1", "model": "m1"},
+    ]
 
 
 def test_existing_session_model_switch(monkeypatch):

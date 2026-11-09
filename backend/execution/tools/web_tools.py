@@ -1,4 +1,4 @@
-"""内置网络工具（对齐 opencode 的 webfetch / websearch 语义）。
+﻿"""内置网络工具（对齐 opencode 的 webfetch / websearch 语义）。
 
 提供：
 - `web_fetch`：只读 GET，抓取 URL 文本（SSRF 防护 + 有界输出）。
@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
-from config import settings
+from config import get_settings
 from ..filesystem import bounded
 
 logger = logging.getLogger(__name__)
@@ -226,7 +226,7 @@ def _duckduckgo_search(query: str, max_results: int = 5) -> list[dict[str, str]]
 
 
 def _tavily_search(query: str, max_results: int) -> list[dict[str, str]]:
-    api_key = settings.tavily_api_key
+    api_key = get_settings().tavily_api_key
     if not api_key:
         raise ValueError("TAVILY_API_KEY not set")
     from tavily import TavilyClient  # type: ignore
@@ -243,7 +243,7 @@ def _tavily_search(query: str, max_results: int) -> list[dict[str, str]]:
 
 
 def _bing_search(query: str, max_results: int) -> list[dict[str, str]]:
-    api_key = settings.bing_api_key
+    api_key = get_settings().bing_api_key
     if not api_key:
         raise ValueError("BING_API_KEY not set")
     params = urllib.parse.urlencode(
@@ -339,7 +339,7 @@ def register_web_tools(
     `web_search`/`web_fetch` 只读放行；`http_request` 标记需人工审批。
     """
     tools = make_web_tools(searcher=searcher)
-    if not bool(getattr(settings, "websearch_enabled", True)):
+    if not bool(getattr(get_settings(), "websearch_enabled", True)):
         tools.pop("web_search", None)
     registered: list[str] = []
     for name, fn in tools.items():

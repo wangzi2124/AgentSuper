@@ -74,9 +74,12 @@ async def _run_turn(request: Request, body: dict[str, Any]) -> tuple[str, str, s
     ctx = get_context(request)
     model = str(body.get("model") or "")
     session_id = request.headers.get("X-Session-Id", "").strip()
+    user_id = request.headers.get("X-User-Id", "").strip() or "anonymous"
     created = False
     if not session_id or ctx.sessions.get(session_id) is None:
-        session_id = ctx.create(title="OpenAI API", model=model or None).id
+        session_id = ctx.sessions.create(
+            title="OpenAI API", user_id=user_id, model=model or None
+        ).id
         created = True
     elif model:
         existing = getattr(ctx.sessions.get(session_id), "model", None)

@@ -8,9 +8,13 @@ Body placeholders:
 * ``$ARGUMENTS`` — everything the user typed after the command
 * ``$1``..``$9`` — shell-like positional arguments
 * ``@path`` — inline file contents (relative to the session workspace)
+* ``!`cmd``` — shell interpolation. It is **not** executed by default: a caller
+  must supply an approved ``shell_runner`` (the runtime routes it through the
+  normal permission/approval gate). Without a runner the literal stays intact,
+  so command text can never become an implicit permission bypass.
 
-Shell interpolation (``!`cmd```) is intentionally not executed: command text is
-never a permission bypass.
+Frontmatter may also carry ``template`` (overrides the Markdown body as the
+template) and ``subtask`` / ``subagent`` (run the command as a subagent task).
 """
 
 from __future__ import annotations
@@ -28,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 _FILE_REF = re.compile(r"(?<![\w/])@([\w][\w./\\-]*)")
+_SHELL_REF = re.compile(r"!`([^`]+)`")
+
+# Frontmatter keys are passed through to the model; never let them become a
+# shell command or override internal fields.
+_RESERVED_FRONTMATTER = {"name", "description", "template", "agent", "model", "subtask", "subagent", "files"}
 
 
 @dataclass(frozen=True)
@@ -42,7 +51,12 @@ class CommandDef:
     source: str = "global"
     path: str = ""
 
-    def render(self, arguments: str, workspace: str | Path | None = None) -> str:
+    def render(
+        self,
+        arguments: str,
+        workspace: str | Path | None = None,
+        shell_runner: Any | None = None,
+    ) -> str:
         args = _split_args(arguments)
         text = self.template or "$ARGUMENTS"
         text = text.replace("$ARGUMENTS", arguments or "")
@@ -51,11 +65,14 @@ class CommandDef:
             text = text.replace(f"${index}", value)
         text = _inline_files(text, args, workspace)
         text = _append_globs(text, self.files, workspace)
+        text = _expand_shell(text, shell_runner, workspace)
         if not text.strip():
             text = "（用户只输入了命令，未附带具体请求。请先按该命令的工作流，向用户确认必要信息。）"
         header = f"[命令：{self.name}]"
         if self.agent:
             header += f"（Agent：{self.agent}）"
+        if self.subtask:
+            header += "（子任务）"
         return f"{header}\n{text.strip()}\n[命令结束]"
 
 
@@ -110,6 +127,33 @@ def _append_globs(text: str, patterns: Iterable[str], workspace: str | Path | No
     return "".join(chunks)
 
 
+def _expand_shell(
+    text: str,
+    runner: Any | None,
+    workspace: str | Path | None,
+) -> str:
+    """Expand ``!`cmd``` only when an approved runner is supplied.
+
+    The runner is expected to have already passed the shell permission gate.
+    Any error is surfaced inline so the model can explain the failure rather
+    than silently dropping the command.
+    """
+    if runner is None or not _SHELL_REF.search(text):
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        command = match.group(1).strip()
+        if not command:
+            return ""
+        try:
+            output = runner(command, workspace)
+        except Exception as exc:  # noqa: BLE001 - never break command rendering
+            return f"\n<shell command={command!r} status=\"error\">\n{exc}\n</shell>\n"
+        return f"\n<shell command={command!r}>\n{str(output).strip()}\n</shell>\n"
+
+    return _SHELL_REF.sub(replace, text)
+
+
 def parse_command_file(path: Path, source: str, root: Path | None = None) -> CommandDef | None:
     try:
         raw = path.read_text(encoding="utf-8-sig")
@@ -144,13 +188,17 @@ def parse_command_file(path: Path, source: str, root: Path | None = None) -> Com
         files = [str(part).strip() for part in files if str(part).strip()]
     else:
         files = ()
+    template = meta.get("template")
+    if not isinstance(template, str) or not template.strip():
+        template = body.strip()
+    subtask = bool(meta.get("subtask") or meta.get("subagent") or False)
     return CommandDef(
         name=name,
         description=str(meta.get("description") or "").strip(),
-        template=body.strip(),
+        template=template,
         agent=str(meta.get("agent") or "").strip(),
         model=str(meta.get("model") or "").strip(),
-        subtask=bool(meta.get("subtask") or False),
+        subtask=subtask,
         files=tuple(files),
         source=source,
         path=str(path),

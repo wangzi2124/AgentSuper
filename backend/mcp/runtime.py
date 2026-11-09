@@ -15,8 +15,9 @@ from typing import Any
 
 from execution.tool_registry import ToolRegistry
 
-from .client import MCPConnection, MCPError
+from .client import MCPAuthRequired, MCPConnection, MCPError
 from .config import MCPServerConfig, load_mcp_configs
+from .oauth import oauth_status
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class ServerState:
     error: str = ""
     tools: list[str] = field(default_factory=list)
     resources: list[dict[str, Any]] = field(default_factory=list)
+    prompts: list[dict[str, Any]] = field(default_factory=list)
     registered: list[str] = field(default_factory=list)
     instructions: str = ""
 
@@ -50,8 +52,14 @@ class ServerState:
             "error": self.error,
             "tools": list(self.tools),
             "resources": list(self.resources),
+            "prompts": list(self.prompts),
             "registered": list(self.registered),
             "has_instructions": bool(self.instructions),
+            "oauth": self.config.transport == "http",
+            "authorized": bool(oauth_status(self.config)["authorized"])
+            if self.config.transport == "http"
+            else False,
+            "auth_required": self.status == "auth_required",
         }
 
 
@@ -101,6 +109,11 @@ class MCPRuntime:
                 connection = MCPConnection(config)
                 try:
                     await connection.connect()
+                except MCPAuthRequired as exc:
+                    logger.info("MCP %s requires OAuth authorization", name)
+                    self._states[name].status = "auth_required"
+                    self._states[name].error = str(exc)
+                    continue
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("MCP %s connect failed: %s", name, exc)
                     self._states[name].status = "error"
@@ -113,6 +126,7 @@ class MCPRuntime:
                 ]
                 self._states[name].instructions = getattr(connection, "instructions", "")
                 self._states[name].resources = await self._list_resources(connection)
+                self._states[name].prompts = list(getattr(connection, "prompts", []) or [])
                 self._states[name].registered = self._register_tools(
                     registry, name, connection
                 )
@@ -167,13 +181,19 @@ class MCPRuntime:
             if reg is None:
                 raise MCPError("MCP runtime has no tool registry yet")
             connection = MCPConnection(state.config)
-            await connection.connect()
+            try:
+                await connection.connect()
+            except MCPAuthRequired as exc:
+                state.status = "auth_required"
+                state.error = str(exc)
+                return state.as_dict()
             self._connections[name] = connection
             state.status = "connected"
             state.error = ""
             state.tools = [str(tool.get("name")) for tool in connection.tools]
             state.instructions = getattr(connection, "instructions", "")
             state.resources = await self._list_resources(connection)
+            state.prompts = list(getattr(connection, "prompts", []) or [])
             state.registered = self._register_tools(reg, name, connection)
             return state.as_dict()
 
@@ -213,6 +233,20 @@ class MCPRuntime:
         if connection is None:
             raise MCPError(f"MCP server {name} is not connected")
         return await connection.read_resource(uri)
+
+    def prompts(self, name: str) -> list[dict[str, Any]]:
+        state = self._states.get(name)
+        if state is None:
+            raise MCPError(f"unknown MCP server: {name}")
+        return list(state.prompts)
+
+    async def get_prompt(
+        self, name: str, prompt: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        connection = self._connections.get(name)
+        if connection is None:
+            raise MCPError(f"MCP server {name} is not connected")
+        return await connection.get_prompt(prompt, arguments)
 
     def instructions(self) -> str:
         parts = [

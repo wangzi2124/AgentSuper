@@ -124,10 +124,10 @@ V2ChatView
 ### 2.3 opencode 能力层（G-01…G-06）
 
 - **指令**：`prompts/instructions.py` 统一发现 global/向上/project/嵌套/config/URL，`PlatformContext.instruction_blocks/instructions_text` 每轮解析；`compose_system(instructions=...)` 只追加在稳定头之后。API `GET /api/instructions` 只回元数据。
-- **命令**：`app/commands/registry.py` 发现 `~/.config/agentsuper/commands` 与 `<ws>/.agentsuper/commands`，支持嵌套名、`$ARGUMENTS`/`$1..$9`/`@file`/`files`；`slash.py` 先解析命令再技能/插件；API `GET /api/v2/commands`；前端斜杠面板合并命令。
+- **命令**：`app/commands/registry.py` 发现 `~/.config/agentsuper/commands` 与 `<ws>/.agentsuper/commands`，支持嵌套名、`$ARGUMENTS`/`$1..$9`/`@file`/`files`、`template` frontmatter、`subtask`/`subagent`（隔离派发）、安全 `` !`cmd` ``（仅注入 runner 才执行）；`slash.py` 先解析命令再技能/插件；`subtask: true` 的命令经 `graph/nodes/subtask.py` 在独立上下文运行（`filter → subtask → synthesize → memory_store`），不带父会话历史；API `GET /api/v2/commands`；前端斜杠面板合并命令。
 - **格式化**：`execution/formatters/`（spec/builtin/checks/service），仅 `write_file`/`edit_file` 后运行，`shell=False`、超时、首成功即停；事件 `formatter_applied`/`formatter_failed`。
-- **MCP**：`mcp/{config,client,runtime}.py` 真 stdio/HTTP JSON-RPC；工具名 `mcp_<server>_<tool>`；API `/api/v2/mcp` 含 CRUD、tools/resources/read/instructions、reload、connect/disconnect；OAuth 明确 501。
-- **Agents**：`agents/registry.py` 支持全局/项目 Markdown、嵌套 ID、mode/model/system/tools/permission/steps/hidden/color/disabled；`resolver.py` 回退 `build`；内置 build/plan/general/explore/compaction，title/summary 显式 disabled；会话 agent 影响 execute 的 prompt/tools/model/steps 与工具权限。
+- **MCP**：`mcp/{config,client,runtime}.py` 真 stdio/HTTP JSON-RPC；工具名 `mcp_<server>_<tool>`；API `/api/v2/mcp` 含 CRUD、tools/resources/read/prompts/get/instructions、reload、connect/disconnect；`McpSettingsView` 可浏览并带参数调用 prompts。HTTP 服务器支持 OAuth 2.1：`mcp/oauth.py` 做 RFC9728/RFC8414 发现、PKCE S256、RFC8707 `resource`、RFC7591 动态注册或预注册 client、refresh；令牌存 `state/mcp-oauth.json`（尽力 0600，禁止日志打印），回调 `GET /api/v2/mcp/oauth/callback` 免登录、靠 state 防伪；`POST/GET/DELETE /api/v2/mcp/servers/{name}/auth` 启动/查询/清除授权。OAuth 发现/令牌端点走 SSRF 校验，本地授权服务器需 `SSRF_ALLOW_INTERNAL=true`。
+- **Agents**：`agents/registry.py` 支持全局/项目 Markdown、嵌套 ID、mode/model/system/tools/permission/steps/hidden/color/disabled；`request` 只经 `request_kwargs()` 的显式白名单（temperature/top_p/top_k/max_tokens/stop/seed/response_format 等）透传，未知键与 harness 保留键丢弃；`resolver.py` 回退 `build`；内置 build/plan/general/explore/compaction，title/summary 显式 disabled；会话 agent 影响 execute 的 prompt/tools/model/steps 与工具权限。
 - **策略**：`policy/engine.py` 来源优先级 global<project<agent<managed、最后命中生效；`execution/actions.py` 统一动作，`policy_block` 在工具执行前硬拦；API `GET /api/v2/policies`。
 - **前端入口**：`/agent-settings`（Agents/命令/策略/指令/引用/配置）与 `/mcp`；导航见 `config/navigation.ts`。
 - **扩展治理**：`references/`（本地/Git 引用，异步 clone）；`net/egress.py`（统一代理/CA/超时）；`harness/warming.py`（空闲保活）；`execution/tools/websearch_policy.py`（provider/随机/429 冷却）；`models/variants.py`（`#variant` 合并）；`models/local_discovery.py`（LM Studio/vLLM）；`extensions/hooks.py`（插件 hook bus）；`execution/tools/patch_tools.py`（unified diff）；`execution/tools/question_tools.py`（`ask_question` durable form）；`execution/uri.py`（`file://#Lx-Ly`）。
@@ -148,6 +148,7 @@ cd backend
 - **启动/重启服务必须报进度**：任何启动或重启后端（`uvicorn` / `taskkill` 后重起）都必须分步输出进度，并**每约 5 秒**轮询一次 `/api/auth/status` 直到就绪；禁止一次长时间等待且无反馈。后台跑测试脚本同理：先启动、再周期性读取日志汇报进度。
 - **配置来源**：`backend/config.example.json` → 复制为 `backend/config.json`（JSONC，已被 gitignore）。
   优先级：操作系统环境变量 > `config.json` > `config.py` 字段默认值；`.env` 文件不再读取。
+- **分层配置与会话作用域**：`config_layers.py` 合并 system → global → project → app（`backend/config.json` 最高）；project 从会话 workspace 向上找 `.agentsuper/config.json`。回合入口用 `bind_workspace_settings(session.directory)` 绑定 contextvar，运行时通过 `get_settings()` 读取；无 project 配置时复用进程级 `settings`。`storage/*`、认证、DB/checkpoint、日志/观测、启动期图构建仍读进程级配置。project 层禁止覆盖 `agentsuper_*`/`auth_*`/`db_*`/`checkpoint_*` 与存储/权限/SSRF 等进程级键。
 - **统一数据根**：所有运行数据走 `storage/paths.py`；`agentsuper_data` 空 = 平台用户目录（Windows `%LOCALAPPDATA%/agentsuper`、macOS `~/Library/Application Support/agentsuper`、Linux `~/.local/share/agentsuper`）。`cache/config/state/logs/bin` 默认跟随数据根；相对路径基于数据根，旧的 `data/` 前缀自动去除。首次启动若新根为空，会自动全量拷贝旧 `backend/data`（源保留，`agentsuper_migrate_legacy=false` 关闭）。
 - 新增配置项必须同时更新 `config.example.json` 与 `tests/unit/test_config_example.py`（完整性测试会失败）。
 
@@ -278,9 +279,9 @@ npx vitest run tests/integration/
 
 当前实测（2026-11-03，本地 Windows）：
 
-- 后端：`pytest` 全量通过（env-gated 用例默认 skip；含 v2 投影/重建测试）
+- 后端：`pytest tests\unit tests\contract tests\reliability tests\security` **846 passed**（env-gated 用例默认 skip；含 v2 投影/重建测试）
 - Harness 覆盖率：`92.46%`（`pytest ... --cov=harness --cov-fail-under=90`，门槛 90%）
-- 前端单测：`143 passed | 119 skipped`（`npm test`；live 用例需后端）
+- 前端单测：`86 passed | 118 skipped`（`npm test`；live 用例需后端）
 - 前端 live SSE 集成：本轮未重跑（需后端；上次 `119 passed`）
 - 前端 `npm run build`：通过
 - 真实模型：DeepSeek `deepseek/deepseek-v4-flash → deepseek-v4-pro`；E2E 8 条、PF-01/02/05/06/07 通过
@@ -288,6 +289,7 @@ npx vitest run tests/integration/
 已知缺口：
 
 - **D-01**：预算事件已补，但计费仍是调用后结算，不是严格预扣。
+- **MCP OAuth**：已支持 PKCE + DCR/预注册客户端；尚未实现 scope 升级（403 `insufficient_scope`）与 Client ID Metadata Documents（CIMD）。
 - **前端 Harness 设计文档章节**尚未补；代码/测试已落地。
 - 真实模型/性能测试默认 env-gated；缺 `HARNESS_SMOKE_MODEL_A/B` 时记为 blocked，不要伪报通过。
 - `backend/README.md`、`frontend/README.md` 未随本文件一起重写（本轮只更新根文档）。

@@ -1,4 +1,4 @@
-"""DeepSeek V4 官方 tokenizer 集成（费用/Token 统计口径）。
+﻿"""DeepSeek V4 官方 tokenizer 集成（费用/Token 统计口径）。
 
 tokenizer 文件（LlamaTokenizerFast 的 tokenizer.json）位于：
 `backend/data/models/deepseek-v4-tokenizer/`（也兼容环境变量 DEEPSEEK_TOKENIZER_DIR 覆盖）。
@@ -18,7 +18,7 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
-from config import settings
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ _lock = threading.Lock()
 
 def _tokenizer_dir() -> Optional[Path]:
     """定位 tokenizer 目录：env 覆盖 → data/models → 仓库内置。"""
-    env_dir = settings.deepseek_tokenizer_dir
+    env_dir = get_settings().deepseek_tokenizer_dir
     if env_dir:
         d = Path(env_dir)
         if (d / "tokenizer.json").exists():

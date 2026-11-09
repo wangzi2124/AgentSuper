@@ -1,4 +1,4 @@
-"""Token counting module using tiktoken with fallback heuristics.
+﻿"""Token counting module using tiktoken with fallback heuristics.
 
 Provides accurate token estimation for LLM context window management.
 Falls back to character-based heuristic when tiktoken is unavailable.
@@ -30,8 +30,8 @@ def _estimate_correction() -> float:
     global _correction
     if _correction is None:
         try:
-            from config import settings
-            _correction = max(1.0, float(getattr(settings, "token_estimate_correction", 1.13)))
+            from config import get_settings
+            _correction = max(1.0, float(getattr(get_settings(), "token_estimate_correction", 1.13)))
         except Exception:
             _correction = 1.13
     return _correction

@@ -1,4 +1,4 @@
-"""模型路由 facade：`get_model(tier)` → 统一 ChatModel 适配器。
+﻿"""模型路由 facade：`get_model(tier)` → 统一 ChatModel 适配器。
 
 业务代码只调用 `get_model()`，禁止直连厂商 SDK。所有解析与传输行为已经
 收敛到 `models/runtime.py` 的 `ModelRuntime`；本模块只保留稳定的 facade，
@@ -12,7 +12,7 @@ from typing import Any
 
 import litellm
 
-from config import settings
+from config import get_settings
 
 from .context_guard import fit_messages  # noqa: F401 - re-export for callers/tests
 from .runtime import (
@@ -82,8 +82,9 @@ def normalize_finish_reason(finish_reason: str | None) -> str:
 
 
 def get_compress_model(max_tokens: int | None = 800, model: str | None = None):
-    chosen = (model or settings.compress_model or "").strip()
-    proxy = settings.litellm_proxy_url
+    current = get_settings()
+    chosen = (model or current.compress_model or "").strip()
+    proxy = current.litellm_proxy_url
     if proxy:
         return TierModel(tier="auto", max_tokens=max_tokens, model_override=chosen or None)
     if chosen:
@@ -109,7 +110,9 @@ class TierModel:
         self.temperature = temperature
         self.max_retries = max_retries
         self.timeout = timeout
-        self.max_tokens = max_tokens if max_tokens is not None else settings.llm_max_tokens
+        self.max_tokens = (
+            max_tokens if max_tokens is not None else get_settings().llm_max_tokens
+        )
         self.model_override = (model_override or "").strip() or None
         self.extra = extra
 
@@ -237,7 +240,7 @@ def resolve_model(state: dict[str, Any] | None = None, default_tier: str = "medi
     if state and isinstance(state.get("model_binding"), dict):
         binding = state["model_binding"]
         tier = binding.get("tier") or default_tier
-        proxy = settings.litellm_proxy_url
+        proxy = get_settings().litellm_proxy_url
         if proxy:
             return TierModel(tier="auto")
         if tier in TIER_MAP or tier in ("auto",):

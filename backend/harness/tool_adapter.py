@@ -94,31 +94,38 @@ class ToolAdapter:
         return rendered, tools
 
     async def _raw_ainvoke(
-        self, messages: list[Any], tools: list[dict[str, Any]] | None
+        self,
+        messages: list[Any],
+        tools: list[dict[str, Any]] | None,
+        request_params: dict[str, Any] | None = None,
     ) -> ChatResult:
+        extra = dict(request_params or {})
         raw = getattr(self.model, "raw_ainvoke", None)
         if callable(raw):
-            return await raw(messages, tools=tools)
-        return await self.model.ainvoke(messages, tools=tools)
+            return await raw(messages, tools=tools, **extra)
+        return await self.model.ainvoke(messages, tools=tools, **extra)
 
     async def _raw_stream(
         self,
         messages: list[Any],
         tools: list[dict[str, Any]] | None,
         on_text: Callable[[str], None],
+        request_params: dict[str, Any] | None = None,
     ) -> Any:
+        extra = dict(request_params or {})
         raw = getattr(self.model, "raw_stream", None)
         if callable(raw):
-            return await raw(messages, tools=tools, on_text=on_text)
-        return await self.model.astream(messages, tools=tools, on_text=on_text)
+            return await raw(messages, tools=tools, on_text=on_text, **extra)
+        return await self.model.astream(messages, tools=tools, on_text=on_text, **extra)
 
     async def complete(
         self,
         messages: list[Any],
         tools: list[dict[str, Any]] | None = None,
+        request_params: dict[str, Any] | None = None,
     ) -> ChatResult:
         prepared, call_tools = self.prepare(messages, tools)
-        result = await self._raw_ainvoke(prepared, call_tools)
+        result = await self._raw_ainvoke(prepared, call_tools, request_params)
         return apply_result(
             result, self.mode, id_factory=self._next_call_id
         )
@@ -127,6 +134,7 @@ class ToolAdapter:
         self,
         messages: list[Any],
         tools: list[dict[str, Any]] | None = None,
+        request_params: dict[str, Any] | None = None,
     ) -> AsyncIterator[HarnessEvent]:
         """流式事件：文本增量 / 工具调用就绪 / 完成。
 
@@ -175,7 +183,9 @@ class ToolAdapter:
 
         async def produce() -> Any:
             try:
-                return await self._raw_stream(prepared, call_tools, on_text)
+                return await self._raw_stream(
+                    prepared, call_tools, on_text, request_params
+                )
             finally:
                 queue.put_nowait(_FINISHED)
 

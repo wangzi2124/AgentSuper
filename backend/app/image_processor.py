@@ -1,4 +1,4 @@
-"""聊天图片附件回显：缩略图 + 描述（F8/F9 D2）。"""
+﻿"""聊天图片附件回显：缩略图 + 描述（F8/F9 D2）。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import os
 import time as tmod
 from typing import Any, Optional
 
-from config import settings
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ def normalize_image(data_b64: str, max_dim: int | None = None) -> str:
     """Downscale oversized images before inlining (G-16)."""
     if not _pil_available():
         return data_b64
-    limit = int(max_dim or getattr(settings, "image_max_dimension", 4096) or 4096)
+    limit = int(max_dim or getattr(get_settings(), "image_max_dimension", 4096) or 4096)
     if limit <= 0:
         return data_b64
     try:
@@ -61,7 +61,7 @@ def make_thumbnail(data_b64: str, px: int | None = None) -> str:
 
         raw = base64.b64decode(data_b64 or "", validate=False)
         img = Image.open(_io.BytesIO(raw))
-        box = max(1, int(px or settings.image_thumbnail_px or 256))
+        box = max(1, int(px or get_settings().image_thumbnail_px or 256))
         img.thumbnail((box, box), Image.LANCZOS)
         buf = _io.BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=70)
@@ -85,7 +85,7 @@ _tesseract_configured = False
 
 
 def _configure_tesseract(pytesseract: Any) -> None:
-    """把 settings.tesseract_cmd / tessdata_dir 应用到 tesseract（仅首次）。
+    """把 get_settings().tesseract_cmd / tessdata_dir 应用到 tesseract（仅首次）。
 
     语言包目录走 TESSDATA_PREFIX 环境变量而非 --tessdata-dir：pytesseract 在
     Windows 下用 shlex.split(posix=False) 切分 config，路径引号会被原样保留导致
@@ -95,16 +95,16 @@ def _configure_tesseract(pytesseract: Any) -> None:
     if _tesseract_configured:
         return
     _tesseract_configured = True
-    cmd = (settings.tesseract_cmd or "").strip()
+    cmd = (get_settings().tesseract_cmd or "").strip()
     if cmd:
         pytesseract.pytesseract.tesseract_cmd = cmd
-    d = (settings.tessdata_dir or "").strip()
+    d = (get_settings().tessdata_dir or "").strip()
     if d:
         os.environ["TESSDATA_PREFIX"] = d
 
 
 def _ocr_lang_attempts() -> list[str]:
-    langs = [x.strip() for x in (settings.ocr_languages or "eng").split("+") if x.strip()]
+    langs = [x.strip() for x in (get_settings().ocr_languages or "eng").split("+") if x.strip()]
     if not langs:
         return ["eng"]
     attempts = ["+".join(langs)]
@@ -115,7 +115,7 @@ def _ocr_lang_attempts() -> list[str]:
 
 def ocr_image(data_b64: str, filename: str = "") -> str:
     """图片 OCR 提取文本（截图/文档图）。引擎缺失或未启用返回空串。"""
-    if not settings.image_use_ocr:
+    if not get_settings().image_use_ocr:
         return ""
     try:
         import io as _io
@@ -144,11 +144,11 @@ def ocr_image(data_b64: str, filename: str = "") -> str:
 
 
 def _caption_kwargs() -> tuple[str, Optional[str], Optional[str], str, int]:
-    model = settings.image_caption_model or ""
-    api_base = settings.image_caption_api_base or None
-    api_key = settings.image_caption_api_key or None
-    prompt = settings.image_caption_prompt or DEFAULT_CAPTION_PROMPT
-    timeout = max(5, int(settings.image_caption_timeout or 15))
+    model = get_settings().image_caption_model or ""
+    api_base = get_settings().image_caption_api_base or None
+    api_key = get_settings().image_caption_api_key or None
+    prompt = get_settings().image_caption_prompt or DEFAULT_CAPTION_PROMPT
+    timeout = max(5, int(get_settings().image_caption_timeout or 15))
     return model, api_base, api_key, prompt, timeout
 
 
@@ -173,7 +173,7 @@ async def caption_image(data_b64: str, mime_type: str = "", filename: str = "") 
         from models.catalog import litellm_extra_kwargs, provider_api, read_providers
 
         provider = model.split("/", 1)[0] if "/" in model else ""
-        default_provider = (settings.llm_model or "").split("/", 1)[0]
+        default_provider = (get_settings().llm_model or "").split("/", 1)[0]
         if provider and (provider in read_providers() or provider == default_provider):
             creds = provider_api(model)
             api_base = api_base or creds.get("api_base") or None
@@ -233,7 +233,7 @@ async def describe_image(data_b64: str, mime_type: str = "", filename: str = "")
     text = ocr_image(data_b64, filename)
     if text:
         return text
-    if settings.image_vlm_caption:
+    if get_settings().image_vlm_caption:
         return await caption_image(data_b64, mime_type, filename)
     return ""
 

@@ -32,5 +32,18 @@ class AgentResolver:
             return None
         return agent
 
+    def resolve(self, requested: str | None = None) -> AgentDef | None:
+        """Resolve any agent (primary or subagent) for isolated subtask runs.
+
+        Command ``subtask`` execution must honour the command's ``agent`` even
+        when that agent is declared ``mode: subagent``; fall back to the normal
+        primary chain when it is missing or disabled.
+        """
+        if requested:
+            agent = self.registry.get(requested)
+            if agent is not None and not agent.disabled:
+                return agent
+        return self.primary(None)
+
 
 __all__ = ["AgentResolver", "FALLBACK_PRIMARY"]

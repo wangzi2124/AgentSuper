@@ -28,6 +28,7 @@ from typing import Any, AsyncIterator, Callable
 from fastapi import Request
 from langgraph.types import Overwrite
 
+from config import bind_workspace_settings
 from execution.approval import ApprovalQueue
 from execution.filesystem import (
     VirtualFileSystem,
@@ -230,9 +231,9 @@ def _attachment_content(
     images = [f for f in items if is_image_file(f)]
     if not images:
         return text
-    from config import settings as _settings
+    from config import get_settings
 
-    limit = int(getattr(_settings, "image_max_bytes", 0) or 0)
+    limit = int(getattr(get_settings(), "image_max_bytes", 0) or 0)
     oversized: list[str] = []
     if limit > 0:
         kept = []
@@ -310,6 +311,7 @@ def initial_state(
     agent: str = "",
     workspace: str = "",
     model_override: str = "",
+    subtask: bool = False,
 ) -> dict[str, Any]:
     """构造一轮的输入状态。
 
@@ -328,9 +330,9 @@ def initial_state(
     # 图片被误判为“当前模型不支持视觉”而不发送。
     if not model:
         try:
-            from config import settings
+            from config import get_settings
 
-            model = str(getattr(settings, "llm_model", "") or "") or None
+            model = str(getattr(get_settings(), "llm_model", "") or "") or None
         except Exception:  # noqa: BLE001
             model = None
     # 非图片附件正文单独存一份：`messages` 里的当前轮 human 会被历史装配排除，
@@ -348,9 +350,9 @@ def initial_state(
 
     # §2.4 C1：会话预算须真实下发，否则扇出门禁 `_remaining_budget` 恒为 0 →
     # 并行扇出在生产永久不可达。未配置（<=0）时不下发该字段，门禁按「未知预算」拒绝。
-    from config import settings
+    from config import get_settings
 
-    budget_total = float(getattr(settings, "session_budget", 0.0) or 0.0)
+    budget_total = float(getattr(get_settings(), "session_budget", 0.0) or 0.0)
 
     # 压缩配置与「本轮模型」成对绑定：目标窗口更小 → 阈值同步调低，
     # 禁止复用旧模型/全局默认阈值（agent-3 §2.2）。窗口未知时保留默认值。
@@ -423,6 +425,7 @@ def initial_state(
         "agent": agent,
         "workspace": workspace,
         "model_override": model_override,
+        "subtask": bool(subtask),
         "compaction_event": {},
         "rag_done": False,
         "use_vector_db": bool(use_vector_db),
@@ -1121,6 +1124,28 @@ class PlatformContext:
         use_vector_db: bool = False,
         message_id: str | None = None,
     ) -> dict[str, Any]:
+        with bind_workspace_settings(self.session_workspace(session_id)):
+            return await self._run_turn_impl(
+                _turn,
+                question,
+                session_id=session_id,
+                user_id=user_id,
+                files=files,
+                use_vector_db=use_vector_db,
+                message_id=message_id,
+            )
+
+    async def _run_turn_impl(
+        self,
+        _turn: Any,
+        question: str,
+        *,
+        session_id: str,
+        user_id: str = "anonymous",
+        files: list[Any] | None = None,
+        use_vector_db: bool = False,
+        message_id: str | None = None,
+    ) -> dict[str, Any]:
         """TurnHarness runner: execute one graph turn and return its final state."""
         from .session.context import set_session_context
 
@@ -1223,6 +1248,29 @@ class PlatformContext:
         message_id: str | None = None,
         voice: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        with bind_workspace_settings(self.session_workspace(session_id)):
+            async for item in self._stream_turn_events_impl(
+                question,
+                session_id=session_id,
+                user_id=user_id,
+                files=files,
+                use_vector_db=use_vector_db,
+                message_id=message_id,
+                voice=voice,
+            ):
+                yield item
+
+    async def _stream_turn_events_impl(
+        self,
+        question: str,
+        *,
+        session_id: str,
+        user_id: str = "anonymous",
+        files: list[Any] | None = None,
+        use_vector_db: bool = False,
+        message_id: str | None = None,
+        voice: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         """Run one turn and yield graph-level events (text delta/tool start/end).
 
         This is the shared event source for v2 coordinator; it reuses compat's
@@ -1270,6 +1318,7 @@ class PlatformContext:
             agent=command_override.get("agent") or self.session_agent(session_id),
             workspace=self.session_workspace(session_id),
             model_override=command_override.get("model") or "",
+            subtask=bool(command_override.get("subtask")),
         )
         roots_token = set_allowed_roots(self.allowed_roots_for(session_id))
         root_token = set_active_root(sess.directory if sess else "")
@@ -1287,6 +1336,27 @@ class PlatformContext:
         self.sessions.touch(session_id)
 
     async def _stream_turn(
+        self,
+        _turn: Any,
+        question: str,
+        *,
+        session_id: str,
+        user_id: str = "anonymous",
+        files: list[Any] | None = None,
+        use_vector_db: bool = False,
+    ) -> AsyncIterator[dict[str, Any]]:
+        with bind_workspace_settings(self.session_workspace(session_id)):
+            async for item in self._stream_turn_impl(
+                _turn,
+                question,
+                session_id=session_id,
+                user_id=user_id,
+                files=files,
+                use_vector_db=use_vector_db,
+            ):
+                yield item
+
+    async def _stream_turn_impl(
         self,
         _turn: Any,
         question: str,
@@ -1338,6 +1408,7 @@ class PlatformContext:
             agent=command_override.get("agent") or self.session_agent(session_id),
             workspace=self.session_workspace(session_id),
             model_override=command_override.get("model") or "",
+            subtask=bool(command_override.get("subtask")),
         )
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))

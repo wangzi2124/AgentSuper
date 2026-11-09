@@ -1,4 +1,4 @@
-"""Model Runtime: one deep module for resolving and executing a model call.
+﻿"""Model Runtime: one deep module for resolving and executing a model call.
 
 The module owns three concerns that used to leak across ``models/router.py``,
 ``models/catalog.py``, ``models/context_guard.py`` and ``models/stream.py``:
@@ -27,7 +27,7 @@ from typing import Any
 
 import litellm
 
-from config import settings
+from config import get_settings
 
 from .context_guard import (
     FitResult,
@@ -176,7 +176,8 @@ def reset_state() -> None:
 
 
 def _ollama_base_url() -> str:
-    host = settings.ollama_api_base or settings.ollama_host or "http://localhost:11434"
+    current = get_settings()
+    host = current.ollama_api_base or current.ollama_host or "http://localhost:11434"
     if not host.startswith(("http://", "https://")):
         host = "http://" + host
     return host.rstrip("/")
@@ -366,7 +367,7 @@ def effective_window(model_id: str | None, fallback: int = 0) -> int:
     if last > 0:
         return last
     if not fallback:
-        fallback = int(getattr(settings, "ollama_num_ctx", 0) or 0)
+        fallback = int(getattr(get_settings(), "ollama_num_ctx", 0) or 0)
     return max(0, int(fallback or 0))
 
 
@@ -401,7 +402,7 @@ def runtime_context_lengths(model_ids: list[str]) -> dict[str, int]:
         if runtime <= 0:
             runtime = int(last_known.get(mid) or 0)
         if runtime <= 0:
-            runtime = int(getattr(settings, "ollama_num_ctx", 0) or 0)
+            runtime = int(getattr(get_settings(), "ollama_num_ctx", 0) or 0)
         out[raw] = runtime
     return out
 
@@ -621,7 +622,7 @@ def _keep_alive_value() -> str | int | None:
     ``"-1"``; Ollama's Go duration parser rejects that ("missing unit"). Numeric
     strings must be sent as integers; durations such as ``"30m"`` stay strings.
     """
-    raw = getattr(settings, "ollama_keep_alive", "")
+    raw = getattr(get_settings(), "ollama_keep_alive", "")
     if raw is None or isinstance(raw, bool):
         return None
     if isinstance(raw, int):
@@ -706,7 +707,9 @@ class _OllamaAdapter(_CloudAdapter):
         try:
             effective = int(window or 0)
             if effective <= 0:
-                effective = int(effective_window(mid, settings.ollama_num_ctx) or 0)
+                effective = int(
+                    effective_window(mid, get_settings().ollama_num_ctx) or 0
+                )
             if effective > 0 and messages:
                 from cognition.context_meter import get_meter
 
@@ -797,7 +800,9 @@ class ModelRuntime:
         self.max_retries = spec.max_retries
         self.timeout = spec.timeout
         self.max_tokens = (
-            spec.max_tokens if spec.max_tokens is not None else settings.llm_max_tokens
+            spec.max_tokens
+            if spec.max_tokens is not None
+            else get_settings().llm_max_tokens
         )
         self.model_override = (spec.model_override or "").strip() or None
         self.extra = spec.extra
@@ -816,7 +821,7 @@ class ModelRuntime:
         model = os.environ.get(env_key)
         if model:
             return model
-        return settings.llm_model
+        return get_settings().llm_model
 
     def model_name(self) -> str:
         return str(self._endpoint().get("model", ""))
@@ -827,12 +832,13 @@ class ModelRuntime:
     def _endpoint(self) -> dict[str, Any]:
         if self._endpoint_cache is not None:
             return self._endpoint_cache
-        proxy = settings.litellm_proxy_url
+        current = get_settings()
+        proxy = current.litellm_proxy_url
         if proxy:
             result: dict[str, Any] = {
                 "model": self.model_override or TIER_MAP.get(self.tier, "smart-router"),
                 "api_base": proxy,
-                "api_key": settings.litellm_proxy_key or "sk-litellm-proxy",
+                "api_key": current.litellm_proxy_key or "sk-litellm-proxy",
                 "is_ollama": False,
             }
             self._endpoint_cache = result
@@ -841,7 +847,7 @@ class ModelRuntime:
 
         raw_model = self._direct_model()
         base_model, variant = split_variant(raw_model)
-        mid = ensure_provider(base_model, settings.llm_api_base)
+        mid = ensure_provider(base_model, current.llm_api_base)
         try:
             from .catalog import provider_api
 
@@ -867,8 +873,8 @@ class ModelRuntime:
             result = {
                 "model": raw_model,
                 "litellm_model": creds.get("litellm_model"),
-                "api_base": creds.get("api_base") or settings.llm_api_base,
-                "api_key": creds.get("api_key") or settings.llm_api_key,
+                "api_base": creds.get("api_base") or current.llm_api_base,
+                "api_key": creds.get("api_key") or current.llm_api_key,
                 "options": creds.get("options"),
                 "headers": creds.get("headers"),
                 "body": creds.get("body"),

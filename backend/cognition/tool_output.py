@@ -1,4 +1,4 @@
-"""Smart tool output bounding module.
+﻿"""Smart tool output bounding module.
 
 Applies line-count and byte-size limits to tool outputs before they enter
 the LLM context window. Prevents large outputs (file reads, shell commands)
@@ -100,7 +100,7 @@ def bound_tool_output(
     目录，上下文只保留预览 + 提示，模型可用 tool_read_file(offset) 或
     tool_grep 续读，避免截断导致信息永久丢失。
 
-    [C5] max_tokens：按 token 封顶（默认 settings.tool_output_max_tokens）。
+    [C5] max_tokens：按 token 封顶（默认 get_settings().tool_output_max_tokens）。
     中文场景 32KB 字符 ≈ 48K token 单条过大，字符/行限内仍可能顶爆预算，
     故在行/字节限之外再按估算 token 逐次减半，直到 ≤ 上限（保留开头+续读提示）。
 
@@ -109,7 +109,7 @@ def bound_tool_output(
         tool_name: Name of the tool (for applying tool-specific limits).
         limits: Custom limits (uses defaults if None).
         save_full_output: 超限时是否把全文写盘。默认 True（对齐 opencode）。
-        max_tokens: 单条工具输出的 token 上限；None 用 settings.tool_output_max_tokens；0 关闭。
+        max_tokens: 单条工具输出的 token 上限；None 用 get_settings().tool_output_max_tokens；0 关闭。
 
     Returns:
         Bounded output string, possibly truncated with a notice.
@@ -121,8 +121,8 @@ def bound_tool_output(
     token_truncated = False
     if max_tokens is None:
         try:
-            from config import settings
-            max_tokens = int(getattr(settings, "tool_output_max_tokens", 8_000) or 0)
+            from config import get_settings
+            max_tokens = int(getattr(get_settings(), "tool_output_max_tokens", 8_000) or 0)
         except Exception:
             max_tokens = 8_000
     if max_tokens and max_tokens > 0:
@@ -343,11 +343,11 @@ class PrunePolicy:
     @classmethod
     def from_settings(cls, *, gate_tokens: int = 0) -> "PrunePolicy":
         try:
-            from config import settings
+            from config import get_settings
 
-            protect = getattr(settings, "compaction_prune_protect_tokens", 40_000)
-            minimum = getattr(settings, "compaction_prune_minimum_tokens", 20_000)
-            enabled = bool(getattr(settings, "compaction_prune", True))
+            protect = getattr(get_settings(), "compaction_prune_protect_tokens", 40_000)
+            minimum = getattr(get_settings(), "compaction_prune_minimum_tokens", 20_000)
+            enabled = bool(getattr(get_settings(), "compaction_prune", True))
         except Exception:  # noqa: BLE001 - settings are optional in unit seams
             return cls(gate_tokens=gate_tokens)
         return cls(

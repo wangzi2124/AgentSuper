@@ -1,4 +1,4 @@
-"""Ollama prompt fitting guard.
+﻿"""Ollama prompt fitting guard.
 
 The guard runs at the model transport boundary (``TierModel``) so every caller is
 covered. It resolves the model's real context window, keeps an output reserve,
@@ -18,7 +18,7 @@ from typing import Any
 
 from cognition.context_budget import transport_split
 from cognition.token_counter import sanitize_tool_messages, truncate_messages
-from config import settings
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class FitResult:
 
 
 def guard_enabled() -> bool:
-    return bool(getattr(settings, "ollama_context_guard", True))
+    return bool(getattr(get_settings(), "ollama_context_guard", True))
 
 
 def estimate_ratio(model_id: str) -> float:
@@ -80,7 +80,7 @@ def resolve_window(model_id: str) -> int:
     try:
         from models.runtime import effective_window
 
-        return max(0, int(effective_window(model_id, settings.ollama_num_ctx) or 0))
+        return max(0, int(effective_window(model_id, get_settings().ollama_num_ctx) or 0))
     except Exception:  # noqa: BLE001 - window resolution must never block a call
         logger.debug("resolve_window failed for %s", model_id, exc_info=True)
         return 0

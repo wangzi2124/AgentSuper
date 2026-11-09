@@ -26,6 +26,21 @@ class MCPError(RuntimeError):
     pass
 
 
+class MCPAuthRequired(MCPError):
+    """The HTTP MCP server rejected the request and needs OAuth authorization."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resource_metadata: str = "",
+        scope: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.resource_metadata = resource_metadata
+        self.scope = scope
+
+
 class StdioTransport:
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
@@ -98,7 +113,9 @@ class StdioTransport:
             {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}}
         )
         try:
-            message = await asyncio.wait_for(future, timeout=self.config.timeout)
+            message = await asyncio.wait_for(
+                future, timeout=self.config.timeout_for(method)
+            )
         except asyncio.TimeoutError as exc:
             self._pending.pop(request_id, None)
             raise MCPError(f"MCP request timed out: {method}") from exc
@@ -153,22 +170,82 @@ class HttpTransport:
             await self.close()
             raise
 
-    async def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
-        if self._client is None:
-            raise MCPError("MCP http transport is not running")
-        self._next_id += 1
+    def _headers(self, token: str = "") -> dict[str, str]:
         headers = dict(self.config.headers)
         headers.setdefault("Accept", "application/json, text/event-stream")
         if self._session_id:
             headers.setdefault("Mcp-Session-Id", self._session_id)
-        payload = {"jsonrpc": "2.0", "id": self._next_id, "method": method, "params": params or {}}
+        if token:
+            headers.setdefault("Authorization", f"Bearer {token}")
+        return headers
+
+    async def _access_token(self) -> str:
+        from . import oauth as oauth_mod
+
         try:
-            response = await self._client.post(self.config.url, json=payload, headers=headers)
-        except httpx.HTTPError as exc:
-            raise MCPError(f"MCP http request failed: {exc}") from exc
-        session_id = response.headers.get("Mcp-Session-Id")
-        if session_id:
-            self._session_id = session_id
+            return await oauth_mod.access_token(self.config)
+        except oauth_mod.OAuthError as exc:
+            raise MCPAuthRequired(str(exc)) from exc
+
+    async def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        if self._client is None:
+            raise MCPError("MCP http transport is not running")
+        self._next_id += 1
+        request_id = self._next_id
+        token = await self._access_token()
+        refresh_error = ""
+        response: httpx.Response | None = None
+        attempts = 2 if token else 1
+        for attempt in range(attempts):
+            payload = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params or {},
+            }
+            try:
+                response = await self._client.post(
+                    self.config.url,
+                    json=payload,
+                    headers=self._headers(token),
+                    timeout=self.config.timeout_for(method),
+                )
+            except httpx.HTTPError as exc:
+                raise MCPError(f"MCP http request failed: {exc}") from exc
+            session_id = response.headers.get("Mcp-Session-Id")
+            if session_id:
+                self._session_id = session_id
+            if (
+                response.status_code == 401
+                and attempt == 0
+                and token
+            ):
+                from . import oauth as oauth_mod
+
+                try:
+                    refreshed = await oauth_mod.refresh_access_token(
+                        self.config, force=True
+                    )
+                except oauth_mod.OAuthError as exc:
+                    refreshed = ""
+                    refresh_error = str(exc)
+                if refreshed:
+                    token = refreshed
+                    continue
+            break
+        assert response is not None
+        if response.status_code == 401:
+            from .oauth import parse_www_authenticate
+
+            challenge = parse_www_authenticate(
+                response.headers.get("www-authenticate", "")
+            )
+            detail = refresh_error or "OAuth authorization required"
+            raise MCPAuthRequired(
+                f"MCP http 401: {detail}",
+                resource_metadata=challenge.get("resource_metadata", ""),
+                scope=challenge.get("scope", ""),
+            )
         if response.status_code >= 400:
             raise MCPError(f"MCP http {response.status_code}: {response.text[:200]}")
         message = _decode_body(response)
@@ -179,14 +256,15 @@ class HttpTransport:
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
         if self._client is None:
             return
-        headers = dict(self.config.headers)
-        if self._session_id:
-            headers.setdefault("Mcp-Session-Id", self._session_id)
+        try:
+            token = await self._access_token()
+        except MCPAuthRequired:
+            token = ""
         try:
             await self._client.post(
                 self.config.url,
                 json={"jsonrpc": "2.0", "method": method, "params": params or {}},
-                headers=headers,
+                headers=self._headers(token),
             )
         except httpx.HTTPError:
             pass
@@ -220,6 +298,7 @@ class MCPConnection:
         self.config = config
         self.transport: StdioTransport | HttpTransport | None = None
         self.tools: list[dict[str, Any]] = []
+        self.prompts: list[dict[str, Any]] = []
         self.instructions = ""
 
     async def connect(self) -> None:
@@ -241,6 +320,7 @@ class MCPConnection:
         self.instructions = str(result.get("instructions") or "") if isinstance(result, dict) else ""
         await self.transport.notify("notifications/initialized", {})
         self.tools = await self.list_tools()
+        self.prompts = await self.list_prompts()
 
     async def list_tools(self) -> list[dict[str, Any]]:
         if self.transport is None:
@@ -248,6 +328,28 @@ class MCPConnection:
         result = await self.transport.request("tools/list", {})
         tools = result.get("tools") if isinstance(result, dict) else None
         return [tool for tool in tools or [] if isinstance(tool, dict) and tool.get("name")]
+
+    async def list_prompts(self) -> list[dict[str, Any]]:
+        """List server prompts (best effort; servers may not support prompts)."""
+        if self.transport is None:
+            return []
+        try:
+            result = await self.transport.request("prompts/list", {})
+        except MCPError as exc:
+            logger.debug("MCP %s prompts/list unavailable: %s", self.config.name, exc)
+            return []
+        prompts = result.get("prompts") if isinstance(result, dict) else None
+        return [item for item in prompts or [] if isinstance(item, dict) and item.get("name")]
+
+    async def get_prompt(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        if self.transport is None:
+            raise MCPError(f"MCP server {self.config.name} is not connected")
+        result = await self.transport.request(
+            "prompts/get", {"name": name, "arguments": arguments or {}}
+        )
+        return result if isinstance(result, dict) else {}
 
     async def list_resources(self) -> list[dict[str, Any]]:
         if self.transport is None:
@@ -297,6 +399,7 @@ def _flatten_result(result: Any) -> str:
 
 __all__ = [
     "HttpTransport",
+    "MCPAuthRequired",
     "MCPConnection",
     "MCPError",
     "PROTOCOL_VERSION",

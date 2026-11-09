@@ -1,4 +1,4 @@
-"""Web search provider policy: selection, fallback and 429 cooldown (G-13).
+﻿"""Web search provider policy: selection, fallback and 429 cooldown (G-13).
 
 Providers are declared, never assumed: a provider without credentials stays out
 of the candidate list. A provider that reports rate limiting is cooled down for
@@ -44,14 +44,14 @@ def candidates(
     rng: random.Random | None = None,
 ) -> list[SearchProvider]:
     """Return configured providers in attempt order, skipping cooled ones."""
-    from config import settings
+    from config import get_settings
 
     engines: list[SearchProvider] = []
-    if getattr(settings, "tavily_api_key", ""):
+    if getattr(get_settings(), "tavily_api_key", ""):
         from .web_tools import _tavily_search
 
         engines.append(SearchProvider("tavily", _tavily_search, 0))
-    if getattr(settings, "bing_api_key", ""):
+    if getattr(get_settings(), "bing_api_key", ""):
         from .web_tools import _bing_search
 
         engines.append(SearchProvider("bing", _bing_search, 1))
@@ -92,10 +92,10 @@ def cooldowns() -> dict[str, float]:
 
 def search(query: str, top_k: int) -> tuple[str, str]:
     """Run one search, returning ``(text, provider)`` or raising the last error."""
-    from config import settings
+    from config import get_settings
 
-    provider = str(getattr(settings, "websearch_provider", "auto") or "auto")
-    cooldown = float(getattr(settings, "websearch_cooldown_seconds", 60.0) or 60.0)
+    provider = str(getattr(get_settings(), "websearch_provider", "auto") or "auto")
+    cooldown = float(getattr(get_settings(), "websearch_cooldown_seconds", 60.0) or 60.0)
     errors: list[str] = []
     chosen = candidates(provider=provider)
     if not chosen:

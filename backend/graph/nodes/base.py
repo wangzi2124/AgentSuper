@@ -621,14 +621,20 @@ async def _stream_step(
     workspace_lock: _AsyncRWLock | None = None,
     permission_lock: asyncio.Lock | None = None,
     allowed_tools: set[str] | None = None,
+    request_params: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, tuple[Any, str, dict[str, Any], dict[str, Any]]]]:
     from harness.tool_adapter import Done, TextDelta, ToolCallReady
 
     early_calls: dict[str, Any] = {}
     early_tasks: dict[str, asyncio.Task] = {}
     result = None
+    stream_iter = (
+        adapter.stream(convo, tool_defs, request_params)
+        if request_params
+        else adapter.stream(convo, tool_defs)
+    )
     try:
-        async for event in adapter.stream(convo, tool_defs):
+        async for event in stream_iter:
             if isinstance(event, TextDelta):
                 if event.text:
                     push_event(
@@ -742,6 +748,7 @@ async def run_tool_loop(
     on_compaction: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     session_id: str = "",
     allowed_tools: set[str] | None = None,
+    request_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """LLM 工具调用循环，返回 {text, rounds, tool_trace, tool_history, usage}。
 
@@ -750,13 +757,13 @@ async def run_tool_loop(
     """
     from harness.tool_adapter import get_tool_adapter
 
-    from config import settings as _settings
+    from config import get_settings
 
     tool_adapter = adapter or get_tool_adapter(model)
     tool_defs = build_tool_defs(registry, scope)
     if allowed_tools is not None:
         tool_defs = [spec for spec in tool_defs if spec.get("function", {}).get("name") in allowed_tools]
-    max_parallel_tools = max(1, int(getattr(_settings, "tool_concurrency", 10) or 10))
+    max_parallel_tools = max(1, int(getattr(get_settings(), "tool_concurrency", 10) or 10))
     convo = [dict(m) for m in messages]
     requires_tool_evidence = _needs_tool_evidence(messages)
     roots_note = _authorized_roots_note()
@@ -829,12 +836,20 @@ async def run_tool_loop(
                         workspace_lock=workspace_lock,
                         permission_lock=permission_lock,
                         allowed_tools=allowed_tools,
+                        request_params=request_params,
                     )
             else:
                 with trace_span("llm.call", rounds=rounds):
-                    result = await retry_async(
-                        lambda: tool_adapter.complete(convo, tool_defs or None)
-                    )
+                    if request_params:
+                        result = await retry_async(
+                            lambda: tool_adapter.complete(
+                                convo, tool_defs or None, request_params
+                            )
+                        )
+                    else:
+                        result = await retry_async(
+                            lambda: tool_adapter.complete(convo, tool_defs or None)
+                        )
         except Exception as exc:  # noqa: BLE001 - 上下文超限时压缩后重试一次
             from models.context_guard import is_overflow_error
 

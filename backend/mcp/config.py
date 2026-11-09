@@ -31,6 +31,28 @@ class MCPServerConfig:
     headers: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
     timeout: float = 20.0
+    # Fine-grained timeouts (0 = inherit ``timeout``): handshake, catalog
+    # listing (tools/resources/prompts) and execution (call/read/get).
+    startup_timeout: float = 0.0
+    catalog_timeout: float = 0.0
+    execution_timeout: float = 0.0
+    # OAuth 2.1 client settings. ``client_id`` is optional: when omitted the
+    # client attempts RFC 7591 dynamic registration. ``redirect_uri`` overrides
+    # the callback URL derived from the API request (useful for reverse proxies).
+    oauth_client_id: str = ""
+    oauth_client_secret: str = ""
+    oauth_token_endpoint_auth_method: str = ""
+    oauth_scopes: tuple[str, ...] = ()
+    oauth_redirect_uri: str = ""
+    oauth_resource_metadata_url: str = ""
+
+    def timeout_for(self, method: str) -> float:
+        name = str(method or "")
+        if name == "initialize":
+            return self.startup_timeout or self.timeout
+        if name in ("tools/list", "resources/list", "prompts/list"):
+            return self.catalog_timeout or self.timeout
+        return self.execution_timeout or self.timeout
 
     def validate(self) -> str | None:
         if self.transport == "stdio" and not self.command:
@@ -53,10 +75,34 @@ def _parse(name: str, raw: Any) -> MCPServerConfig | None:
         args = [args]
     env = raw.get("env") or {}
     headers = raw.get("headers") or {}
+    oauth = raw.get("oauth") if isinstance(raw.get("oauth"), dict) else {}
     try:
         timeout = float(raw.get("timeout") or 20.0)
     except (TypeError, ValueError):
         timeout = 20.0
+
+    def _optional_float(key: str) -> float:
+        value = raw.get(key)
+        if value in (None, ""):
+            return 0.0
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _oauth_value(key: str) -> str:
+        if raw.get(key) not in (None, ""):
+            return str(raw.get(key) or "").strip()
+        return str(oauth.get(key) or "").strip()
+
+    raw_scopes = raw.get("scopes") if raw.get("scopes") is not None else oauth.get("scopes")
+    if isinstance(raw_scopes, str):
+        scopes = tuple(part for part in raw_scopes.replace(",", " ").split() if part)
+    elif isinstance(raw_scopes, (list, tuple)):
+        scopes = tuple(str(part).strip() for part in raw_scopes if str(part).strip())
+    else:
+        scopes = ()
+
     return MCPServerConfig(
         name=str(raw.get("name") or name),
         transport=transport,
@@ -67,6 +113,15 @@ def _parse(name: str, raw: Any) -> MCPServerConfig | None:
         headers={str(k): str(v) for k, v in headers.items()} if isinstance(headers, dict) else {},
         enabled=bool(raw.get("enabled", True)),
         timeout=max(1.0, timeout),
+        startup_timeout=_optional_float("startup_timeout"),
+        catalog_timeout=_optional_float("catalog_timeout"),
+        execution_timeout=_optional_float("execution_timeout"),
+        oauth_client_id=_oauth_value("client_id"),
+        oauth_client_secret=_oauth_value("client_secret"),
+        oauth_token_endpoint_auth_method=_oauth_value("token_endpoint_auth_method"),
+        oauth_scopes=scopes,
+        oauth_redirect_uri=_oauth_value("redirect_uri"),
+        oauth_resource_metadata_url=_oauth_value("resource_metadata_url"),
     )
 
 

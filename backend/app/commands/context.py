@@ -10,8 +10,19 @@ _OVERRIDE: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
 )
 
 
-def set_command_override(agent: str = "", model: str = "") -> None:
-    _OVERRIDE.set({"agent": str(agent or ""), "model": str(model or "")})
+def set_command_override(
+    agent: str = "",
+    model: str = "",
+    *,
+    subtask: bool = False,
+    command: str = "",
+) -> None:
+    value: dict[str, Any] = {"agent": str(agent or ""), "model": str(model or "")}
+    if subtask:
+        value["subtask"] = True
+    if command:
+        value["command"] = str(command)
+    _OVERRIDE.set(value)
 
 
 def consume_command_override() -> dict[str, Any]:

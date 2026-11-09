@@ -1,4 +1,4 @@
-"""Unified egress factory: proxies, CA bundle and timeouts (opencode gap G-12).
+﻿"""Unified egress factory: proxies, CA bundle and timeouts (opencode gap G-12).
 
 All outbound HTTP/HTTPX call sites should build clients here so proxy, CA and
 timeout policy stay in one place. SSRF validation remains the caller's job.
@@ -29,9 +29,9 @@ class EgressConfig:
 
 
 def egress_config() -> EgressConfig:
-    from config import settings
+    from config import get_settings
 
-    proxy = str(getattr(settings, "egress_proxy", "") or "").strip()
+    proxy = str(getattr(get_settings(), "egress_proxy", "") or "").strip()
     if not proxy:
         proxy = (
             os.environ.get("HTTPS_PROXY")
@@ -40,10 +40,10 @@ def egress_config() -> EgressConfig:
             or os.environ.get("http_proxy")
             or ""
         )
-    no_proxy = str(getattr(settings, "egress_no_proxy", "") or "").strip()
+    no_proxy = str(getattr(get_settings(), "egress_no_proxy", "") or "").strip()
     if not no_proxy:
         no_proxy = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
-    ca_bundle = str(getattr(settings, "egress_ca_bundle", "") or "").strip()
+    ca_bundle = str(getattr(get_settings(), "egress_ca_bundle", "") or "").strip()
     if not ca_bundle:
         ca_bundle = (
             os.environ.get("SSL_CERT_FILE")
@@ -51,14 +51,14 @@ def egress_config() -> EgressConfig:
             or ""
         )
     try:
-        timeout = float(getattr(settings, "egress_timeout_seconds", DEFAULT_TIMEOUT) or DEFAULT_TIMEOUT)
+        timeout = float(getattr(get_settings(), "egress_timeout_seconds", DEFAULT_TIMEOUT) or DEFAULT_TIMEOUT)
     except (TypeError, ValueError):
         timeout = DEFAULT_TIMEOUT
     return EgressConfig(
         proxy=proxy,
         no_proxy=no_proxy,
         ca_bundle=ca_bundle,
-        verify=bool(getattr(settings, "egress_verify", True)),
+        verify=bool(getattr(get_settings(), "egress_verify", True)),
         timeout=max(1.0, timeout),
     )
 

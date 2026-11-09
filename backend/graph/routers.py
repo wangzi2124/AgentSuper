@@ -59,6 +59,11 @@ def _context_tokens(state: dict[str, Any]) -> int:
     )
 
 
+def route_after_filter(state: dict[str, Any]) -> str:
+    """Slash commands with ``subtask: true`` bypass planning/RAG entirely."""
+    return "subtask" if state.get("subtask") else "supervisor"
+
+
 def route_after_supervisor(state: dict[str, Any]) -> str:
     """Supervisor 根据当前状态决定下一步。"""
 
@@ -68,11 +73,12 @@ def route_after_supervisor(state: dict[str, Any]) -> str:
     if state.get("final_output"):
         return "end"
 
-    from config import settings
+    from config import get_settings
 
+    current = get_settings()
     compress_threshold = int(state.get("compress_threshold") or COMPRESS_THRESHOLD)
     if (
-        bool(getattr(settings, "compaction_auto", True))
+        bool(getattr(current, "compaction_auto", True))
         and not state.get("context_compressed")
         and _context_tokens(state) > compress_threshold
         and len(state.get("messages") or []) > KEEP_RECENT
@@ -124,20 +130,21 @@ def should_plan_parallel(state: dict[str, Any]) -> bool:
     if len(agent_tasks) < 2:
         return False
 
-    from config import settings
+    from config import get_settings
 
-    if not getattr(settings, "plan_parallel_enabled", False):
+    current = get_settings()
+    if not getattr(current, "plan_parallel_enabled", False):
         return False
 
-    # C2：扇出次数上限。
+    # C2���ȳ��������ޡ�
     if int(state.get("fanout_count", 0) or 0) >= int(
-        getattr(settings, "plan_max_fanout_calls", 2)
+        getattr(current, "plan_max_fanout_calls", 2)
     ):
         return False
 
-    # C1：剩余预算门禁（成本受控）——未知/为零预算不放行扇出。
+    # C1��ʣ��Ԥ���Ž����ɱ��ܿأ�����δ֪/Ϊ��Ԥ�㲻�����ȳ���
     remaining = _remaining_budget(state)
-    if remaining <= float(getattr(settings, "plan_fanout_min_budget", 0.20)):
+    if remaining <= float(getattr(current, "plan_fanout_min_budget", 0.20)):
         return False
     return True
 

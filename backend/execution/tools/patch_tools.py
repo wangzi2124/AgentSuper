@@ -81,7 +81,17 @@ def make_patch_tools(vfs: VirtualFileSystem) -> dict[str, Any]:
                 lines = _apply_hunk(lines, hunk)
         except ValueError as exc:
             return f"错误：补丁应用失败：{exc}"
-        return vfs.write_file(path, "\n".join(lines) + ("\n" if existing.endswith("\n") else ""))
+        out = vfs.write_file(
+            path, "\n".join(lines) + ("\n" if existing.endswith("\n") else "")
+        )
+        if not out.startswith("错误："):
+            try:
+                from .file_tools import _after_mutation
+
+                _after_mutation(vfs, path)
+            except Exception:  # noqa: BLE001 - formatting must never break a patch
+                pass
+        return out
 
     return {"apply_patch": apply_patch}
 

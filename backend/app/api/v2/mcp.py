@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+import html
+import json
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse
 
 from app.deps import default_session_directory, get_context
 from mcp.client import MCPError
-from mcp.config import delete_server, parse_server, read_server, write_server
+from mcp.config import (
+    MCPServerConfig,
+    delete_server,
+    parse_server,
+    read_server,
+    write_server,
+)
+from mcp.oauth import (
+    OAuthError,
+    clear_oauth_state,
+    complete_oauth,
+    oauth_status,
+    start_oauth,
+)
 from mcp.runtime import get_mcp_runtime
 
 router = APIRouter(prefix="/v2/mcp", tags=["MCP"])
@@ -42,6 +59,77 @@ def _validate(name: str, payload: dict[str, Any]) -> None:
 
 async def _reload(ctx, workspace: str | None) -> list[dict[str, Any]]:
     return await get_mcp_runtime().reload(workspace, ctx.registry)
+
+
+def _resolve_server(
+    name: str, ctx, session_id: str, scope: str = ""
+) -> tuple[MCPServerConfig, str | None, str]:
+    workspace = _workspace(ctx, session_id)
+    if scope:
+        chosen = _scope({"scope": scope}, workspace)
+        raw = read_server(name, workspace=workspace, scope=chosen)
+        if raw is None:
+            raise HTTPException(
+                status_code=404, detail=f"MCP server not found in {chosen}: {name}"
+            )
+        config = parse_server(name, raw)
+        if config is None:
+            raise HTTPException(status_code=400, detail="invalid MCP server entry")
+        return config, workspace, chosen
+    if workspace:
+        raw = read_server(name, workspace=workspace, scope="project")
+        if raw is not None:
+            config = parse_server(name, raw)
+            if config is not None:
+                return config, workspace, "project"
+    raw = read_server(name, workspace=workspace, scope="global")
+    if raw is None:
+        raise HTTPException(status_code=404, detail=f"MCP server not found: {name}")
+    config = parse_server(name, raw)
+    if config is None:
+        raise HTTPException(status_code=400, detail="invalid MCP server entry")
+    return config, workspace, "global"
+
+
+def _redirect_uri(request: Request, config: MCPServerConfig) -> str:
+    configured = str(config.oauth_redirect_uri or "").strip()
+    if configured:
+        return configured
+    return str(request.base_url).rstrip("/") + "/api/v2/mcp/oauth/callback"
+
+
+def _callback_page(ok: bool, message: str, *, server: str = "") -> str:
+    payload = (
+        json.dumps(
+            {"type": "mcp-oauth", "ok": ok, "server": server},
+            ensure_ascii=False,
+        )
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+    title = "OAuth 授权成功" if ok else "OAuth 授权失败"
+    body = (
+        "<p>授权成功，可以关闭此窗口并回到 AgentSuper。</p>"
+        if ok
+        else f"<p>{html.escape(message)}</p>"
+    )
+    link = (
+        f'<p><a href="/mcp?oauth=success&amp;server={html.escape(quote(server, safe=""))}">'
+        "返回 MCP 设置</a></p>"
+        if ok
+        else '<p><a href="/mcp">返回 MCP 设置</a></p>'
+    )
+    return (
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        f"<title>{title}</title></head><body>"
+        f"<h1>{title}</h1>{body}{link}"
+        f"<script>try{{if(window.opener)window.opener.postMessage({payload},'*');}}"
+        "catch(e){}setTimeout(function(){try{window.close();}catch(e){}},200);</script>"
+        "</body></html>"
+    )
 
 
 @router.get("")
@@ -98,8 +186,15 @@ async def remove_server(
     ctx = get_context(request)
     workspace = _workspace(ctx, session_id)
     chosen = _scope({"scope": scope}, workspace)
+    raw = read_server(name, workspace=workspace, scope=chosen)
+    config = parse_server(name, raw) if raw is not None else None
     if not delete_server(name, workspace=workspace, scope=chosen):
         raise HTTPException(status_code=404, detail=f"MCP server not found in {chosen}: {name}")
+    if config is not None:
+        try:
+            clear_oauth_state(config)
+        except OAuthError:
+            pass
     await _reload(ctx, workspace)
     return {"deleted": name, "scope": chosen}
 
@@ -118,6 +213,29 @@ async def server_resources(name: str) -> dict:
         return {"resources": get_mcp_runtime().resources(name)}
     except MCPError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/servers/{name}/prompts")
+async def server_prompts(name: str) -> dict:
+    try:
+        return {"prompts": get_mcp_runtime().prompts(name)}
+    except MCPError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/servers/{name}/prompts/get")
+async def get_server_prompt(request: Request, name: str) -> dict:
+    payload = await request.json()
+    prompt = str(payload.get("prompt") or payload.get("name") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt name is required")
+    arguments = payload.get("arguments")
+    if arguments is not None and not isinstance(arguments, dict):
+        raise HTTPException(status_code=400, detail="arguments must be an object")
+    try:
+        return {"prompt": await get_mcp_runtime().get_prompt(name, prompt, arguments)}
+    except MCPError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/servers/{name}/resources/read")
@@ -140,11 +258,75 @@ async def server_instructions(name: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/servers/{name}/auth")
+async def server_auth_status(
+    request: Request, name: str, session_id: str = "", scope: str = ""
+) -> dict:
+    ctx = get_context(request)
+    config, _workspace_path, _scope_name = _resolve_server(name, ctx, session_id, scope)
+    return oauth_status(config)
+
+
 @router.post("/servers/{name}/auth")
-async def server_auth(name: str) -> dict:
-    raise HTTPException(
-        status_code=501,
-        detail="OAuth MCP servers are not supported yet; configure headers manually",
+async def server_auth(
+    request: Request, name: str, session_id: str = "", scope: str = ""
+) -> dict:
+    ctx = get_context(request)
+    config, workspace, _scope_name = _resolve_server(name, ctx, session_id, scope)
+    payload: dict[str, Any] = {}
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            payload = body
+    except Exception:  # noqa: BLE001 - empty/non-JSON bodies are fine
+        payload = {}
+    redirect_uri = str(payload.get("redirect_uri") or "").strip() or _redirect_uri(
+        request, config
+    )
+    try:
+        return await start_oauth(config, redirect_uri, workspace=workspace)
+    except OAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/servers/{name}/auth")
+async def server_auth_clear(
+    request: Request, name: str, session_id: str = "", scope: str = ""
+) -> dict:
+    ctx = get_context(request)
+    config, _workspace_path, _scope_name = _resolve_server(name, ctx, session_id, scope)
+    state = clear_oauth_state(config)
+    cleared = bool(state.get("token") or state.get("clients"))
+    try:
+        await get_mcp_runtime().disconnect(name)
+    except MCPError:
+        pass
+    return {"cleared": cleared}
+
+
+@router.get("/oauth/callback", response_class=HTMLResponse)
+async def oauth_callback(
+    state: str = "",
+    code: str = "",
+    error: str = "",
+    error_description: str = "",
+) -> HTMLResponse:
+    try:
+        result = await complete_oauth(
+            state,
+            code or None,
+            error=error or None,
+            error_description=error_description or None,
+        )
+    except OAuthError as exc:
+        return HTMLResponse(
+            _callback_page(False, str(exc)),
+            status_code=400,
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )
+    return HTMLResponse(
+        _callback_page(True, "OK", server=str(result.get("server") or "")),
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
     )
 
 

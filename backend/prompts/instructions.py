@@ -1,4 +1,4 @@
-"""Project instruction discovery and injection (opencode gap G-01).
+﻿"""Project instruction discovery and injection (opencode gap G-01).
 
 Instructions are *not* prompt constants. They are resolved per turn from a
 workspace so that ``AGENTS.md`` / configured files / URLs can change without a
@@ -8,7 +8,7 @@ Discovery order (stable, earlier wins on duplicate content):
 
 1. ``global``   — user-level ``AGENTS.md`` (config dir + ``~/.config/agentsuper``)
 2. ``project``  — every ``AGENTS.md`` from the workspace up to home (outermost first)
-3. ``config``   — ``settings.instructions`` entries (file / glob / ``~/`` / URL)
+3. ``config``   — ``get_settings().instructions`` entries (file / glob / ``~/`` / URL)
 4. ``nested``   — ``AGENTS.md`` inside directories the agent touched last turn
 
 Deduplication is by resolved path and by content hash. Change detection happens
@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal
 
-from config import settings
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +312,7 @@ class InstructionResolver:
             if candidate.is_file():
                 add_file(candidate, "project")
 
-        for raw in list(getattr(settings, "instructions", []) or []):
+        for raw in list(getattr(get_settings(), "instructions", []) or []):
             entry = str(raw or "").strip()
             if not entry:
                 continue
@@ -354,8 +354,8 @@ class InstructionResolver:
     def _fit(
         self, candidates: Iterable[_Candidate], model_id: str
     ) -> list[InstructionBlock]:
-        max_chars = int(getattr(settings, "instructions_max_chars", 0) or 0)
-        max_tokens = int(getattr(settings, "instructions_max_tokens", 0) or 0)
+        max_chars = int(getattr(get_settings(), "instructions_max_chars", 0) or 0)
+        max_tokens = int(getattr(get_settings(), "instructions_max_tokens", 0) or 0)
         if max_chars <= 0 and max_tokens <= 0:
             return [
                 InstructionBlock(source=c.source, content=c.content, tokens=c.tokens)
@@ -410,13 +410,13 @@ class InstructionResolver:
 
     def resolve(self, workspace: str | Path, model_id: str = "") -> list[InstructionBlock]:
         """Resolve the blocks to inject for one turn (empty when disabled)."""
-        if not bool(getattr(settings, "instructions_enabled", True)):
+        if not bool(getattr(get_settings(), "instructions_enabled", True)):
             return []
         return self._fit(self._collect(workspace, model_id), model_id)
 
     def describe(self, workspace: str | Path, model_id: str = "") -> list[dict[str, object]]:
         """Metadata-only view for the API (never returns block bodies)."""
-        if not bool(getattr(settings, "instructions_enabled", True)):
+        if not bool(getattr(get_settings(), "instructions_enabled", True)):
             return []
         out: list[dict[str, object]] = []
         for candidate in self._collect(workspace, model_id):

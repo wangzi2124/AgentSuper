@@ -1,4 +1,4 @@
-"""Configuration policy layer (opencode gap G-06).
+﻿"""Configuration policy layer (opencode gap G-06).
 
 Policies are *hard* rules: they can only tighten behaviour, never grant it.
 They are evaluated after permissions/approval and before an action runs. A deny
@@ -15,7 +15,7 @@ import fnmatch
 from dataclasses import dataclass, field
 from typing import Iterable, Literal
 
-from config import settings
+from config import get_settings
 
 PolicyEffect = Literal["allow", "deny"]
 
@@ -130,7 +130,7 @@ class PolicyEngine:
 
     @classmethod
     def from_settings(cls) -> "PolicyEngine":
-        return cls(_parse(getattr(settings, "policies", []) or [], "global"))
+        return cls(_parse(getattr(get_settings(), "policies", []) or [], "global"))
 
     def with_statements(
         self, statements: Iterable[object] | Iterable[PolicyStatement], source: str

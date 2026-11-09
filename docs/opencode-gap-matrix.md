@@ -13,7 +13,7 @@
 | G-01 项目指令 | 已落地 | `prompts/instructions.py`、`prompts/assembly.py`、`api/instructions.py`、Agent 配置页 |
 | G-02 Commands | 已落地（shell 插值按安全差异不执行） | `app/commands/registry.py`、`app/skills/slash.py`、`api/commands.py`、Composer 斜杠面板 |
 | G-03 Formatters | 已落地 | `execution/formatters/`、`file_tools.py`、事件 `formatter_applied/failed` |
-| G-04 MCP | 已落地（OAuth 明确 501） | `mcp/{config,client,runtime}.py`、`api/v2/mcp.py`、`/mcp` 页；真实 stdio 集成测试 `tests/integration/test_mcp_stdio_real.py` |
+| G-04 MCP | 已落地（含 OAuth 2.1） | `mcp/{config,client,runtime,oauth}.py`、`api/v2/mcp.py`、`/mcp` 页；OAuth 相关测试 `tests/unit/test_mcp_oauth*.py`；真实 stdio 集成测试 `tests/integration/test_mcp_stdio_real.py` |
 | G-05 Agents | 已落地 | `agents/{registry,resolver,roles}.py`、内置 build/plan/general/explore/compaction + role_*、CRUD、request 跨源合并、会话 agent 影响主循环 |
 | G-06 Policies | 已落地 | `policy/engine.py`、`execution/{actions,access}.py`、`api/v2/policies.py`、provider.use 运行时拦截 |
 | G-07 References | 已落地 | `references/`、`api/v2/references.py`、配置页、Composer `@ref:` 选择器 |

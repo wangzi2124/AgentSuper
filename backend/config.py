@@ -3,7 +3,9 @@
 配置来源（从高到低）：
 1. ``Settings(...)`` 显式参数（测试）
 2. 操作系统环境变量（``export LLM_MODEL=...`` / Docker env / CI）
-3. ``backend/config.json``（JSONC：支持 //、/* */ 注释与尾逗号）
+3. 分层 JSONC 配置文件（见 ``config_layers.py``，后者覆盖前者）：
+   system → global → project（优先会话 workspace，缺失时从 cwd 向上搜索）
+   → ``backend/config.json``；字符串值支持 ``{env:NAME}`` / ``{file:path}``。
 4. 字段默认值（本文件）
 
 注意：``.env`` 文件不再读取；需要持久化配置请复制 ``config.example.json`` 为
@@ -12,8 +14,10 @@
 
 import json
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -99,8 +103,16 @@ def persist_settings(values: dict[str, Any]) -> Path:
     return path
 
 
+_workspace_var: ContextVar[str | None] = ContextVar(
+    "agentsuper_config_workspace", default=None
+)
+_current_settings: ContextVar["Settings | None"] = ContextVar(
+    "agentsuper_current_settings", default=None
+)
+
+
 class JsonConfigSettingsSource(PydanticBaseSettingsSource):
-    """读取 backend/config.json（JSONC）。文件缺失/损坏时返回空字典。"""
+    """读取分层 JSONC 配置（system/global/project/backend），后者覆盖前者。"""
 
     def __init__(self, settings_cls):
         super().__init__(settings_cls)
@@ -110,6 +122,13 @@ class JsonConfigSettingsSource(PydanticBaseSettingsSource):
         return None, field_name, False
 
     def __call__(self):
+        try:
+            from config_layers import load_layered_config
+
+            return load_layered_config(_workspace_var.get())
+        except Exception:
+            pass
+        # Fallback: at least honour the app-local file if layering is broken.
         if not self._path.exists():
             return {}
         try:
@@ -472,3 +491,65 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    """Return the settings bound to the current turn, else process settings."""
+    current = _current_settings.get()
+    return current if current is not None else settings
+
+
+def has_project_config(workspace: str | Path | None) -> bool:
+    if not workspace:
+        return False
+    try:
+        from config_layers import config_layers
+
+        return any(source == "project" for source, _ in config_layers(workspace))
+    except Exception:
+        return False
+
+
+@contextmanager
+def bind_workspace_settings(
+    workspace: str | Path | None = None,
+) -> Iterator[Settings]:
+    """Bind a workspace's project-layer config for the current context.
+
+    When the workspace has no project config the process-wide ``settings`` is
+    reused, so existing behaviour (and test monkeypatching) is unchanged.
+    """
+    if not has_project_config(workspace):
+        yield get_settings()
+        return
+    workspace_token = _workspace_var.set(str(workspace))
+    try:
+        try:
+            scoped = Settings()
+        except Exception:
+            scoped = settings
+        settings_token = _current_settings.set(scoped)
+        try:
+            yield scoped
+        finally:
+            try:
+                _current_settings.reset(settings_token)
+            except ValueError:  # generator resumed/closed from another context
+                _current_settings.set(None)
+    finally:
+        try:
+            _workspace_var.reset(workspace_token)
+        except ValueError:
+            _workspace_var.set(None)
+
+
+__all__ = [
+    "Settings",
+    "bind_workspace_settings",
+    "config_file_path",
+    "get_settings",
+    "has_project_config",
+    "parse_jsonc",
+    "persist_settings",
+    "settings",
+]

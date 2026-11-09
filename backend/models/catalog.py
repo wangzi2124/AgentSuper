@@ -1,4 +1,4 @@
-"""模型目录（model catalog）：单一事实来源，provider/model → 能力/上下文/限长/价格。
+﻿"""模型目录（model catalog）：单一事实来源，provider/model → 能力/上下文/限长/价格。
 
 设计对齐 opencode v2（config.ts:36-38 顶层 model 为 "provider/model" 字符串、
 provider.ts ConfigProvider.Info.models 汇总可用模型，价格走各 provider usage 换算）。
@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from config import settings
+from config import get_settings
 from models.builtin_catalog import BUILTIN_CATALOG as _BUILTIN_CATALOG  # noqa: F841 — 供 build_catalog 回退
 from models.builtin_catalog import ZERO_COST as _ZERO_COST            # noqa: F841 — 供 probes / upsert / get_catalog 默认填充
 
@@ -241,7 +241,7 @@ def annotate_runtime_context(entries: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def _ollama_base_url() -> str:
-    host = settings.ollama_host or "http://localhost:11434"
+    host = get_settings().ollama_host or "http://localhost:11434"
     if not host.startswith(("http://", "https://")):
         host = "http://" + host
     return host.rstrip("/")
@@ -727,6 +727,7 @@ def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
     providers = dict(cfg.get("providers") or {})
     name = str(name or "").strip()
     is_new = name not in providers
+    before = dict(providers.get(name) or {})
     if is_new:
         if not name:
             raise ValueError("Provider 名称（模型前缀）不能为空")
@@ -777,8 +778,141 @@ def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
     providers[name] = entry
     cfg["providers"] = providers
     save_config(cfg)
-    reload_catalog()
+    # 只重探本次改动的 Provider（标签类修改甚至无需探测），避免一次写操作
+    # 串行重探全部 Provider 拖慢接口数秒。
+    probe_keys = ("api_base", "api_key", "enabled", "type", "package",
+                  "compatibility", "timeout", "headers", "body")
+    needs_probe = is_new or any(entry.get(k) != before.get(k) for k in probe_keys)
+    _refresh_provider_catalog(name, probe=needs_probe)
     return dict(entry)
+
+
+def _belongs_to_provider(entry: dict[str, Any], name: str) -> bool:
+    """目录条目是否由该 Provider 的探测产生（用户 override/extra 不在此列）。"""
+    if entry.get("origin_provider") == name:
+        return True
+    return (entry.get("origin") == "provider"
+            and str(entry.get("id") or "").startswith(f"{name}/"))
+
+
+def _dedupe_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for e in entries:
+        mid = str(e.get("id") or "")
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        out.append(e)
+    return out
+
+
+def _filter_hidden_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    hidden = read_hidden()
+    if not hidden:
+        return entries
+    return [e for e in entries if str(e.get("id") or "") not in hidden]
+
+
+def _annotate_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """重新标注 origin：local 判定沿用快照里已有的 local 条目。"""
+    local_ids = {
+        str(e.get("id"))
+        for e in entries
+        if e.get("origin") == "local" and e.get("id")
+    }
+    with _provider_seen_lock:
+        provider_seen = {k: set(v) for k, v in _provider_seen.items()}
+    # 仍在配置中的 Provider 的既有条目沿用快照 origin；避免 seen 缓存缺失时
+    # 把 provider 模型误降级成 builtin（已删除 Provider 不在 providers 里，不受影响）。
+    configured = read_providers()
+    for e in entries:
+        origin_provider = e.get("origin_provider")
+        mid = str(e.get("id") or "")
+        if origin_provider and mid and origin_provider in configured:
+            provider_seen.setdefault(origin_provider, set()).add(mid)
+    return annotate_origin(
+        entries,
+        cfg=load_config(),
+        local_ids=local_ids,
+        provider_seen=provider_seen,
+    )
+
+
+def _invalidate_provider_probe(name: str) -> None:
+    _probe_cache.pop(name, None)
+    _probe_cache.pop(f"ollama:{name}", None)
+    with _provider_seen_lock:
+        _provider_seen.pop(name, None)
+
+
+def _cached_provider_base(cached: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
+    """以静态目录为底，保留其它 Provider/本地探测条目，丢弃目标 Provider 的旧探测结果。"""
+    static = build_catalog()
+    static_ids = {str(e.get("id") or "") for e in static}
+    kept = [
+        e for e in cached
+        if str(e.get("id") or "") in static_ids or not _belongs_to_provider(e, name)
+    ]
+    return _dedupe_entries(list(static) + kept)
+
+
+def _probe_single_provider(name: str, known_ids: set[str]) -> list[dict[str, Any]]:
+    p = read_providers().get(name)
+    if not p or not bool(p.get("enabled", True)) or not str(p.get("api_base") or "").strip():
+        return []
+    try:
+        if _provider_type(p) == "ollama":
+            return probe_ollama_provider_models(
+                name, str(p.get("api_base")), p.get("api_key") or "", known_ids, force=True
+            )
+        return probe_provider_models(
+            name, str(p.get("api_base")), p.get("api_key") or "", known_ids, force=True
+        )
+    except Exception:
+        return []
+
+
+def _refresh_provider_catalog(name: str, *, probe: bool) -> None:
+    """Provider 写后刷新：只重探目标 Provider，不重探其它 Provider。"""
+    _invalidate_config_cache()
+    if not probe:
+        return
+    _invalidate_provider_probe(name)
+    key = _cache_key()
+    with _catalog_lock:
+        cached = list(_catalog_cache.get(key) or [])
+    if not cached:
+        # 冷缓存没有可增量更新的快照，走全量重建（首次访问成本不可避免）。
+        reload_catalog()
+        return
+    base = _cached_provider_base(cached, name)
+    known = {str(e.get("id") or "") for e in base}
+    extras = _probe_single_provider(name, known)
+    recreate = False
+    with _catalog_lock:
+        current = _catalog_cache.get(key)
+        if current is None:
+            recreate = True
+        else:
+            base = _cached_provider_base(list(current), name)
+            merged = _dedupe_entries(list(base) + list(extras))
+            _catalog_cache[key] = _annotate_entries(_filter_hidden_entries(merged))
+    if recreate:
+        reload_catalog()
+
+
+def _prune_provider_catalog(name: str) -> None:
+    """删除 Provider 后从快照移除其探测模型，不触发任何网络探测。"""
+    _invalidate_config_cache()
+    _invalidate_provider_probe(name)
+    key = _cache_key()
+    with _catalog_lock:
+        cached = _catalog_cache.get(key)
+        if cached is None:
+            return
+        base = _cached_provider_base(list(cached), name)
+        _catalog_cache[key] = _annotate_entries(_filter_hidden_entries(base))
 
 
 def remove_provider(name: str) -> bool:
@@ -790,7 +924,7 @@ def remove_provider(name: str) -> bool:
     cfg["providers"] = providers
     _clear_invalid_defaults(cfg)
     save_config(cfg)
-    reload_catalog()
+    _prune_provider_catalog(name)
     return True
 
 
@@ -903,7 +1037,8 @@ def _strip_unknown_fields(entry: dict) -> dict:
 _PROBE_TTL = 60.0
 # 单个 provider 的 /v1/models 探测超时。探测只用于把「provider 上有但目录未收录」的模型
 # 补进下拉框，属锦上添花，不值得让请求等太久——调小它可降低不可达端点的拖累。
-_PROBE_TIMEOUT = float(settings.model_probe_timeout or 4)
+def _probe_timeout() -> float:
+    return float(get_settings().model_probe_timeout or 4)
 _probe_cache: dict[str, tuple[float, list[dict[str, Any]], set[str]]] = {}
 # 每个 enabled Provider 最近一次探测实际返回的完整模型 ID（含已收录的内置 ID）。
 # 模型管理页据此判断「该模型确实由 Provider 拉取」，而不是按前缀猜测。
@@ -955,7 +1090,7 @@ def probe_provider_models(provider_name: str, api_base: str, api_key: str,
         url = norm + "/v1/models"
         req = urllib.request.Request(url, headers={"User-Agent": "agentsuper/0.1",
                                                    **(dict({"Authorization": f"Bearer {api_key}"}) if api_key else {})})
-        with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=_probe_timeout()) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         extras: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -1012,7 +1147,7 @@ def probe_ollama_provider_models(provider_name: str, api_base: str, api_key: str
     try:
         import urllib.request
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=_probe_timeout()) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         extras: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -1063,7 +1198,7 @@ def probe_ollama_provider_models(provider_name: str, api_base: str, api_key: str
 def probe_configured_providers(known_ids: set[str], force: bool = False) -> list[dict[str, Any]]:
     """对所有 enabled 的自定义 provider 做 /v1/models 探测，合并增量条目。
 
-    并行探测：每个 provider 的探测是独立的外网 HTTP（timeout=_PROBE_TIMEOUT），
+    并行探测：每个 provider 的探测是独立的外网 HTTP（timeout=_probe_timeout()），
     串行时端点不可达会把耗时累加（实测 3 个 provider 串行 → 8.7s，阻塞
     `GET /api/models`，而该接口在前端每次整页加载的 critical path 上）。
     并行后总耗时 = 最慢的那一个。`known_ids` 只读，无需跨线程共享写状态。
@@ -1124,11 +1259,11 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
 
     1) model 的 provider 命中注册表（providers.<name>.api_base/api_key）；
     2) ollama 前缀 → OLLAMA_HOST/api_key="ollama"（沿用 litellm 自动发现）；
-    3) 未注册的自定义 provider → 回落 settings.llm_api_base/llm_api_key。
+    3) 未注册的自定义 provider → 回落 get_settings().llm_api_base/llm_api_key。
 
     `options`：需要透传给 litellm 的 provider 特定参数。Ollama 默认 num_ctx=2048，
     超过窗口的往期历史会被推理服务截断（模型答"记不清/无历史"），因此必须显式
-    放大 num_ctx（settings.ollama_num_ctx）；条目声明的 `context_length` 会**收窄**该值
+    放大 num_ctx（get_settings().ollama_num_ctx）；条目声明的 `context_length` 会**收窄**该值
     （B5：模型自身窗口更小时以条目为准，避免按错误窗口估预算）；带 deterministic 能力的
     provider 也可在此扩展。
 
@@ -1140,7 +1275,7 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     adaptive→不下发交服务端默认。仅对声明了 reasoning 能力的模型或显式设了 `thinking` 的
     模型生效。
     """
-    from config import settings
+    from config import get_settings
     mid = normalize_model(model_id)
     if "#" in str(mid or ""):
         from .variants import apply_variant, find_variant, split_variant
@@ -1150,7 +1285,7 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         definition = find_variant(read_providers(), lookup(base) or {}, base, variant)
         return apply_variant(base_result, definition, variant=variant)
     if not mid:
-        return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key,
+        return {"api_base": get_settings().llm_api_base, "api_key": get_settings().llm_api_key,
                 "is_ollama": False, "litellm_model": None, "provider_type": "openai", "options": None}
     provider = mid.split("/", 1)[0] if "/" in mid else ""
     # 自定义模型条目自带 `provider` 字段；模型 id 前缀可能因手工录入/历史配置而
@@ -1195,7 +1330,7 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         #   enabled→think=True；disabled→think=False；adaptive→不传（交服务端默认）。
         per_model = (entry or {}).get("thinking")
         if per_model or caps.get("reasoning"):
-            raw_mode = per_model or getattr(settings, "ollama_thinking", "disabled")
+            raw_mode = per_model or getattr(get_settings(), "ollama_thinking", "disabled")
             _ot = _normalize_deepseek_thinking(raw_mode)
             if _ot in ("enabled", "disabled"):
                 opts["think"] = (_ot == "enabled")
@@ -1211,7 +1346,7 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         # 最稳妥（ChatLiteLLM 某些版本内部探测会忽略构造参数转而读环境变量）。
         # 注册表未配 api_base 时读 OLLAMA_API_BASE（其次 OLLAMA_HOST）兜底。
         if not _ob:
-            _ob = (settings.ollama_api_base or settings.ollama_host or "").strip()
+            _ob = (get_settings().ollama_api_base or get_settings().ollama_host or "").strip()
         return {"api_base": _ob or None, "api_key": _ok or "ollama", "is_ollama": True,
                 "litellm_model": None, "provider_type": "ollama", "options": opts}
     # DeepSeek 思考模型（V4.1-Flash / V4-Pro 默认开思考）：按「推理模型」能力 + 全局
@@ -1222,13 +1357,13 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     # adaptive → 不显式下发（options=None），交服务端默认。
     options = None
     if provider == "deepseek" and read_capabilities(mid).get("reasoning"):
-        _tt = _normalize_deepseek_thinking(getattr(settings, "deepseek_thinking", "disabled"))
+        _tt = _normalize_deepseek_thinking(getattr(get_settings(), "deepseek_thinking", "disabled"))
         if _tt in ("enabled", "disabled"):
             options = {"thinking": {"type": _tt}}
     if reg:
         result = {
-            "api_base": reg.get("api_base") or settings.llm_api_base,
-            "api_key": reg.get("api_key") or settings.llm_api_key,
+            "api_base": reg.get("api_base") or get_settings().llm_api_base,
+            "api_key": reg.get("api_key") or get_settings().llm_api_key,
             "is_ollama": False,
             "litellm_model": None,
             "provider_type": _provider_type(reg),
@@ -1238,7 +1373,7 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
             if reg.get(key) not in (None, "", {}):
                 result[key] = reg[key]
         return result
-    return {"api_base": settings.llm_api_base, "api_key": settings.llm_api_key,
+    return {"api_base": get_settings().llm_api_base, "api_key": get_settings().llm_api_key,
             "is_ollama": False, "litellm_model": None, "provider_type": "openai", "options": options}
 
 
@@ -1276,12 +1411,12 @@ def provider_config_hint(model_id: Optional[str], *, creds: Optional[dict] = Non
 
     判定口径（与 provider_api 的解析优先级一致）：
       - 无模型 / ollama 前缀 / provider 命中注册表且带 api_base → 视为已配置；
-      - 否则走 settings.llm_api_base/api_key 兜底：api_key 为空 AND
+      - 否则走 get_settings().llm_api_base/api_key 兜底：api_key 为空 AND
         （api_base 为空 或 api_base 是 ollama 本地（localhost/127.0.0.1:11434）或默认
         deepseek 端点）→ 说明用户根本没配服务商，返回提示而非把它当自定义 provider 直连。
     提示文案面向「模型管理」页配置 Provider（api_base + api_key），也提及 config.json 兜底。
     """
-    from config import settings
+    from config import get_settings
 
     mid = normalize_model(model_id)
     if not mid:
@@ -1524,13 +1659,13 @@ def model_ref_dict(model_id: Optional[str]) -> Optional[dict[str, Any]]:
 
 
 def default_model() -> str:
-    """默认模型：数据库(默认为模型管理面板配置)优先，其次 settings.llm_model，最后目录首个。"""
-    from config import settings
+    """默认模型：数据库(默认为模型管理面板配置)优先，其次 get_settings().llm_model，最后目录首个。"""
+    from config import get_settings
     dm = load_config().get("default_model")
     if dm and _id_in_catalog(str(dm)):
         return str(dm)
-    if settings.llm_model and _id_in_catalog(str(settings.llm_model)):
-        return str(settings.llm_model)
+    if get_settings().llm_model and _id_in_catalog(str(get_settings().llm_model)):
+        return str(get_settings().llm_model)
     for e in get_catalog():
         if e.get("default"):
             return e["id"]

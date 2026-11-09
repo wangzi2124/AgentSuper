@@ -1,4 +1,4 @@
-"""Formatter runner and matching service (opencode gap G-03).
+﻿"""Formatter runner and matching service (opencode gap G-03).
 
 Commands come only from server config; they never receive model input directly.
 The file path is passed as a separate argv element with ``shell=False``.
@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from config import settings
+from config import get_settings
 
 from .builtin import BUILTIN_FORMATTERS
 from .spec import FormatterResult, FormatterSpec
@@ -102,7 +102,7 @@ class FormatterService:
 
     @classmethod
     def from_settings(cls) -> "FormatterService":
-        specs, disabled = _config_specs(getattr(settings, "formatter", False))
+        specs, disabled = _config_specs(getattr(get_settings(), "formatter", False))
         return cls(specs, disabled)
 
     @property

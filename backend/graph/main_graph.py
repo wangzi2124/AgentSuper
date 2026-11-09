@@ -30,10 +30,16 @@ from .nodes import (
     make_plan_node,
     make_rag_node,
     make_rewrite_node,
+    make_subtask_node,
     make_supervisor_node,
     make_synthesize_node,
 )
-from .routers import route_after_grade, route_after_plan, route_after_supervisor
+from .routers import (
+    route_after_filter,
+    route_after_grade,
+    route_after_plan,
+    route_after_supervisor,
+)
 from .state import AgentState
 from .subagent import SUBAGENTS, make_runner, make_task_tool
 
@@ -196,13 +202,16 @@ def build_main_graph(
     builder.add_node("rewrite", make_rewrite_node(rewrite_model))
     builder.add_node("memory_recall", make_memory_recall_node(store))
     def _resolve_compress_model() -> Any | None:
-        if not getattr(settings, "compress_model_enabled", True):
+        from config import get_settings
+
+        current = get_settings()
+        if not getattr(current, "compress_model_enabled", True):
             return None
         from models.router import get_compress_model
 
         return get_compress_model(
-            max_tokens=getattr(settings, "compress_max_tokens", 800),
-            model=settings.compress_model,
+            max_tokens=getattr(current, "compress_max_tokens", 800),
+            model=current.compress_model,
         )
 
     # 未注入压缩模型时，节点每次调用重新解析配置：修改 compress_model 后无需重启即生效。
@@ -232,11 +241,25 @@ def build_main_graph(
     # （旧静态三路 `parallel` 节点/边已删除 —— `route_after_plan` 从不返回字符串
     # `"parallel"`，该节点是死接线；并行一律走 `Send → parallel_worker`。）
     builder.add_node("parallel_worker", make_parallel_worker_node(subagent_runner))
+    builder.add_node(
+        "subtask",
+        make_subtask_node(
+            model,
+            registry,
+            system_prompt,
+            scope=DEFAULT_TOOL_SCOPE,
+            extra_system=extra_system,
+        ),
+    )
     builder.add_node("synthesize", make_synthesize_node(synthesize_model))
     builder.add_node("memory_store", make_memory_store_node(store))
 
     builder.set_entry_point("filter")
-    builder.add_edge("filter", "supervisor")
+    builder.add_conditional_edges(
+        "filter",
+        route_after_filter,
+        {"subtask": "subtask", "supervisor": "supervisor"},
+    )
     builder.add_conditional_edges(
         "supervisor",
         route_after_supervisor,
@@ -265,6 +288,7 @@ def build_main_graph(
     builder.add_edge("memory_recall", "execute_subagent")
     builder.add_edge("execute_subagent", "supervisor")
     builder.add_edge("parallel_worker", "synthesize")
+    builder.add_edge("subtask", "synthesize")
     builder.add_edge("context_compress", "supervisor")
     builder.add_edge("synthesize", "memory_store")
     builder.add_edge("memory_store", END)

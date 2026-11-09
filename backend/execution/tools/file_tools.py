@@ -86,8 +86,9 @@ def append_file(vfs: VirtualFileSystem, path: str, content: str) -> str:
     fp = vfs._resolve(path)
     old = fp.read_text(encoding="utf-8") if fp.exists() else ""
     # 通过公开 write_file 写入合并内容，保证变更历史可回滚
-    vfs.write_file(path, old + content)
-    return f"已追加 {len(content)} 字符到 {path}"
+    out = vfs.write_file(path, old + content)
+    _after_mutation(vfs, path)
+    return out if out.startswith("错误：") else f"已追加 {len(content)} 字符到 {path}"
 
 
 def delete_file(vfs: VirtualFileSystem, path: str) -> str:

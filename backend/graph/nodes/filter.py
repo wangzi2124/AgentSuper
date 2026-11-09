@@ -31,7 +31,11 @@ def _last_human_msg(state: dict[str, Any]):
 
 def make_filter_node() -> Callable[[dict[str, Any]], dict[str, Any]]:
     def filter_node(state: dict[str, Any]) -> dict[str, Any]:
-        # 已有计划/最终结果时不介入（幂等：仅在本轮首过、尚无计划时判定）。
+        # Subtask commands are explicit user workflows; never treat them as
+        # smalltalk. route_after_filter sends them to the isolated subtask node.
+        if state.get("subtask"):
+            return {}
+        # 有既有计划/最终结果时跳过（幂等）；仅在本次首过闸门时判断。
         if state.get("task_plan") or state.get("final_output"):
             return {}
 

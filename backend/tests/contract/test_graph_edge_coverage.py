@@ -99,6 +99,11 @@ async def test_runtime_graph_edges_cover_static_design_edges(tmp_path, monkeypat
     state["budget_total"] = 10.0
     covered |= _edges(await _nodes(graph, state, "edge-parallel"))
 
+    # slash command with subtask: filter -> subtask -> synthesize
+    covered |= _edges(
+        await _nodes(graph, initial_state("do it", subtask=True), "edge-subtask")
+    )
+
     static = {(e.source, e.target) for e in graph.get_graph().edges}
     missed = static - covered
     # Dynamic Send edge may not appear in get_graph(); require 95% of static.

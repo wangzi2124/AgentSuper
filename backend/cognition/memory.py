@@ -1,4 +1,4 @@
-"""认知层长期记忆（对齐 agent.md §4.4 / §5）。
+﻿"""认知层长期记忆（对齐 agent.md §4.4 / §5）。
 
 - `MemoryManager`：进程内共享记忆（TTL / 标签 / 命名空间 / 磁盘持久化），
   由 `app.agent.memory` 迁入本模块，`app.agent.memory` 保留为再导出 shim。
@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 from dataclasses import dataclass, field
 
-from config import settings
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ class MemoryManager:
         self._store: dict[str, MemoryEntry] = {}
         self._default_ttl = default_ttl
         self._lock = asyncio.Lock()
-        # 持久化仅由显式 persist_path 开启；settings.memory_persist_path 现指向
+        # 持久化仅由显式 persist_path 开启；get_settings().memory_persist_path 现指向
         # LangGraph SQLite Store（app/memory_store.py），不能再被 JSON 写入复用。
         self._persist_path = persist_path
         # 异步去抖落盘状态

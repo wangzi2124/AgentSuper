@@ -65,6 +65,43 @@ class AgentDef:
         return self.description or f"You are the {self.name} agent."
 
 
+# Explicit allowlist for model-call kwargs. Anything else is dropped so an
+# agent frontmatter typo cannot reach a strict provider as an unknown argument.
+# Harness-owned keys (model/messages/tools/stream/credentials) are intentionally
+# absent.
+_REQUEST_ALLOWED = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "top_k",
+        "max_tokens",
+        "stop",
+        "seed",
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+        "response_format",
+        "reasoning_effort",
+        "verbosity",
+        "user",
+    }
+)
+
+
+def request_kwargs(request: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Map an agent ``request`` block to allowlisted model-call kwargs."""
+    if not request:
+        return None
+    out = {
+        str(key): value
+        for key, value in request.items()
+        if str(key) in _REQUEST_ALLOWED and value is not None
+    }
+    return out or None
+
+
 def _as_list(value: Any) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -307,5 +344,6 @@ __all__ = [
     "delete_agent",
     "load_registry",
     "parse_agent_file",
+    "request_kwargs",
     "save_agent",
 ]

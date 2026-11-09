@@ -17,6 +17,36 @@ def parse_slash_command(question: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _skill_policy_block(name: str) -> str | None:
+    """Return a hard-policy denial reason for direct skill injection.
+
+    Direct ``/skill`` / ``@skill`` injection bypasses the tool loop, so it must
+    honour the same ``skill`` / ``skill.use`` hard policies the ``load_skill_*``
+    tool does. Missing policy infrastructure is treated as "no block".
+    """
+    try:
+        from execution.access import policy_block_for
+    except Exception:  # noqa: BLE001
+        return None
+    for action in ("skill.use", "skill"):
+        try:
+            reason = policy_block_for(action, name)
+        except Exception:  # noqa: BLE001
+            continue
+        if reason:
+            return reason
+    return None
+
+
+def _blocked_skill_text(name: str, reason: str) -> str:
+    return (
+        "[技能指令：" + name + "]\n"
+        "（该技能被配置策略禁止调用：" + reason + "）\n"
+        "[技能指令结束]\n\n"
+        "请告知用户该技能当前不可用，不要凭记忆臆造技能内容。"
+    )
+
+
 def _get_plugin_body(plugin: Any) -> str:
     parts = []
     name = getattr(plugin, "name", "") or ""
@@ -65,6 +95,9 @@ def apply_slash_skill(question: str, loader: Any = None, plugin_loader: Any = No
                 logger.warning("direct skill lookup failed: %s", exc)
                 skill, body = None, ""
             if skill is not None and getattr(skill, "enabled", True) and body.strip():
+                blocked = _skill_policy_block(name)
+                if blocked:
+                    return _blocked_skill_text(name, blocked), name
                 injected = "[技能指令：" + name + "]\n" + body.strip() + "\n[技能指令结束]\n\n用户请求：\n" + rest
                 return injected, name
         return question, None
@@ -84,8 +117,13 @@ def apply_slash_skill(question: str, loader: Any = None, plugin_loader: Any = No
     if command is not None:
         from app.commands.context import set_command_override
 
-        set_command_override(command.agent, command.model)
-        return command.render(rest, workspace), name
+        set_command_override(
+            command.agent,
+            command.model,
+            subtask=command.subtask,
+        )
+        shell_runner = kwargs.get("shell_runner")
+        return command.render(rest, workspace, shell_runner=shell_runner), name
 
     if loader is not None:
         try:
@@ -100,6 +138,9 @@ def apply_slash_skill(question: str, loader: Any = None, plugin_loader: Any = No
                 logger.warning("slash skill body failed: %s", exc)
                 body = ""
             if body.strip():
+                blocked = _skill_policy_block(name)
+                if blocked:
+                    return _blocked_skill_text(name, blocked), name
                 out = rest or _EMPTY_HINT_SKILL
                 injected = "[技能指令：" + name + "]\n" + body.strip() + "\n[技能指令结束]\n\n用户请求：\n" + out
                 return injected, name

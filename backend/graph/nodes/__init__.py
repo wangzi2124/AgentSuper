@@ -8,6 +8,7 @@ from .memory import make_memory_recall_node, make_memory_store_node
 from .parallel import make_parallel_node, make_parallel_worker_node
 from .plan import make_plan_node
 from .rag import make_grade_node, make_rag_node, make_rewrite_node
+from .subtask import make_subtask_node
 from .supervisor import make_supervisor_node
 from .synthesize import make_synthesize_node
 
@@ -26,6 +27,7 @@ __all__ = [
     "make_plan_node",
     "make_rag_node",
     "make_rewrite_node",
+    "make_subtask_node",
     "make_supervisor_node",
     "make_synthesize_node",
 ]

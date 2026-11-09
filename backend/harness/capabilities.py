@@ -1,4 +1,4 @@
-"""模型工具调用能力探测（agent-4 §3 / §6-P0）。
+﻿"""模型工具调用能力探测（agent-4 §3 / §6-P0）。
 
 策略：未知模型一律走文本回退（保守），显式能力表优先于目录探测。
 可用环境变量人工覆盖：
@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from config import settings
+from config import get_settings
 
 NATIVE = "native"
 FALLBACK = "fallback"
@@ -33,13 +33,14 @@ def _model_candidates(model_id: str | None) -> list[str]:
 
 
 def mode_override(model_id: str | None) -> str | None:
-    """人工覆盖：全局强制 > 回退白名单 > 原生白名单。"""
-    force = (settings.harness_tool_mode or "").strip().lower()
+    """�˹����ǣ�ȫ��ǿ�� > ���˰����� > ԭ����������"""
+    current = get_settings()
+    force = (current.harness_tool_mode or "").strip().lower()
     if force in MODES:
         return force
     candidates = _model_candidates(model_id)
-    fallback = _model_list(settings.harness_fallback_models)
-    native = _model_list(settings.harness_native_models)
+    fallback = _model_list(current.harness_fallback_models)
+    native = _model_list(current.harness_native_models)
     if any(c in fallback for c in candidates):
         return FALLBACK
     if any(c in native for c in candidates):

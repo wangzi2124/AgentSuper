@@ -1,4 +1,4 @@
-"""Single token-accounting module for context decisions.
+﻿"""Single token-accounting module for context decisions.
 
 Every caller that needs to know "how big is this context?" must cross this
 interface: the router, the compactor, the overflow guard and the budget all
@@ -47,9 +47,9 @@ class TokenEstimate:
 
 def _image_tokens() -> int:
     try:
-        from config import settings
+        from config import get_settings
 
-        return max(0, int(getattr(settings, "image_token_estimate", 1_600) or 0))
+        return max(0, int(getattr(get_settings(), "image_token_estimate", 1_600) or 0))
     except Exception:  # noqa: BLE001 - config unavailable in tests/tools
         return 1_600
 

@@ -1,4 +1,4 @@
-"""生产加固：ToolRegistry 配额（速率限制、token_budget）。
+﻿"""生产加固：ToolRegistry 配额（速率限制、token_budget）。
 
 已接线：`graph/nodes/base.py:_execute_tool_call` 在每次工具执行前调用本模块；
 只有显式声明了 `rate_limit` / `token_budget` 的工具才受限（默认 0 = 不限）。
@@ -141,10 +141,10 @@ def get_quota(registry: object) -> ToolRegistryQuota:
         quota = _instances.get(registry)
         if quota is None:
             try:
-                from config import settings
+                from config import get_settings
 
-                default_rate = int(getattr(settings, "tool_default_rate_limit", 0) or 0)
-                default_budget = int(getattr(settings, "tool_default_token_budget", 0) or 0)
+                default_rate = int(getattr(get_settings(), "tool_default_rate_limit", 0) or 0)
+                default_budget = int(getattr(get_settings(), "tool_default_token_budget", 0) or 0)
             except Exception:  # noqa: BLE001 - 配置不可用时保持不限
                 default_rate = default_budget = 0
             quota = ToolRegistryQuota(

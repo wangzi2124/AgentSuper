@@ -203,6 +203,14 @@ def make_execute_node(
             agent_def = None
         agent_id = agent_def.name if agent_def is not None else "build"
         allowed_tools = set(agent_def.tools) if agent_def is not None and agent_def.tools else None
+        from agents.registry import request_kwargs
+
+        request_params = request_kwargs(agent_def.request) if agent_def is not None else None
+        loop_kwargs: dict[str, Any] = {}
+        if agent_def is not None and agent_def.max_rounds > 0:
+            loop_kwargs["max_rounds"] = agent_def.max_rounds
+        if request_params:
+            loop_kwargs["request_params"] = request_params
 
         model = _model
         if model is None and state.get("model_override"):
@@ -301,6 +309,7 @@ def make_execute_node(
                 on_compaction=_on_compaction,
                 session_id=str(state.get("session_id") or ""),
                 allowed_tools=allowed_tools,
+                **loop_kwargs,
             )
         finally:
             reset_agent_policy(policy_token)

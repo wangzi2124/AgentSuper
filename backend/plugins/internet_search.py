@@ -11,7 +11,7 @@ import urllib.request
 import urllib.parse
 from typing import Literal
 
-from config import settings
+from config import get_settings
 
 PLUGIN_NAME = "internet-search"
 PLUGIN_VERSION = "0.2.0"
@@ -20,7 +20,7 @@ PLUGIN_DESCRIPTION = "Search the internet using multiple engines (Tavily/Bing/Du
 
 def _bing_search(query: str, max_results: int = 5, market: str = "zh-CN") -> list:
     """Search using Bing API (requires BING_API_KEY)."""
-    api_key = settings.bing_api_key
+    api_key = get_settings().bing_api_key
     if not api_key:
         raise ValueError("BING_API_KEY not set")
     
@@ -147,7 +147,7 @@ def _baidu_search(query: str, max_results: int = 5) -> list:
 
 def _tavily_search(query: str, max_results: int = 5, topic: str = "general") -> list:
     """Search using Tavily API (requires TAVILY_API_KEY)."""
-    api_key = settings.tavily_api_key
+    api_key = get_settings().tavily_api_key
     if not api_key:
         raise ValueError("TAVILY_API_KEY not set")
     

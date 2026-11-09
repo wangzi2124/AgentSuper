@@ -1,4 +1,4 @@
-"""Unified compression helpers for graph compaction, manual compact and switch.
+﻿"""Unified compression helpers for graph compaction, manual compact and switch.
 
 Aligns with opencode v2 compaction:
 - ``threshold = context_window - buffer`` where buffer defaults to
@@ -56,9 +56,9 @@ def parse_buffer(value: Any, window: int) -> int:
 
 def _buffer_default(window: int) -> int:
     try:
-        from config import settings
+        from config import get_settings
 
-        configured = getattr(settings, "compaction_buffer", "15%")
+        configured = getattr(get_settings(), "compaction_buffer", "15%")
     except Exception:  # noqa: BLE001
         configured = "15%"
     return parse_buffer(configured, int(window))
@@ -68,9 +68,9 @@ def _tail_turns_default(tail_turns: int | None = None) -> int:
     if tail_turns is not None:
         return int(tail_turns)
     try:
-        from config import settings
+        from config import get_settings
 
-        return int(getattr(settings, "compaction_tail_turns", DEFAULT_TAIL_TURNS) or 0)
+        return int(getattr(get_settings(), "compaction_tail_turns", DEFAULT_TAIL_TURNS) or 0)
     except Exception:  # noqa: BLE001
         return DEFAULT_TAIL_TURNS
 
@@ -80,9 +80,9 @@ def _keep_default(keep_tokens: int | None = None) -> int:
     if keep_tokens is not None and keep_tokens > 0:
         return int(keep_tokens)
     try:
-        from config import settings
+        from config import get_settings
 
-        return max(0, int(getattr(settings, "compaction_keep_tokens", 0) or 0))
+        return max(0, int(getattr(get_settings(), "compaction_keep_tokens", 0) or 0))
     except Exception:  # noqa: BLE001
         return 0
 
@@ -95,9 +95,9 @@ def _normalized_output(window: int, max_output_tokens: int) -> int:
 def _explicit_reserved() -> int:
     """``compaction_buffer`` absolute token override (percent is legacy-only)."""
     try:
-        from config import settings
+        from config import get_settings
 
-        raw = str(getattr(settings, "compaction_buffer", "15%") or "").strip()
+        raw = str(getattr(get_settings(), "compaction_buffer", "15%") or "").strip()
     except Exception:  # noqa: BLE001
         return 0
     if not raw or raw.endswith("%"):
@@ -116,9 +116,9 @@ def _preserve_default(usable: int) -> int:
 def _min_gain_default(usable: int) -> int:
     """Minimum saved tokens required to write a checkpoint."""
     try:
-        from config import settings
+        from config import get_settings
 
-        configured = int(getattr(settings, "compaction_min_gain_tokens", 0) or 0)
+        configured = int(getattr(get_settings(), "compaction_min_gain_tokens", 0) or 0)
     except Exception:  # noqa: BLE001
         configured = 0
     if configured > 0:

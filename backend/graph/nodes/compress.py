@@ -45,8 +45,9 @@ def make_compress_node(
         messages = list(state.get("messages") or [])
         existing = state.get("context_summary", "")
 
-        from config import settings
+        from config import get_settings
 
+        current = get_settings()
         active_model = model
         if model_factory is not None:
             try:
@@ -55,7 +56,7 @@ def make_compress_node(
                 logger.warning("compress model resolve failed, rule-only: %s", exc)
                 active_model = None
         # 未显式配置压缩模型时，按 opencode 行为回退到本回合主模型。
-        if active_model is not None and not getattr(settings, "compress_model", None):
+        if active_model is not None and not getattr(current, "compress_model", None):
             if session_model_factory is not None:
                 try:
                     active_model = session_model_factory(state)
@@ -63,7 +64,7 @@ def make_compress_node(
                     logger.warning("session model resolve failed, keep compress model: %s", exc)
 
         active_keep = (
-            max(0, int(settings.compaction_keep_tokens or 0))
+            max(0, int(current.compaction_keep_tokens or 0))
             if keep_recent is None
             else max(1, int(keep_recent))
         )

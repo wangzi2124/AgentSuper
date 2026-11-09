@@ -1,4 +1,4 @@
-"""聊天附件处理：文本提取、工作区落盘与内联装配。
+﻿"""聊天附件处理：文本提取、工作区落盘与内联装配。
 
 聊天输入框的附件只带 base64 内容。为了让模型能读长文档（例如 API 文档的
 9.10 小节），附件统一落盘到会话工作区 `attachments/`，模型可用 `read_file`
@@ -71,9 +71,9 @@ _TEXT_EXTENSIONS = frozenset(
 
 def _setting_int(name: str, default: int, *, minimum: int = 1) -> int:
     try:
-        from config import settings
+        from config import get_settings
 
-        value = int(getattr(settings, name, default) or default)
+        value = int(getattr(get_settings(), name, default) or default)
     except Exception:  # noqa: BLE001 - 配置不可用时用默认值
         value = default
     return max(minimum, value)

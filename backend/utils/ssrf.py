@@ -1,4 +1,4 @@
-"""SSRF 防护：HTTP 工具/插件出站请求前的目标地址校验。
+﻿"""SSRF 防护：HTTP 工具/插件出站请求前的目标地址校验。
 
 - 仅允许 http/https 协议
 - 拒绝私有 / 环回 / 链路本地 / 保留地址及云元数据地址（169.254.169.254 等）
@@ -11,7 +11,7 @@ import logging
 import socket
 import urllib.parse
 
-from config import settings
+from config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ _METADATA_HOSTS = (
 
 def allow_internal() -> bool:
     """是否放行内网地址（默认不放行）。"""
-    return bool(settings.ssrf_allow_internal)
+    return bool(get_settings().ssrf_allow_internal)
 
 
 def is_internal_ip(ip: str) -> bool:

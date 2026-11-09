@@ -12,6 +12,7 @@
 """
 
 from fastapi import APIRouter, Depends, Request
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import require_admin
 from app.api.responses import fail, ok
@@ -115,20 +116,23 @@ async def upsert_prov(name: str, req: Request):
         return fail(message=f"Provider 名称不能包含「/」：{name}，请填写 litellm 前缀（如 deepseek）")
     body = await req.json()
     try:
-        entry = catalog.upsert_provider(name, body)
+        # 写操作会做 Provider 探测（网络 IO，秒级）：放线程池，避免阻塞事件循环。
+        entry = await run_in_threadpool(catalog.upsert_provider, name, body)
     except ValueError as e:
         return fail(message=str(e))
-    return ok({"provider": entry, "providers": catalog.provider_models_source(),
-               "models": _catalog_models()})
+    providers = await run_in_threadpool(catalog.provider_models_source)
+    models = await run_in_threadpool(_catalog_models)
+    return ok({"provider": entry, "providers": providers, "models": models})
 
 
 @router.delete("/models/providers/{name:path}", dependencies=[Depends(require_admin)])
 async def delete_prov(name: str):
     if "/" in name:
         return fail(message=f"Provider 名称不能包含「/」：{name}，请填写 litellm 前缀")
-    removed = catalog.remove_provider(name)
-    return ok({"removed": removed, "providers": catalog.provider_models_source(),
-               "models": _catalog_models()})
+    removed = await run_in_threadpool(catalog.remove_provider, name)
+    providers = await run_in_threadpool(catalog.provider_models_source)
+    models = await run_in_threadpool(_catalog_models)
+    return ok({"removed": removed, "providers": providers, "models": models})
 
 
 @router.put("/models/defaults", dependencies=[Depends(require_admin)])
