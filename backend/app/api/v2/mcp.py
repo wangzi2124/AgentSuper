@@ -179,6 +179,16 @@ async def update_server(request: Request, name: str, session_id: str = "") -> di
     return {"server": read_server(name, workspace=workspace, scope=scope), "scope": scope}
 
 
+@router.get("/servers/{name}/config")
+async def server_config(
+    request: Request, name: str, session_id: str = "", scope: str = ""
+) -> dict:
+    ctx = get_context(request)
+    _config, workspace, chosen = _resolve_server(name, ctx, session_id, scope)
+    raw = read_server(name, workspace=workspace, scope=chosen) or {}
+    return {"config": raw, "scope": chosen}
+
+
 @router.delete("/servers/{name}")
 async def remove_server(
     request: Request, name: str, session_id: str = "", scope: str = ""

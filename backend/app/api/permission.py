@@ -85,11 +85,12 @@ async def respond(request_id: str, body: RespondRequest, request: Request):
 
 
 @router.get("/permission/browse", tags=["Permission"])
-async def browse_dirs(request: Request, path: str = ""):
+async def browse_dirs(request: Request, path: str = "", files: bool = False):
     """列出指定目录下的子目录（供前端工作目录选择器使用）。
 
     - path 为空：Windows 上返回所有盘符（C:\\, D:\\ 等），其他系统返回根目录 /
     - path 为目录：返回其子目录列表 + 父目录，供逐层下钻
+    - files=true：额外返回该目录下的文件列表（供指令文件选择器使用）
     """
     require_admin(request)
     raw = (path or "").strip().strip('"').strip("'")
@@ -102,6 +103,7 @@ async def browse_dirs(request: Request, path: str = ""):
                 "parent": "",
                 "name": "",
                 "dirs": [{"name": d.rstrip("\\"), "path": d} for d in drives],
+                "files": [],
             }
         raw = "/"
 
@@ -110,23 +112,30 @@ async def browse_dirs(request: Request, path: str = ""):
         raise HTTPException(status_code=400, detail=f"Not a directory: {raw}")
 
     dirs: list[dict] = []
+    file_items: list[dict] = []
     try:
         for child in p.iterdir():
             try:
                 if child.is_dir():
                     dirs.append({"name": child.name or str(child), "path": str(child)})
+                elif files and child.is_file():
+                    file_items.append({"name": child.name, "path": str(child)})
             except (PermissionError, OSError):
                 continue
     except PermissionError:
         pass
 
     dirs.sort(key=lambda d: d["name"].lower())
-    return {
+    file_items.sort(key=lambda d: d["name"].lower())
+    payload = {
         "path": str(p),
         "parent": str(p.parent) if str(p.parent) != str(p) else "",
         "name": p.name or str(p),
         "dirs": dirs,
     }
+    if files:
+        payload["files"] = file_items
+    return payload
 
 
 @router.get("/permission/workspaces", tags=["Permission"])

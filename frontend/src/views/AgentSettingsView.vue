@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { fetchWithTimeout } from '../api/fetch'
+import AgentEditModal from '../components/AgentEditModal.vue'
+import InstructionFilePicker from '../components/InstructionFilePicker.vue'
+import { addInstructionEntry, listInstructions, removeInstructionEntry } from '../api/instructions'
 
 interface AgentInfo {
   name: string
@@ -77,20 +80,11 @@ const referenceForm = ref({ name: '', path: '', repository: '', branch: '', desc
 const error = ref('')
 const busy = ref(false)
 
-const form = ref({
-  name: '',
-  description: '',
-  mode: 'subagent',
-  tier: 'medium',
-  model: '',
-  tools: '',
-  permission: '',
-  steps: 6,
-  color: '',
-  hidden: false,
-  disabled: false,
-})
-const editing = ref('')
+const showEditor = ref(false)
+const editingAgent = ref<AgentInfo | null>(null)
+const instructionEntries = ref<string[]>([])
+const instructionWorkspace = ref('')
+const showFilePicker = ref(false)
 
 const scopeLabel = computed(() => (sessionId.value ? '项目级（当前会话工作区）' : '全局'))
 
@@ -113,9 +107,7 @@ async function loadAll() {
       request<{ agents: AgentInfo[] }>(`/api/v2/agents${query()}`),
       request<{ commands: CommandInfo[] }>(`/api/v2/commands${query()}`),
       request<{ statements: PolicyInfo[] }>('/api/v2/policies'),
-      request<{ sources: InstructionSource[]; enabled: boolean }>(
-        `/api/instructions${query()}`,
-      ),
+      listInstructions(sessionId.value || undefined),
       request<{ schema: Record<string, SettingEntry[]>; values: Record<string, unknown> }>(
         '/api/v2/config',
       ),
@@ -126,6 +118,8 @@ async function loadAll() {
     commands.value = commandBody.commands
     policies.value = policyBody.statements
     instructions.value = instructionBody.sources
+    instructionEntries.value = instructionBody.entries || []
+    instructionWorkspace.value = instructionBody.workspace || ''
     configSchema.value = configBody.schema
     configValues.value = configBody.values
     configDraft.value = JSON.parse(JSON.stringify(configBody.values))
@@ -144,70 +138,67 @@ async function loadAll() {
   }
 }
 
-function resetForm() {
-  editing.value = ''
-  form.value = {
-    name: '',
-    description: '',
-    mode: 'subagent',
-    tier: 'medium',
-    model: '',
-    tools: '',
-    permission: '',
-    steps: 6,
-    color: '',
-    hidden: false,
-    disabled: false,
-  }
+function openCreate() {
+  editingAgent.value = null
+  showEditor.value = true
 }
 
-function editAgent(agent: AgentInfo) {
-  editing.value = agent.name
-  form.value = {
-    name: agent.name,
-    description: agent.description,
-    mode: agent.mode,
-    tier: agent.tier,
-    model: agent.model,
-    tools: agent.tools.join(', '),
-    permission: Object.entries(agent.permission)
-      .map(([key, value]) => `${key}: ${value}`)
-      .join('\n'),
-    steps: agent.steps,
-    color: agent.color,
-    hidden: agent.hidden,
-    disabled: agent.disabled,
-  }
+function openEdit(agent: AgentInfo) {
+  editingAgent.value = agent
+  showEditor.value = true
 }
 
-function parsePermission(text: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const line of text.split('\n')) {
-    const [key, value] = line.split(':')
-    if (key && value && value.trim()) out[key.trim()] = value.trim()
-  }
-  return out
-}
-
-async function saveAgent() {
+async function saveAgent(payload: Record<string, unknown>) {
   busy.value = true
   error.value = ''
-  const payload = {
-    ...form.value,
-    tools: form.value.tools.split(',').map((item) => item.trim()).filter(Boolean),
-    permission: parsePermission(form.value.permission),
-    scope: sessionId.value ? 'project' : 'global',
-  }
+  const body = { ...payload, scope: sessionId.value ? 'project' : 'global' }
   try {
-    const url = editing.value
-      ? `/api/v2/agents/${encodeURIComponent(editing.value)}${query()}`
+    const target = editingAgent.value?.name
+    const url = target
+      ? `/api/v2/agents/${encodeURIComponent(target)}${query()}`
       : `/api/v2/agents${query()}`
     await request(url, {
-      method: editing.value ? 'PATCH' : 'POST',
+      method: target ? 'PATCH' : 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     })
-    resetForm()
+    showEditor.value = false
+    editingAgent.value = null
+    await loadAll()
+  } catch (err) {
+    error.value = String((err as Error).message || err)
+  } finally {
+    busy.value = false
+  }
+}
+
+function openFilePicker() {
+  if (!sessionId.value) {
+    error.value = '请先填写会话 ID，以确定项目工作区'
+    return
+  }
+  showFilePicker.value = true
+}
+
+async function addInstructionFile(path: string) {
+  busy.value = true
+  error.value = ''
+  try {
+    await addInstructionEntry(path, sessionId.value)
+    showFilePicker.value = false
+    await loadAll()
+  } catch (err) {
+    error.value = String((err as Error).message || err)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function removeInstructionFile(entry: string) {
+  busy.value = true
+  error.value = ''
+  try {
+    await removeInstructionEntry(entry, sessionId.value)
     await loadAll()
   } catch (err) {
     error.value = String((err as Error).message || err)
@@ -363,138 +354,145 @@ onMounted(loadAll)
 </script>
 
 <template>
-  <div class="agent-settings">
-    <header class="page-head">
+  <div class="page-header">
+    <div class="header-row">
       <div>
-        <h1>Agent 配置</h1>
+        <h2>Agent 配置</h2>
         <p>Agent、斜杠命令、策略与项目指令均由服务端提供；此页只读写 API。</p>
       </div>
       <div class="head-actions">
         <input
           v-model="sessionId"
-          class="text-input"
+          class="ctrl session-input"
           placeholder="会话 ID（可选，项目级）"
           @change="loadAll"
         />
         <button class="btn" :disabled="busy" @click="loadAll">刷新</button>
       </div>
-    </header>
+    </div>
+  </div>
 
-    <p v-if="error" class="error">{{ error }}</p>
+  <div class="page-content agent-settings">
+    <p v-if="error" class="form-error">{{ error }}</p>
 
-    <section class="card">
-      <h2>Agents <small>{{ scopeLabel }}</small></h2>
-      <div class="agent-grid">
-        <form class="agent-form" @submit.prevent="saveAgent">
-          <label>ID<input v-model="form.name" class="text-input" :disabled="!!editing" required /></label>
-          <label>描述<input v-model="form.description" class="text-input" /></label>
-          <label>模式
-            <select v-model="form.mode" class="text-input">
-              <option value="primary">primary</option>
-              <option value="subagent">subagent</option>
-              <option value="all">all</option>
-            </select>
-          </label>
-          <label>模型<input v-model="form.model" class="text-input" placeholder="provider/model（可空）" /></label>
-          <label>工具（逗号分隔，空=全部）<input v-model="form.tools" class="text-input" /></label>
-          <label>权限（每行 action: allow|deny）<textarea v-model="form.permission" rows="3" class="text-input" /></label>
-          <label>最大轮次<input v-model.number="form.steps" type="number" min="1" class="text-input" /></label>
-          <label>颜色<input v-model="form.color" class="text-input" placeholder="#RRGGBB" /></label>
-          <div class="checks">
-            <label><input v-model="form.hidden" type="checkbox" /> 隐藏</label>
-            <label><input v-model="form.disabled" type="checkbox" /> 禁用</label>
-          </div>
-          <div class="row">
-            <button class="btn primary" type="submit" :disabled="busy">{{ editing ? '保存修改' : '新建 Agent' }}</button>
-            <button v-if="editing" class="btn" type="button" @click="resetForm">取消</button>
-          </div>
-        </form>
-        <ul class="agent-list">
-          <li v-for="agent in agents" :key="agent.name">
-            <div class="agent-line">
-              <strong>{{ agent.name }}</strong>
-              <span class="tag">{{ agent.mode }}</span>
-              <span class="tag">{{ agent.source }}</span>
-              <span v-if="agent.model" class="tag">{{ agent.model }}</span>
-              <span v-if="agent.disabled" class="tag danger">禁用</span>
-              <span v-if="agent.hidden" class="tag">隐藏</span>
-              <span class="spacer" />
-              <button class="link" type="button" @click="editAgent(agent)">编辑</button>
-              <button class="link danger" type="button" @click="removeAgent(agent)">删除</button>
+    <section class="section">
+      <div class="section-head">
+        <div class="section-title">
+          Agents <span class="badge type-badge">{{ scopeLabel }}</span>
+        </div>
+        <button class="btn btn-primary" type="button" :disabled="busy" @click="openCreate">
+          + 新增 Agent
+        </button>
+      </div>
+
+      <div v-if="agents.length" class="list-meta">{{ agents.length }} 个 Agent</div>
+      <div v-if="agents.length" class="agent-list">
+        <div v-for="agent in agents" :key="agent.name" class="card agent-card">
+          <div class="agent-avatar">{{ agent.name.slice(0, 1).toUpperCase() }}</div>
+          <div class="agent-info">
+            <div class="agent-title">
+              {{ agent.name }}
+              <span class="badge type-badge">{{ agent.mode }}</span>
+              <span class="badge type-badge">{{ agent.source }}</span>
+              <span v-if="agent.model" class="badge type-badge">{{ agent.model }}</span>
+              <span v-if="agent.hidden" class="badge type-badge">隐藏</span>
             </div>
-            <p class="muted">{{ agent.description || '无描述' }}</p>
-            <p class="muted">工具：{{ agent.tools.length ? agent.tools.join(', ') : '全部' }}</p>
-          </li>
-        </ul>
+            <div class="agent-desc">{{ agent.description || '无描述' }}</div>
+            <div class="agent-sub">工具：{{ agent.tools.length ? agent.tools.join(', ') : '全部' }}</div>
+          </div>
+          <span class="badge" :class="agent.disabled ? 'badge-disabled' : 'badge-enabled'">
+            {{ agent.disabled ? '已禁用' : '已启用' }}
+          </span>
+          <div class="agent-actions">
+            <button class="btn btn-sm" type="button" @click="openEdit(agent)">编辑</button>
+            <button class="btn btn-sm btn-danger" type="button" @click="removeAgent(agent)">删除</button>
+          </div>
+        </div>
+      </div>
+      <div v-else class="empty-state">
+        <div class="icon">🤖</div>
+        <p>暂无 Agent</p>
+        <p style="font-size: 13px; margin-top: 4px">点击「新增 Agent」创建。</p>
       </div>
     </section>
 
+    <AgentEditModal
+      :show="showEditor"
+      :agent="editingAgent"
+      :busy="busy"
+      :scope-label="scopeLabel"
+      @close="showEditor = false"
+      @submit="saveAgent"
+    />
+
     <section class="card">
-      <h2>斜杠命令</h2>
+      <h3>斜杠命令</h3>
       <ul class="plain-list">
         <li v-for="command in commands" :key="command.name">
           <code>/{{ command.name }}</code>
           <span>{{ command.description }}</span>
-          <span class="tag">{{ command.source }}</span>
-          <span v-if="command.agent" class="tag">agent: {{ command.agent }}</span>
-          <span v-if="command.model" class="tag">{{ command.model }}</span>
+          <span class="badge type-badge">{{ command.source }}</span>
+          <span v-if="command.agent" class="badge type-badge">agent: {{ command.agent }}</span>
+          <span v-if="command.model" class="badge type-badge">{{ command.model }}</span>
         </li>
         <li v-if="!commands.length" class="muted">未发现命令（写入 .agentsuper/commands/*.md）</li>
       </ul>
     </section>
 
     <section class="card">
-      <h2>策略规则</h2>
+      <h3>策略规则</h3>
       <div v-for="(rule, index) in policyDraft" :key="index" class="rule-row">
-        <input v-model="rule.action" class="text-input" placeholder="action" />
-        <input v-model="rule.resource" class="text-input" placeholder="resource（通配 *）" />
-        <select v-model="rule.effect" class="text-input">
+        <input v-model="rule.action" class="ctrl" placeholder="action" />
+        <input v-model="rule.resource" class="ctrl" placeholder="resource（通配 *）" />
+        <select v-model="rule.effect" class="ctrl">
           <option value="deny">deny</option>
           <option value="allow">allow</option>
         </select>
-        <button class="link" type="button" @click="moveRule(index, -1)">上移</button>
-        <button class="link" type="button" @click="moveRule(index, 1)">下移</button>
-        <button class="link danger" type="button" @click="removeRule(index)">删除</button>
+        <button class="btn btn-sm" type="button" @click="moveRule(index, -1)">上移</button>
+        <button class="btn btn-sm" type="button" @click="moveRule(index, 1)">下移</button>
+        <button class="btn btn-sm btn-danger" type="button" @click="removeRule(index)">删除</button>
       </div>
-      <div class="rule-row">
-        <input v-model="newRule.action" class="text-input" placeholder="action，如 tool.use / websearch.use" />
-        <input v-model="newRule.resource" class="text-input" placeholder="resource，如 web_search 或 *" />
-        <select v-model="newRule.effect" class="text-input">
+      <div class="rule-row rule-row-new">
+        <input v-model="newRule.action" class="ctrl" placeholder="action，如 tool.use / websearch.use" />
+        <input v-model="newRule.resource" class="ctrl" placeholder="resource，如 web_search 或 *" />
+        <select v-model="newRule.effect" class="ctrl">
           <option value="deny">deny</option>
           <option value="allow">allow</option>
         </select>
-        <button class="btn" type="button" @click="addRule">添加</button>
-        <button class="btn primary" type="button" :disabled="busy" @click="saveRules">保存规则</button>
+        <button class="btn btn-sm" type="button" @click="addRule">添加</button>
+        <button class="btn btn-sm btn-primary" type="button" :disabled="busy" @click="saveRules">保存规则</button>
       </div>
       <p class="muted">规则按顺序匹配，最后命中生效；deny 不会被 allow 放宽。审批授权仅对当前回合有效，不提供「允许并记住」。</p>
     </section>
 
     <section class="card">
-      <h2>引用（References） <small>{{ scopeLabel }}</small></h2>
+      <h3>引用（References） <span class="badge type-badge">{{ scopeLabel }}</span></h3>
       <ul class="plain-list">
         <li v-for="ref in references" :key="ref.name">
           <strong>{{ ref.name }}</strong>
-          <span class="tag">{{ ref.kind }}</span>
-          <span class="tag" :class="ref.status === 'error' ? 'danger' : ''">{{ ref.status }}</span>
-          <span>{{ ref.description }}</span>
+          <span class="badge type-badge">{{ ref.kind }}</span>
+          <span class="badge" :class="ref.status === 'error' ? 'badge-disabled' : 'badge-enabled'">{{ ref.status }}</span>
+          <span class="muted-inline">{{ ref.description }}</span>
           <span class="spacer" />
-          <button v-if="ref.kind === 'git'" class="link" type="button" @click="refreshReference(ref.name)">刷新</button>
-          <button class="link danger" type="button" @click="removeReference(ref.name)">删除</button>
+          <button v-if="ref.kind === 'git'" class="btn btn-sm" type="button" @click="refreshReference(ref.name)">刷新</button>
+          <button class="btn btn-sm btn-danger" type="button" @click="removeReference(ref.name)">删除</button>
         </li>
         <li v-if="!references.length" class="muted">未配置引用</li>
       </ul>
-      <form class="agent-form" @submit.prevent="saveReference">
-        <label>别名<input v-model="referenceForm.name" class="text-input" required /></label>
-        <label>本地路径<input v-model="referenceForm.path" class="text-input" /></label>
-        <label>Git 仓库<input v-model="referenceForm.repository" class="text-input" /></label>
-        <label>分支<input v-model="referenceForm.branch" class="text-input" /></label>
-        <label>描述<input v-model="referenceForm.description" class="text-input" /></label>
-        <button class="btn primary" type="submit" :disabled="busy">添加引用</button>
+      <form class="form-grid" @submit.prevent="saveReference">
+        <label class="field">别名<input v-model="referenceForm.name" class="ctrl" required /></label>
+        <label class="field">本地路径<input v-model="referenceForm.path" class="ctrl" /></label>
+        <label class="field">Git 仓库<input v-model="referenceForm.repository" class="ctrl" /></label>
+        <label class="field">分支<input v-model="referenceForm.branch" class="ctrl" /></label>
+        <label class="field">描述<input v-model="referenceForm.description" class="ctrl" /></label>
+        <div class="form-footer">
+          <button class="btn btn-primary" type="submit" :disabled="busy">添加引用</button>
+        </div>
       </form>
     </section>
 
     <section class="card">
-      <h2>Web 搜索</h2>
+      <h3>Web 搜索</h3>
       <p v-if="websearch" class="muted">
         状态：{{ websearch.enabled ? '启用' : '禁用' }}；选择：{{ websearch.provider }}；
         可用：{{ websearch.available.join(', ') || '无' }}
@@ -505,9 +503,9 @@ onMounted(loadAll)
     </section>
 
     <section class="card">
-      <h2>运行配置</h2>
+      <h3>运行配置</h3>
       <div v-for="(entries, group) in configSchema" :key="group" class="config-group">
-        <h3>{{ group }}</h3>
+        <h4>{{ group }}</h4>
         <div class="config-grid">
           <label v-for="entry in entries" :key="entry.name" class="config-row">
             <span>{{ entry.name }}</span>
@@ -520,74 +518,282 @@ onMounted(loadAll)
               v-else-if="typeof configDraft[entry.name] === 'number'"
               v-model.number="configDraft[entry.name]"
               type="number"
-              class="text-input"
+              class="ctrl"
             />
             <textarea
               v-else-if="isJsonField(entry)"
               :value="JSON.stringify(configDraft[entry.name])"
               rows="2"
-              class="text-input"
+              class="ctrl"
               @change="setJsonValue(entry.name, $event)"
             />
-            <input v-else v-model="configDraft[entry.name]" class="text-input" />
+            <input v-else v-model="configDraft[entry.name]" class="ctrl" />
           </label>
         </div>
       </div>
-      <div class="row">
-        <button class="btn primary" type="button" :disabled="busy" @click="saveConfig">保存配置</button>
+      <div class="form-footer">
+        <button class="btn btn-primary" type="button" :disabled="busy" @click="saveConfig">保存配置</button>
         <button class="btn" type="button" :disabled="busy" @click="rollbackConfig">回滚上次修改</button>
       </div>
       <p class="muted">配置修改即时生效；密钥类字段不会回传明文。</p>
     </section>
 
     <section class="card">
-      <h2>项目指令来源</h2>
+      <div class="section-head">
+        <h3>项目指令来源 <span class="badge type-badge">{{ scopeLabel }}</span></h3>
+        <button
+          class="btn btn-sm btn-primary"
+          type="button"
+          :disabled="busy || !sessionId"
+          :title="sessionId ? '选择要注入的文件' : '请先填写会话 ID'"
+          @click="openFilePicker"
+        >+ 添加文件</button>
+      </div>
+
+      <div v-if="instructionEntries.length" class="entry-list">
+        <span v-for="entry in instructionEntries" :key="entry" class="entry-chip">
+          <code>{{ entry }}</code>
+          <button class="chip-remove" type="button" title="移除" @click="removeInstructionFile(entry)">×</button>
+        </span>
+      </div>
+      <p v-else-if="sessionId" class="muted">尚未手动添加文件（AGENTS.md 仍会自动发现）。</p>
+      <p v-else class="muted">填写会话 ID 后可为该项目添加/移除指令文件；全局指令请用「运行配置」的 instructions。</p>
+
       <ul class="plain-list">
         <li v-for="source in instructions" :key="source.id">
-          <span class="tag" :class="source.loaded ? '' : 'danger'">{{ source.loaded ? '已加载' : '已跳过' }}</span>
+          <span class="badge" :class="source.loaded ? 'badge-enabled' : 'badge-disabled'">{{ source.loaded ? '已加载' : '已跳过' }}</span>
           <code>{{ source.kind }}</code>
           <span>{{ source.location }}</span>
-          <span class="muted">{{ source.chars }} 字符 / {{ source.tokens }} tokens</span>
-          <span v-if="source.skipped_reason" class="muted">{{ source.skipped_reason }}</span>
+          <span class="muted-inline">{{ source.chars }} 字符 / {{ source.tokens }} tokens</span>
+          <span v-if="source.skipped_reason" class="muted-inline">{{ source.skipped_reason }}</span>
         </li>
         <li v-if="!instructions.length" class="muted">当前工作区没有生效的指令来源</li>
       </ul>
     </section>
+
+    <InstructionFilePicker
+      :show="showFilePicker"
+      :start-path="instructionWorkspace"
+      :busy="busy"
+      @close="showFilePicker = false"
+      @select="addInstructionFile"
+    />
   </div>
 </template>
 
 <style scoped>
-.agent-settings { padding: 24px; max-width: 1100px; margin: 0 auto; color: var(--text); }
-.page-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
-.page-head h1 { margin: 0 0 4px; font-size: 20px; }
-.page-head p { margin: 0; color: var(--text-secondary); font-size: 13px; }
-.head-actions { display: flex; gap: 8px; }
-.card { margin-top: 18px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
-.card h2 { margin: 0 0 12px; font-size: 15px; }
-.card h2 small { color: var(--text-secondary); font-weight: 400; margin-left: 6px; }
-.agent-grid { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 20px; }
-.agent-form { display: flex; flex-direction: column; gap: 8px; }
-.agent-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); }
-.text-input { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 13px; }
-.checks { display: flex; gap: 16px; font-size: 12px; }
-.row { display: flex; gap: 8px; }
-.btn { padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
-.btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
-.agent-list, .plain-list { list-style: none; margin: 0; padding: 0; }
-.agent-list li { padding: 10px 0; border-bottom: 1px solid var(--border); }
-.agent-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.agent-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.head-actions { display: flex; gap: 8px; align-items: center; }
+.session-input { width: 240px; }
+
+.section { display: flex; flex-direction: column; gap: 10px; }
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.section-title {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.list-meta { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
+
+.agent-list { display: flex; flex-direction: column; gap: 10px; animation: fadeSlideUp 0.4s var(--ease); }
+.agent-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  border-radius: var(--radius-lg);
+  transition: all var(--duration) var(--ease);
+}
+.agent-card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: color-mix(in srgb, var(--primary) 25%, var(--border));
+  transform: translateY(-1px);
+}
+.agent-avatar {
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--primary);
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--primary) 10%, var(--bg-subtle));
+  border: 1px solid var(--border-subtle);
+}
+.agent-info { flex: 1; min-width: 0; }
+.agent-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.agent-desc { font-size: 12.5px; color: var(--text-secondary); margin-top: 3px; line-height: 1.5; }
+.agent-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.agent-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+.type-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border: 1px solid var(--border-subtle);
+}
+
+.btn-sm { padding: 7px 14px; font-size: 12px; }
+
+.card h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section-head h3 { margin: 0; }
+
+.entry-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.entry-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+  font-size: 12px;
+}
+.entry-chip code {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+.chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  transition: all var(--duration) var(--ease);
+}
+.chip-remove:hover { background: var(--danger-soft); color: var(--danger); }
+
+.ctrl {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  transition: all var(--duration) var(--ease);
+  box-sizing: border-box;
+}
+.ctrl:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.plain-list { list-style: none; margin: 0; padding: 0; }
+.plain-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.plain-list li:last-child { border-bottom: 0; }
+.plain-list code {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 12px;
+  color: var(--primary);
+  background: var(--bg-subtle);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}
 .spacer { flex: 1; }
-.tag { font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-secondary); }
-.tag.danger { color: var(--danger, #d33); border-color: currentColor; }
-.muted { color: var(--text-secondary); font-size: 12px; margin: 4px 0 0; }
-.link { border: 0; background: none; color: var(--primary); cursor: pointer; font-size: 12px; }
-.link.danger { color: var(--danger, #d33); }
-.plain-list li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; flex-wrap: wrap; }
-.config-group { margin-bottom: 12px; }
-.config-group h3 { margin: 8px 0; font-size: 12px; color: var(--text-secondary); text-transform: uppercase; }
-.config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px 16px; }
-.config-row { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); }
+.muted { color: var(--text-secondary); font-size: 12px; margin: 8px 0 0; line-height: 1.6; }
+.muted-inline { color: var(--text-secondary); font-size: 12px; }
+.form-error { color: var(--danger); font-size: 12.5px; }
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+.field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+.form-footer { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+
+.config-group { margin-bottom: 14px; }
+.config-group h4 {
+  margin: 8px 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+}
+.config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 16px; }
+.config-row { display: flex; flex-direction: column; gap: 5px; font-size: 12px; font-weight: 500; color: var(--text-secondary); }
 .config-row input[type='checkbox'] { align-self: flex-start; }
-.rule-row { display: grid; grid-template-columns: 1fr 1fr 100px auto auto auto; gap: 6px; align-items: center; margin-bottom: 6px; }
-.error { color: var(--danger, #d33); }
+
+.rule-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 110px auto auto auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.rule-row-new { margin-top: 4px; padding-top: 12px; border-top: 1px dashed var(--border); }
+
+@media (max-width: 768px) {
+  .header-row { flex-direction: column; }
+  .session-input { width: 100%; }
+  .rule-row { grid-template-columns: 1fr; }
+  .agent-actions { margin-left: auto; }
+}
 </style>

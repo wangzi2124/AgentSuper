@@ -20,7 +20,9 @@ disappears from the result when deleted. Token budgeting reuses
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 import threading
 import time
 import urllib.request
@@ -35,9 +37,79 @@ logger = logging.getLogger(__name__)
 InstructionKind = Literal["global", "project", "nested", "config", "url"]
 
 INSTRUCTION_FILENAME = "AGENTS.md"
+WORKSPACE_INSTRUCTIONS_DIR = ".agentsuper"
+WORKSPACE_INSTRUCTIONS_FILE = "instructions.json"
 _URL_TIMEOUT = 5.0
 _URL_TTL = 60.0
 _MAX_NESTED_DIRS = 200
+
+
+def _has_glob(value: str) -> bool:
+    return any(ch in value for ch in "*?[")
+
+
+def workspace_instructions_path(workspace: str | Path) -> Path:
+    """Location of the per-workspace instruction override file."""
+    return (
+        Path(workspace).expanduser()
+        / WORKSPACE_INSTRUCTIONS_DIR
+        / WORKSPACE_INSTRUCTIONS_FILE
+    )
+
+
+def _clean_entries(raw: object) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        value = str(item or "").strip()
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def read_workspace_instructions(workspace: str | Path) -> list[str]:
+    """Read the raw entries managed from the UI (files / globs / URLs)."""
+    path = workspace_instructions_path(workspace)
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        logger.debug("cannot read workspace instructions %s", path, exc_info=True)
+        return []
+    if isinstance(payload, dict):
+        return _clean_entries(payload.get("instructions"))
+    return _clean_entries(payload)
+
+
+def write_workspace_instructions(workspace: str | Path, entries: Iterable[str]) -> Path:
+    """Atomically persist the workspace instruction entries."""
+    path = workspace_instructions_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"instructions": _clean_entries(list(entries))}
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    os.replace(tmp, path)
+    return path
+
+
+def add_workspace_instruction(workspace: str | Path, entry: str) -> list[str]:
+    entries = read_workspace_instructions(workspace)
+    value = str(entry or "").strip()
+    if value and value not in entries:
+        entries.append(value)
+    write_workspace_instructions(workspace, entries)
+    return entries
+
+
+def remove_workspace_instruction(workspace: str | Path, entry: str) -> list[str]:
+    value = str(entry or "").strip()
+    entries = [item for item in read_workspace_instructions(workspace) if item != value]
+    write_workspace_instructions(workspace, entries)
+    return entries
 
 
 @dataclass(frozen=True)
@@ -95,10 +167,6 @@ def _hash(text: str) -> str:
 
 def _is_url(value: str) -> bool:
     return value.lower().startswith(("http://", "https://"))
-
-
-def _has_glob(value: str) -> bool:
-    return any(ch in value for ch in "*?[")
 
 
 def _estimate_tokens(text: str, model_id: str) -> int:
@@ -312,31 +380,43 @@ class InstructionResolver:
             if candidate.is_file():
                 add_file(candidate, "project")
 
-        for raw in list(getattr(get_settings(), "instructions", []) or []):
-            entry = str(raw or "").strip()
-            if not entry:
-                continue
-            if _is_url(entry):
-                add_url(entry)
-                continue
-            expanded = Path(entry).expanduser()
+        def add_entry(entry: str, kind: InstructionKind = "config") -> None:
+            value = str(entry or "").strip()
+            if not value:
+                return
+            if _is_url(value):
+                add_url(value)
+                return
+            expanded = Path(value).expanduser()
             if not expanded.is_absolute():
                 base = ws / expanded
             else:
                 base = expanded
             if _has_glob(str(base)):
                 try:
-                    matches = sorted(ws.glob(entry)) if not expanded.is_absolute() else sorted(
-                        Path(expanded.anchor).glob(str(expanded)[len(expanded.anchor):])
+                    matches = (
+                        sorted(ws.glob(value))
+                        if not expanded.is_absolute()
+                        else sorted(
+                            Path(expanded.anchor).glob(
+                                str(expanded)[len(expanded.anchor):]
+                            )
+                        )
                     )
                 except (ValueError, OSError):
                     matches = []
                 for match in matches:
                     if match.is_file():
-                        add_file(match, "config")
+                        add_file(match, kind)
             else:
                 if base.is_file():
-                    add_file(base, "config")
+                    add_file(base, kind)
+
+        for raw in list(getattr(get_settings(), "instructions", []) or []):
+            add_entry(raw, "config")
+
+        for entry in read_workspace_instructions(ws):
+            add_entry(entry, "config")
 
         with self._lock:
             nested_dirs = list(self._accessed.get(_norm(ws), []))
@@ -459,9 +539,16 @@ def reset_instruction_resolver() -> None:
 
 __all__ = [
     "INSTRUCTION_FILENAME",
+    "WORKSPACE_INSTRUCTIONS_DIR",
+    "WORKSPACE_INSTRUCTIONS_FILE",
     "InstructionBlock",
     "InstructionResolver",
     "InstructionSource",
+    "add_workspace_instruction",
     "get_instruction_resolver",
+    "read_workspace_instructions",
+    "remove_workspace_instruction",
     "reset_instruction_resolver",
+    "workspace_instructions_path",
+    "write_workspace_instructions",
 ]

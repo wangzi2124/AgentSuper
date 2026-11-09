@@ -166,3 +166,29 @@ def test_singleton_is_resettable():
     assert first is get_instruction_resolver()
     reset_instruction_resolver()
     assert get_instruction_resolver() is not first
+
+
+def test_workspace_override_entries_are_loaded(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "_global_candidates", lambda: [])
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _write(workspace / "guide.md", "GUIDE RULES")
+    mod.write_workspace_instructions(workspace, ["guide.md"])
+
+    blocks = InstructionResolver().resolve(workspace)
+    assert any(
+        block.source.kind == "config" and "GUIDE RULES" in block.content
+        for block in blocks
+    )
+
+
+def test_workspace_override_add_and_remove(tmp_path):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+
+    assert mod.add_workspace_instruction(workspace, "a.md") == ["a.md"]
+    assert mod.add_workspace_instruction(workspace, "a.md") == ["a.md"]
+    assert mod.add_workspace_instruction(workspace, "b.md") == ["a.md", "b.md"]
+    assert mod.remove_workspace_instruction(workspace, "a.md") == ["b.md"]
+    assert mod.read_workspace_instructions(workspace) == ["b.md"]
+

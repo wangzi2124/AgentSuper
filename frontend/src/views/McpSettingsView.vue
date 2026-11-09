@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { fetchWithTimeout } from '../api/fetch'
+import McpServerEditModal from '../components/McpServerEditModal.vue'
 
 interface MCPPromptArgument {
   name: string
@@ -42,19 +43,9 @@ const instructions = ref<Record<string, string>>({})
 const error = ref('')
 const busy = ref(false)
 const authPollers = new Map<string, number>()
-const form = ref({
-  name: '',
-  type: 'stdio',
-  command: '',
-  args: '',
-  url: '',
-  env: '',
-  headers: '',
-  oauthClientId: '',
-  oauthClientSecret: '',
-  oauthScopes: '',
-  oauthRedirectUri: '',
-})
+const showEditor = ref(false)
+const editingServer = ref<Record<string, unknown> | null>(null)
+const editingScope = ref('')
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetchWithTimeout(url, init)
@@ -69,6 +60,11 @@ function query(): string {
 
 function promptKey(server: string, prompt: string): string {
   return `${server}::${prompt}`
+}
+
+function statusClass(server: MCPServer): string {
+  if (server.status === 'connected') return 'badge-enabled'
+  return 'badge-disabled'
 }
 
 function setPrompts(server: string, items: MCPPrompt[]) {
@@ -95,56 +91,51 @@ async function load() {
   }
 }
 
-function parseLines(text: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const line of text.split('\n')) {
-    const idx = line.indexOf('=')
-    if (idx > 0) out[line.slice(0, idx).trim()] = line.slice(idx + 1).trim()
-  }
-  return out
+function openCreate() {
+  editingServer.value = null
+  editingScope.value = ''
+  showEditor.value = true
 }
 
-async function createServer() {
+async function openEdit(server: MCPServer) {
   busy.value = true
   error.value = ''
   try {
-    const payload: Record<string, unknown> = {
-      name: form.value.name,
-      type: form.value.type,
-      enabled: true,
-    }
-    if (form.value.type === 'stdio') {
-      payload.command = form.value.command
-      payload.args = form.value.args.split(/\s+/).filter(Boolean)
-      payload.env = parseLines(form.value.env)
-    } else {
-      payload.url = form.value.url
-      payload.headers = parseLines(form.value.headers)
-      const oauth: Record<string, unknown> = {}
-      if (form.value.oauthClientId.trim()) oauth.client_id = form.value.oauthClientId.trim()
-      if (form.value.oauthClientSecret.trim()) oauth.client_secret = form.value.oauthClientSecret.trim()
-      if (form.value.oauthScopes.trim()) oauth.scopes = form.value.oauthScopes.trim().split(/\s+/).filter(Boolean)
-      if (form.value.oauthRedirectUri.trim()) oauth.redirect_uri = form.value.oauthRedirectUri.trim()
-      if (Object.keys(oauth).length) payload.oauth = oauth
-    }
-    await request(`/api/v2/mcp/servers${query()}`, {
-      method: 'POST',
+    const body = await request<{ config: Record<string, unknown>; scope: string }>(
+      `/api/v2/mcp/servers/${encodeURIComponent(server.name)}/config${query()}`,
+    )
+    editingServer.value = { ...body.config, name: body.config.name || server.name }
+    editingScope.value = body.scope
+    showEditor.value = true
+  } catch (err) {
+    error.value = String((err as Error).message || err)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function saveServer(payload: Record<string, unknown>) {
+  busy.value = true
+  error.value = ''
+  const target = editingServer.value?.name as string | undefined
+  const scope = target
+    ? editingScope.value || (sessionId.value ? 'project' : 'global')
+    : sessionId.value
+      ? 'project'
+      : 'global'
+  const body = { ...payload, scope }
+  try {
+    const url = target
+      ? `/api/v2/mcp/servers/${encodeURIComponent(target)}${query()}`
+      : `/api/v2/mcp/servers${query()}`
+    await request(url, {
+      method: target ? 'PATCH' : 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     })
-    form.value = {
-      name: '',
-      type: 'stdio',
-      command: '',
-      args: '',
-      url: '',
-      env: '',
-      headers: '',
-      oauthClientId: '',
-      oauthClientSecret: '',
-      oauthScopes: '',
-      oauthRedirectUri: '',
-    }
+    showEditor.value = false
+    editingServer.value = null
+    editingScope.value = ''
     await load()
   } catch (err) {
     error.value = String((err as Error).message || err)
@@ -368,164 +359,283 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="mcp-settings">
-    <header class="page-head">
+  <div class="page-header">
+    <div class="header-row">
       <div>
-        <h1>MCP 服务器</h1>
+        <h2>MCP 服务器</h2>
         <p>工具与资源来自真实 MCP 握手；连接失败会显示错误，不会伪造成功。</p>
       </div>
       <div class="head-actions">
-        <input v-model="sessionId" class="text-input" placeholder="会话 ID（可选，项目级）" @change="load" />
+        <input v-model="sessionId" class="ctrl session-input" placeholder="会话 ID（可选，项目级）" @change="load" />
         <button class="btn" :disabled="busy" @click="load">刷新</button>
       </div>
-    </header>
+    </div>
+  </div>
 
-    <p v-if="error" class="error">{{ error }}</p>
+  <div class="page-content mcp-settings">
+    <p v-if="error" class="form-error">{{ error }}</p>
 
-    <section class="card">
-      <h2>已配置服务器</h2>
-      <ul class="server-list">
-        <li v-for="server in servers" :key="server.name">
-          <div class="server-line">
-            <strong>{{ server.name }}</strong>
-            <span class="tag">{{ server.transport }}</span>
-            <span class="tag" :class="server.status === 'error' ? 'danger' : ''">{{ server.status }}</span>
-            <span v-if="server.has_instructions" class="tag">instructions</span>
-            <span v-if="server.oauth && (server.authorized || server.auth_required)" class="tag">{{ server.authorized ? 'oauth' : 'oauth-required' }}</span>
-            <span class="spacer" />
-            <button class="link" type="button" @click="showTools(server.name)">工具</button>
-            <button class="link" type="button" @click="showResources(server.name)">资源</button>
-            <button class="link" type="button" @click="showPrompts(server.name)">Prompts</button>
-            <button v-if="server.has_instructions" class="link" type="button" @click="showInstructions(server.name)">指令</button>
+    <div class="section-head">
+      <div class="section-title">
+        已配置服务器
+        <span v-if="servers.length" class="badge type-badge">{{ servers.length }}</span>
+      </div>
+      <button class="btn btn-primary" type="button" :disabled="busy" @click="openCreate">
+        + 新增服务器
+      </button>
+    </div>
+
+    <div v-if="servers.length" class="list-meta">{{ servers.length }} 个 MCP 服务器</div>
+    <div v-if="servers.length" class="server-list">
+      <div v-for="server in servers" :key="server.name" class="card server-card">
+        <div class="server-main">
+          <div class="server-avatar">🔌</div>
+          <div class="server-info">
+            <div class="server-title">
+              {{ server.name }}
+              <span class="badge type-badge">{{ server.transport }}</span>
+              <span v-if="server.has_instructions" class="badge type-badge">instructions</span>
+              <span v-if="server.oauth && (server.authorized || server.auth_required)" class="badge type-badge">
+                {{ server.authorized ? 'oauth' : 'oauth-required' }}
+              </span>
+            </div>
+            <div class="server-sub">注册工具：{{ server.registered.join(', ') || '无' }}</div>
+          </div>
+          <span class="badge" :class="statusClass(server)">{{ server.status }}</span>
+          <div class="server-actions">
+            <button class="btn btn-sm" type="button" @click="showTools(server.name)">工具</button>
+            <button class="btn btn-sm" type="button" @click="showResources(server.name)">资源</button>
+            <button class="btn btn-sm" type="button" @click="showPrompts(server.name)">Prompts</button>
+            <button v-if="server.has_instructions" class="btn btn-sm" type="button" @click="showInstructions(server.name)">指令</button>
             <button
               v-if="server.enabled && server.oauth && !server.authorized"
-              class="link"
+              class="btn btn-sm"
               type="button"
               @click="authorize(server.name)"
             >OAuth 授权</button>
             <button
               v-else-if="server.enabled && server.oauth && server.auth_required"
-              class="link"
+              class="btn btn-sm"
               type="button"
               @click="authorize(server.name)"
             >重新授权</button>
             <button
               v-if="server.oauth && server.authorized"
-              class="link"
+              class="btn btn-sm"
               type="button"
               @click="clearAuth(server.name)"
             >清除授权</button>
             <button
               v-if="server.status === 'connected'"
-              class="link"
+              class="btn btn-sm"
               type="button"
               @click="disconnect(server.name)"
             >断开</button>
-            <button v-else class="link" type="button" @click="connect(server.name)">连接</button>
-            <button class="link danger" type="button" @click="remove(server.name)">删除</button>
+            <button v-else class="btn btn-sm btn-primary" type="button" @click="connect(server.name)">连接</button>
+            <button class="btn btn-sm" type="button" @click="openEdit(server)">编辑</button>
+            <button class="btn btn-sm btn-danger" type="button" @click="remove(server.name)">删除</button>
           </div>
-          <p v-if="server.error" class="error">{{ server.error }}</p>
-          <p class="muted">注册工具：{{ server.registered.join(', ') || '无' }}</p>
-          <p v-if="tools[server.name]" class="muted">可用工具：{{ tools[server.name].join(', ') || '无' }}</p>
-          <div v-if="resources[server.name]" class="muted">
-            资源：
-            <span v-for="(res, idx) in resources[server.name]" :key="idx">
-              {{ res.uri || res.name || 'unknown' }}
-            </span>
-          </div>
-          <div v-if="prompts[server.name]" class="prompt-panel">
-            <p v-if="!prompts[server.name].length" class="muted">该服务器未暴露 prompts</p>
-            <div v-for="prompt in prompts[server.name]" :key="prompt.name" class="prompt-item">
-              <div class="prompt-head">
-                <strong>{{ prompt.name }}</strong>
-                <span v-if="prompt.description" class="muted">{{ prompt.description }}</span>
-                <span class="spacer" />
-                <button
-                  class="btn"
-                  type="button"
-                  :disabled="promptBusy === promptKey(server.name, prompt.name) || server.status !== 'connected'"
-                  :title="server.status === 'connected' ? '调用 prompts/get' : '请先连接服务器'"
-                  @click="runPrompt(server.name, prompt)"
-                >{{ promptBusy === promptKey(server.name, prompt.name) ? '获取中…' : '获取' }}</button>
-              </div>
-              <div v-if="prompt.arguments?.length" class="prompt-args">
-                <label v-for="arg in prompt.arguments" :key="arg.name">
-                  <span>{{ arg.name }}<span v-if="arg.required" class="required">*</span></span>
-                  <input
-                    v-model="promptForms[promptKey(server.name, prompt.name)][arg.name]"
-                    class="text-input"
-                    :placeholder="arg.description || ''"
-                  />
-                </label>
-              </div>
-              <pre v-if="promptResults[promptKey(server.name, prompt.name)]" class="prompt-result">{{ promptText(promptResults[promptKey(server.name, prompt.name)]) }}</pre>
-            </div>
-          </div>
-          <pre v-if="instructions[server.name]" class="muted">{{ instructions[server.name] }}</pre>
-        </li>
-        <li v-if="!servers.length" class="muted">未配置 MCP 服务器</li>
-      </ul>
-      <p class="muted">HTTP 服务器支持 OAuth 2.1（PKCE + 动态注册）；需要登录时点击「OAuth 授权」。Claude 风格的 headers 仍可手动配置。</p>
-    </section>
+        </div>
 
-    <section class="card">
-      <h2>新增服务器</h2>
-      <form class="server-form" @submit.prevent="createServer">
-        <label>名称<input v-model="form.name" class="text-input" required /></label>
-        <label>传输
-          <select v-model="form.type" class="text-input">
-            <option value="stdio">stdio</option>
-            <option value="http">Streamable HTTP</option>
-          </select>
-        </label>
-        <template v-if="form.type === 'stdio'">
-          <label>命令<input v-model="form.command" class="text-input" placeholder="npx" required /></label>
-          <label>参数<input v-model="form.args" class="text-input" placeholder="-y @modelcontextprotocol/server-filesystem ." /></label>
-          <label>环境变量（每行 KEY=VALUE）<textarea v-model="form.env" rows="2" class="text-input" /></label>
-        </template>
-        <template v-else>
-          <label>URL<input v-model="form.url" class="text-input" placeholder="https://example.com/mcp" required /></label>
-          <label>Headers（每行 KEY=VALUE）<textarea v-model="form.headers" rows="2" class="text-input" /></label>
-          <label>OAuth Client ID（可选，留空自动动态注册）<input v-model="form.oauthClientId" class="text-input" /></label>
-          <label>OAuth Client Secret（可选）<input v-model="form.oauthClientSecret" type="password" class="text-input" /></label>
-          <label>OAuth Scopes（空格分隔，可选）<input v-model="form.oauthScopes" class="text-input" placeholder="read write" /></label>
-          <label>OAuth Redirect URI（可选）<input v-model="form.oauthRedirectUri" class="text-input" placeholder="默认使用当前 API 回调" /></label>
-        </template>
-        <button class="btn primary" type="submit" :disabled="busy">保存并连接</button>
-      </form>
-    </section>
+        <p v-if="server.error" class="form-error">{{ server.error }}</p>
+        <p v-if="tools[server.name]" class="muted">可用工具：{{ tools[server.name].join(', ') || '无' }}</p>
+        <div v-if="resources[server.name]" class="muted">
+          资源：
+          <span v-for="(res, idx) in resources[server.name]" :key="idx">
+            {{ res.uri || res.name || 'unknown' }}
+          </span>
+        </div>
+        <div v-if="prompts[server.name]" class="prompt-panel">
+          <p v-if="!prompts[server.name].length" class="muted">该服务器未暴露 prompts</p>
+          <div v-for="prompt in prompts[server.name]" :key="prompt.name" class="prompt-item">
+            <div class="prompt-head">
+              <strong>{{ prompt.name }}</strong>
+              <span v-if="prompt.description" class="muted">{{ prompt.description }}</span>
+              <span class="spacer" />
+              <button
+                class="btn btn-sm btn-primary"
+                type="button"
+                :disabled="promptBusy === promptKey(server.name, prompt.name) || server.status !== 'connected'"
+                :title="server.status === 'connected' ? '调用 prompts/get' : '请先连接服务器'"
+                @click="runPrompt(server.name, prompt)"
+              >{{ promptBusy === promptKey(server.name, prompt.name) ? '获取中…' : '获取' }}</button>
+            </div>
+            <div v-if="prompt.arguments?.length" class="prompt-args">
+              <label v-for="arg in prompt.arguments" :key="arg.name">
+                <span>{{ arg.name }}<span v-if="arg.required" class="required">*</span></span>
+                <input
+                  v-model="promptForms[promptKey(server.name, prompt.name)][arg.name]"
+                  class="ctrl"
+                  :placeholder="arg.description || ''"
+                />
+              </label>
+            </div>
+            <pre v-if="promptResults[promptKey(server.name, prompt.name)]" class="prompt-result">{{ promptText(promptResults[promptKey(server.name, prompt.name)]) }}</pre>
+          </div>
+        </div>
+        <pre v-if="instructions[server.name]" class="muted">{{ instructions[server.name] }}</pre>
+      </div>
+      <p class="muted">HTTP 服务器支持 OAuth 2.1（PKCE + 动态注册）；需要登录时点击「OAuth 授权」。Claude 风格的 headers 仍可手动配置。</p>
+    </div>
+    <div v-else class="empty-state">
+      <div class="icon">🔌</div>
+      <p>未配置 MCP 服务器</p>
+      <p style="font-size: 13px; margin-top: 4px">点击「新增服务器」添加。</p>
+    </div>
+
+    <McpServerEditModal
+      :show="showEditor"
+      :server="editingServer"
+      :busy="busy"
+      @close="showEditor = false"
+      @submit="saveServer"
+    />
   </div>
 </template>
 
 <style scoped>
-.mcp-settings { padding: 24px; max-width: 1000px; margin: 0 auto; color: var(--text); }
-.page-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
-.page-head h1 { margin: 0 0 4px; font-size: 20px; }
-.page-head p { margin: 0; color: var(--text-secondary); font-size: 13px; }
-.head-actions { display: flex; gap: 8px; }
-.card { margin-top: 18px; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
-.card h2 { margin: 0 0 12px; font-size: 15px; }
-.server-list { list-style: none; margin: 0; padding: 0; }
-.server-list li { padding: 10px 0; border-bottom: 1px solid var(--border); }
-.server-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mcp-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.head-actions { display: flex; gap: 8px; align-items: center; }
+.session-input { width: 240px; }
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.section-title {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.list-meta { font-size: 13px; color: var(--text-secondary); font-weight: 500; margin-top: -8px; }
+
+.server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: fadeSlideUp 0.4s var(--ease);
+}
+.server-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-radius: var(--radius-lg);
+  transition: all var(--duration) var(--ease);
+}
+.server-card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: color-mix(in srgb, var(--primary) 25%, var(--border));
+  transform: translateY(-1px);
+}
+.server-main {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.server-avatar {
+  font-size: 20px;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--primary) 10%, var(--bg-subtle));
+  border: 1px solid var(--border-subtle);
+}
+.server-info { flex: 1; min-width: 0; }
+.server-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.server-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.server-actions { display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0; }
+
+.type-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border: 1px solid var(--border-subtle);
+}
+
+.btn-sm { padding: 7px 14px; font-size: 12px; }
+
+.ctrl {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  transition: all var(--duration) var(--ease);
+  box-sizing: border-box;
+}
+.ctrl:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
 .spacer { flex: 1; }
-.server-form { display: flex; flex-direction: column; gap: 8px; max-width: 520px; }
-.server-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); }
-.text-input { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 13px; }
-.btn { padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); cursor: pointer; }
-.btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
-.tag { font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-secondary); }
-.tag.danger { color: var(--danger, #d33); border-color: currentColor; }
-.link { border: 0; background: none; color: var(--primary); cursor: pointer; font-size: 12px; }
-.link.danger { color: var(--danger, #d33); }
-.muted { color: var(--text-secondary); font-size: 12px; margin: 4px 0 0; }
-.error { color: var(--danger, #d33); font-size: 12px; }
-.prompt-panel { margin-top: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
-.prompt-item + .prompt-item { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
-.prompt-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.muted { color: var(--text-secondary); font-size: 12px; margin: 4px 0 0; line-height: 1.6; }
+.form-error { color: var(--danger); font-size: 12.5px; }
+
+.prompt-panel {
+  margin-top: 4px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+}
+.prompt-item + .prompt-item { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.prompt-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .prompt-head .muted { margin: 0; }
-.prompt-args { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
-.prompt-args label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-secondary); }
-.required { color: var(--danger, #d33); margin-left: 2px; }
-.prompt-result { margin: 6px 0 0; padding: 8px; border-radius: 6px; background: var(--surface); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow: auto; }
+.prompt-args { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.prompt-args label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-secondary); }
+.required { color: var(--danger); margin-left: 2px; }
+.prompt-result {
+  margin: 8px 0 0;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow: auto;
+}
+
+@media (max-width: 768px) {
+  .header-row { flex-direction: column; }
+  .session-input { width: 100%; }
+  .server-actions { width: 100%; }
+}
 </style>
