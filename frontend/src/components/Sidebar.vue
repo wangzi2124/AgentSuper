@@ -30,7 +30,6 @@ watch(() => route.path, () => { sidebarOpen.value = false })
         </div>
         <div class="brand-text">
           <h1>AgentSuper</h1>
-          <p>知识库工作台</p>
         </div>
       </div>
     </div>
