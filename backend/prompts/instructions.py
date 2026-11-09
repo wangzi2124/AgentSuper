@@ -48,6 +48,21 @@ def _has_glob(value: str) -> bool:
     return any(ch in value for ch in "*?[")
 
 
+def detect_project_root(start: str | Path | None = None) -> Path:
+    """Nearest project root (git repo, then AGENTS.md), like opencode's cwd rules."""
+    try:
+        current = Path(start or Path.cwd()).expanduser().resolve()
+    except OSError:
+        current = Path(start or Path.cwd())
+    for directory in [current, *current.parents]:
+        if (directory / ".git").exists():
+            return directory
+    for directory in [current, *current.parents]:
+        if (directory / INSTRUCTION_FILENAME).is_file():
+            return directory
+    return current
+
+
 def workspace_instructions_path(workspace: str | Path) -> Path:
     """Location of the per-workspace instruction override file."""
     return (
@@ -68,32 +83,57 @@ def _clean_entries(raw: object) -> list[str]:
     return out
 
 
-def read_workspace_instructions(workspace: str | Path) -> list[str]:
-    """Read the raw entries managed from the UI (files / globs / URLs)."""
+def _load_payload(workspace: str | Path) -> dict:
     path = workspace_instructions_path(workspace)
     if not path.is_file():
-        return []
+        return {}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         logger.debug("cannot read workspace instructions %s", path, exc_info=True)
-        return []
-    if isinstance(payload, dict):
-        return _clean_entries(payload.get("instructions"))
-    return _clean_entries(payload)
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, list):
+        return {"instructions": raw}
+    return {}
 
 
-def write_workspace_instructions(workspace: str | Path, entries: Iterable[str]) -> Path:
-    """Atomically persist the workspace instruction entries."""
+def _write_payload(workspace: str | Path, payload: dict) -> Path:
     path = workspace_instructions_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"instructions": _clean_entries(list(entries))}
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     os.replace(tmp, path)
     return path
+
+
+def read_workspace_instructions(workspace: str | Path) -> list[str]:
+    """Read the raw entries managed from the UI (files / globs / URLs)."""
+    return _clean_entries(_load_payload(workspace).get("instructions"))
+
+
+def read_workspace_auto_discover(workspace: str | Path) -> bool:
+    """Whether ``AGENTS.md`` auto-discovery is enabled for this workspace."""
+    value = _load_payload(workspace).get("auto_discover")
+    return value if isinstance(value, bool) else True
+
+
+def write_workspace_instructions(workspace: str | Path, entries: Iterable[str]) -> Path:
+    """Atomically persist the workspace instruction entries."""
+    payload = _load_payload(workspace)
+    payload["instructions"] = _clean_entries(list(entries))
+    return _write_payload(workspace, payload)
+
+
+def write_workspace_auto_discover(workspace: str | Path, enabled: bool) -> Path:
+    """Toggle automatic ``AGENTS.md`` discovery for this workspace."""
+    payload = _load_payload(workspace)
+    payload["auto_discover"] = bool(enabled)
+    payload.setdefault("instructions", [])
+    return _write_payload(workspace, payload)
 
 
 def add_workspace_instruction(workspace: str | Path, entry: str) -> list[str]:
@@ -371,14 +411,16 @@ class InstructionResolver:
             seen_hashes.add(digest)
             out.append(_Candidate(source=source, content=content, loaded=True))
 
-        for path in _global_candidates():
-            if path.is_file():
-                add_file(path, "global")
+        auto_discover = read_workspace_auto_discover(ws)
+        if auto_discover:
+            for path in _global_candidates():
+                if path.is_file():
+                    add_file(path, "global")
 
-        for directory in _upward_dirs(ws):
-            candidate = directory / INSTRUCTION_FILENAME
-            if candidate.is_file():
-                add_file(candidate, "project")
+            for directory in _upward_dirs(ws):
+                candidate = directory / INSTRUCTION_FILENAME
+                if candidate.is_file():
+                    add_file(candidate, "project")
 
         def add_entry(entry: str, kind: InstructionKind = "config") -> None:
             value = str(entry or "").strip()
@@ -418,12 +460,13 @@ class InstructionResolver:
         for entry in read_workspace_instructions(ws):
             add_entry(entry, "config")
 
-        with self._lock:
-            nested_dirs = list(self._accessed.get(_norm(ws), []))
-        for directory in nested_dirs:
-            candidate = Path(directory) / INSTRUCTION_FILENAME
-            if candidate.is_file():
-                add_file(candidate, "nested")
+        if auto_discover:
+            with self._lock:
+                nested_dirs = list(self._accessed.get(_norm(ws), []))
+            for directory in nested_dirs:
+                candidate = Path(directory) / INSTRUCTION_FILENAME
+                if candidate.is_file():
+                    add_file(candidate, "nested")
 
         for candidate in out:
             if candidate.loaded:
@@ -545,10 +588,13 @@ __all__ = [
     "InstructionResolver",
     "InstructionSource",
     "add_workspace_instruction",
+    "detect_project_root",
     "get_instruction_resolver",
+    "read_workspace_auto_discover",
     "read_workspace_instructions",
     "remove_workspace_instruction",
     "reset_instruction_resolver",
     "workspace_instructions_path",
+    "write_workspace_auto_discover",
     "write_workspace_instructions",
 ]

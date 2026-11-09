@@ -192,3 +192,23 @@ def test_workspace_override_add_and_remove(tmp_path):
     assert mod.remove_workspace_instruction(workspace, "a.md") == ["b.md"]
     assert mod.read_workspace_instructions(workspace) == ["b.md"]
 
+
+def test_auto_discover_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "_global_candidates", lambda: [])
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _write(workspace / "AGENTS.md", "ROOT")
+    _write(workspace / "guide.md", "GUIDE")
+    mod.write_workspace_instructions(workspace, ["guide.md"])
+
+    assert mod.read_workspace_auto_discover(workspace) is True
+    assert [block.content for block in InstructionResolver().resolve(workspace)] == [
+        "ROOT",
+        "GUIDE",
+    ]
+
+    mod.write_workspace_auto_discover(workspace, False)
+    assert mod.read_workspace_auto_discover(workspace) is False
+    assert [block.content for block in InstructionResolver().resolve(workspace)] == ["GUIDE"]
+
+

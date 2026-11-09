@@ -18,6 +18,7 @@ export interface InstructionListResult {
   workspace: string
   scope: 'project' | 'global'
   entries: string[]
+  auto_discover: boolean
   sources: InstructionSourceMeta[]
   loaded_count: number
   total_chars: number
@@ -72,6 +73,20 @@ export async function removeInstructionEntry(entry: string, sessionId: string): 
   if (!res.ok) throw new Error(await readError(res))
   const body = (await res.json()) as { entries?: string[] }
   return body.entries ?? []
+}
+
+export async function setInstructionAutoDiscover(
+  autoDiscover: boolean,
+  sessionId: string,
+): Promise<boolean> {
+  const res = await fetchWithTimeout(`/api/instructions/settings${query(sessionId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ auto_discover: autoDiscover }),
+  })
+  if (!res.ok) throw new Error(await readError(res))
+  const body = (await res.json()) as { auto_discover?: boolean }
+  return body.auto_discover ?? autoDiscover
 }
 
 export async function browseFiles(path: string): Promise<BrowseFilesResult> {

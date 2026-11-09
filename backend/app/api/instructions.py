@@ -11,42 +11,55 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.deps import default_session_directory, get_context
+from app.deps import get_context, is_auto_workspace
 from config import get_settings
 from prompts.instructions import (
     add_workspace_instruction,
+    detect_project_root,
     get_instruction_resolver,
+    read_workspace_auto_discover,
     read_workspace_instructions,
     remove_workspace_instruction,
+    write_workspace_auto_discover,
 )
 
 router = APIRouter(tags=["Instructions"])
 
 
-def _workspace(ctx, session_id: str) -> tuple[Path, bool]:
+def _workspace(ctx, session_id: str, workspace: str = "") -> tuple[Path, bool]:
+    """Resolve the instruction workspace like opencode: project root, not temp."""
+    if workspace.strip():
+        path = Path(workspace.strip().strip('"').strip("'")).expanduser()
+        if not path.is_dir():
+            raise HTTPException(status_code=400, detail=f"workspace not found: {workspace}")
+        return path, True
     if session_id:
         sess = ctx.sessions.get(session_id)
         directory = getattr(sess, "directory", None) if sess is not None else None
-        workspace = directory or default_session_directory(session_id)
-        return Path(workspace).expanduser(), True
-    return Path.cwd(), False
+        if directory and not is_auto_workspace(directory):
+            return Path(directory).expanduser(), True
+        return detect_project_root(Path.cwd()), True
+    return detect_project_root(Path.cwd()), True
 
 
 @router.get("/instructions")
-async def list_instructions(request: Request, session_id: str = "") -> dict:
+async def list_instructions(
+    request: Request, session_id: str = "", workspace: str = ""
+) -> dict:
     """Metadata for the effective instruction sources of one session."""
     ctx = get_context(request)
-    workspace, project = _workspace(ctx, session_id)
+    workspace_path, project = _workspace(ctx, session_id, workspace)
     model_id = ctx.session_model(session_id) if session_id else ""
     resolver = get_instruction_resolver()
-    sources = resolver.describe(str(workspace), model_id)
+    sources = resolver.describe(str(workspace_path), model_id)
     loaded = [item for item in sources if item.get("loaded")]
-    effective = resolver.resolve(str(workspace), model_id)
+    effective = resolver.resolve(str(workspace_path), model_id)
     return {
         "enabled": bool(getattr(get_settings(), "instructions_enabled", True)),
-        "workspace": str(workspace),
+        "workspace": str(workspace_path),
         "scope": "project" if project else "global",
-        "entries": read_workspace_instructions(workspace) if project else [],
+        "entries": read_workspace_instructions(workspace_path) if project else [],
+        "auto_discover": read_workspace_auto_discover(workspace_path) if project else True,
         "sources": sources,
         "loaded_count": len(loaded),
         "total_chars": sum(len(block.content) for block in effective),
@@ -104,32 +117,26 @@ def _normalize_entry(entry: object, workspace: Path) -> str:
     return relative.as_posix()
 
 
-def _require_project(session_id: str, project: bool) -> None:
-    if not project:
-        raise HTTPException(
-            status_code=400,
-            detail="session_id is required to manage project instructions",
-        )
-
-
 @router.post("/instructions/entries")
-async def add_instruction_entry(request: Request, session_id: str = "") -> dict:
+async def add_instruction_entry(
+    request: Request, session_id: str = "", workspace: str = ""
+) -> dict:
     ctx = get_context(request)
-    workspace, project = _workspace(ctx, session_id)
-    _require_project(session_id, project)
+    workspace_path, _project = _workspace(ctx, session_id, workspace)
     payload = await request.json()
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
-    entry = _normalize_entry(payload.get("entry"), workspace)
-    entries = add_workspace_instruction(workspace, entry)
-    return {"entries": entries, "workspace": str(workspace), "entry": entry}
+    entry = _normalize_entry(payload.get("entry"), workspace_path)
+    entries = add_workspace_instruction(workspace_path, entry)
+    return {"entries": entries, "workspace": str(workspace_path), "entry": entry}
 
 
 @router.delete("/instructions/entries")
-async def remove_instruction_entry(request: Request, session_id: str = "") -> dict:
+async def remove_instruction_entry(
+    request: Request, session_id: str = "", workspace: str = ""
+) -> dict:
     ctx = get_context(request)
-    workspace, project = _workspace(ctx, session_id)
-    _require_project(session_id, project)
+    workspace_path, _project = _workspace(ctx, session_id, workspace)
     try:
         payload = await request.json()
     except Exception:  # noqa: BLE001 - empty body is a validation error below
@@ -137,8 +144,24 @@ async def remove_instruction_entry(request: Request, session_id: str = "") -> di
     entry = str((payload or {}).get("entry") or "").strip()
     if not entry:
         raise HTTPException(status_code=400, detail="entry is required")
-    entries = remove_workspace_instruction(workspace, entry)
-    return {"entries": entries, "workspace": str(workspace), "entry": entry}
+    entries = remove_workspace_instruction(workspace_path, entry)
+    return {"entries": entries, "workspace": str(workspace_path), "entry": entry}
+
+
+@router.patch("/instructions/settings")
+async def update_instruction_settings(
+    request: Request, session_id: str = "", workspace: str = ""
+) -> dict:
+    ctx = get_context(request)
+    workspace_path, _project = _workspace(ctx, session_id, workspace)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    value = payload.get("auto_discover")
+    if not isinstance(value, bool):
+        raise HTTPException(status_code=400, detail="auto_discover must be a boolean")
+    write_workspace_auto_discover(workspace_path, value)
+    return {"auto_discover": value, "workspace": str(workspace_path)}
 
 
 __all__ = ["router"]

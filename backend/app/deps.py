@@ -56,6 +56,17 @@ logger = logging.getLogger(__name__)
 
 _AUTO_WORKSPACE_ROOT = Path(tempfile.gettempdir()) / "agentsuper"
 
+
+def is_auto_workspace(directory: str | Path | None) -> bool:
+    """True when the directory is the default per-session temp workspace."""
+    if not directory:
+        return False
+    try:
+        Path(directory).expanduser().resolve().relative_to(_AUTO_WORKSPACE_ROOT.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
 # 程序内部数据目录：运行时基础设施（截断落盘 / CodeAct 沙箱 / 生成物 / 语音 / 上传 /
 # 快照）。与「会话默认临时目录」同性质——隐式免审，不进入用户「工作目录白名单」，
 # 也不能被用户删除。敏感文件规则（.git / .env* / *.db / *.json 权限文件）仍优先。
@@ -904,14 +915,14 @@ class PlatformContext:
     def instruction_blocks(self, session_id: str) -> list[Any]:
         """Resolve instruction blocks for this session's workspace (never raises)."""
         try:
-            from prompts.instructions import get_instruction_resolver
+            from prompts.instructions import detect_project_root, get_instruction_resolver
 
             sess = self.sessions.get(session_id)
-            workspace = (
-                getattr(sess, "directory", None)
-                if sess is not None and getattr(sess, "directory", None)
-                else default_session_directory(session_id)
-            )
+            directory = getattr(sess, "directory", None) if sess is not None else None
+            if not directory or is_auto_workspace(directory):
+                workspace = str(detect_project_root(Path.cwd()))
+            else:
+                workspace = str(directory)
             return get_instruction_resolver().resolve(
                 workspace, self.session_model(session_id) or ""
             )

@@ -1,0 +1,4 @@
+{
+  "instructions": ["docs/project-instructions.md"],
+  "auto_discover": false
+}

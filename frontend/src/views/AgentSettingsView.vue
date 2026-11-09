@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { fetchWithTimeout } from '../api/fetch'
 import AgentEditModal from '../components/AgentEditModal.vue'
 import InstructionFilePicker from '../components/InstructionFilePicker.vue'
-import { addInstructionEntry, listInstructions, removeInstructionEntry } from '../api/instructions'
+import { addInstructionEntry, listInstructions, removeInstructionEntry, setInstructionAutoDiscover } from '../api/instructions'
 
 interface AgentInfo {
   name: string
@@ -84,6 +84,7 @@ const showEditor = ref(false)
 const editingAgent = ref<AgentInfo | null>(null)
 const instructionEntries = ref<string[]>([])
 const instructionWorkspace = ref('')
+const instructionAutoDiscover = ref(true)
 const showFilePicker = ref(false)
 
 const scopeLabel = computed(() => (sessionId.value ? '项目级（当前会话工作区）' : '全局'))
@@ -120,6 +121,7 @@ async function loadAll() {
     instructions.value = instructionBody.sources
     instructionEntries.value = instructionBody.entries || []
     instructionWorkspace.value = instructionBody.workspace || ''
+    instructionAutoDiscover.value = instructionBody.auto_discover ?? true
     configSchema.value = configBody.schema
     configValues.value = configBody.values
     configDraft.value = JSON.parse(JSON.stringify(configBody.values))
@@ -173,10 +175,6 @@ async function saveAgent(payload: Record<string, unknown>) {
 }
 
 function openFilePicker() {
-  if (!sessionId.value) {
-    error.value = '请先填写会话 ID，以确定项目工作区'
-    return
-  }
   showFilePicker.value = true
 }
 
@@ -199,6 +197,20 @@ async function removeInstructionFile(entry: string) {
   error.value = ''
   try {
     await removeInstructionEntry(entry, sessionId.value)
+    await loadAll()
+  } catch (err) {
+    error.value = String((err as Error).message || err)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function toggleAutoDiscover(event: Event) {
+  const enabled = (event.target as HTMLInputElement).checked
+  busy.value = true
+  error.value = ''
+  try {
+    await setInstructionAutoDiscover(enabled, sessionId.value)
     await loadAll()
   } catch (err) {
     error.value = String((err as Error).message || err)
@@ -540,14 +552,25 @@ onMounted(loadAll)
 
     <section class="card">
       <div class="section-head">
-        <h3>项目指令来源 <span class="badge type-badge">{{ scopeLabel }}</span></h3>
-        <button
-          class="btn btn-sm btn-primary"
-          type="button"
-          :disabled="busy || !sessionId"
-          :title="sessionId ? '选择要注入的文件' : '请先填写会话 ID'"
-          @click="openFilePicker"
-        >+ 添加文件</button>
+        <h3>项目指令来源</h3>
+        <div class="section-actions">
+          <label class="auto-toggle" title="关闭后不再自动注入工作区及上级目录的 AGENTS.md">
+            <input
+              type="checkbox"
+              :checked="instructionAutoDiscover"
+              :disabled="busy"
+              @change="toggleAutoDiscover"
+            />
+            自动加载 AGENTS.md
+          </label>
+          <button
+            class="btn btn-sm btn-primary"
+            type="button"
+            :disabled="busy"
+            title="选择要注入的文件"
+            @click="openFilePicker"
+          >+ 添加文件</button>
+        </div>
       </div>
 
       <div v-if="instructionEntries.length" class="entry-list">
@@ -556,8 +579,8 @@ onMounted(loadAll)
           <button class="chip-remove" type="button" title="移除" @click="removeInstructionFile(entry)">×</button>
         </span>
       </div>
-      <p v-else-if="sessionId" class="muted">尚未手动添加文件（AGENTS.md 仍会自动发现）。</p>
-      <p v-else class="muted">填写会话 ID 后可为该项目添加/移除指令文件；全局指令请用「运行配置」的 instructions。</p>
+      <p v-else class="muted">尚未手动添加文件（关闭上方开关后 AGENTS.md 不再自动注入）。</p>
+      <p class="muted-inline workspace-hint">工作区：{{ instructionWorkspace || '—' }}</p>
 
       <ul class="plain-list">
         <li v-for="source in instructions" :key="source.id">
@@ -680,6 +703,24 @@ onMounted(loadAll)
   gap: 8px;
 }
 .section-head h3 { margin: 0; }
+.section-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.auto-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.auto-toggle input { cursor: pointer; }
+.workspace-hint {
+  display: block;
+  margin-top: 6px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11.5px;
+  word-break: break-all;
+}
 
 .entry-list {
   display: flex;

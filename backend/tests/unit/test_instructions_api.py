@@ -6,7 +6,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import instructions as api
-from prompts.instructions import reset_instruction_resolver
+from prompts.instructions import (
+    read_workspace_auto_discover,
+    reset_instruction_resolver,
+    workspace_instructions_path,
+)
 
 
 class _Sess:
@@ -43,6 +47,7 @@ def test_add_list_and_remove(tmp_path, monkeypatch):
     body = client.get("/api/instructions?session_id=s1").json()
     assert body["scope"] == "project"
     assert body["entries"] == ["guide.md"]
+    assert body["auto_discover"] is True
     assert any(
         source["kind"] == "config" and source["loaded"] for source in body["sources"]
     )
@@ -56,11 +61,26 @@ def test_add_list_and_remove(tmp_path, monkeypatch):
     assert res.json()["entries"] == []
 
 
-def test_add_requires_session(tmp_path, monkeypatch):
+def test_explicit_workspace_without_session(tmp_path, monkeypatch):
+    reset_instruction_resolver()
+    (tmp_path / "guide.md").write_text("GUIDE RULES", encoding="utf-8")
+    client = _client(tmp_path, monkeypatch)
+    res = client.post(
+        f"/api/instructions/entries?workspace={tmp_path}", json={"entry": "guide.md"}
+    )
+    assert res.status_code == 200
+    assert workspace_instructions_path(tmp_path).is_file()
+
+
+def test_auto_discover_toggle(tmp_path, monkeypatch):
     reset_instruction_resolver()
     client = _client(tmp_path, monkeypatch)
-    res = client.post("/api/instructions/entries", json={"entry": "guide.md"})
-    assert res.status_code == 400
+    res = client.patch(
+        "/api/instructions/settings?session_id=s1", json={"auto_discover": False}
+    )
+    assert res.status_code == 200
+    assert res.json()["auto_discover"] is False
+    assert read_workspace_auto_discover(tmp_path) is False
 
 
 def test_rejects_paths_outside_workspace(tmp_path, monkeypatch):
