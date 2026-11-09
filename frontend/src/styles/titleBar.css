@@ -38,6 +38,8 @@
 }
 .titlebar-icon:hover { background: var(--bg-subtle); color: var(--text); }
 .titlebar-icon.pressed { background: var(--bg-subtle); color: var(--text); }
+.titlebar-sidebar-toggle svg { transition: transform var(--duration) var(--ease); }
+.titlebar-sidebar-toggle.collapsed svg { transform: rotate(180deg); }
 
 .titlebar-tabs {
   min-width: 0;

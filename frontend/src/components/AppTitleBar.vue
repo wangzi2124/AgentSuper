@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import UserMenu from './UserMenu.vue'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { useTabsStore, type AppTab } from '../stores/tabs'
+import { useSidebarStore } from '../stores/sidebar'
 import { useV2SessionStore } from '../v2/sessionStore'
 import { FEATURE_NAV, pageTitle } from '../config/navigation'
 
@@ -12,6 +13,7 @@ const router = useRouter()
 const agent = useMultiAgentStore()
 const v2 = useV2SessionStore()
 const tabsStore = useTabsStore()
+const sidebar = useSidebarStore()
 const scroller = ref<HTMLElement | null>(null)
 const featureMenuOpen = ref(false)
 
@@ -135,6 +137,20 @@ function newConversation() {
       <button class="titlebar-icon" :class="{ pressed: route.name === 'MultiAgent' }" title="主页" aria-label="主页" @click="goHome">
         <svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
           <path d="M13.8 11.6H9.4M11.6 9.4v4.4M6.8 9.4v4.4H2V9.4h4.8Zm0-7.4v4.4H2V2h4.8Zm7.2 0v4.4H9.4V2H14Z"/>
+        </svg>
+      </button>
+
+      <button
+        class="titlebar-icon titlebar-sidebar-toggle"
+        :class="{ collapsed: sidebar.collapsed }"
+        :title="sidebar.collapsed ? '展开侧边栏' : '收起侧边栏'"
+        aria-label="切换侧边栏"
+        @click="sidebar.toggle()"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="2"/>
+          <path d="M9 4v16"/>
+          <polyline points="15.5 9.5 13 12 15.5 14.5"/>
         </svg>
       </button>
 
