@@ -743,7 +743,7 @@ function toolResultText(part: ToolPart): string {
           </div>
           <div class="empty-orb-ring"></div>
         </div>
-        <p class="empty-title">向智能助手提问</p>
+        <p class="empty-title">基于 RAG 的知识库问答与 Agent 系统</p>
         <p class="empty-hint">知识库检索、代码编写、联网搜索一站完成</p>
       </div>
 

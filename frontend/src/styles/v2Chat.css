@@ -593,7 +593,7 @@
   box-shadow: var(--shadow-sm);
 }
 .empty-orb-ring { display: none; }
-.empty-title { font-size: 17px; font-weight: 700; color: var(--text); margin: 0; }
+.empty-title { font-size: 17px; font-weight: 700; color: var(--text); margin: 0; line-height: 1.5; text-align: center; max-width: 640px; }
 .empty-hint { font-size: 13px; margin: 2px 0 0; }
 /* 功能按钮 + 功能菜单 */
 .feature-btn {

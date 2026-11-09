@@ -148,6 +148,7 @@ html[data-theme='dark'] {
 /* ── Base ── */
 html, body, #app {
   height: 100%;
+  font-size: 13px;
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   color: var(--text);
   background: var(--bg);
@@ -157,8 +158,8 @@ html, body, #app {
 }
 
 a { color: var(--primary); text-decoration: none; }
-button { cursor: pointer; font-family: inherit; }
-input, textarea { font-family: inherit; }
+button { cursor: pointer; font-family: inherit; font-size: inherit; }
+input, textarea, select { font-family: inherit; font-size: inherit; }
 
 ::selection {
   background: var(--primary-glow);
