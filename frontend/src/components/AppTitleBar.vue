@@ -15,6 +15,18 @@ const tabsStore = useTabsStore()
 const scroller = ref<HTMLElement | null>(null)
 const featureMenuOpen = ref(false)
 
+const featureIcons = new Map(FEATURE_NAV.map((item) => [item.path, item.icon]))
+
+function tabIcon(tab: AppTab): { d: string; box: string } {
+  if (tab.kind === 'conversation') {
+    return { d: 'M2.5 3.5h11v7.2H7l-3.2 2.6v-2.6H2.5V3.5Z', box: '0 0 16 16' }
+  }
+  const icon = featureIcons.get(tab.path)
+  return icon
+    ? { d: icon, box: '0 0 24 24' }
+    : { d: 'M4 4h9l7 7v9H4V4Zm9 0v7h7M8 14h8M8 17h5', box: '0 0 24 24' }
+}
+
 function openFeature(path: string) {
   featureMenuOpen.value = false
   if (route.path !== path) router.push(path)
@@ -137,9 +149,8 @@ function newConversation() {
           @click="openTab(tab)"
           @mouseup="closeWithMiddle($event, tab)"
         >
-          <svg class="tab-kind" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
-            <path v-if="tab.kind === 'conversation'" d="M2.5 3.5h11v7.2H7l-3.2 2.6v-2.6H2.5V3.5Z"/>
-            <path v-else d="M2.5 2.5h11v11h-11v-11Zm3.2 3.2h4.6M5.7 8.9h4.6"/>
+          <svg class="tab-kind" width="13" height="13" :viewBox="tabIcon(tab).box" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path :d="tabIcon(tab).d" />
           </svg>
           <span class="tab-label">{{ tab.title }}</span>
           <span class="tab-close" title="关闭标签页" @click="closeTab($event, tab)">

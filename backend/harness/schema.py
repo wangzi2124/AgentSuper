@@ -5,9 +5,41 @@ from __future__ import annotations
 import weakref
 from typing import Any, Callable, Iterable
 
-# 15 → 20：内置联网（web_search/web_fetch/http_request）与天气（get_weather）
+# 20：内置联网（web_search/web_fetch/http_request）与天气（get_weather）
 # 常驻工具表后，需保留足够的 global 槽位给 task + load_skill_*，避免技能被挤掉。
 MAX_TOOL_DEFS = 20
+
+# Core tools that must never be crowded out by plugin/custom/MCP tools.
+CORE_SCOPED_TOOLS = frozenset(
+    {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "append_file",
+        "delete_file",
+        "create_directory",
+        "ls",
+        "grep",
+        "glob",
+        "shell_exec",
+        "apply_patch",
+    }
+)
+
+# Essential global tools: real-time/network capabilities the prompt tells the
+# model to use. If too many scoped (plugin/custom) tools exist, these used to
+# lose every slot, so the model was told to call `get_weather` while the tool
+# was absent from its schema — it then hallucinated a result.
+ESSENTIAL_GLOBAL_TOOLS = frozenset(
+    {
+        "web_search",
+        "web_fetch",
+        "http_request",
+        "get_weather",
+        "ask_question",
+        "task",
+    }
+)
 
 
 def _signature(definitions: Iterable[Any]) -> tuple[Any, ...]:
@@ -35,17 +67,41 @@ class ToolSchemaCache:
     def _select(self, definitions: list[Any]) -> list[Any]:
         """Select at most ``limit`` definitions for the model.
 
-        Business tools (``scope != "global"``: file/shell/etc.) take priority;
-        global tools (``task`` + one ``load_skill_*`` per enabled skill) fill the
-        remaining slots. Previously globals came first, so a large skill library
-        could crowd out ``write_file``/``shell_exec`` entirely — the model then
-        could not act at all (no tool call → no permission prompt).
+        Priority (highest first): core file/shell tools → essential global
+        tools (web/weather/task/question) → other scoped tools (plugins, MCP,
+        custom) → other global tools (skills). Essential globals are reserved
+        so a large plugin library can no longer remove `get_weather`/`web_*`
+        from the schema while the prompt still instructs the model to call it.
         """
         if len(definitions) <= self.limit:
             return definitions
-        scoped = [td for td in definitions if getattr(td, "scope", "") != "global"]
-        globals_ = [td for td in definitions if getattr(td, "scope", "") == "global"]
-        return (scoped + globals_)[: self.limit]
+
+        core = [td for td in definitions if getattr(td, "name", "") in CORE_SCOPED_TOOLS]
+        essential = [
+            td for td in definitions if getattr(td, "name", "") in ESSENTIAL_GLOBAL_TOOLS
+        ]
+        scoped_rest = [
+            td
+            for td in definitions
+            if getattr(td, "scope", "") != "global"
+            and getattr(td, "name", "") not in CORE_SCOPED_TOOLS
+            and getattr(td, "name", "") not in ESSENTIAL_GLOBAL_TOOLS
+        ]
+        global_rest = [
+            td
+            for td in definitions
+            if getattr(td, "scope", "") == "global"
+            and getattr(td, "name", "") not in ESSENTIAL_GLOBAL_TOOLS
+        ]
+
+        selected = core + essential
+        remaining = self.limit - len(selected)
+        if remaining > 0:
+            selected.extend(scoped_rest[:remaining])
+            remaining = self.limit - len(selected)
+        if remaining > 0:
+            selected.extend(global_rest[:remaining])
+        return selected[: self.limit]
 
     def build(
         self,

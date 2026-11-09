@@ -58,6 +58,45 @@ def test_skill_tools_do_not_crowd_out_file_and_shell_tools():
 
 
 
+def test_essential_globals_survive_plugin_crowding():
+    """回归：插件/自定义工具占满 scoped 槽位时，天气/联网工具不能被挤掉。"""
+    registry = ToolRegistry()
+    for name in (
+        "read_file",
+        "write_file",
+        "edit_file",
+        "append_file",
+        "delete_file",
+        "create_directory",
+        "ls",
+        "grep",
+        "glob",
+        "shell_exec",
+        "apply_patch",
+    ):
+        registry.register(
+            ToolDefinition(name=name, description=name, fn=lambda: "ok", scope="location")
+        )
+    for name in ("web_search", "web_fetch", "http_request", "get_weather", "ask_question", "task"):
+        registry.register(
+            ToolDefinition(name=name, description=name, fn=lambda: "ok", scope="global")
+        )
+    for i in range(20):
+        registry.register(
+            ToolDefinition(
+                name=f"tool_{i}", description=f"tool {i}", fn=lambda: "ok", scope="location"
+            )
+        )
+
+    names = [d["function"]["name"] for d in build_tool_defs(registry, scope="location")]
+
+    assert len(names) == MAX_TOOL_DEFS
+    for required in ("get_weather", "web_search", "web_fetch", "http_request", "ask_question", "task"):
+        assert required in names
+    for required in ("read_file", "write_file", "edit_file", "ls", "grep", "glob", "shell_exec"):
+        assert required in names
+
+
 def test_tool_order_is_deterministic_across_registration_orders():
     def build(names: list[str]) -> list[str]:
         registry = ToolRegistry()
