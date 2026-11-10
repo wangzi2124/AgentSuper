@@ -82,7 +82,7 @@ HTTP / SSE
 
 - **后台回合 / 断连续流**：v2 使用 `app/session/coordinator.py` + `/api/v2/event`；旧 `/api/chat/multi-agent/stream` 与 `turn_runner` 已删除。
 - **TurnHarness**：`harness/kernel.py`。`PlatformContext.run/stream` 已接入；`turn_id` 通过 contextvar 传播。
-- **Model Runtime**：`models/runtime.py`（ADR-0001）。`TierModel` 只做 facade；endpoint/凭证、窗口、`num_ctx`/`think`、`keep_alive` 与预热都收在 `ModelRuntime.complete/stream/warm`，provider 差异由 `_OllamaAdapter` / `_ProviderAdapter`（云/兼容）承担。解析结果按回合 scope 缓存（`app/api/compat.py` 与 `set_current_turn` 成对 begin/end）；无 scope 的后台调用单次解析。`models/catalog.py` 保持声明式，provider/config 读取有写时失效的进程缓存。
+- **Model Runtime**：`models/runtime.py`（ADR-0001）。`TierModel` 只做 facade；endpoint/凭证、窗口、`num_ctx`/`think`、`keep_alive`、Provider timeout 与预热都收在 `ModelRuntime.complete/stream/warm`，provider 差异由 `_OllamaAdapter` / `_ProviderAdapter`（云/兼容）承担。解析结果按回合 scope 缓存（`app/api/compat.py` 与 `set_current_turn` 成对 begin/end）；无 scope 的后台调用单次解析。`models/catalog.py` 保持声明式，provider/config 读取有写时失效的进程缓存。
 - **AgentLoop**：`run_tool_loop`。`graph/nodes/execute.py` 传 `stream=True`；native 与 fallback 都走 `ToolAdapter.stream()`，正文增量经 `push_event(text_delta)` 实时转 SSE；`app/api/compat._graph_events` 同时等待图节点与事件队列（不再靠 12s 心跳才 drain）。fallback 在 `ToolCallReady` 时提前执行工具；`models/stream.collect_stream` 只扣住疑似工具 JSON，普通正文逐块下发。空回复最多补答 2 次，之后收尾；不把 thinking 模型的 reasoning 冒充答案。
 - **工具并发**：同一轮工具调用按 `TOOL_CONCURRENCY`（默认 10）有界并发；`ToolDefinition.mutating` 或 `file_tools.WRITE_TOOLS`/`shell_exec` 拿写锁独占，`READ_TOOLS`（read_file/ls/grep/glob）拿共享读锁——读之间并行，但不与写重叠；自定义插件工具默认 `mutating=True`（保守串行），只读插件可显式传 false。审批提示按回合串行。结果仍按模型 tool_calls 顺序回填。
 - **Prompt 前缀缓存**：`prompts/assembly.compose_system` 固定 shared + profile + role 稳定头，vision/memory/RAG/skills 追加在后；tools 选满后按 name 排序，避免注册序抖动前缀；`harness/schema.py` 预留 core 文件/Shell 与 essential global（web/weather/task/ask_question）名额，插件/自定义工具再多也不会挤掉 `get_weather`/`web_*`；`models/cache_hints.py` 对 Anthropic 在 system 与最新 user 注入 `cache_control`，对 OpenAI/Azure/OpenRouter/OpenCode/Venice 注入 `prompt_cache_key` + `x-session-affinity`；提示词文件按 mtime 缓存读取。
@@ -241,7 +241,7 @@ npx vitest run tests/integration/
 - **自动压缩/手动 compact**：`ContextHarness` + `tail_snapshot` 语义；手动 compact 也要写 tail 起点。
 - **模型目录**：`models/catalog.py` 读取能力/窗口；`harness/capabilities.build_profile` 有 60s TTL，人工 override 优先。
 - **模型列表口径**：目录条目的只读 `origin`（`override` / `extra` / `provider` / `builtin` / `local`）是「模型管理 → 模型列表」的过滤依据；前端只展示前三类，内置与本机 Ollama 自动探测仅保留在下拉/聊天选择器。Provider 表格「模型数」同口径（`provider_models_source`）。`_provider_seen` 仅在内存记录本次探测实际返回的 ID（含已收录内置 ID），Provider 重建时离线/禁用即清空，不持久化；前端缓存 v2，v1 直接丢弃。要在列表里管理内置/本机模型，需手动添加，或配置一个非保留名的 ollama 类型 Provider。
-- **Provider 表单**：Label（显示名）与模型前缀（litellm provider 段）**都必填、互不推导**；前缀新增时校验 `^[a-z0-9][a-z0-9_-]*$`、编辑时只读；后端 `upsert_provider` 同样校验（存量条目不做回溯）。
+- **Provider 表单**：Label（显示名）与模型前缀（litellm provider 段）**都必填、互不推导**；前缀新增时校验 `^[a-z0-9][a-z0-9_-]*$`、编辑时只读；后端 `upsert_provider` 同样校验（存量条目不做回溯）。扩展字段 `timeout`/`headers`/`body`/`package`/`compatibility` 由 `catalog._merge_provider_extras` 统一并入 `provider_api()`（openai 与 ollama 分支同口径，回归用例在 `tests/unit/test_ollama_compat.py`）：`headers`/`body` 经 `litellm_extra_kwargs` 映射为 `extra_headers`/`extra_body`，`timeout` 进 `_endpoint()` 由 `_timeout_for()` 消费——**保存即参与运行**，不要再新增旁路。空 timeout（None/""/0）= 清除字段回退默认，不会钳成 1 秒。`provider_models_source()` 会回传这些字段（编辑表单回填依赖）；前端 `ModelManagerView` 的 timeout 输入是 `type="number"`，v-model 会把值变成 number，提交侧必须按 String 处理再 trim。
 - **Ollama 窗口**：默认不下发 `num_ctx`，以 Ollama 服务器配置为准；运行时窗口由 `models/runtime.py` 在后台刷新 `/api/ps.context_length`（30s 快照 + per-model last-known），模型调用路径只读快照、不阻塞事件循环；未加载时回落 `OLLAMA_NUM_CTX`（默认 4096）。只有「模型管理」显式设置过 `context_length` 才下发覆盖；`/api/models` 的 `runtime_context_length` 是只读展示字段。prompt 适配守卫（`models/context_guard.py`）会按该窗口裁剪；**若 system+工具+当前消息仍装不下，会自动把 `num_ctx` 提升到所需窗口（2 的幂，上限 32768）并粘住该值**，只有超过上限才报错。不要在回落值上再假设 8192。本模型空闲驻留由 `OLLAMA_KEEP_ALIVE`（默认 `"30m"`）控制；模型切换成功后会后台预热。数字串（如 `-1` / `0`）在 runtime 内归一化为整数再下发，避免 Ollama 的 Go duration 解析报 `missing unit in duration "-1"`。
 - **上下文窗口**：未知窗口时 `resolve_mode` 保守回退；不要在未知窗口上做原生工具假设。
 - **Ollama**：`ollama/*` / `ollama_chat/*` 已适配；tools 模型走原生路径（流式工具调用由 stream 层转非流式），无 tools 模型走文本回退。本地 CPU 慢，默认不设为默认模型；冒烟用 `HARNESS_OLLAMA_TEST=1` + `HARNESS_OLLAMA_TOOLS_MODEL` / `HARNESS_OLLAMA_TEXT_MODEL`。
@@ -277,14 +277,15 @@ npx vitest run tests/integration/
 
 ## 8. 验收与已知缺口
 
-当前实测（2026-11-03，本地 Windows）：
+当前实测（2026-11-10，本地 Windows，Provider 表单修复轮）：
 
-- 后端：`pytest tests\unit tests\contract tests\reliability tests\security` **846 passed**（env-gated 用例默认 skip；含 v2 投影/重建测试）
-- Harness 覆盖率：`92.46%`（`pytest ... --cov=harness --cov-fail-under=90`，门槛 90%）
-- 前端单测：`86 passed | 118 skipped`（`npm test`；live 用例需后端）
+- 后端：`pytest tests\unit tests\contract tests\reliability tests\security` **861 passed**（env-gated 用例默认 skip；含 v2 投影/重建测试与 Provider extras 回归）
+- Harness 覆盖率：门槛 90%；上次实测 `92.46%`（2026-11-03，本轮未重跑 cov）
+- 前端单测：`89 passed | 118 skipped`（`npm test`；live 用例需后端）
 - 前端 live SSE 集成：本轮未重跑（需后端；上次 `119 passed`）
 - 前端 `npm run build`：通过
 - 真实模型：DeepSeek `deepseek/deepseek-v4-flash → deepseek-v4-pro`；E2E 8 条、PF-01/02/05/06/07 通过
+- 浏览器端到端：Playwright（Chromium）可用于前端 UI 复现/验证；前端 token 注入方式为 localStorage 键 `agent_super_user_id` / `agent_super_auth_token`（见 `frontend/src/api/auth.ts`），可绕过登录页
 
 已知缺口：
 
