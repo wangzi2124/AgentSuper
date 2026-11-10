@@ -773,10 +773,22 @@ def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
     entry.setdefault("enabled", True)
     entry.setdefault("api_base", "")
     ptype = _provider_type(entry)
-    if ptype == "ollama" and name in ("ollama", "ollama_chat"):
+    # 保留前缀与 litellm 的本地 Ollama 路由（ollama/、ollama_chat/）冲突。
+    # - `ollama_chat`：任何 type 都拒绝（本地内置模型全用它，同名 Provider 会把
+    #   本地模型劫持到云端端点）。
+    # - `ollama` + type=ollama：允许——`provider_api()` 注册表命中优先于前缀，
+    #   模型 id `ollama/<name>` 会正确改写为 `ollama_chat/<name>` 并带注册表
+    #   api_base/api_key 走 /api/chat；本地性由 runtime 按 api_base 判定
+    #   （见 `_is_local_ollama_endpoint` 的 `ollama_registered` 分支）。
+    # - `ollama` + type=openai：拒绝——openai 分支不改写 litellm_model，原始 id
+    #   `ollama/<name>` 会被 litellm 前缀路由到本地 Ollama 协议（/api/generate），
+    #   云端表现为 "Could not get model info"。
+    if name == "ollama_chat" or (name == "ollama" and ptype != "ollama"):
         raise ValueError(
-            "Provider 名称不能使用保留前缀 ollama / ollama_chat（本地 Ollama 已占用）；"
-            "Ollama Cloud 请使用 ollama-cloud 等名称"
+            "该前缀与 litellm 本地 Ollama 路由冲突：type=openai 的 Provider 不能"
+            "叫 ollama / ollama_chat（模型 id 会被 litellm 前缀路由到本地 Ollama）；"
+            "Ollama Cloud 请把 type 切为 ollama（可用名字 ollama），或改用"
+            "ollama-cloud 等名称"
         )
     entry["type"] = ptype
     providers[name] = entry
@@ -1315,8 +1327,22 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     declared = str(entry.get("provider") or "").strip()
     providers = read_providers()
     reg = providers.get(provider)
-    if reg is None and declared and declared != provider:
+    # 声明回落（id 前缀与注册表名不一致时按条目 provider 找）：保留本地前缀
+    # （ollama/ollama_chat）不走回落——本地内置/自动探测条目声明的 provider=ollama
+    # 是 litellm 语义，注册表存在同名 Provider 时会把本地模型劫持到云端端点。
+    if (
+        reg is None
+        and declared
+        and declared != provider
+        and provider not in ("ollama", "ollama_chat")
+    ):
         reg = providers.get(declared)
+    # 注册表 Provider 撞保留前缀名时，仅放行「非本地条目」：origin 为 builtin/local
+    # 的模型（本地 Ollama 自动探测/内置）必须继续走下方本地分支；未收录的新 id
+    # （entry 为空）与 Provider 探测/手动添加的条目按注册表解析（注册表优先于前缀）。
+    if reg is not None and provider in ("ollama", "ollama_chat"):
+        if str(entry.get("origin") or "") in ("builtin", "local"):
+            reg = None
     # 注册表中显式声明 type=ollama 的 Provider（如 Ollama Cloud）：走原生 /api/chat，
     # 但模型 id 保持 `{provider}/{name}`，避免与本地 ollama/、ollama_chat/ 前缀冲突。
     if reg and _provider_type(reg) == "ollama":
@@ -1328,6 +1354,10 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
             "litellm_model": f"ollama_chat/{name}",
             "provider_type": "ollama",
             "options": None,
+            # 显式注册的 Ollama Provider（可指向云端如 ollama.com，也可显式指本地）：
+            # runtime 依据该标志按 api_base 判定本地性，不再依赖模型 id 前缀
+            # （前缀可能撞保留名 ollama/，此时前缀不代表“本地”）。
+            "ollama_registered": True,
         }
         # 表单扩展字段与 openai 分支同口径透传，否则编辑后保存的值不参与运行
         _merge_provider_extras(reg, creds)

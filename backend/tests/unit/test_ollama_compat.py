@@ -246,6 +246,64 @@ def test_upsert_provider_rejects_reserved_ollama_prefix(monkeypatch):
         )
 
 
+def test_upsert_provider_reserved_prefix_rules(monkeypatch):
+    """保留前缀三段式：ollama+type=ollama 允许（注册表优先改写）；其余拒绝。"""
+    monkeypatch.setattr(catalog, "load_config", lambda: {"providers": {}})
+    monkeypatch.setattr(catalog, "save_config", lambda c: None)
+    monkeypatch.setattr(catalog, "reload_catalog", lambda: None)
+
+    # ollama_chat：任何 type 拒绝（本地内置模型全用它，同名会劫持到云端）
+    for ptype in ("openai", "ollama"):
+        with pytest.raises(ValueError, match="保留|路由冲突|Ollama"):
+            catalog.upsert_provider(
+                "ollama_chat", {"label": "Reserved", "type": ptype, "api_base": "https://ollama.com"}
+            )
+    # ollama + type=openai：拒绝（litellm 前缀路由无解）
+    with pytest.raises(ValueError):
+        catalog.upsert_provider(
+            "ollama", {"label": "Cloud", "type": "openai", "api_base": "https://ollama.com"}
+        )
+    # ollama + type=ollama：允许——模型 id ollama/<name> 注册表命中优先，
+    # provider_api 会改写为 ollama_chat/<name> 走注册表端点
+    entry = catalog.upsert_provider(
+        "ollama", {"label": "Ollama Cloud", "type": "ollama", "api_base": "https://ollama.com"}
+    )
+    assert entry["type"] == "ollama"
+
+
+def test_provider_api_ollama_prefix_registered_beats_local(monkeypatch):
+    """Provider 叫 ollama（type=ollama）指向云端：模型 id `ollama/<name>` 注册表
+    命中优先于前缀，改写为 ollama_chat/<name> 并带注册表 api_base/api_key。"""
+    monkeypatch.setattr(
+        catalog,
+        "read_providers",
+        lambda: {
+            "ollama": {"type": "ollama", "api_base": "https://ollama.com", "api_key": "cloud-key"},
+        },
+    )
+    creds = catalog.provider_api("ollama/beam")
+    assert creds["is_ollama"] is True
+    assert creds["litellm_model"] == "ollama_chat/beam"
+    assert creds["api_base"] == "https://ollama.com"
+    assert creds["api_key"] == "cloud-key"
+    # 显式注册标志：runtime 按它把本地性交给 api_base 判定
+    assert creds["ollama_registered"] is True
+
+
+def test_provider_api_registered_ollama_local_base(monkeypatch):
+    """显式注册的 Ollama Provider 指向 localhost：仍判本地（按 api_base）。"""
+    monkeypatch.setattr(
+        catalog,
+        "read_providers",
+        lambda: {
+            "ollama": {"type": "ollama", "api_base": "http://localhost:11434", "api_key": ""},
+        },
+    )
+    creds = catalog.provider_api("ollama/qwen:7b")
+    assert creds["ollama_registered"] is True
+    assert creds["api_base"] == "http://localhost:11434"
+
+
 def test_ollama_type_provider_api_carries_form_extras(monkeypatch):
     """编辑 Provider 表单保存的 timeout/headers/body 必须参与运行（ollama 分支回归）。"""
     monkeypatch.setattr(

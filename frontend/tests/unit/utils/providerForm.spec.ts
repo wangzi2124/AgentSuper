@@ -40,12 +40,19 @@ describe('validateProviderForm', () => {
     expect(long.error).toContain(String(PROVIDER_LABEL_MAX_LEN))
   })
 
-  it('Ollama 类型禁止保留前缀', () => {
-    for (const reserved of ['ollama', 'ollama_chat']) {
-      const r = validateProviderForm({ ...okBase, name: reserved, type: 'ollama' }, false)
-      expect(r.ok, reserved).toBe(false)
-      expect(r.error).toContain('保留前缀')
+  it('保留前缀三段式：ollama_chat 全拒；ollama 仅 type=ollama 放行', () => {
+    for (const type of ['openai', 'ollama'] as const) {
+      const r = validateProviderForm({ ...okBase, name: 'ollama_chat', type }, false)
+      expect(r.ok, type).toBe(false)
+      expect(r.error).toContain('Ollama')
     }
+    expect(
+      validateProviderForm({ ...okBase, name: 'ollama', type: 'openai' }, false).ok,
+    ).toBe(false)
+    // type=ollama + 名字 ollama：注册表命中优先于前缀，允许
+    expect(
+      validateProviderForm({ ...okBase, name: 'ollama', type: 'ollama' }, false).ok,
+    ).toBe(true)
   })
 
   it('编辑时保留存量前缀（不套用 slug 规则、不转小写）', () => {

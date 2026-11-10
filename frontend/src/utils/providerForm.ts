@@ -4,7 +4,9 @@
  * 规则：Label 与模型前缀都必填、互不推导。
  * - Label：人类可读名称，trim 后非空，≤ 50 字符。
  * - 前缀：litellm provider 段，匹配 `^[a-z0-9][a-z0-9_-]*$`；新增时自动转小写。
- * - Ollama 类型禁止保留前缀 `ollama` / `ollama_chat`。
+ * - 保留前缀：`ollama_chat` 任何类型都拒绝；`ollama` 仅 type=ollama 允许
+ *   （注册表命中优先于前缀，模型 id `ollama/*` 会正确改写为 `ollama_chat/*`
+ *   走注册表端点）；type=openai 的 `ollama` 会被 litellm 前缀路由到本地 Ollama。
  * - 编辑已有 Provider 时不校验前缀字符集（存量条目保持原样）。
  */
 
@@ -71,10 +73,13 @@ export function validateProviderForm(
     }
   }
 
-  if (values.type === 'ollama' && (OLLAMA_RESERVED_PREFIXES as readonly string[]).includes(name)) {
+  const reserved =
+    name === 'ollama_chat' || (name === 'ollama' && values.type !== 'ollama')
+  if (reserved) {
     return {
       ok: false,
-      error: 'Ollama 类型不能使用保留前缀 ollama / ollama_chat，请改用 ollama-cloud 或 ollama-local',
+      error:
+        '该前缀与 litellm 本地 Ollama 路由冲突：type=openai 不能叫 ollama / ollama_chat；Ollama Cloud 请把 type 切为 ollama（可用名字 ollama），或改用 ollama-cloud 等名称',
       label,
       name,
     }

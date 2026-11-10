@@ -636,6 +636,11 @@ def _keep_alive_value() -> str | int | None:
 
 
 def _is_local_ollama_endpoint(endpoint: dict[str, Any]) -> bool:
+    # 显式注册的 Ollama Provider：本地性按 api_base 地址判定。模型 id 前缀
+    # （ollama/）可能与保留名撞车——此时前缀不代表“本地”，注册表配置才是真值。
+    if endpoint.get("ollama_registered"):
+        base = str(endpoint.get("api_base") or "").lower()
+        return "127.0.0.1" in base or "localhost" in base
     mid = str(endpoint.get("model") or "")
     base = str(endpoint.get("api_base") or "").lower()
     return _is_ollama(mid) or "127.0.0.1" in base or "localhost" in base
@@ -867,6 +872,7 @@ class ModelRuntime:
                 "headers": creds.get("headers"),
                 "body": creds.get("body"),
                 "timeout": creds.get("timeout"),
+                "ollama_registered": bool(creds.get("ollama_registered")),
                 "variant": variant,
                 "is_ollama": True,
             }

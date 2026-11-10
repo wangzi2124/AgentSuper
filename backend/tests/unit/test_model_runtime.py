@@ -100,6 +100,65 @@ def test_endpoint_timeout_absent_falls_back(monkeypatch):
     assert rt._timeout_for(ep) == 120  # 未配置时回退 RuntimeSpec 默认超时
 
 
+def test_registered_ollama_endpoint_locality_by_api_base(monkeypatch):
+    """显式注册的 Ollama Provider（模型 id 可能带 ollama/ 前缀）：本地性按
+    api_base 判定，不再被 id 前缀短路到本地适配器。"""
+    monkeypatch.setattr(settings, "litellm_proxy_url", "")
+    monkeypatch.setattr(
+        catalog,
+        "provider_api",
+        lambda mid: {
+            "api_base": "https://ollama.com",
+            "api_key": "cloud-key",
+            "is_ollama": True,
+            "litellm_model": "ollama_chat/beam",
+            "ollama_registered": True,
+        },
+    )
+    rt = ModelRuntime(RuntimeSpec(model_override="ollama/beam"))
+    ep = rt.endpoint()
+    assert ep["is_ollama"] is True
+    assert ep["ollama_registered"] is True
+    # 云端地址 + ollama/ 前缀 -> 不是本地端点 -> 走 Cloud 适配器（无 warm/num_ctx）
+    assert runtime._is_local_ollama_endpoint(ep) is False
+    assert runtime._adapter_for(ep).name == "cloud"
+
+    # 同一注册表 Provider 指向 localhost -> 本地端点
+    monkeypatch.setattr(
+        catalog,
+        "provider_api",
+        lambda mid: {
+            "api_base": "http://localhost:11434",
+            "api_key": "",
+            "is_ollama": True,
+            "ollama_registered": True,
+        },
+    )
+    rt_local = ModelRuntime(RuntimeSpec(model_override="ollama/qwen:7b"))
+    ep_local = rt_local.endpoint()
+    assert runtime._is_local_ollama_endpoint(ep_local) is True
+
+
+def test_unregistered_ollama_prefix_still_local(monkeypatch):
+    """无注册表的本地 Ollama 模型（ollama_chat/ 前缀）：保持原 id 前缀判本地。"""
+    monkeypatch.setattr(settings, "litellm_proxy_url", "")
+    monkeypatch.setattr(
+        catalog,
+        "provider_api",
+        lambda mid: {
+            "api_base": "http://localhost:11434",
+            "api_key": "ollama",
+            "is_ollama": True,
+            "litellm_model": "ollama_chat/qwen:7b",
+        },
+    )
+    rt = ModelRuntime(RuntimeSpec(model_override="ollama_chat/qwen:7b"))
+    ep = rt.endpoint()
+    assert not ep.get("ollama_registered")
+    assert runtime._is_local_ollama_endpoint(ep) is True
+    assert runtime._adapter_for(ep).name == "ollama"
+
+
 def test_local_ollama_transport_sends_keep_alive(monkeypatch):
     monkeypatch.setattr(settings, "litellm_proxy_url", "")
     monkeypatch.setattr(settings, "ollama_context_guard", False)

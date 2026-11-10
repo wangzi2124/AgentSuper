@@ -242,6 +242,7 @@ npx vitest run tests/integration/
 - **模型目录**：`models/catalog.py` 读取能力/窗口；`harness/capabilities.build_profile` 有 60s TTL，人工 override 优先。
 - **模型列表口径**：目录条目的只读 `origin`（`override` / `extra` / `provider` / `builtin` / `local`）是「模型管理 → 模型列表」的过滤依据；前端只展示前三类，内置与本机 Ollama 自动探测仅保留在下拉/聊天选择器。Provider 表格「模型数」同口径（`provider_models_source`）。`_provider_seen` 仅在内存记录本次探测实际返回的 ID（含已收录内置 ID），Provider 重建时离线/禁用即清空，不持久化；前端缓存 v2，v1 直接丢弃。要在列表里管理内置/本机模型，需手动添加，或配置一个非保留名的 ollama 类型 Provider。
 - **Provider 表单**：Label（显示名）与模型前缀（litellm provider 段）**都必填、互不推导**；前缀新增时校验 `^[a-z0-9][a-z0-9_-]*$`、编辑时只读；后端 `upsert_provider` 同样校验（存量条目不做回溯）。扩展字段 `timeout`/`headers`/`body`/`package`/`compatibility` 由 `catalog._merge_provider_extras` 统一并入 `provider_api()`（openai 与 ollama 分支同口径，回归用例在 `tests/unit/test_ollama_compat.py`）：`headers`/`body` 经 `litellm_extra_kwargs` 映射为 `extra_headers`/`extra_body`，`timeout` 进 `_endpoint()` 由 `_timeout_for()` 消费——**保存即参与运行**，不要再新增旁路。空 timeout（None/""/0）= 清除字段回退默认，不会钳成 1 秒。`provider_models_source()` 会回传这些字段（编辑表单回填依赖）；前端 `ModelManagerView` 的 timeout 输入是 `type="number"`，v-model 会把值变成 number，提交侧必须按 String 处理再 trim。
+- **保留前缀三段式（ollama/ollama_chat）**：`upsert_provider`（后端）与 `frontend/src/utils/providerForm.ts`（前端）同规则：`ollama_chat` 前缀任何 type 拒绝；`ollama` 前缀 + type=openai 拒绝（litellm 前缀路由无解）；`ollama` 前缀 + type=ollama **允许**（Ollama Cloud 等远端 Ollama 协议端点）。该组合下 `catalog.provider_api()` 注册表命中**优先于 litellm 前缀**：改写 `litellm_model=ollama_chat/<name>` + api_base/key 走 `/api/chat`，并打 `ollama_registered: True` 标志；`runtime._is_local_ollama_endpoint()` 据此按 **api_base**（localhost/127.0.0.1=本地，否则云端）选 adapter，云端即 `_CloudAdapter`（无 warm/num_ctx/keep_alive、timeout 120 而非 300）。防劫持守卫：provider 名为保留前缀时，`origin` 为 builtin/local 的本地条目**不**被注册表命中劫持（继续走本地 Ollama 分支），未收录 id 与 Provider 探测条目按注册表解析。
 - **Ollama 窗口**：默认不下发 `num_ctx`，以 Ollama 服务器配置为准；运行时窗口由 `models/runtime.py` 在后台刷新 `/api/ps.context_length`（30s 快照 + per-model last-known），模型调用路径只读快照、不阻塞事件循环；未加载时回落 `OLLAMA_NUM_CTX`（默认 4096）。只有「模型管理」显式设置过 `context_length` 才下发覆盖；`/api/models` 的 `runtime_context_length` 是只读展示字段。prompt 适配守卫（`models/context_guard.py`）会按该窗口裁剪；**若 system+工具+当前消息仍装不下，会自动把 `num_ctx` 提升到所需窗口（2 的幂，上限 32768）并粘住该值**，只有超过上限才报错。不要在回落值上再假设 8192。本模型空闲驻留由 `OLLAMA_KEEP_ALIVE`（默认 `"30m"`）控制；模型切换成功后会后台预热。数字串（如 `-1` / `0`）在 runtime 内归一化为整数再下发，避免 Ollama 的 Go duration 解析报 `missing unit in duration "-1"`。
 - **上下文窗口**：未知窗口时 `resolve_mode` 保守回退；不要在未知窗口上做原生工具假设。
 - **Ollama**：`ollama/*` / `ollama_chat/*` 已适配；tools 模型走原生路径（流式工具调用由 stream 层转非流式），无 tools 模型走文本回退。本地 CPU 慢，默认不设为默认模型；冒烟用 `HARNESS_OLLAMA_TEST=1` + `HARNESS_OLLAMA_TOOLS_MODEL` / `HARNESS_OLLAMA_TEXT_MODEL`。
@@ -277,9 +278,9 @@ npx vitest run tests/integration/
 
 ## 8. 验收与已知缺口
 
-当前实测（2026-11-10，本地 Windows，Provider 表单修复轮）：
+当前实测（2026-11-10，本地 Windows，Ollama Cloud / 保留前缀三段式轮）：
 
-- 后端：`pytest tests\unit tests\contract tests\reliability tests\security` **861 passed**（env-gated 用例默认 skip；含 v2 投影/重建测试与 Provider extras 回归）
+- 后端：`pytest tests\unit tests\contract tests\reliability tests\security` **866 passed**（env-gated 用例默认 skip；含 v2 投影/重建测试、Provider extras 与 ollama 保留前缀回归）
 - Harness 覆盖率：门槛 90%；上次实测 `92.46%`（2026-11-03，本轮未重跑 cov）
 - 前端单测：`89 passed | 118 skipped`（`npm test`；live 用例需后端）
 - 前端 live SSE 集成：本轮未重跑（需后端；上次 `119 passed`）
