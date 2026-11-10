@@ -80,10 +80,29 @@ export const useTabsStore = defineStore('tabs', () => {
     return tabs.value[idx]?.path || tabs.value[idx - 1]?.path || HOME_PATH
   }
 
-  function closeAll() {
+  function closeAll(): string | null {
     tabs.value = []
     persist()
+    return activePath.value ? HOME_PATH : null
   }
 
-  return { tabs, activePath, openTab, setActive, renameTab, closeTab, closeAll }
+  function closeOthers(path: string): string | null {
+    const idx = tabs.value.findIndex(t => t.path === path)
+    if (idx < 0) return null
+    const keep = tabs.value[idx]!
+    tabs.value = [keep]
+    persist()
+    return activePath.value && activePath.value !== path ? path : null
+  }
+
+  function closeToRight(path: string): string | null {
+    const idx = tabs.value.findIndex(t => t.path === path)
+    if (idx < 0 || idx === tabs.value.length - 1) return null
+    const removedActive = tabs.value.slice(idx + 1).some(t => t.path === activePath.value)
+    tabs.value = tabs.value.slice(0, idx + 1)
+    persist()
+    return removedActive ? path : null
+  }
+
+  return { tabs, activePath, openTab, setActive, renameTab, closeTab, closeAll, closeOthers, closeToRight }
 })

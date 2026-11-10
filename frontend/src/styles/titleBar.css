@@ -147,3 +147,31 @@
 .titlebar-feature-item.active { background: var(--bg-subtle); color: var(--text); }
 .titlebar-feature-item svg { flex-shrink: 0; opacity: .78; }
 .titlebar-feature-item.active svg { opacity: 1; color: var(--primary); }
+
+.tab-context-menu {
+  position: fixed;
+  z-index: 61;
+  min-width: 150px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+}
+.tab-context-item {
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.tab-context-item:hover:not(:disabled) { background: var(--bg-subtle); color: var(--text); }
+.tab-context-item:disabled { opacity: 0.45; cursor: default; }
+.tab-context-sep { height: 1px; margin: 4px 2px; background: var(--border); }

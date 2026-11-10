@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, ref, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import UserMenu from './UserMenu.vue'
 import { useMultiAgentStore } from '../stores/multiAgent'
@@ -16,6 +16,7 @@ const tabsStore = useTabsStore()
 const sidebar = useSidebarStore()
 const scroller = ref<HTMLElement | null>(null)
 const featureMenuOpen = ref(false)
+const tabMenu = ref<{ x: number; y: number; path: string } | null>(null)
 
 const featureIcons = new Map(FEATURE_NAV.map((item) => [item.path, item.icon]))
 
@@ -91,6 +92,50 @@ function closeWithMiddle(event: MouseEvent, tab: AppTab) {
   if (next) router.push(next)
 }
 
+const menuStyle = computed(() => {
+  if (!tabMenu.value) return {}
+  const x = Math.max(8, Math.min(tabMenu.value.x, window.innerWidth - 200))
+  const y = Math.max(8, Math.min(tabMenu.value.y, window.innerHeight - 190))
+  return { left: `${x}px`, top: `${y}px` }
+})
+
+const menuTarget = computed(() => tabsStore.tabs.find(t => t.path === tabMenu.value?.path) || null)
+const canCloseOthers = computed(() => tabsStore.tabs.length > 1)
+const canCloseToRight = computed(() => {
+  const idx = tabsStore.tabs.findIndex(t => t.path === tabMenu.value?.path)
+  return idx >= 0 && idx < tabsStore.tabs.length - 1
+})
+
+function openTabMenu(event: MouseEvent, tab: AppTab) {
+  event.preventDefault()
+  featureMenuOpen.value = false
+  tabMenu.value = { x: event.clientX, y: event.clientY, path: tab.path }
+}
+
+function runMenuAction(action: (path: string) => string | null) {
+  const path = tabMenu.value?.path
+  tabMenu.value = null
+  if (!path) return
+  const next = action(path)
+  if (next) router.push(next)
+}
+
+function menuClose() {
+  runMenuAction(path => tabsStore.closeTab(path))
+}
+
+function menuCloseOthers() {
+  runMenuAction(path => tabsStore.closeOthers(path))
+}
+
+function menuCloseToRight() {
+  runMenuAction(path => tabsStore.closeToRight(path))
+}
+
+function menuCloseAll() {
+  runMenuAction(() => tabsStore.closeAll())
+}
+
 function goHome() {
   if (route.name !== 'MultiAgent') router.push({ name: 'MultiAgent' })
 }
@@ -164,6 +209,7 @@ function newConversation() {
           :title="tab.title"
           @click="openTab(tab)"
           @mouseup="closeWithMiddle($event, tab)"
+          @contextmenu.prevent="openTabMenu($event, tab)"
         >
           <svg class="tab-kind" width="13" height="13" :viewBox="tabIcon(tab).box" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path :d="tabIcon(tab).d" />
@@ -184,6 +230,15 @@ function newConversation() {
 
     <div class="titlebar-right">
       <UserMenu />
+    </div>
+
+    <div v-if="tabMenu" class="titlebar-menu-mask" @click="tabMenu = null" @contextmenu.prevent="tabMenu = null"></div>
+    <div v-if="tabMenu" class="tab-context-menu" :style="menuStyle">
+      <button class="tab-context-item" :disabled="!menuTarget" @click="menuClose">关闭</button>
+      <button class="tab-context-item" :disabled="!canCloseOthers" @click="menuCloseOthers">关闭其他</button>
+      <button class="tab-context-item" :disabled="!canCloseToRight" @click="menuCloseToRight">关闭右侧</button>
+      <div class="tab-context-sep"></div>
+      <button class="tab-context-item" :disabled="!tabsStore.tabs.length" @click="menuCloseAll">关闭全部</button>
     </div>
   </header>
 </template>
