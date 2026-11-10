@@ -246,6 +246,121 @@ def test_upsert_provider_rejects_reserved_ollama_prefix(monkeypatch):
         )
 
 
+def test_ollama_type_provider_api_carries_form_extras(monkeypatch):
+    """编辑 Provider 表单保存的 timeout/headers/body 必须参与运行（ollama 分支回归）。"""
+    monkeypatch.setattr(
+        catalog,
+        "read_providers",
+        lambda: {
+            "ollama-cloud": {
+                "type": "ollama",
+                "api_base": "https://ollama.com/v1",
+                "api_key": "k",
+                "timeout": 45,
+                "headers": {"X-Test": "1"},
+                "body": {"seed": 7},
+            }
+        },
+    )
+    creds = catalog.provider_api("ollama-cloud/gemma4:31b")
+    assert creds["is_ollama"] is True
+    assert creds["timeout"] == 45
+    assert creds["headers"] == {"X-Test": "1"}
+    assert creds["body"] == {"seed": 7}
+
+
+def test_provider_api_openai_type_carries_form_extras(monkeypatch):
+    """编辑 Provider 表单保存的 timeout/headers/body 必须参与运行（openai 分支回归）。"""
+    monkeypatch.setattr(
+        catalog,
+        "read_providers",
+        lambda: {
+            "mycloud": {
+                "type": "openai",
+                "api_base": "http://127.0.0.1:8001/v1",
+                "api_key": "k",
+                "timeout": 90,
+                "headers": {"X-Test": "2"},
+                "body": {"top_k": 3},
+                "package": "openai",
+                "compatibility": "",
+            }
+        },
+    )
+    creds = catalog.provider_api("mycloud/m1")
+    assert creds["is_ollama"] is False
+    assert creds["timeout"] == 90
+    assert creds["headers"] == {"X-Test": "2"}
+    assert creds["body"] == {"top_k": 3}
+
+
+def test_provider_extras_not_set_are_omitted(monkeypatch):
+    """空值不下发：runtime 依据键存在与否回退默认超时。"""
+    monkeypatch.setattr(
+        catalog,
+        "read_providers",
+        lambda: {"ollama-cloud": {"type": "ollama", "api_base": "https://ollama.com", "api_key": "k"}},
+    )
+    creds = catalog.provider_api("ollama-cloud/gemma4:31b")
+    assert "timeout" not in creds
+    assert "headers" not in creds
+    assert "body" not in creds
+
+
+def test_upsert_provider_timeout_zero_clears_instead_of_clamping(monkeypatch):
+    """前端空 timeout 发 0：应清除字段而不是钳成 1 秒超时。"""
+    cfg = {
+        "providers": {
+            "p": {"label": "P", "api_base": "http://x/v1", "timeout": 30.0},
+        }
+    }
+    monkeypatch.setattr(catalog, "load_config", lambda: cfg)
+    monkeypatch.setattr(catalog, "save_config", lambda c: cfg.update(c))
+    monkeypatch.setattr(catalog, "_cache_key", lambda: "test-key")
+    monkeypatch.setattr(catalog, "_catalog_cache", {"test-key": []})
+    monkeypatch.setattr(catalog, "_probe_cache", {})
+    monkeypatch.setattr(catalog, "_provider_seen", {})
+    monkeypatch.setattr(catalog, "reload_catalog", lambda: None)
+
+    entry = catalog.upsert_provider("p", {"label": "P", "api_base": "http://x/v1", "timeout": 0})
+    assert "timeout" not in entry
+    assert "timeout" not in cfg["providers"]["p"]
+
+    entry = catalog.upsert_provider("p", {"label": "P", "api_base": "http://x/v1", "timeout": "30"})
+    assert entry["timeout"] == 30.0
+
+
+def test_provider_models_source_returns_form_extras(monkeypatch):
+    """GET /models/config 的 providers 列表必须回传表单可编辑字段（编辑回填依赖）。"""
+    monkeypatch.setattr(catalog, "get_catalog", lambda force_reload=False: [])
+    monkeypatch.setattr(
+        catalog,
+        "read_providers",
+        lambda: {
+            "p": {
+                "label": "P",
+                "api_base": "http://x/v1",
+                "api_key": "k",
+                "enabled": True,
+                "type": "openai",
+                "timeout": 60,
+                "package": "openai",
+                "headers": {"X-A": "b"},
+                "body": {"k": 1},
+                "compatibility": "",
+            }
+        },
+    )
+    rows = catalog.provider_models_source()
+    p = rows[0]
+    assert p["timeout"] == 60
+    assert p["package"] == "openai"
+    assert p["headers"] == {"X-A": "b"}
+    assert p["body"] == {"k": 1}
+    # 空值字段不下发，前端回填成空串
+    assert "compatibility" not in p
+
+
 def test_probe_ollama_type_provider_uses_tags_with_bearer(monkeypatch):
     import json as _json
     import urllib.request as _urlreq

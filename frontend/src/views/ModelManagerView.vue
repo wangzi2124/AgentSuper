@@ -129,7 +129,8 @@ async function submitProvider() {
     type: providerForm.type,
     package: providerForm.package.trim() || (providerForm.type === 'ollama' ? 'ollama' : 'openai'),
     compatibility: providerForm.compatibility.trim(),
-    timeout: providerForm.timeout.trim() ? Number(providerForm.timeout) : 0,
+    // v-model 对 type="number" 输入会把值转成 number，统一按 String 处理避免 .trim() 崩溃
+    timeout: String(providerForm.timeout).trim() ? Number(providerForm.timeout) : 0,
     headers,
     body,
   })

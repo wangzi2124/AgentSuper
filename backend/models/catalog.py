@@ -754,11 +754,15 @@ def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
     for key in ("headers", "body"):
         if key in entry and not isinstance(entry[key], dict):
             raise ValueError(f"Provider {key} 必须是 JSON 对象")
-    if entry.get("timeout") not in (None, ""):
+    # timeout：空值（None/""/0）= 未设置，清除键；否则钳到 >= 1 秒。
+    # 旧逻辑把 0 钳成 1.0，导致「清空 timeout 再保存」变成 1 秒超时。
+    if entry.get("timeout") not in (None, "", 0, "0", False):
         try:
             entry["timeout"] = max(1.0, float(entry["timeout"]))
         except (TypeError, ValueError) as exc:
             raise ValueError("Provider timeout 必须是数字（秒）") from exc
+    else:
+        entry.pop("timeout", None)
     label = str(entry.get("label") or "").strip()
     if not label:
         raise ValueError("Provider Label（显示名称）不能为空")
@@ -1254,6 +1258,21 @@ def _normalize_deepseek_thinking(value: Any) -> str:
     return "adaptive"
 
 
+_PROVIDER_EXTRAS_KEYS = ("headers", "body", "timeout", "package", "compatibility")
+
+
+def _merge_provider_extras(reg: dict[str, Any], result: dict[str, Any]) -> None:
+    """把 Provider 表单扩展字段并进 `provider_api()` 结果。
+
+    `headers`/`body` 由 runtime 映射为 litellm `extra_headers`/`extra_body`；
+    `timeout` 由 `ModelRuntime._endpoint()` 读取；缺失意味着编辑后保存的
+    值不参与运行。空值（None/""/{}/0）视为未设置，不下发。
+    """
+    for key in _PROVIDER_EXTRAS_KEYS:
+        if reg.get(key) not in (None, "", {}, 0):
+            result[key] = reg[key]
+
+
 def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     """解析模型对应的调用凭证：{api_base, api_key, is_ollama, options}。优先级：
 
@@ -1302,7 +1321,7 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
     # 但模型 id 保持 `{provider}/{name}`，避免与本地 ollama/、ollama_chat/ 前缀冲突。
     if reg and _provider_type(reg) == "ollama":
         name = mid.split("/", 1)[1] if "/" in mid else mid
-        return {
+        creds = {
             "api_base": _ollama_native_base(reg.get("api_base")) or None,
             "api_key": (reg.get("api_key") or "").strip() or "ollama",
             "is_ollama": True,
@@ -1310,6 +1329,9 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
             "provider_type": "ollama",
             "options": None,
         }
+        # 表单扩展字段与 openai 分支同口径透传，否则编辑后保存的值不参与运行
+        _merge_provider_extras(reg, creds)
+        return creds
     # 支持 ollama/ 与 ollama_chat/ 两种前缀（ollama_chat/ 是 LiteLLM 推荐的前缀）
     if is_ollama_model(mid):
         # [运行时窗口] 默认**不下发** num_ctx，让 Ollama 用它自己的配置
@@ -1369,9 +1391,7 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
             "provider_type": _provider_type(reg),
             "options": options,
         }
-        for key in ("headers", "body", "timeout", "package", "compatibility"):
-            if reg.get(key) not in (None, "", {}):
-                result[key] = reg[key]
+        _merge_provider_extras(reg, result)
         return result
     return {"api_base": get_settings().llm_api_base, "api_key": get_settings().llm_api_key,
             "is_ollama": False, "litellm_model": None, "provider_type": "openai", "options": options}
@@ -1523,11 +1543,16 @@ def provider_models_source() -> list[dict[str, Any]]:
             if str(e.get("id") or "").startswith(prefix)
             and e.get("origin") in _ORIGIN_MANAGED
         ]
-        out.append({"provider": name, "label": p.get("label") or name,
-                    "api_base": p.get("api_base") or "", "api_key": p.get("api_key") or "",
-                    "enabled": bool(p.get("enabled", True)),
-                    "type": _provider_type(p),
-                    "models": models})
+        entry = {"provider": name, "label": p.get("label") or name,
+                 "api_base": p.get("api_base") or "", "api_key": p.get("api_key") or "",
+                 "enabled": bool(p.get("enabled", True)),
+                 "type": _provider_type(p),
+                 "models": models}
+        # 回传表单可编辑的扩展字段（编辑表单回填依赖；缺失会让已保存值看起来丢失）
+        for key in ("package", "compatibility", "timeout", "headers", "body"):
+            if p.get(key) not in (None, ""):
+                entry[key] = p[key]
+        out.append(entry)
     return out
 
 

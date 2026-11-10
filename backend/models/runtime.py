@@ -866,6 +866,7 @@ class ModelRuntime:
                 "options": creds.get("options"),
                 "headers": creds.get("headers"),
                 "body": creds.get("body"),
+                "timeout": creds.get("timeout"),
                 "variant": variant,
                 "is_ollama": True,
             }
@@ -878,6 +879,7 @@ class ModelRuntime:
                 "options": creds.get("options"),
                 "headers": creds.get("headers"),
                 "body": creds.get("body"),
+                "timeout": creds.get("timeout"),
                 "variant": variant,
                 "is_ollama": bool(creds.get("is_ollama")),
             }

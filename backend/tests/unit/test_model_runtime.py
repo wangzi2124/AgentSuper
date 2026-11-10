@@ -67,6 +67,39 @@ def test_without_scope_each_call_resolves(monkeypatch):
     assert runtime.resolve_runtime(spec) is not runtime.resolve_runtime(spec)
 
 
+def test_endpoint_carries_provider_timeout(monkeypatch):
+    """provider_api 返回的 timeout 必须进入 endpoint 并被 _timeout_for 消费（表单参数参与运行）。"""
+    monkeypatch.setattr(settings, "litellm_proxy_url", "")
+    monkeypatch.setattr(settings, "llm_model", "mycloud/m1")
+    monkeypatch.setattr(
+        catalog,
+        "provider_api",
+        lambda mid: {
+            "api_base": "http://127.0.0.1:8001/v1",
+            "api_key": "k",
+            "is_ollama": False,
+            "timeout": 90,
+        },
+    )
+    rt = ModelRuntime(RuntimeSpec(model_override="mycloud/m1"))
+    ep = rt.endpoint()
+    assert ep["timeout"] == 90
+    assert rt._timeout_for(ep) == 90
+
+
+def test_endpoint_timeout_absent_falls_back(monkeypatch):
+    monkeypatch.setattr(settings, "litellm_proxy_url", "")
+    monkeypatch.setattr(
+        catalog,
+        "provider_api",
+        lambda mid: {"api_base": "https://api.example.com/v1", "api_key": "k", "is_ollama": False},
+    )
+    rt = ModelRuntime(RuntimeSpec(model_override="mycloud/m1", timeout=120))
+    ep = rt.endpoint()
+    assert not ep.get("timeout")
+    assert rt._timeout_for(ep) == 120  # 未配置时回退 RuntimeSpec 默认超时
+
+
 def test_local_ollama_transport_sends_keep_alive(monkeypatch):
     monkeypatch.setattr(settings, "litellm_proxy_url", "")
     monkeypatch.setattr(settings, "ollama_context_guard", False)

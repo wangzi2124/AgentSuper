@@ -55,5 +55,7 @@ langfuse>=2.60.10,<3
 # 以下默认不安装，按需启用：
 # 语音合成 TTS / openai-whisper 回退：见 requirements-voice.txt（torch / qwen-tts / openai-whisper）
 # ttsclone 独立 UI（app.py 专用）：gradio / flash_attn（server.py / clone.py 不依赖）
-# 技能脚本按需：defusedxml pdfplumber pdf2image imageio playwright anthropic
+# 技能脚本按需：defusedxml pdfplumber pdf2image imageio anthropic
 #   另需系统二进制：tesseract（OCR，pytesseract 已装但二进制缺失则 OCR 静默返回空）、poppler（pdf2image）
+# 浏览器自动化测试（Web UI 回归）：playwright 已入 pyproject.toml/uv.lock；
+#   装完 Python 包后还需下载浏览器内核：uv run playwright install chromium
