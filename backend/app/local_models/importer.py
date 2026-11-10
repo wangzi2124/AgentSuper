@@ -126,6 +126,20 @@ def create_ollama_model(name: str, paths: list[Path], num_ctx: int = 0) -> None:
     raise ImportError_("Ollama 导入失败：" + "；".join(errors[-2:]))
 
 
+def delete_ollama_model(name: str) -> None:
+    """Remove a model from Ollama; missing models are ignored."""
+    if not name:
+        return
+    status, body = _request(
+        f"{ollama_base_url()}/api/delete",
+        json.dumps({"model": name}).encode(),
+        {"Content-Type": "application/json"},
+        timeout=120,
+    )
+    if status >= 400 and "not found" not in body.lower():
+        raise ImportError_(f"Ollama 删除模型失败（{name}）：HTTP {status} {body[:300]}")
+
+
 def _ensure_success(body: str) -> None:
     text = (body or "").strip()
     if not text:

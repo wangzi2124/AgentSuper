@@ -75,3 +75,21 @@ def test_create_reports_both_failures(tmp_path: Path, monkeypatch):
 def test_create_rejects_missing_file(tmp_path: Path):
     with pytest.raises(importer.ImportError_):
         importer.create_ollama_model("my-model", [tmp_path / "missing.gguf"])
+
+
+def test_delete_ollama_model_ignores_missing(monkeypatch):
+    monkeypatch.setattr(importer, "_request", lambda *a, **k: (404, '{"error":"model not found"}'))
+    importer.delete_ollama_model("gone")
+
+
+def test_delete_ollama_model_reports_failure(monkeypatch):
+    monkeypatch.setattr(importer, "_request", lambda *a, **k: (500, '{"error":"boom"}'))
+    with pytest.raises(importer.ImportError_):
+        importer.delete_ollama_model("m")
+
+
+def test_delete_ollama_model_noops_on_empty_name(monkeypatch):
+    calls = []
+    monkeypatch.setattr(importer, "_request", lambda *a, **k: calls.append(a) or (200, ""))
+    importer.delete_ollama_model("")
+    assert calls == []

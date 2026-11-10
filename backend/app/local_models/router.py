@@ -109,5 +109,8 @@ async def delete_download(job_id: str, delete_files: bool = True) -> dict:
     job = store.get(job_id)
     if job is None:
         return fail(message="任务不存在")
-    removed = await run_in_threadpool(downloader.remove_job, job_id, delete_files=delete_files)
+    try:
+        removed = await run_in_threadpool(downloader.remove_job, job_id, delete_files=delete_files)
+    except Exception as exc:  # noqa: BLE001
+        return fail(message=str(exc))
     return ok({"removed": removed, "entry_id": job.get("entry_id") or ""})

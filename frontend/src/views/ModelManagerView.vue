@@ -297,7 +297,7 @@ function activeState(state: string) {
 }
 function removeJob(job: LocalDownloadJob) {
   const msg = job.state === 'done'
-    ? '删除任务并清理下载文件？已导入的模型条目仍保留，可在模型列表删除。'
+    ? '删除任务、下载文件，并移除已导入的 Ollama 模型？'
     : '删除任务并清理已下载文件？'
   if (!window.confirm(msg)) return
   void lm.remove(job)
@@ -416,6 +416,7 @@ function removeJob(job: LocalDownloadJob) {
           <span v-if="lm.activeJobs.length" class="spinner-mm mm-refresh-spin" title="下载中"></span>
         </div>
         <p class="hint">从 ModelScope（优先，失败自动回落 HuggingFace）搜索 GGUF，下载后自动导入本机 Ollama，并注册进模型列表，可直接在聊天框选择。</p>
+        <p v-if="lm.error" class="lm-error">{{ lm.error }}</p>
         <div class="mm-list-toolbar">
           <label class="mm-search">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
@@ -874,6 +875,7 @@ function removeJob(job: LocalDownloadJob) {
 
 /* ── 本地模型下载 ── */
 .lm-source { width: auto; min-width: 150px; }
+.lm-error { color: var(--danger); font-size: 12px; margin: 6px 0 0; }
 .lm-sub {
   display: block;
   margin-top: 2px;

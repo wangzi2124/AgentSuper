@@ -172,7 +172,36 @@ def remove_job(job_id: str, *, delete_files: bool = True) -> bool:
     if delete_files:
         import shutil
 
+        _remove_imported_model(job)
         target = store.downloads_dir() / job_id
         if target.exists():
             shutil.rmtree(target, ignore_errors=True)
     return store.delete(job_id)
+
+
+def _remove_imported_model(job: dict[str, Any]) -> None:
+    """Drop the imported Ollama model + catalog entry that belong to this job."""
+    entry_id = str(job.get("entry_id") or "")
+    if not entry_id:
+        return
+    job_entry = job.get("entry") or {}
+    job_local = job_entry.get("local") or {}
+    if job_local.get("job_id") and job_local["job_id"] != job["id"]:
+        return
+    from models import catalog
+
+    cfg = catalog.load_config()
+    persisted = next((e for e in (cfg.get("extra") or []) if e.get("id") == entry_id), None)
+    persisted_local = (persisted or {}).get("local") or {}
+    owner = str(persisted_local.get("job_id") or "")
+    if owner and owner != job["id"]:
+        return
+    name = str(persisted_local.get("ollama_model") or job_local.get("ollama_model") or "")
+    if not name and persisted is None and not job_entry:
+        return
+    if name:
+        try:
+            importer.delete_ollama_model(name)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"移除 Ollama 模型失败：{exc}") from exc
+    catalog.remove_custom_model(entry_id)
