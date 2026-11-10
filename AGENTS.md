@@ -258,7 +258,7 @@ npx vitest run tests/integration/
 - **权限**：`permission_request` 归一化后交给 `PermissionStore`；不要塞回 reducer 里弹窗。
 - **排队**：`turn_done` 由 store 决定 drain/下一轮；controller 只产出终态。
 - **移动端**：`MobileChat` 复用 `V2ChatView`；改聊天逻辑时先确认移动端不被破坏。
-- **模型列表过滤**：`ModelManagerView` 的表格/搜索/分页用 `utils/modelOrigin.ts` 过滤；默认/轻量/图片下拉与聊天选择器必须保持全量，不要把过滤下沉到 store。
+- **模型列表过滤**：`ModelManagerView` 的表格/搜索/分页用 `utils/modelOrigin.ts` 过滤；默认/轻量/图片下拉保持全量。聊天输入框选择器（桌面 `modelManager.modelOptions` / 移动 `multiAgent.modelOptions`）用 `chatSelectableModels`，只展示已配置 Provider 实际返回/手动配置的模型（`origin` 为 override/extra/provider）外加显式默认模型，避免内置目录里与 Provider 无关的条目混入；没有 Provider 模型时回退全量。
 - **Chat surface**: `V2ChatView` is the single timeline; do not reintroduce per-agent blocks as the main render path.
 - **只展示真实工具**：时间线过滤 `!step.tool_name` 的 Harness 图内节点（filter/plan/rag/execute_subagent 等）；不要渲染 `NODE_LABELS` 或 Agent 过滤 chips。
 - **工具步骤**：默认紧凑行，点击展开；不要默认展开所有参数/输出，避免长任务淹没最终答案。

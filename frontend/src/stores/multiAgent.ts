@@ -16,6 +16,7 @@ import {
 } from '../api/sessions'
 import { SUPPORTED_MODELS } from '../config/models'
 import { fetchModels, modelsToOptions, type ModelInfo, type ModelOption } from '../api/models'
+import { chatSelectableModels } from '../utils/modelOrigin'
 import {
   saveSessionToCache,
   loadSessionFromCache,
@@ -104,7 +105,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   )
   const modelOptions = computed<ModelOption[]>(() =>
     models.value.length
-      ? modelsToOptions(models.value)
+      ? modelsToOptions(chatSelectableModels(models.value, [defaultModelId.value]))
       : SUPPORTED_MODELS.map(m => ({ value: m.value, label: m.label, desc: m.desc })),
   )
   let modelsLoaded = false

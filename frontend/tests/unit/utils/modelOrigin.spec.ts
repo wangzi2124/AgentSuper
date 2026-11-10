@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ModelInfo, ModelOrigin } from '../../../src/api/models'
-import { isManagedModel, managedModels } from '../../../src/utils/modelOrigin'
+import { chatSelectableModels, isManagedModel, managedModels } from '../../../src/utils/modelOrigin'
 
 function model(id: string, origin?: ModelOrigin): ModelInfo {
   return { id, origin } as ModelInfo
@@ -29,5 +29,28 @@ describe('modelOrigin', () => {
       model('builtin/edited', 'override'),
     ])
     expect(out.map(m => m.id)).toEqual(['p/seen', 'custom/manual', 'builtin/edited'])
+  })
+
+  it('chatSelectableModels 只保留 Provider 模型与显式默认模型', () => {
+    const out = chatSelectableModels(
+      [
+        model('deepseek/deepseek-v4-flash', 'builtin'),
+        model('deepseek/deepseek-v4-pro', 'provider'),
+        model('openai/gpt-4o', 'builtin'),
+        model('ollama_chat/qwen2.5:7b', 'builtin'),
+        model('custom/manual', 'extra'),
+      ],
+      ['deepseek/deepseek-v4-flash', null],
+    )
+    expect(out.map(m => m.id)).toEqual([
+      'deepseek/deepseek-v4-flash',
+      'deepseek/deepseek-v4-pro',
+      'custom/manual',
+    ])
+  })
+
+  it('chatSelectableModels 无 Provider 模型时回退全量', () => {
+    const all = [model('openai/gpt-4o', 'builtin'), model('local/x', 'local')]
+    expect(chatSelectableModels(all, []).map(m => m.id)).toEqual(['openai/gpt-4o', 'local/x'])
   })
 })

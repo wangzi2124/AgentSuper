@@ -13,6 +13,7 @@ import {
 } from '../api/models'
 import { useMultiAgentStore } from './multiAgent'
 import { loadModelCache, saveModelCache } from '../api/model-cache'
+import { chatSelectableModels } from '../utils/modelOrigin'
 
 // 模型管理 store：前端配置自定义模型 / Provider / 默认与轻量模型。
 // 写操作直落后端 data/model_catalog.db（SQLite，旧 JSON 首启自动导入后仅作备份）并即时刷新多 Agent 选择器。
@@ -200,9 +201,11 @@ export const useModelManagerStore = defineStore('modelManager', () => {
     }
   }
 
-  const modelOptions = computed<ModelOption[]>(() =>
-    (config.value?.models || []).map(m => ({ value: m.id, label: m.name || m.id, desc: m.description || m.id })),
-  )
+  const modelOptions = computed<ModelOption[]>(() => {
+    const cfg = config.value
+    const selectable = chatSelectableModels(cfg?.models || [], [cfg?.default_model])
+    return selectable.map(m => ({ value: m.id, label: m.name || m.id, desc: m.description || m.id }))
+  })
 
   return {
     config, loading, saving, refreshing, busyId, error, notice,
