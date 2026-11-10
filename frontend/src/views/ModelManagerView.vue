@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useModelManagerStore } from '../stores/modelManager'
 import { useLocalModelsStore } from '../stores/localModels'
 import { fetchModelShow, type ModelInfo, type ProviderInfo } from '../api/models'
@@ -9,6 +9,16 @@ import { managedModels } from '../utils/modelOrigin'
 
 const mm = useModelManagerStore()
 const lm = useLocalModelsStore()
+const filesPanel = ref<HTMLElement | null>(null)
+
+watch(
+  () => lm.repo,
+  async (repo) => {
+    if (!repo) return
+    await nextTick()
+    filesPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  },
+)
 
 const defaultSel = ref<string>('')
 const smallSel = ref<string>('')
@@ -451,7 +461,7 @@ function removeJob(job: LocalDownloadJob) {
           </div>
         </div>
 
-        <div v-if="lm.repo" class="lm-files">
+        <div v-if="lm.repo" ref="filesPanel" class="lm-files">
           <div class="lm-files-head">
             <strong>{{ lm.repo.id }}</strong>
             <span v-if="lm.filesLoading" class="spinner-mm"></span>
