@@ -29,6 +29,7 @@ from observability.chainlog import ChainLogMiddleware  # noqa: E402
 from observability.monitor import RequestLogMiddleware, get_recent_stats, get_stats  # noqa: E402
 
 from .api import admin, attachments, chat, commands, compat, instructions, openai_compat, sessions, v2  # noqa: E402
+from .local_models.router import router as local_models_api  # noqa: E402
 from .deps import build_context  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -416,6 +417,7 @@ def create_app(
     app.include_router(attachments.router, prefix="/api/attachments", tags=["Attachments"])
     app.include_router(instructions.router, prefix="/api", tags=["Instructions"])
     app.include_router(commands.router, prefix="/api", tags=["Commands"])
+    app.include_router(local_models_api, prefix="/api", tags=["Local Models"])
     # agent.md §9 约定裸 `/chat` + `/chat/stream`（非 /api 前缀）；与 /api/chat* 同一实现。
     app.include_router(chat.router)
     app.include_router(openai_compat.router)

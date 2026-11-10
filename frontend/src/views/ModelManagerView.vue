@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useModelManagerStore } from '../stores/modelManager'
+import { useLocalModelsStore } from '../stores/localModels'
 import { fetchModelShow, type ModelInfo, type ProviderInfo } from '../api/models'
+import type { LocalDownloadJob } from '../api/localModels'
 import { validateProviderForm } from '../utils/providerForm'
 import { managedModels } from '../utils/modelOrigin'
 
 const mm = useModelManagerStore()
+const lm = useLocalModelsStore()
 
 const defaultSel = ref<string>('')
 const smallSel = ref<string>('')
@@ -18,6 +21,7 @@ const VOICE_SIZE_OPTIONS = ['0.6B', '1.7B']
 onMounted(async () => {
   await mm.load()
   syncSelectors()
+  void lm.init()
 })
 
 function syncSelectors() {
@@ -260,6 +264,44 @@ function capOf(m: ModelInfo) {
   const think = m.thinking === 'enabled' ? '思考' : ''
   return [c.tool_use && '工具', c.vision && '视觉', c.reasoning && '推理', think].filter(Boolean).join('·') || '—'
 }
+
+// ── 本地模型下载 ──
+function fmtSize(bytes?: number) {
+  const n = Number(bytes || 0)
+  if (!n) return '未知大小'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = n
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+function fmtSpeed(bytes?: number) {
+  return bytes ? `${fmtSize(bytes)}/s` : ''
+}
+const JOB_STATE_LABEL: Record<string, string> = {
+  pending: '排队中',
+  downloading: '下载中',
+  importing: '导入中',
+  done: '已完成',
+  error: '失败',
+  cancelled: '已取消',
+}
+function jobStateLabel(state: string) {
+  return JOB_STATE_LABEL[state] || state
+}
+function activeState(state: string) {
+  return state === 'pending' || state === 'downloading' || state === 'importing'
+}
+function removeJob(job: LocalDownloadJob) {
+  const msg = job.state === 'done'
+    ? '删除任务并清理下载文件？已导入的模型条目仍保留，可在模型列表删除。'
+    : '删除任务并清理已下载文件？'
+  if (!window.confirm(msg)) return
+  void lm.remove(job)
+}
 </script>
 
 <template>
@@ -363,6 +405,105 @@ function capOf(m: ModelInfo) {
                 {{ mm.busyId === p.provider ? '删除中…' : '删除' }}
               </button>
             </span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 本地模型下载 -->
+      <section class="card mm-block">
+        <div class="form-title">
+          本地模型
+          <span v-if="lm.activeJobs.length" class="spinner-mm mm-refresh-spin" title="下载中"></span>
+        </div>
+        <p class="hint">从 ModelScope（优先，失败自动回落 HuggingFace）搜索 GGUF，下载后自动导入本机 Ollama，并注册进模型列表，可直接在聊天框选择。</p>
+        <div class="mm-list-toolbar">
+          <label class="mm-search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input
+              v-model="lm.query"
+              placeholder="搜索 GGUF 模型，如 qwen2.5-7b-instruct-gguf"
+              @keyup.enter="lm.search()"
+            />
+          </label>
+          <select v-model="lm.source" class="ctrl lm-source">
+            <option value="auto">自动（按优先级）</option>
+            <option v-for="s in lm.priority" :key="s" :value="s">{{ s }}</option>
+          </select>
+          <button class="btn btn-primary mm-save-btn" :disabled="lm.searching || !lm.query.trim()" @click="lm.search()">
+            <span v-if="lm.searching" class="spinner-mm"></span>
+            {{ lm.searching ? '搜索中…' : '搜索' }}
+          </button>
+        </div>
+
+        <div v-if="lm.results.length" class="mm-table lm-table">
+          <div class="mm-th"><span>模型</span><span>来源</span><span class="mm-num">下载量</span><span></span></div>
+          <div
+            v-for="r in lm.results"
+            :key="r.source + '/' + r.id"
+            class="mm-tr"
+            :class="{ 'lm-row-active': lm.repo?.id === r.id }"
+          >
+            <span class="mm-main">{{ r.name || r.id }}<span class="lm-sub">{{ r.id }}</span></span>
+            <span class="mm-mono">{{ r.source }}</span>
+            <span class="mm-num">{{ r.downloads.toLocaleString() }}</span>
+            <span class="mm-ops"><button class="btn btn-sm" @click="lm.openRepo(r)">查看文件</button></span>
+          </div>
+        </div>
+
+        <div v-if="lm.repo" class="lm-files">
+          <div class="lm-files-head">
+            <strong>{{ lm.repo.id }}</strong>
+            <span v-if="lm.filesLoading" class="spinner-mm"></span>
+            <span v-else class="mm-count">{{ lm.files.length }} 个 GGUF 文件</span>
+          </div>
+          <div v-if="!lm.filesLoading && !lm.files.length" class="empty-tip">该仓库没有 GGUF 文件，换一个试试。</div>
+          <div v-if="lm.files.length" class="mm-table lm-file-table">
+            <div class="mm-th"><span>文件</span><span class="mm-num">大小</span><span class="mm-num">量化</span><span></span></div>
+            <label
+              v-for="f in lm.files"
+              :key="f.file"
+              class="mm-tr lm-file-row"
+              :class="{ 'lm-row-active': lm.selectedFile === f.file }"
+            >
+              <span class="mm-main">{{ f.file }}<span v-if="f.split" class="lm-sub">分片 {{ f.parts }} 个，自动全部下载</span></span>
+              <span class="mm-num">{{ fmtSize(f.size) }}</span>
+              <span class="mm-num">{{ f.quantization || '—' }}</span>
+              <span class="mm-ops"><input v-model="lm.selectedFile" type="radio" :value="f.file" /></span>
+            </label>
+          </div>
+          <div v-if="lm.files.length" class="lm-actions">
+            <button class="btn btn-primary mm-save-btn" :disabled="!lm.selectedEntry || !!lm.busyId" @click="lm.startDownload">
+              <span v-if="lm.busyId" class="spinner-mm"></span>
+              {{ lm.busyId ? '提交中…' : '下载并导入' }}
+            </button>
+            <span class="hint">下载后通过本机 Ollama <code>/api/create</code> 导入；大型模型请确认磁盘空间。</span>
+          </div>
+        </div>
+
+        <div v-if="lm.jobs.length" class="lm-jobs">
+          <div class="form-title small">下载任务</div>
+          <div v-for="j in lm.jobs" :key="j.id" class="lm-job">
+            <div class="lm-job-main">
+              <span class="mm-main">{{ j.entry?.name || j.file }}</span>
+              <span class="lm-job-state" :class="'lm-state-' + j.state">{{ jobStateLabel(j.state) }}</span>
+              <span class="mm-count">{{ fmtSize(j.downloaded) }} / {{ fmtSize(j.total) }}<template v-if="j.speed"> · {{ fmtSpeed(j.speed) }}</template></span>
+            </div>
+            <div class="lm-bar">
+              <div
+                class="lm-bar-fill"
+                :class="{ 'lm-bar-done': j.state === 'done' }"
+                :style="{ width: (j.state === 'done' ? 100 : j.percent) + '%' }"
+              ></div>
+            </div>
+            <div class="lm-job-foot">
+              <span v-if="j.error" class="lm-job-error">{{ j.error }}</span>
+              <span v-else-if="j.state === 'done'" class="hint">已注册：{{ j.entry_id }}</span>
+              <span v-else class="hint">{{ j.percent }}%</span>
+              <span class="mm-ops">
+                <button v-if="activeState(j.state)" class="btn btn-sm" :disabled="lm.busyId === j.id" @click="lm.cancel(j)">取消</button>
+                <button class="btn btn-sm btn-danger" :disabled="lm.busyId === j.id" @click="removeJob(j)">删除</button>
+              </span>
+            </div>
           </div>
         </div>
       </section>
@@ -730,6 +871,49 @@ function capOf(m: ModelInfo) {
 .slider::before { content: ''; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: 0.2s; }
 .switch input:checked + .slider { background: var(--primary); }
 .switch input:checked + .slider::before { transform: translateX(18px); }
+
+/* ── 本地模型下载 ── */
+.lm-source { width: auto; min-width: 150px; }
+.lm-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lm-table .mm-th, .lm-table .mm-tr { grid-template-columns: 2.4fr 0.7fr 0.8fr 0.9fr; min-width: 620px; }
+.lm-file-table .mm-th, .lm-file-table .mm-tr { grid-template-columns: 2.6fr 0.8fr 0.7fr 0.5fr; min-width: 620px; }
+.lm-file-row { cursor: pointer; }
+.lm-row-active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 7%, var(--bg-subtle));
+}
+.lm-files { margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 10px; }
+.lm-files-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; font-size: 13px; }
+.lm-actions { display: flex; align-items: center; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+.lm-jobs { margin-top: 14px; border-top: 1px dashed var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.lm-job { background: var(--bg-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius); padding: 10px 12px; }
+.lm-job-main { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.lm-job-state {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+  color: var(--text-secondary);
+}
+.lm-state-done { color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, transparent); }
+.lm-state-error { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.lm-state-cancelled { color: var(--text-tertiary, #9aa); }
+.lm-bar { height: 6px; border-radius: 999px; background: var(--border); overflow: hidden; margin: 8px 0 6px; }
+.lm-bar-fill { height: 100%; background: var(--primary); transition: width 0.4s var(--ease); }
+.lm-bar-done { background: var(--success, #22c55e); }
+.lm-job-foot { display: flex; align-items: center; gap: 10px; }
+.lm-job-foot .mm-ops { margin-left: auto; }
+.lm-job-error { color: var(--danger); font-size: 12px; }
 </style>
 
 <style>

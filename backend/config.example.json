@@ -703,5 +703,27 @@
 
   // Ollama 纯文本（无工具）模型。
   // 示例：ollama/deepseek-r1:latest
-  "harness_ollama_text_model": "ollama/deepseek-r1:latest"
+  "harness_ollama_text_model": "ollama/deepseek-r1:latest",
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 本地模型下载（ModelScope 优先，HuggingFace 兜底）
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // 下载目录（相对统一数据根；空 = 默认 local_models）。
+  "local_models_dir": "local_models",
+
+  // 下载源优先级，逗号分隔：modelscope,huggingface。
+  "local_model_source_priority": "modelscope,huggingface",
+
+  // 同时进行的下载任务数上限。
+  "local_model_download_concurrency": 2,
+
+  // 下载目录总配额（GB）；0 = 不限制。
+  "local_model_disk_quota_gb": 0.0,
+
+  // ModelScope 站点地址（可换成镜像）。
+  "modelscope_endpoint": "https://modelscope.cn",
+
+  // HuggingFace 站点地址（可换成镜像）。
+  "huggingface_endpoint": "https://huggingface.co"
 }

@@ -48,6 +48,36 @@ vi.mock('@/stores/modelManager', () => {
   return { useModelManagerStore: () => fake }
 })
 
+vi.mock('@/stores/localModels', () => {
+  const fake = {
+    endpoints: {},
+    priority: ['modelscope', 'huggingface'],
+    query: '',
+    source: 'auto',
+    results: [],
+    searching: false,
+    repo: null,
+    files: [],
+    filesLoading: false,
+    selectedFile: '',
+    selectedEntry: null,
+    jobs: [],
+    activeJobs: [],
+    busyId: '',
+    error: '',
+    init: vi.fn(),
+    search: vi.fn(),
+    openRepo: vi.fn(),
+    startDownload: vi.fn(),
+    refreshJobs: vi.fn(),
+    cancel: vi.fn(),
+    remove: vi.fn(),
+    startPolling: vi.fn(),
+    stopPolling: vi.fn(),
+  }
+  return { useLocalModelsStore: () => fake }
+})
+
 import ModelManagerView from '@/views/ModelManagerView.vue'
 
 describe('ModelManagerView 模型列表', () => {

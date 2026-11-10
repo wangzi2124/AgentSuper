@@ -439,6 +439,19 @@ class Settings(BaseSettings):
     lmstudio_api_base: str = ""
     vllm_api_base: str = ""
 
+    # ── 本地模型下载（ModelScope 优先，HuggingFace 兜底）──
+    # 下载目录（相对统一数据根；空 = 默认 local_models）。
+    local_models_dir: str = "local_models"
+    # 下载源优先级，逗号分隔：modelscope,huggingface。
+    local_model_source_priority: str = "modelscope,huggingface"
+    # 同时进行的下载任务数上限。
+    local_model_download_concurrency: int = 2
+    # 下载目录总配额（GB）；0 = 不限制。
+    local_model_disk_quota_gb: float = 0.0
+    # 各下载源站点地址（便于镜像替换）。
+    modelscope_endpoint: str = "https://modelscope.cn"
+    huggingface_endpoint: str = "https://huggingface.co"
+
     # ── 跨模型工具调用 Harness ──
     # 全局强制工具调用路径：native | fallback；空 = 按模型目录能力探测。
     harness_tool_mode: str = ""
