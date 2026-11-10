@@ -82,6 +82,18 @@ def test_delete_ollama_model_ignores_missing(monkeypatch):
     importer.delete_ollama_model("gone")
 
 
+def test_delete_ollama_model_uses_delete_method(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_request(url, data, headers, timeout, method="POST"):
+        calls.append({"url": url, "method": method, "body": json.loads(data.decode())})
+        return 200, ""
+
+    monkeypatch.setattr(importer, "_request", fake_request)
+    importer.delete_ollama_model("m")
+    assert calls == [{"url": f"{importer.ollama_base_url()}/api/delete", "method": "DELETE", "body": {"model": "m"}}]
+
+
 def test_delete_ollama_model_reports_failure(monkeypatch):
     monkeypatch.setattr(importer, "_request", lambda *a, **k: (500, '{"error":"boom"}'))
     with pytest.raises(importer.ImportError_):

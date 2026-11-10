@@ -24,10 +24,16 @@ def ollama_base_url() -> str:
     return _ollama_base_url()
 
 
-def _request(url: str, data: Any, headers: dict[str, str], timeout: float) -> tuple[int, str]:
+def _request(
+    url: str,
+    data: Any,
+    headers: dict[str, str],
+    timeout: float,
+    method: str = "POST",
+) -> tuple[int, str]:
     from net.egress import urllib_opener
 
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib_opener().open(req, timeout=timeout) as resp:
             return int(getattr(resp, "status", 200)), resp.read().decode("utf-8", "replace")
@@ -135,6 +141,7 @@ def delete_ollama_model(name: str) -> None:
         json.dumps({"model": name}).encode(),
         {"Content-Type": "application/json"},
         timeout=120,
+        method="DELETE",
     )
     if status >= 400 and "not found" not in body.lower():
         raise ImportError_(f"Ollama 删除模型失败（{name}）：HTTP {status} {body[:300]}")
