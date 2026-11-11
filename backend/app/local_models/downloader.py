@@ -93,19 +93,64 @@ def _run_inner(job_id: str) -> None:
         downloaded = _download_file(job_id, url, dest, downloaded, total, window)
         paths.append(dest)
 
+    _import_job(job_id, paths)
+
+
+def _import_job(job_id: str, paths: list[Path]) -> None:
+    job = store.get(job_id)
+    if job is None:
+        return
     if _is_cancelled(job_id):
         raise Cancelled()
-    store.update(job_id, state="importing", downloaded=total or downloaded, speed=0.0)
+    fields: dict[str, Any] = {"state": "importing", "speed": 0.0}
+    total = int(job.get("total") or 0)
+    if total > 0:
+        fields["downloaded"] = total
+    store.update(job_id, **fields)
+    files = [str(f) for f in (job.get("files") or []) if str(f).strip()]
     entry = importer.import_downloaded(
         job_id=job_id,
         repo_id=str(job.get("repo_id") or ""),
-        file=files[0],
+        file=files[0] if files else "",
         source=str(job.get("source") or ""),
         gguf_paths=paths,
         display_name=str(job.get("name") or ""),
         context_length=int(job.get("context_length") or 0),
     )
     store.update(job_id, state="done", entry_id=entry["id"], entry=entry, error="", speed=0.0)
+
+
+def _retry_run(job_id: str, paths: list[Path]) -> None:
+    with _semaphore():
+        try:
+            _import_job(job_id, paths)
+        except Cancelled:
+            store.update(job_id, state="cancelled", speed=0.0)
+        except Exception as exc:  # noqa: BLE001
+            store.update(job_id, state="error", speed=0.0, error=str(exc)[:800])
+
+
+def retry_import(job_id: str) -> bool:
+    """Retry the import step for a failed job, reusing already-downloaded files."""
+    job = store.get(job_id)
+    if job is None or job.get("state") != "error":
+        return False
+    files = [str(f) for f in (job.get("files") or []) if str(f).strip()]
+    if not files:
+        return False
+    job_dir = store.downloads_dir() / job_id
+    paths = [job_dir / Path(name).name for name in files]
+    if not all(p.exists() for p in paths):
+        return False
+    store.update(job_id, state="pending", error="", speed=0.0)
+    thread = threading.Thread(
+        target=_retry_run,
+        args=(job_id, paths),
+        name=f"local-model-retry-{job_id}",
+        daemon=True,
+    )
+    thread.start()
+    return True
 
 
 def _download_file(

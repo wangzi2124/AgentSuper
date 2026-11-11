@@ -110,6 +110,15 @@ export async function cancelLocalDownload(id: string): Promise<void> {
   await apiRequest(`/api/local-models/downloads/${encodeURIComponent(id)}/cancel`, { method: 'POST' }, true)
 }
 
+export async function retryLocalDownload(id: string): Promise<LocalDownloadJob | null> {
+  const data = await apiRequest<{ job: LocalDownloadJob | null }>(
+    `/api/local-models/downloads/${encodeURIComponent(id)}/retry`,
+    { method: 'POST' },
+    true,
+  )
+  return data.job ?? null
+}
+
 export async function deleteLocalDownload(id: string, deleteFiles = true): Promise<void> {
   await apiRequest(
     `/api/local-models/downloads/${encodeURIComponent(id)}?delete_files=${deleteFiles}`,

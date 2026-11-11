@@ -104,6 +104,19 @@ async def cancel_download(job_id: str) -> dict:
     return ok({"job": _public(job) if job else None})
 
 
+@router.post("/downloads/{job_id}/retry")
+async def retry_download(job_id: str) -> dict:
+    job = store.get(job_id)
+    if job is None:
+        return fail(message="任务不存在")
+    if job.get("state") != "error":
+        return fail(message="只有失败的任务可以重试")
+    if not await run_in_threadpool(downloader.retry_import, job_id):
+        return fail(message="下载文件不完整或已丢失，请删除后重新下载")
+    job = store.get(job_id)
+    return ok({"job": _public(job) if job else None})
+
+
 @router.delete("/downloads/{job_id}")
 async def delete_download(job_id: str, delete_files: bool = True) -> dict:
     job = store.get(job_id)

@@ -512,6 +512,7 @@ function removeJob(job: LocalDownloadJob) {
               <span v-else class="hint">{{ j.percent }}%</span>
               <span class="mm-ops">
                 <button v-if="activeState(j.state)" class="btn btn-sm" :disabled="lm.busyId === j.id" @click="lm.cancel(j)">取消</button>
+                <button v-if="j.state === 'error'" class="btn btn-sm" :disabled="lm.busyId === j.id" @click="lm.retry(j)">重试导入</button>
                 <button class="btn btn-sm btn-danger" :disabled="lm.busyId === j.id" @click="removeJob(j)">删除</button>
               </span>
             </div>

@@ -7,6 +7,7 @@ import {
   fetchHubFiles,
   fetchLocalDownloads,
   fetchLocalModelSources,
+  retryLocalDownload,
   searchHubModels,
   type HubFile,
   type HubModel,
@@ -162,6 +163,24 @@ export const useLocalModelsStore = defineStore('localModels', () => {
     }
   }
 
+  async function retry(job: LocalDownloadJob) {
+    busyId.value = job.id
+    error.value = ''
+    try {
+      const updated = await retryLocalDownload(job.id)
+      if (updated) {
+        jobs.value = jobs.value.map(j => (j.id === updated.id ? updated : j))
+        startPolling()
+      } else {
+        await refreshJobs()
+      }
+    } catch (e) {
+      setError(e)
+    } finally {
+      busyId.value = ''
+    }
+  }
+
   async function remove(job: LocalDownloadJob) {
     busyId.value = job.id
     try {
@@ -178,7 +197,7 @@ export const useLocalModelsStore = defineStore('localModels', () => {
   return {
     endpoints, priority, query, source, results, searching, repo, files, filesLoading,
     selectedFile, selectedEntry, jobs, activeJobs, busyId, error,
-    init, search, openRepo, startDownload, refreshJobs, cancel, remove,
+    init, search, openRepo, startDownload, refreshJobs, cancel, retry, remove,
     startPolling, stopPolling,
   }
 })
