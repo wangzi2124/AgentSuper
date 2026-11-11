@@ -132,6 +132,44 @@ def create_ollama_model(name: str, paths: list[Path], num_ctx: int = 0) -> None:
     raise ImportError_("Ollama 导入失败：" + "；".join(errors[-2:]))
 
 
+def _error_text(body: str) -> str:
+    text = (body or "").strip()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text[:300]
+    if isinstance(payload, dict) and payload.get("error"):
+        return str(payload["error"])[:300]
+    return text[:300]
+
+
+def verify_ollama_model(name: str, timeout: float = 600.0) -> None:
+    """Load the model with a 1-token probe so unloadable GGUFs fail the import.
+
+    ``/api/create`` only writes the manifest; Ollama loads the model lazily on
+    first inference. A GGUF whose architecture/quant the bundled llama.cpp
+    cannot load (e.g. newer ``qwen35`` MTP heads) therefore "imports" fine and
+    only blows up when the user sends a message. Probing here turns that into a
+    retryable import error instead of a silent chat failure.
+    """
+    if not name:
+        return
+    status, body = _request(
+        f"{ollama_base_url()}/api/chat",
+        json.dumps({
+            "model": name,
+            "messages": [{"role": "user", "content": "ping"}],
+            "stream": False,
+            "options": {"num_predict": 1},
+        }).encode(),
+        {"Content-Type": "application/json"},
+        timeout=timeout,
+    )
+    if status >= 400:
+        raise ImportError_(f"Ollama 无法加载模型（{name}）：HTTP {status} {_error_text(body)}")
+    _ensure_success(body)
+
+
 def delete_ollama_model(name: str) -> None:
     """Remove a model from Ollama; missing models are ignored."""
     if not name:
@@ -203,6 +241,10 @@ def import_downloaded(
     local["path"] = str(paths[0])
     local["files"] = [str(p) for p in paths]
     name = str(local.get("ollama_model") or entry["id"].split("/", 1)[-1].split(":")[0])
-    create_ollama_model(name, paths, int(entry.get("context_length") or 0))
+    # Only bake ``num_ctx`` when the user explicitly set a context override; the
+    # model's native context (often huge, e.g. 262144) would otherwise be forced
+    # on every request and fail to load on modest hardware.
+    create_ollama_model(name, paths, int(context_length or 0))
+    verify_ollama_model(name)
     catalog.upsert_custom_model(entry)
     return entry

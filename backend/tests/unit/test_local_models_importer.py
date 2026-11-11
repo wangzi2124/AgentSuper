@@ -77,6 +77,79 @@ def test_create_rejects_missing_file(tmp_path: Path):
         importer.create_ollama_model("my-model", [tmp_path / "missing.gguf"])
 
 
+def test_verify_ollama_model_ok(monkeypatch):
+    monkeypatch.setattr(
+        importer, "_request",
+        lambda *a, **k: (200, '{"message":{"role":"assistant","content":"hi"}}'),
+    )
+    importer.verify_ollama_model("m")
+
+
+def test_verify_ollama_model_reports_load_failure(monkeypatch):
+    monkeypatch.setattr(
+        importer, "_request",
+        lambda *a, **k: (500, '{"error":"check_tensor_dims: tensor not found"}'),
+    )
+    with pytest.raises(importer.ImportError_) as exc:
+        importer.verify_ollama_model("m")
+    assert "tensor not found" in str(exc.value)
+
+
+def test_verify_ollama_model_noops_on_empty_name(monkeypatch):
+    calls = []
+    monkeypatch.setattr(importer, "_request", lambda *a, **k: calls.append(a) or (200, ""))
+    importer.verify_ollama_model("")
+    assert calls == []
+
+
+def test_import_downloaded_verifies_before_registering(tmp_path, monkeypatch):
+    from models import catalog
+
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"x")
+    calls: list[tuple] = []
+    monkeypatch.setattr(importer.meta_mod, "parse_gguf_metadata", lambda _p: {"general.name": "M"})
+    monkeypatch.setattr(
+        importer.meta_mod, "build_catalog_entry",
+        lambda **k: {"id": "ollama_chat/m:latest", "local": {"ollama_model": "m"}, "context_length": 262144},
+    )
+    monkeypatch.setattr(importer, "create_ollama_model", lambda name, paths, ctx: calls.append(("create", name, ctx)))
+    monkeypatch.setattr(importer, "verify_ollama_model", lambda name: calls.append(("verify", name)))
+    monkeypatch.setattr(catalog, "upsert_custom_model", lambda e: calls.append(("register", e["id"])))
+
+    entry = importer.import_downloaded(
+        job_id="j1", repo_id="org/m", file="m.gguf", source="hf", gguf_paths=[gguf],
+    )
+    assert calls == [("create", "m", 0), ("verify", "m"), ("register", "ollama_chat/m:latest")]
+    assert entry["local"]["job_id"] == "j1"
+
+
+def test_import_downloaded_skips_registration_when_verify_fails(tmp_path, monkeypatch):
+    from models import catalog
+
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"x")
+    registered: list[str] = []
+    monkeypatch.setattr(importer.meta_mod, "parse_gguf_metadata", lambda _p: {"general.name": "M"})
+    monkeypatch.setattr(
+        importer.meta_mod, "build_catalog_entry",
+        lambda **k: {"id": "ollama_chat/m:latest", "local": {"ollama_model": "m"}, "context_length": 0},
+    )
+    monkeypatch.setattr(importer, "create_ollama_model", lambda *a, **k: None)
+
+    def boom(_name):
+        raise importer.ImportError_("Ollama 无法加载模型")
+
+    monkeypatch.setattr(importer, "verify_ollama_model", boom)
+    monkeypatch.setattr(catalog, "upsert_custom_model", lambda e: registered.append(e["id"]))
+
+    with pytest.raises(importer.ImportError_):
+        importer.import_downloaded(
+            job_id="j1", repo_id="org/m", file="m.gguf", source="hf", gguf_paths=[gguf],
+        )
+    assert registered == []
+
+
 def test_delete_ollama_model_ignores_missing(monkeypatch):
     monkeypatch.setattr(importer, "_request", lambda *a, **k: (404, '{"error":"model not found"}'))
     importer.delete_ollama_model("gone")
