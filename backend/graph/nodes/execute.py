@@ -192,13 +192,15 @@ def make_execute_node(
 
     async def execute_node(state: dict[str, Any]) -> dict[str, Any]:
         agent_def = None
+        agent_registry = None
         try:
             from agents.registry import load_registry
             from agents.resolver import AgentResolver
 
-            agent_def = AgentResolver(
-                load_registry(state.get("workspace") or None)
-            ).primary(str(state.get("agent") or "") or None)
+            agent_registry = load_registry(state.get("workspace") or None)
+            agent_def = AgentResolver(agent_registry).primary(
+                str(state.get("agent") or "") or None
+            )
         except Exception:  # noqa: BLE001 - agent resolution is advisory
             agent_def = None
         agent_id = agent_def.name if agent_def is not None else "build"
@@ -231,6 +233,21 @@ def make_execute_node(
         extra_system = _extra_system
         if agent_def is not None and agent_def.prompt_body.strip():
             extra_system = f"{extra_system}\n\n{agent_def.prompt_body.strip()}".strip()
+        if (
+            registry is not None
+            and registry.get("task") is not None
+            and agent_registry is not None
+        ):
+            try:
+                subagent_names = sorted(agent_registry.subagents())
+            except Exception:  # noqa: BLE001 - catalog is advisory
+                subagent_names = []
+            if subagent_names:
+                catalog = (
+                    "可用子 Agent（通过 task 工具委派，名称以本清单为准）："
+                    + ", ".join(subagent_names)
+                )
+                extra_system = f"{extra_system}\n\n{catalog}".strip()
         # Stable head first; vision/memory/RAG/skills are turn-specific and stay
         # after it so provider prefix caching is not invalidated by volatile text.
         sys_text = compose_system(

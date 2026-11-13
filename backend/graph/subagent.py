@@ -155,13 +155,38 @@ async def run_subagent(
     }
 
 
+def current_workspace() -> str | None:
+    """Workspace bound to the running turn, if the platform context is present."""
+    try:
+        from app.session.context import current_platform_ctx, current_session_id
+
+        session_id = current_session_id()
+        ctx = current_platform_ctx()
+        if not session_id or ctx is None:
+            return None
+        return ctx.session_workspace(session_id) or None
+    except Exception:  # noqa: BLE001 - graph stays usable without the app layer
+        return None
+
+
+def live_agents() -> AgentRegistry:
+    """Reload agent definitions from disk for the current turn's workspace."""
+    return load_registry(current_workspace())
+
+
 def make_runner(
     registry: ToolRegistry,
     *,
     agents: AgentRegistry | None = None,
+    agents_provider: Callable[[], AgentRegistry] | None = None,
     model_factory: Callable[[SubAgent], Any] | None = None,
 ) -> Callable[..., Any]:
-    """构造 `runner(agent, task, context="") -> dict`，供 task 工具与并行节点复用。"""
+    """构造 `runner(agent, task, context="") -> dict`，供 task 工具与并行节点复用。
+
+    ``agents_provider`` 在每次调用时现读注册表，因此通过「Agent 配置」新建或
+    修改的子 Agent 无需重启后端即可生效；未提供时回退到传入的 ``agents`` 或
+    启动时加载的 ``SUBAGENTS``。
+    """
     agent_registry = agents
 
     def _factory(spec: SubAgent) -> Any:
@@ -171,11 +196,21 @@ def make_runner(
             return TierModel(tier=spec.tier, model_override=spec.model)
         return get_model(spec.tier)
 
+    def _resolve() -> AgentRegistry | None:
+        if agents_provider is None:
+            return agent_registry
+        try:
+            return agents_provider()
+        except Exception:  # noqa: BLE001 - fall back to the last known registry
+            logger.warning("live agent registry load failed", exc_info=True)
+            return agent_registry
+
     async def runner(agent: str, task: str, context: str = "") -> dict[str, Any]:
-        if agent_registry is not None:
-            defn = agent_registry.get(agent)
+        active = _resolve()
+        if active is not None:
+            defn = active.get(agent)
             spec = _to_subagent(defn) if defn is not None and defn.is_subagent else None
-            available = ", ".join(agent_registry.subagents())
+            available = ", ".join(active.subagents())
         else:
             spec = SUBAGENTS.get(agent)
             available = ", ".join(SUBAGENTS)

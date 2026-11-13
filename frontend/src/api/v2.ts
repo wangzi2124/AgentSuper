@@ -218,6 +218,34 @@ export async function switchSessionModel(
   )
 }
 
+export interface AgentInfoV2 {
+  name: string
+  description: string
+  mode: string
+  tier: string
+  model: string
+  tools: string[]
+  permission: Record<string, string>
+  request: Record<string, unknown>
+  hidden: boolean
+  disabled: boolean
+  color: string
+  steps: number
+  source: string
+}
+
+export async function listAgents(
+  sessionId?: string | null,
+  mode = 'primary',
+): Promise<AgentInfoV2[]> {
+  const query = new URLSearchParams()
+  if (sessionId) query.set('session_id', sessionId)
+  if (mode) query.set('mode', mode)
+  const suffix = query.toString() ? `?${query}` : ''
+  const payload = await apiRequest<{ agents: AgentInfoV2[] }>(`${BASE}/agents${suffix}`)
+  return payload.agents ?? []
+}
+
 export async function switchSessionAgent(
   sessionId: string,
   agent: string,

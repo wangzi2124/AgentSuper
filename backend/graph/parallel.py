@@ -147,11 +147,13 @@ def build_parallel_graph(
     """构建并行扇出图（§6.2）。不传 `runner` 时按 `registry`/`vfs` 现造子 Agent runner。"""
     if runner is None:
         from .main_graph import default_registry
-        from .subagent import make_runner
+        from .subagent import live_agents, make_runner
 
         if registry is None:
             registry, _ = default_registry(vfs)
-        runner = make_runner(registry, model_factory=model_factory)
+        runner = make_runner(
+            registry, model_factory=model_factory, agents_provider=live_agents
+        )
 
     builder = StateGraph(ParallelState)
     builder.add_node("dispatch", make_dispatch_node(agents))

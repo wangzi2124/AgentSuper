@@ -41,7 +41,7 @@ from .routers import (
     route_after_supervisor,
 )
 from .state import AgentState
-from .subagent import SUBAGENTS, make_runner, make_task_tool
+from .subagent import SUBAGENTS, live_agents, make_runner, make_task_tool
 
 logger = logging.getLogger(__name__)
 
@@ -169,14 +169,17 @@ def build_main_graph(
                 plan_model = None
 
     # 子 Agent runner（在注册 task 工具之前捕获 base 注册表，避免自我递归）
-    subagent_runner = make_runner(registry, model_factory=subagent_models)
+    subagent_runner = make_runner(
+        registry, model_factory=subagent_models, agents_provider=live_agents
+    )
     if enable_task_tool:
         registry.register_function(
             make_task_tool(subagent_runner),
             name="task",
             description=(
-                "把子任务委派给专职子 Agent（research/code/file），返回其自包含结果。"
-                f" 可用：{', '.join(SUBAGENTS)}。"
+                "把子任务委派给专职子 Agent，返回其自包含结果。"
+                f" 内置：{', '.join(SUBAGENTS)}；"
+                "当前可用子 Agent 以本轮系统提示中的清单为准（新增/修改无需重启）。"
             ),
             scope="global",
         )

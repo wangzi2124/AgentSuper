@@ -10,14 +10,16 @@ import {
   fetchTurnDiff,
   forkSession,
   interruptSession,
+  listAgents,
   replyForm,
   replyPermission,
   restoreTurnSnapshot,
   stageRevert,
+  switchSessionAgent,
   switchSessionModel,
   updateInboxDelivery,
 } from '../api/v2'
-import type { TurnDiff } from '../api/v2'
+import type { AgentInfoV2, TurnDiff } from '../api/v2'
 import { listCommands, type SlashCommandInfo } from '../api/commands'
 import { listReferences, type ReferenceItem } from '../api/references'
 import type {
@@ -96,6 +98,46 @@ const currentModelLabel = computed(() => currentModel.value?.label || '默认模
 const currentModelDesc = computed(() => currentModel.value?.desc || '')
 const modelMenuOpen = ref(false)
 const modelTipVisible = ref(false)
+
+const pendingAgent = ref('')
+const agentOptions = ref<AgentInfoV2[]>([])
+const agentMenuOpen = ref(false)
+const agentTipVisible = ref(false)
+const currentAgentName = computed(
+  () => runtime.value?.info?.agent || pendingAgent.value || 'build',
+)
+const currentAgent = computed(
+  () => agentOptions.value.find(agent => agent.name === currentAgentName.value) || null,
+)
+const currentAgentLabel = computed(() => currentAgent.value?.name || currentAgentName.value)
+const currentAgentDesc = computed(
+  () => currentAgent.value?.description || '默认 Agent',
+)
+
+async function ensureAgents() {
+  try {
+    const agents = await listAgents(sessionId.value || null)
+    agentOptions.value = agents.filter(agent => !agent.disabled && !agent.hidden)
+  } catch {
+    agentOptions.value = []
+  }
+}
+
+async function pickAgent(name: string) {
+  agentMenuOpen.value = false
+  if (!name || name === currentAgentName.value) return
+  const id = sessionId.value
+  if (!id) {
+    pendingAgent.value = name
+    return
+  }
+  try {
+    const info = await switchSessionAgent(id, name)
+    v2.setInfo(id, info)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
 const referenceItems = ref<ReferenceItem[]>([])
 const referenceMenuOpen = ref(false)
 
@@ -134,23 +176,20 @@ function scrollToBottom() {
 
 watch(() => [messages.value.length, status.value], scrollToBottom)
 
-// ── `/` 技能选择器 ────────────────────────────────────────────────
-// 在行首或空白之后输入 `/` 弹出技能列表；选中后把 `/技能名 ` 写回输入框，
+// ── `/skills` 技能选择器 ──────────────────────────────────────────
+// 在行首或空白之后输入 `/skills` 弹出技能/命令；选中后把 `/技能名 ` 写回输入框，
 // 发送时后端 `apply_slash_skill` 会加载该技能正文并注入模型上下文。
-const slashTrigger = computed(() => {
-  const value = draft.value
-  for (let i = value.length - 1; i >= 0; i--) {
-    if (value[i] !== '/') continue
-    const prev = i > 0 ? value[i - 1] : ''
-    if (prev && !/\s/.test(prev)) continue
-    if (value[i + 1] === '/') continue
-    return i
-  }
-  return -1
+const slashToken = computed(() => {
+  const match = /(^|\s)(\/\S*)$/.exec(draft.value)
+  if (!match) return null
+  return { start: draft.value.length - match[2].length, token: match[2].toLowerCase() }
 })
+const slashTrigger = computed(
+  () => (slashToken.value?.token === '/skills' ? slashToken.value.start : -1),
+)
 const slashRest = computed(() => {
-  const i = slashTrigger.value
-  return i >= 0 ? draft.value.slice(i + 1) : ''
+  const trigger = slashToken.value
+  return trigger ? draft.value.slice(trigger.start + trigger.token.length) : ''
 })
 interface SlashItem {
   name: string
@@ -162,7 +201,11 @@ const commandsLoading = ref(false)
 const slashAll = computed<SlashItem[]>(() => [
   ...skillStore.skills
     .filter((skill) => skill.enabled)
-    .map((skill) => ({ name: skill.name, description: skill.description || '', kind: 'skill' as const })),
+    .map((skill) => ({
+      name: skill.name,
+      description: skill.description || '',
+      kind: 'skill' as const,
+    })),
   ...commandItems.value.map((command) => ({
     name: command.name,
     description: command.description || (command.agent ? `Agent: ${command.agent}` : ''),
@@ -180,23 +223,11 @@ async function ensureCommands() {
     commandsLoading.value = false
   }
 }
-const slashChosen = computed(() => {
-  const rest = slashRest.value
-  const space = rest.search(/\s/)
-  if (space < 0) return false
-  const token = rest.slice(0, space)
-  if (!token) return true
-  return slashAll.value.some((item) => item.name === token)
-})
-const slashOpen = computed(
-  () => !slashDismissed.value && slashTrigger.value >= 0 && !slashChosen.value,
-)
+const slashOpen = computed(() => !slashDismissed.value && slashTrigger.value >= 0)
 const slashQuery = computed(() => {
   const typed = slashSearch.value.trim()
   if (typed) return typed.toLowerCase()
-  const rest = slashRest.value
-  const space = rest.search(/\s/)
-  return (space < 0 ? rest : rest.slice(0, space)).trim().toLowerCase()
+  return slashRest.value.trim().toLowerCase()
 })
 const slashFiltered = computed(() => {
   const query = slashQuery.value
@@ -205,7 +236,7 @@ const slashFiltered = computed(() => {
   return available.filter(
     (item) =>
       item.name.toLowerCase().includes(query)
-      || (item.description || '').toLowerCase().includes(query),
+      || item.description.toLowerCase().includes(query),
   )
 })
 
@@ -330,6 +361,7 @@ onMounted(() => {
   v2.start()
   void models.load()
   void ensureReferences()
+  void ensureAgents()
   void loadSession()
 })
 
@@ -341,6 +373,7 @@ onBeforeUnmount(() => {
 
 watch(() => route.params.id, () => {
   error.value = ''
+  void ensureAgents()
   void loadSession()
 })
 
@@ -355,12 +388,14 @@ async function send() {
       const info = await createSession({
         title: (text || '附件').slice(0, 24),
         directory: legacy.activeDirectory || undefined,
+        agent: pendingAgent.value || undefined,
         model: pendingModel.value
           ? { id: pendingModel.value, provider_id: '', variant: null }
           : null,
       })
       id = info.id
       pendingModel.value = ''
+      pendingAgent.value = ''
       v2.setInfo(id, info)
       void legacy.loadConversations()
       const name = route.name === 'MultiAgent' ? 'MultiAgentConversation' : 'V2ChatConversation'
@@ -822,8 +857,8 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
           </div>
           <div class="v2-assistant">
             <template v-if="isActiveMessage(message)">
-              <div class="v2-think" role="status" aria-label="Thinking">
-                <span class="v2-think-text">Thinking</span>
+              <div class="v2-think" role="status" aria-label="思考中">
+                <span class="v2-think-text">思考中</span>
               </div>
               <div v-if="hasExecInfo(message)" class="v2-exec">
                 <div v-if="liveCompaction" class="v2-exec-row" :class="liveCompaction.status">
@@ -886,8 +921,8 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M12 3v4M8 12h.01M16 12h.01M9 16h6"/></svg>
         </div>
         <div class="v2-assistant">
-          <div class="v2-think" role="status" aria-label="Thinking">
-            <span class="v2-think-text">Thinking</span>
+          <div class="v2-think" role="status" aria-label="思考中">
+            <span class="v2-think-text">思考中</span>
           </div>
           <div v-if="liveCompaction" class="v2-exec">
             <div class="v2-exec-row" :class="liveCompaction.status">
@@ -999,7 +1034,7 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
           ref="composerRef"
           v-model="draft"
           rows="2"
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行；输入 / 选择技能"
+          placeholder="输入消息，Enter 发送，Shift+Enter 换行；/skills 选择技能"
           @keydown="onComposerKeydown"
         ></textarea>
         <div class="input-actions">
@@ -1038,6 +1073,48 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
             <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
           </button>
           <span v-if="recording" class="record-hint">{{ recordSeconds.toFixed(0) }}s</span>
+          <div
+            class="model-wrap"
+            @mouseenter="agentTipVisible = true"
+            @mouseleave="agentTipVisible = false"
+          >
+            <button
+              class="model-pill"
+              type="button"
+              :title="currentAgentDesc"
+              @click.stop="agentMenuOpen = !agentMenuOpen"
+            >
+              <span class="model-current">{{ currentAgentLabel }}</span>
+              <svg class="model-chevron" :class="{ open: agentMenuOpen }" width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m4 6.5 4 4 4-4"/></svg>
+            </button>
+            <div v-if="agentMenuOpen" class="model-menu-mask" @click="agentMenuOpen = false"></div>
+            <div v-if="agentMenuOpen" class="model-menu">
+              <div class="model-menu-head">
+                <span>Agent</span>
+                <b>{{ currentAgentLabel }}</b>
+              </div>
+              <div class="model-menu-section">选择 Agent</div>
+              <button
+                v-for="agent in agentOptions"
+                :key="agent.name"
+                class="model-menu-item"
+                :class="{ active: agent.name === currentAgentName }"
+                type="button"
+                @click="pickAgent(agent.name)"
+              >
+                <span class="model-menu-text">
+                  <span class="model-menu-name">{{ agent.name }}</span>
+                  <span class="model-menu-desc">{{ agent.description || agent.mode }}</span>
+                </span>
+                <svg v-if="agent.name === currentAgentName" class="check" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 8.5 3 3 6-7"/></svg>
+              </button>
+              <div v-if="!agentOptions.length" class="model-menu-section">没有可用 Agent</div>
+            </div>
+            <div v-if="agentTipVisible && !agentMenuOpen && currentAgentDesc" class="model-tip">
+              <div class="model-tip-name">{{ currentAgentLabel }}</div>
+              <span class="model-tip-desc">{{ currentAgentDesc }}</span>
+            </div>
+          </div>
           <div
             class="model-wrap"
             @mouseenter="modelTipVisible = true"

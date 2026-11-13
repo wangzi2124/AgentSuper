@@ -2,6 +2,7 @@
 
 import pytest
 
+from agents.registry import AgentDef, AgentRegistry
 from execution.filesystem import VirtualFileSystem
 from graph.main_graph import default_registry
 from graph.subagent import SUBAGENTS, make_runner, make_task_tool, run_subagent
@@ -76,3 +77,47 @@ async def test_task_tool_delegates_and_returns_text(tmp_path):
     task = make_task_tool(runner)
     text = await task("code", "写一个函数")
     assert text == "code 完成"
+
+
+@pytest.mark.asyncio
+async def test_runner_reloads_agents_from_provider(tmp_path):
+    reg = _registry(tmp_path)
+    calls = {"count": 0}
+
+    def provider() -> AgentRegistry:
+        calls["count"] += 1
+        fresh = AgentRegistry()
+        fresh.register(
+            AgentDef(
+                name="fresh",
+                description="动态加载的子 Agent",
+                mode="subagent",
+                tools=("read_file",),
+            )
+        )
+        return fresh
+
+    runner = make_runner(
+        reg,
+        agents_provider=provider,
+        model_factory=lambda spec: FakeModel(f"{spec.name} 完成"),
+    )
+    out = await runner("fresh", "任务")
+    assert out["text"] == "fresh 完成"
+    assert calls["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_provider_failure_falls_back(tmp_path):
+    reg = _registry(tmp_path)
+
+    def provider() -> AgentRegistry:
+        raise RuntimeError("disk unavailable")
+
+    runner = make_runner(
+        reg,
+        agents_provider=provider,
+        model_factory=lambda spec: FakeModel(f"{spec.name} 完成"),
+    )
+    out = await runner("code", "任务")
+    assert out["text"] == "code 完成"

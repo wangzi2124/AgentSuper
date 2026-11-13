@@ -246,6 +246,9 @@ export function applyV2Event(
       next.compaction = null
       if (next.info) next.info = { ...next.info, status: 'busy' }
       break
+    case 'session.agent.selected':
+      if (next.info) next.info = { ...next.info, agent: event.data.agent }
+      break
     case 'session.execution.succeeded':
     case 'session.execution.interrupted':
       next.status = { type: 'idle' }
