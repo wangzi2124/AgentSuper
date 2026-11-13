@@ -674,6 +674,29 @@ function toolPart(part: MessagePart): ToolPart | null {
   return part.type === 'tool' ? part : null
 }
 
+/** 时间线只保留最新一条工具记录，避免多轮工具调用堆满聊天区。 */
+function visibleParts(message: MessageV2): MessagePart[] {
+  const parts = textParts(message)
+  let latest = -1
+  parts.forEach((part, index) => {
+    if (part.type === 'tool') latest = index
+  })
+  if (latest < 0) return parts
+  return parts.filter((part, index) => part.type !== 'tool' || index === latest)
+}
+
+/** 回合进行中且尚未产生工具/正文时，展示模型的 think 状态。 */
+const thinking = computed(() => {
+  if (status.value !== 'busy' && status.value !== 'retry') return false
+  const last = messages.value[messages.value.length - 1]
+  if (!last || last.type !== 'assistant') return true
+  const parts = last.content
+  if (parts.some((part) => part.type === 'tool')) return false
+  return !parts.some(
+    (part) => (part.type === 'text' || part.type === 'reasoning') && part.text.trim().length > 0,
+  )
+})
+
 function asTool(part: MessagePart): ToolPart {
   return part as ToolPart
 }
@@ -782,7 +805,7 @@ function toolResultText(part: ToolPart): string {
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M12 3v4M8 12h.01M16 12h.01M9 16h6"/></svg>
           </div>
           <div class="v2-assistant">
-            <template v-for="(part, index) in textParts(message)" :key="`${message.id}-${index}`">
+            <template v-for="(part, index) in visibleParts(message)" :key="part.type === 'tool' ? part.id : `${message.id}-${index}`">
               <div v-if="part.type === 'text'" class="v2-bubble assistant">{{ part.text }}</div>
               <div v-else-if="part.type === 'reasoning'" class="v2-reasoning">
                 <span>推理</span>
@@ -835,6 +858,16 @@ function toolResultText(part: ToolPart): string {
         <template v-else-if="message.type === 'system'">
           <div class="v2-system">{{ message.text }}</div>
         </template>
+      </div>
+
+      <div v-if="thinking" class="v2-message assistant v2-thinking-row">
+        <div class="v2-avatar assistant">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M12 3v4M8 12h.01M16 12h.01M9 16h6"/></svg>
+        </div>
+        <div class="v2-think">
+          <span class="v2-think-dots"><i></i><i></i><i></i></span>
+          <span class="v2-think-label">think</span>
+        </div>
       </div>
 
       <div v-if="inbox.length" class="v2-inbox">
