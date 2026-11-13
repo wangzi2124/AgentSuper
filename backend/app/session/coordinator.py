@@ -18,7 +18,11 @@ class ExecutionCoordinator:
     def __init__(self, ctx: Any) -> None:
         self.ctx = ctx
         self._tasks: dict[str, asyncio.Task[Any]] = {}
-        self._cancelled: set[str] = set()
+        # session_id -> "stop" | "resume"：只记录真正打断的回合。
+        self._interrupt: dict[str, str] = {}
+        # 每次 wake 自增；drain 退出前对比，避免「空队列检查 → 任务注销」窗口丢唤醒。
+        self._wake_seq: dict[str, int] = {}
+        self._closed = False
         self._lock = asyncio.Lock()
 
     def is_running(self, session_id: str) -> bool:
@@ -27,14 +31,20 @@ class ExecutionCoordinator:
 
     async def wake(self, session_id: str) -> None:
         async with self._lock:
+            if self._closed:
+                return
+            self._wake_seq[session_id] = self._wake_seq.get(session_id, 0) + 1
             task = self._tasks.get(session_id)
             if task is not None and not task.done():
                 return
             self._tasks[session_id] = asyncio.create_task(self._drain(session_id))
 
-    def interrupt(self, session_id: str) -> bool:
-        self._cancelled.add(session_id)
-        return bool(self.ctx.cancel_turn(session_id))
+    def interrupt(self, session_id: str, resume: bool = False) -> bool:
+        if not self.ctx.cancel_turn(session_id):
+            return False
+        # 空闲时 interrupt 不留下标记，否则下一次成功回合会被误报为 interrupted。
+        self._interrupt[session_id] = "resume" if resume else "stop"
+        return True
 
     async def wait(self, session_id: str) -> None:
         task = self._tasks.get(session_id)
@@ -42,6 +52,7 @@ class ExecutionCoordinator:
             await asyncio.shield(task)
 
     async def close(self) -> None:
+        self._closed = True
         tasks = [task for task in self._tasks.values() if not task.done()]
         for task in tasks:
             task.cancel()
@@ -53,12 +64,34 @@ class ExecutionCoordinator:
         from . import repository as repo
         from app.events.emitter import emit_event
 
+        seen = self._wake_seq.get(session_id, 0)
+        interrupted = False
         try:
             while True:
                 item = repo.promote_next(session_id)
                 if item is None:
+                    # 与 wake/任务注销共用一个临界区：若期间有新唤醒，继续 drain 而不是退出。
+                    async with self._lock:
+                        current = self._wake_seq.get(session_id, 0)
+                        if current != seen:
+                            seen = current
+                            continue
                     break
                 await self._run_item(session_id, item)
+                mode = self._interrupt.get(session_id)
+                if mode is None:
+                    continue
+                interrupted = True
+                if mode == "stop":
+                    break
+                # resume=true 只继续 steer/control，queue 保持排队。
+                if not any(
+                    i.get("delivery") == "steer" for i in repo.list_inputs(session_id)
+                ):
+                    break
+        except asyncio.CancelledError:
+            await self._reset_idle(session_id)
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("v2 execution failed: %s", session_id, exc_info=True)
             await emit_event(
@@ -70,10 +103,8 @@ class ExecutionCoordinator:
                 },
                 session_id=session_id,
             )
-            interrupted = session_id in self._cancelled
             await self._finish(session_id, "interrupted" if interrupted else "failed")
         else:
-            interrupted = session_id in self._cancelled
             outcome = "interrupted" if interrupted else "succeeded"
             await emit_event(
                 self.ctx,
@@ -87,11 +118,29 @@ class ExecutionCoordinator:
             )
             await self._finish(session_id, outcome)
         finally:
-            self._cancelled.discard(session_id)
+            self._interrupt.pop(session_id, None)
             async with self._lock:
                 current = self._tasks.get(session_id)
                 if current is asyncio.current_task():
                     self._tasks.pop(session_id, None)
+                    if (
+                        not self._closed
+                        and self._wake_seq.get(session_id, 0) != seen
+                    ):
+                        # 退出检查后又有新入队/唤醒：立刻接管，避免任务注销留下孤儿条目。
+                        self._tasks[session_id] = asyncio.create_task(
+                            self._drain(session_id)
+                        )
+
+    async def _reset_idle(self, session_id: str) -> None:
+        """取消（shutdown/close）时把会话状态归零，避免永久卡在 busy。"""
+        try:
+            from . import repository as repo
+
+            repo.set_session_status(session_id, "idle", outcome="interrupted")
+            self.ctx.sessions.update(session_id, status="idle")
+        except Exception:  # noqa: BLE001
+            logger.warning("重置会话状态失败: %s", session_id, exc_info=True)
 
     async def _finish(self, session_id: str, outcome: str) -> None:
         from . import repository as repo

@@ -63,7 +63,7 @@ class CommandDef:
         for index in range(9, 0, -1):
             value = args[index - 1] if index <= len(args) else ""
             text = text.replace(f"${index}", value)
-        text = _inline_files(text, args, workspace)
+        text = _inline_files(text, workspace)
         text = _append_globs(text, self.files, workspace)
         text = _expand_shell(text, shell_runner, workspace)
         if not text.strip():
@@ -90,7 +90,7 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def _inline_files(text: str, args: list[str], workspace: str | Path | None) -> str:
+def _inline_files(text: str, workspace: str | Path | None) -> str:
     root = Path(workspace) if workspace else None
     if root is None:
         return text

@@ -288,8 +288,3 @@ def make_sqlite_conn(
     if schema_ddl:
         conn.executescript(schema_ddl)
     return conn
-
-
-def translate_sql_for_test(sql: str) -> Optional[str]:
-    """测试用：暴露方言翻译结果。"""
-    return _translate_sql(sql, "mysql")

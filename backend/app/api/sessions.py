@@ -189,7 +189,6 @@ async def interrupt_session(session_id: str, ctx: PlatformContext = Depends(get_
 @router.post("/{session_id}/compact")
 async def compact_session(
     session_id: str,
-    checkpoint: str | None = None,
     ctx: PlatformContext = Depends(get_context),
 ) -> Response:
     _must_get(ctx, session_id)

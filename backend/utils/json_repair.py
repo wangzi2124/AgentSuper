@@ -96,19 +96,6 @@ def parse_answer_envelope(text: str | None) -> str:
     return text
 
 
-def is_unparsed_json_answer(text: str | None) -> bool:
-    """是否为「看起来是 JSON、但提取不出正文」的回答。
-
-    在 `parse_answer_envelope` 之后调用：若文本（去代码围栏后）仍以 `{` 开头，说明没能
-    提取出正文——弱模型自造 schema（`{"type":"content",...}`）、把工具 schema 当文本打印
-    （`{"name":"tool_task","description":...}`）等都属于此。此时应视为**失败回答**
-    （触发重试/回退强模型），而不是把 JSON 直接展示给用户。
-    """
-    if not text:
-        return False
-    return _strip_code_fence(text.strip()).startswith("{")
-
-
 def is_tool_call_markup(text: str | None) -> bool:
     """是否为「工具调用被当文本输出」的回答（Hermes / DeepSeek DSML 等标记）。
 

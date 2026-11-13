@@ -36,26 +36,6 @@ class DocumentListResponse(BaseModel):
     total: int
 
 
-class Source(BaseModel):
-    """来源模型，表示检索到的文档片段来源。"""
-    document_id: str
-    content: str
-    score: float
-
-
-class StepEvent(BaseModel):
-    """步骤事件模型，用于记录代理执行过程中的步骤信息。"""
-    type: str  # "step_start" | "step_end" | "tool_start" | "tool_end"
-    step_id: str
-    name: str
-    status: str  # "running" | "completed" | "failed"
-    detail: Optional[str] = None
-    duration_ms: Optional[float] = None
-    tool_name: Optional[str] = None
-    tool_args: Optional[dict] = None
-    tool_result: Optional[str] = None
-
-
 class ChatRequest(BaseModel):
     """聊天请求模型，包含用户消息和相关参数。"""
     message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50_000)] = Field(..., description="用户消息内容（1~50000 字符，不能为空，首尾空白自动去除）")
@@ -69,14 +49,6 @@ class ChatRequest(BaseModel):
     # 服务端按 (user_id, session_id, client_msg_id) 去重，避免断网重试产生重复轮次。
     client_msg_id: Optional[str] = None
     agent_mode: Optional[str] = None  # Agent 模式：None=supervisor路由, "plan"=规划, "explore"=探索
-
-
-class ChatResponse(BaseModel):
-    """聊天响应模型，包含AI回答和相关源。"""
-    answer: str
-    sources: list[Source]
-    conversation_id: str
-    steps: list[StepEvent] = []
 
 
 class UploadResponse(BaseModel):
@@ -109,20 +81,6 @@ class ChunkListResponse(BaseModel):
     total: int
     offset: int
     limit: int
-
-
-class MultiAgentChatResponse(BaseModel):
-    """多 Agent 聊天响应模型。"""
-    answer: str
-    sources: list[Source]
-    conversation_id: str
-    steps: list[StepEvent] = []
-    routed_to: Optional[str] = None
-    # [文件改动] 本次轮次改动的文件 + 行数（快照 diff，聊天框展示）
-    files_changed: list = Field(default_factory=list)
-    # [plan] plan Agent 落盘的计划文件路径（<data>/plans/<conversation_id>/plan.md）。
-    # 此前只出现在 AgentMessage.payload 里，两端点都不下发 —— 加进来才真正可达。
-    plan_path: Optional[str] = None
 
 
 class RestoreSnapshotRequest(BaseModel):

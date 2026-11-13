@@ -54,6 +54,18 @@ async def _empty_state():
     return {}
 
 
+def test_backup_filename_cannot_escape_backup_dir(tmp_path):
+    deps, _, _ = _deps(tmp_path)
+    path = SwitchService(deps)._backup(
+        "../../evil", "model/a", "model/b", [], 0, 0, 0
+    )
+    root = (tmp_path / "switches").resolve()
+    assert type(path) is str
+    from pathlib import Path
+
+    assert Path(path).resolve().parent == root
+
+
 @pytest.mark.asyncio
 async def test_empty_target_is_rejected(tmp_path):
     deps, _, _ = _deps(tmp_path)

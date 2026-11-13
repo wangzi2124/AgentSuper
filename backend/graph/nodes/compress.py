@@ -21,8 +21,6 @@ from harness.compression import (
 
 logger = logging.getLogger(__name__)
 
-KEEP_RECENT = 6
-
 
 def _model_label(model: Any | None) -> str:
     value = getattr(model, "model_name", None)

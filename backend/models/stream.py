@@ -7,7 +7,8 @@
 2. 累积：把 chunk 增量拼成完整 message（content / reasoning_content / tool_calls）；
 3. 方言归一化：Ollama 把工具调用以 JSON 文本流入 content → 重组为标准 tool_calls，
    未知工具名则抽取 arguments 内嵌回复（见 `dialect.py`）；
-4. reasoning 回退：content 为空、仅 reasoning_content 有输出时用 reasoning 兜底。
+4. reasoning 不冒充答案：content 为空时保留空串（交给上层空回复纠偏），
+   绝不把 reasoning_content 当作最终回答。
 
 观测/计费（trace / monitor / chainlog / usage 累加）依赖 app 层，由调用方在适配器中完成，
 本层不 import `app.*`。
@@ -16,7 +17,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -35,7 +35,6 @@ class StreamResult:
     tool_calls: list | None = None
     finish_reason: str | None = None
     usage: object | None = None
-    content_from_reasoning: bool = False
     interrupted: bool = False
     stream_error: Exception | None = None
 
@@ -136,7 +135,6 @@ def _build_tool_calls(tool_slots: dict[int, dict]) -> list | None:
 async def collect_stream(stream, tool_names: set[str] | None = None, on_text=None) -> StreamResult:
     """累积一次流式响应；正文增量即时下发，疑似工具 JSON 先扣住。"""
     text_chunks: list[str] = []
-    reasoning_chunks: list[str] = []
     emitter = _IncrementalText(on_text)
     tool_slots: dict[int, dict] = {}
     finish_reason = None
@@ -162,9 +160,6 @@ async def collect_stream(stream, tool_names: set[str] | None = None, on_text=Non
             if c:
                 text_chunks.append(c)
                 emitter.feed(c)
-            rc = getattr(delta, "reasoning_content", None)
-            if rc:
-                reasoning_chunks.append(rc)
             for tc in (getattr(delta, "tool_calls", None) or []):
                 idx = getattr(tc, "index", None) or 0
                 slot = tool_slots.setdefault(
@@ -193,12 +188,6 @@ async def collect_stream(stream, tool_names: set[str] | None = None, on_text=Non
         )
 
     content = "".join(text_chunks)
-    # [零进展] 正文是否由模型自己产出，必须在 reasoning 回退之前取
-    content_is_real = bool(content.strip())
-    if not content.strip() and reasoning_chunks:
-        reasoning = "".join(reasoning_chunks).strip()
-        if reasoning:
-            content = reasoning
 
     # [Ollama 流式兼容] 工具调用被注入为 content 中的 JSON 文本 → 重组
     converted_to_call = False
@@ -206,12 +195,15 @@ async def collect_stream(stream, tool_names: set[str] | None = None, on_text=Non
     call = parse_streamed_tool_call(content)
     if call and not tool_slots:
         if tool_names and call["name"] in tool_names:
+            from harness.adapter import stable_call_id
+
+            arguments = json.dumps(call["arguments"], ensure_ascii=False)
             tool_slots[0] = {
-                "id": f"call_{uuid.uuid4().hex[:16]}",
+                "id": stable_call_id(call["name"], arguments, 0),
                 "type": "function",
                 "function": {
                     "name": call["name"],
-                    "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                    "arguments": arguments,
                 },
             }
             content = ""
@@ -236,19 +228,13 @@ async def collect_stream(stream, tool_names: set[str] | None = None, on_text=Non
         tool_calls=_build_tool_calls(tool_slots),
         finish_reason=finish_reason,
         usage=usage,
-        content_from_reasoning=not content_is_real,
     )
 
 
 def nonstream_result(response, on_text=None) -> StreamResult:
-    """把一次非流式响应转成 StreamResult（含 reasoning 回退与整段文本推送）。"""
+    """把一次非流式响应转成 StreamResult（整段文本推送）。"""
     msg = getattr(response.choices[0], "message", None)
-    raw_content = getattr(msg, "content", None) or ""
-    content = raw_content
-    if not content.strip():
-        reasoning = getattr(msg, "reasoning_content", None) or ""
-        if reasoning.strip():
-            content = reasoning
+    content = getattr(msg, "content", None) or ""
     tool_calls = list(getattr(msg, "tool_calls", None) or []) or None
     if on_text is not None and content:
         on_text(content)
@@ -257,7 +243,6 @@ def nonstream_result(response, on_text=None) -> StreamResult:
         tool_calls=tool_calls,
         finish_reason=getattr(response.choices[0], "finish_reason", None),
         usage=getattr(response, "usage", None),
-        content_from_reasoning=not bool(raw_content.strip()),
     )
 
 

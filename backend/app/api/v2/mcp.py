@@ -133,7 +133,7 @@ def _callback_page(ok: bool, message: str, *, server: str = "") -> str:
 
 
 @router.get("")
-async def list_servers(request: Request) -> dict:
+async def list_servers() -> dict:
     return {"servers": get_mcp_runtime().status()}
 
 
@@ -351,7 +351,7 @@ async def connect_server(request: Request, name: str) -> dict:
 
 
 @router.post("/{name}/disconnect")
-async def disconnect_server(request: Request, name: str) -> dict:
+async def disconnect_server(name: str) -> dict:
     try:
         server = await get_mcp_runtime().disconnect(name)
     except MCPError as exc:

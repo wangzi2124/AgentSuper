@@ -12,7 +12,6 @@ Only Ollama is affected; cloud providers keep their existing behavior.
 from __future__ import annotations
 
 import logging
-import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,9 +32,6 @@ _OVERFLOW_HINTS = (
     "maximum context",
     "too many tokens",
 )
-
-_lock = threading.Lock()
-_last_fit: dict[str, "FitResult"] = {}
 
 
 @dataclass
@@ -158,7 +154,6 @@ def fit_messages(
             _raise_overflow(mid, window, budget, mandatory, reserve)
 
     if before <= budget:
-        _last_fit[mid] = fit
         return fit
 
     fitted = truncate_messages(
@@ -180,7 +175,6 @@ def fit_messages(
     if after > budget:
         _raise_overflow(mid, window, budget, after, reserve)
 
-    _last_fit[mid] = fit
     _emit_truncated(fit)
     logger.info(
         "Ollama prompt fitted: model=%s window=%d budget=%d tokens %d->%d dropped=%d",
@@ -227,16 +221,8 @@ def is_overflow_error(exc: BaseException) -> bool:
         return False
 
 
-def last_fit(model_id: str) -> FitResult | None:
-    mid = _mid(model_id)
-    with _lock:
-        return _last_fit.get(mid)
-
-
 def reset_state() -> None:
-    """Test helper: clear calibration and last-fit caches."""
-    with _lock:
-        _last_fit.clear()
+    """Test helper: clear calibration caches."""
     from cognition.context_meter import get_meter
 
     get_meter().reset_calibration()
@@ -377,7 +363,6 @@ __all__ = [
     "fit_messages",
     "guard_enabled",
     "is_overflow_error",
-    "last_fit",
     "minimum_window",
     "record_actual_usage",
     "refit_after_overflow",

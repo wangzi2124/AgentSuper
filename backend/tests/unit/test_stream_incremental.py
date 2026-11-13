@@ -60,6 +60,24 @@ async def test_unknown_tool_reply_is_streamed_once():
     assert seen == ["hello"]
 
 
+@pytest.mark.asyncio
+async def test_reasoning_is_not_returned_as_answer():
+    async def body():
+        yield _chunk(reasoning="only thinking")
+
+    result = await collect_stream(body())
+    assert result.content == ""
+
+
+@pytest.mark.asyncio
+async def test_ollama_tool_json_gets_deterministic_id():
+    payload = '{"name": "read_file", "arguments": {"path": "a"}}'
+    first = await collect_stream(_gen([payload]), tool_names={"read_file"})
+    second = await collect_stream(_gen([payload]), tool_names={"read_file"})
+    assert first.tool_calls[0].id == second.tool_calls[0].id
+    assert first.tool_calls[0].id.startswith("call_")
+
+
 async def _fake_acompletion(**kwargs):
     if kwargs.get("stream"):
         async def body():

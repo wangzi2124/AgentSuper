@@ -53,16 +53,20 @@ _WORKSPACE_READ_TOOLS = frozenset(_FILE_READ_TOOLS)
 
 
 class _AsyncRWLock:
-    """Small asyncio reader-writer lock for workspace access."""
+    """Small asyncio reader-writer lock for workspace access.
+
+    写者优先：有写者排队时新的读者不再插队，避免持续读把写工具饿死。
+    """
 
     def __init__(self) -> None:
         self._condition = asyncio.Condition()
         self._readers = 0
         self._writer = False
+        self._waiting_writers = 0
 
     async def acquire_read(self) -> None:
         async with self._condition:
-            while self._writer:
+            while self._writer or self._waiting_writers:
                 await self._condition.wait()
             self._readers += 1
 
@@ -75,8 +79,16 @@ class _AsyncRWLock:
 
     async def acquire_write(self) -> None:
         async with self._condition:
-            while self._writer or self._readers:
-                await self._condition.wait()
+            self._waiting_writers += 1
+            try:
+                while self._writer or self._readers:
+                    await self._condition.wait()
+            except BaseException:
+                self._waiting_writers -= 1
+                if self._waiting_writers == 0:
+                    self._condition.notify_all()
+                raise
+            self._waiting_writers -= 1
             self._writer = True
 
     async def release_write(self) -> None:
@@ -390,6 +402,10 @@ def _describe(result: Any) -> str:
         return str(result)
 
 
+def _is_mutating(td: ToolDefinition) -> bool:
+    return getattr(td, "mutating", False) or td.name in _MUTATING_TOOL_NAMES
+
+
 async def _dispatch(
     td: ToolDefinition, args: dict[str, Any]
 ) -> str:
@@ -405,7 +421,20 @@ async def _dispatch(
         if inspect.iscoroutinefunction(fn):
             result = await fn(**args)
         else:
-            result = await asyncio.to_thread(fn, **args)
+            future = asyncio.ensure_future(asyncio.to_thread(fn, **args))
+            try:
+                result = await asyncio.shield(future)
+            except asyncio.CancelledError:
+                if _is_mutating(td):
+                    # 线程无法真正取消：写工具必须等它落盘，否则调用方释放写锁后
+                    # 下一次写会与仍在运行的线程重叠。
+                    try:
+                        await asyncio.shield(future)
+                    except Exception:  # noqa: BLE001
+                        pass
+                else:
+                    future.cancel()
+                raise
             if inspect.isawaitable(result):
                 result = await result
         return _describe(result)
@@ -522,7 +551,7 @@ async def _execute_tool_call(
         # Writers/shell take the exclusive side; file reads/searches take the
         # shared side. Reads still overlap each other but never a mutation.
         if td is not None and workspace_lock is not None:
-            if getattr(td, "mutating", False) or td.name in _MUTATING_TOOL_NAMES:
+            if _is_mutating(td):
                 await workspace_lock.acquire_write()
                 try:
                     return await _run()

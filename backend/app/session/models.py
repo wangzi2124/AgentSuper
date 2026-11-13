@@ -148,20 +148,6 @@ class PartDataCompaction(BaseModel):
     tail_start_id: Optional[str] = None
 
 
-# type → PartData 模型的映射（append_part 校验/转换用）
-PART_DATA_MODELS: dict[str, type[BaseModel]] = {
-    "text": PartDataText,
-    "reasoning": PartDataReasoning,
-    "tool": PartDataTool,
-    "step-start": PartDataStep,
-    "step-finish": PartDataStep,
-    "file": PartDataFile,
-    "patch": PartDataPatch,
-    "agent": PartDataAgent,
-    "compaction": PartDataCompaction,
-}
-
-
 class TokenUsage(BaseModel):
     """单条消息的 token 结算（对齐 opencode Message.tokens）。"""
 
@@ -220,20 +206,6 @@ class SessionUpdate(BaseModel):
     archived: Optional[int] = None
     agent: Optional[str] = None
     model: Optional[ModelRef] = None
-
-
-class PromptRequest(BaseModel):
-    """向会话投递输入。"""
-
-    prompt: str
-    files: list[Any] = []
-    delivery: str = "steer"  # steer | queue
-
-
-class RevertRequest(BaseModel):
-    """撤销到指定消息。"""
-
-    message_id: str
 
 
 class SessionStatus(BaseModel):

@@ -27,6 +27,52 @@ def _session(store) -> repository.SessionInfo:
     )
 
 
+def test_promote_next_never_hands_same_item_to_two_workers(store) -> None:
+    import threading
+
+    sess = _session(store)
+    total = 60
+    for i in range(total):
+        repository.admit_input(
+            sess.id, {"message": f"m{i}"}, delivery="queue", input_id=f"in_{i}"
+        )
+
+    promoted: list[str] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(4)
+
+    def worker() -> None:
+        barrier.wait()
+        while True:
+            item = repository.promote_next(sess.id)
+            if item is None:
+                return
+            with lock:
+                promoted.append(item["id"])
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(promoted) == total
+    assert len(set(promoted)) == total
+
+
+def test_session_id_rejects_path_traversal(store) -> None:
+    project = repository.resolve_project(str(store.parent))
+    for bad in ("../../evil", "a/b", r"a\b", "..", "a.b", "x" * 129):
+        with pytest.raises(ValueError):
+            repository.create_session(
+                "u1", project.id, str(store.parent), session_id=bad
+            )
+    sess = repository.create_session(
+        "u1", project.id, str(store.parent), session_id="ses_ok-1"
+    )
+    assert sess.id == "ses_ok-1"
+
+
 def test_v2_schema_has_columns_tables_and_marker(store) -> None:
     _get_db(store).close()
     conn = sqlite3.connect(store)

@@ -14,7 +14,7 @@ import uuid
 from typing import Any, Optional
 
 from .db import _get_db
-from .ids import new_id
+from .ids import new_id, validate_session_id
 from .models import ContextEpoch, Message, Part, ProjectInfo, SessionInfo
 
 _DEFAULT_USER = "anonymous"
@@ -138,7 +138,7 @@ def create_session(
     session_id: Optional[str] = None,
 ) -> SessionInfo:
     now = int(time.time() * 1000)
-    sid = session_id or new_id("ses_")
+    sid = validate_session_id(session_id) if session_id else new_id("ses_")
     slug = uuid.uuid4().hex[:8]
     conn = _get_db()
     try:
@@ -216,16 +216,6 @@ def list_sessions(
         conn.close()
 
 
-def list_sessions_by_status(status: str) -> list[SessionInfo]:
-    """列出所有处于指定状态的会话（启动对账用，不区分用户）。"""
-    conn = _get_db()
-    try:
-        rows = conn.execute("SELECT * FROM sessions WHERE status = ?", (status,)).fetchall()
-        return [_row_to_session(r) for r in rows]
-    finally:
-        conn.close()
-
-
 def update_session(session_id: str, **fields: Any) -> SessionInfo:
     allowed = {"title", "archived", "agent", "model", "status", "cost", "directory",
                "tokens_input", "tokens_output", "tokens_cache_read", "tokens_cache_write",
@@ -284,10 +274,6 @@ def set_session_status(
     if status == "idle" and idle is None:
         fields["time_idle"] = int(time.time() * 1000)
     return update_session(session_id, **fields)
-
-
-def touch_session_viewed(session_id: str) -> SessionInfo:
-    return update_session(session_id, time_viewed=int(time.time() * 1000))
 
 
 def list_children(parent_id: str) -> list[SessionInfo]:
@@ -468,18 +454,6 @@ def latest_seq(session_id: str) -> int:
             (session_id,),
         ).fetchone()
         return int(row["n"])
-    finally:
-        conn.close()
-
-
-def latest_compaction_seq(session_id: str) -> Optional[int]:
-    conn = _get_db()
-    try:
-        row = conn.execute(
-            "SELECT MAX(seq) AS n FROM session_messages WHERE session_id = ? AND type = 'compaction'",
-            (session_id,),
-        ).fetchone()
-        return int(row["n"]) if row and row["n"] is not None else None
     finally:
         conn.close()
 
@@ -672,28 +646,6 @@ def find_tool_part(session_id: str, message_id: str, tool_call_id: str) -> Optio
         conn.close()
 
 
-def add_session_usage(session_id: str, input_tokens: int = 0, output_tokens: int = 0,
-                      cost: float = 0.0, cache_read: int = 0, cache_write: int = 0,
-                      reasoning: int = 0) -> None:
-    """累加会话级 token/费用（对齐 sessions 表成本结算列）。
-
-    [token 统计] 扩展自 input/output/cost：补齐 cache_read/cache_write/reasoning，
-    与 assistant 消息 data.tokens 的五键口径一致。
-    """
-    conn = _get_db()
-    try:
-        conn.execute(
-            "UPDATE sessions SET tokens_input = tokens_input + ?, tokens_output = tokens_output + ?,"
-            " tokens_cache_read = tokens_cache_read + ?, tokens_cache_write = tokens_cache_write + ?,"
-            " tokens_reasoning = tokens_reasoning + ?, cost = cost + ?, time_updated = ? WHERE id = ?",
-            (int(input_tokens), int(output_tokens), int(cache_read), int(cache_write),
-             int(reasoning), float(cost), int(time.time() * 1000), session_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def append_part(session_id: str, message_id: str, part_type: str, data: dict[str, Any]) -> Part:
     conn = _get_db()
     try:
@@ -838,30 +790,6 @@ def update_part(session_id: str, part_id: str, data: dict[str, Any]) -> Optional
         conn.close()
 
 
-def update_message(session_id: str, message_id: str, data: dict[str, Any]) -> Optional[Message]:
-    """就地更新一条消息的 data（如 assistant 结算字段/最终答案回填）。
-
-    消息日志仍是 append-only：本函数只更新既有行的 data，不新增 seq。
-    """
-    conn = _get_db()
-    try:
-        row = conn.execute(
-            "SELECT * FROM session_messages WHERE session_id = ? AND id = ?",
-            (session_id, message_id),
-        ).fetchone()
-        if not row:
-            return None
-        conn.execute(
-            "UPDATE session_messages SET data = ? WHERE session_id = ? AND id = ?",
-            (json.dumps(data, ensure_ascii=False), session_id, message_id),
-        )
-        conn.commit()
-        return Message(id=row["id"], session_id=row["session_id"], type=row["type"],
-                       data=data, seq=row["seq"], time_created=row["time_created"])
-    finally:
-        conn.close()
-
-
 def delete_message(session_id: str, message_id: str) -> bool:
     """删除指定会话中的一条消息（对齐旧 delete_message 端点语义）。"""
     conn = _get_db()
@@ -981,8 +909,7 @@ def admit_input(session_id: str, prompt: dict[str, Any], delivery: str = "steer"
                 input_id: Optional[str] = None) -> str:
     """投递输入：入队并返回 input id（对齐 opencode SessionInput.admit）。
 
-    `admitted_seq` 是**入队票号**，在单条 INSERT 内原子计算：promote_newest 按它 DESC
-    取「最新一条」（后来居上插队）。
+    `admitted_seq` 是**入队票号**，在单条 INSERT 内原子计算，用于队列排序。
     票号取 session_messages.seq 与既有 session_inputs.admitted_seq 的共同上界 +1 —— 必须
     同时看两张表：只看 messages 会让「同一轮内连续投递的多条任务」拿到**同一个票号**
     （两条消息之间没有新 seq），LIFO 顺序退化成未定义的 rowid 顺序（实测按 FIFO 出队）。
@@ -1014,20 +941,23 @@ def admit_input(session_id: str, prompt: dict[str, Any], delivery: str = "steer"
 
 
 def promote_next(session_id: str) -> Optional[dict[str, Any]]:
-    """提升下一条待执行输入（steer 优先于 queue），返回其 prompt。"""
+    """原子提升下一条待执行输入（steer 优先于 queue），返回其 prompt。"""
     conn = _get_db()
     try:
+        # SELECT + UPDATE 必须在同一写事务内：并发 drain 不能取到同一条。
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM session_inputs WHERE session_id = ? AND status = 'pending'"
             " ORDER BY (delivery = 'steer') DESC, admitted_seq ASC LIMIT 1",
             (session_id,),
         ).fetchone()
         if not row:
+            conn.commit()
             return None
         now = int(time.time() * 1000)
         conn.execute(
             "UPDATE session_inputs SET promoted_seq = ?, status = 'delivered', time_delivered = ?"
-            " WHERE session_id = ? AND id = ?",
+            " WHERE session_id = ? AND id = ? AND status = 'pending'",
             (row["admitted_seq"], now, session_id, row["id"]),
         )
         conn.commit()
@@ -1038,39 +968,9 @@ def promote_next(session_id: str) -> Optional[dict[str, Any]]:
             "type": row["type"],
             "status": "delivered",
         }
-    finally:
-        conn.close()
-
-
-def promote_newest(session_id: str) -> Optional[dict[str, Any]]:
-    """原子取出**最新一条**待执行输入并出队（后来居上：新加的任务排到队首）。
-
-    与 promote_next 的区别只有排序方向：steer 仍优先于 queue，同类内
-    `admitted_seq DESC`（最新优先）。DELETE + SELECT 在同一事务内完成，
-    因此同一 session 的并发 drain 不会取到同一条。
-    """
-    conn = _get_db()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT * FROM session_inputs WHERE session_id = ? AND status = 'pending'"
-            " ORDER BY (delivery = 'steer') DESC, admitted_seq DESC LIMIT 1",
-            (session_id,),
-        ).fetchone()
-        if not row:
-            conn.commit()
-            return None
-        conn.execute("DELETE FROM session_inputs WHERE session_id = ? AND id = ?",
-                     (session_id, row["id"]))
-        conn.commit()
-        return {
-            "id": row["id"],
-            "prompt": json.loads(row["prompt"]),
-            "delivery": row["delivery"],
-            "type": row["type"],
-            "status": "delivered",
-            "enqueued_at": int(row["time_created"]),
-        }
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -1193,19 +1093,6 @@ def update_input_delivery(session_id: str, input_id: str, delivery: str) -> bool
         )
         conn.commit()
         return cur.rowcount > 0
-    finally:
-        conn.close()
-
-
-def has_pending(session_id: str, delivery: Optional[str] = None) -> bool:
-    conn = _get_db()
-    try:
-        sql = "SELECT 1 FROM session_inputs WHERE session_id = ? AND status = 'pending'"
-        params: list[Any] = [session_id]
-        if delivery:
-            sql += " AND delivery = ?"
-            params.append(delivery)
-        return conn.execute(sql + " LIMIT 1", params).fetchone() is not None
     finally:
         conn.close()
 

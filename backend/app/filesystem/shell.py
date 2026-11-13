@@ -51,15 +51,3 @@ def _powershell_available() -> bool:
         return shutil.which("powershell") is not None or shutil.which("pwsh") is not None
     except Exception:
         return False
-
-
-def shell_args(shell: str, command: str) -> list[str]:
-    """按 shell 类型构造执行参数列表(供子进程 exec 使用)。"""
-    n = name(shell)
-    if n in _POWERSHELL_EXES:
-        return [shell, "-NoProfile", "-Command", command]
-    if n in _BASH_EXES:
-        return [shell, "-c", command]
-    if n in _CMD_EXES:
-        return [shell, "/c", command]
-    raise ValueError(f"Unsupported shell: {shell}")

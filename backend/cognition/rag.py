@@ -21,7 +21,6 @@ DEFAULT_THRESHOLD = 0.35
 DEFAULT_TOP_K = 5
 BATCH_SIZE = 5000
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_PERSIST_DIR = data_path(None, "rag")
 
 

@@ -19,25 +19,6 @@ _bus: Optional[Any] = None
 _threads: dict[str, str] = {}
 
 
-def bind_bus(bus: Any) -> None:
-    """应用启动时绑定 AgentBus 实例（main.py lifespan）。"""
-    global _bus
-    _bus = bus
-
-
-def register(child_session_id: str, thread_id: str) -> None:
-    """登记：子会话（kind='task'）正在等待 thread_id 对应的 AgentBus 回复。"""
-    _threads[child_session_id] = thread_id
-
-
-def unregister(child_session_id: str) -> None:
-    _threads.pop(child_session_id, None)
-
-
-def thread_for(child_session_id: str) -> Optional[str]:
-    return _threads.get(child_session_id)
-
-
 def cancel(child_session_id: str) -> bool:
     """取消单个子会话对应的 AgentBus 任务（级联到在途 handler）。
 

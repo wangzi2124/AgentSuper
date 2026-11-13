@@ -52,16 +52,3 @@ def trace(event: str, **payload) -> None:
                 f.write(line + "\n")
     except Exception:
         pass
-
-
-def trace_messages(event: str, messages: list, tool_defs: list[dict] | None = None, **payload) -> None:
-    """估算消息列表 token 并写一条 trace（估算失败则只记条数）。"""
-    try:
-        from cognition.token_counter import estimate_tokens_messages, estimate_tools
-        payload["message_tokens"] = estimate_tokens_messages(messages)
-        payload["schema_tokens"] = estimate_tools(tool_defs)
-        payload["tokens"] = payload["message_tokens"] + payload["schema_tokens"]
-    except Exception:
-        payload["tokens"] = -1
-    payload["msg_count"] = len(messages)
-    trace(event, **payload)

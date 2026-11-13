@@ -11,7 +11,6 @@ graph 平台，可独立启动：`uvicorn app.main:app`。
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -468,6 +467,7 @@ class Session:
     thread_id: str
     title: str = ""
     directory: str | None = None
+    project_id: str | None = None
     user_id: str = "anonymous"
     kind: str = "multi-agent"
     status: str = "idle"
@@ -489,6 +489,7 @@ class Session:
             "thread_id": self.thread_id,
             "title": self.title,
             "directory": self.directory,
+            "project_id": self.project_id,
             "user_id": self.user_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -501,7 +502,7 @@ class Session:
             "id": self.id,
             "slug": self.id,
             "user_id": self.user_id,
-            "project_id": "",
+            "project_id": self.project_id or "",
             "workspace_id": None,
             "parent_id": self.parent_id,
             "directory": self.directory or "",
@@ -557,6 +558,7 @@ class SessionStore:
             thread_id=info.id,
             title=info.title or "新会话",
             directory=info.directory or None,
+            project_id=getattr(info, "project_id", None),
             user_id=info.user_id or "anonymous",
             kind=info.kind or "multi-agent",
             status=info.status or "idle",
@@ -581,7 +583,7 @@ class SessionStore:
             from .session import repository as repo
 
             project = repo.resolve_project(sess.directory or ".")
-            repo.create_session(
+            created = repo.create_session(
                 sess.user_id,
                 project.id,
                 sess.directory or "",
@@ -592,6 +594,7 @@ class SessionStore:
                 title=sess.title,
                 session_id=sess.id,
             )
+            sess.project_id = created.project_id or project.id
         except Exception:  # noqa: BLE001 - 同 id 行已存在等 → 退化为整份更新
             logger.debug("session 落库 create 失败，改走 update: %s", sess.id, exc_info=True)
             self.persist(sess.id)
@@ -816,6 +819,8 @@ class PlatformContext:
     # 轮次快照由 session_snapshots 持久化，不再放进程内字典。
     # 在途回合取消标志（interrupt 置位；compat 流循环每步检查）
     cancels: dict[str, asyncio.Event] = field(default_factory=dict)
+    # 每会话在途回合计数：重叠回合共享同一个 cancel event，先结束的回合不能清掉别人的。
+    turn_refs: dict[str, int] = field(default_factory=dict)
     # 并发闸门（对齐 MAX_CONCURRENT_AGENTS）：超出并发时 SSE 发 `queued`
     max_concurrent: int = 4
     max_queue_size: int = 20
@@ -849,11 +854,19 @@ class PlatformContext:
         warming = getattr(self, "warming", None)
         if warming is not None:
             warming.note_activity()
-        event = asyncio.Event()
-        self.cancels[session_id] = event
+        self.turn_refs[session_id] = self.turn_refs.get(session_id, 0) + 1
+        event = self.cancels.get(session_id)
+        if event is None:
+            event = asyncio.Event()
+            self.cancels[session_id] = event
         return event
 
     def end_turn(self, session_id: str) -> None:
+        remaining = self.turn_refs.get(session_id, 1) - 1
+        if remaining > 0:
+            self.turn_refs[session_id] = remaining
+            return
+        self.turn_refs.pop(session_id, None)
         self.cancels.pop(session_id, None)
 
     def is_running(self, session_id: str) -> bool:
@@ -1185,7 +1198,7 @@ class PlatformContext:
 
         staged_attachments = stage_attachments(files, sess.directory if sess else None)
         await self.ensure_conversation(session_id)
-        view = self.rebuild_context_view(session_id)
+        view = await asyncio.to_thread(self.rebuild_context_view, session_id)
         history = view.messages if view is not None else None
         from .session.projector import project_user_message
 
@@ -1306,7 +1319,7 @@ class PlatformContext:
         sess = self.sessions.get(session_id)
         staged_attachments = stage_attachments(files, sess.directory if sess else None)
         await self.ensure_conversation(session_id)
-        view = self.rebuild_context_view(session_id)
+        view = await asyncio.to_thread(self.rebuild_context_view, session_id)
         history = view.messages if view is not None else None
         user_msg_id = message_id or f"um_{uuid.uuid4().hex[:12]}"
         if history is not None:
@@ -1395,7 +1408,7 @@ class PlatformContext:
 
         staged_attachments = stage_attachments(files, sess.directory if sess else None)
         await self.ensure_conversation(session_id)
-        view = self.rebuild_context_view(session_id)
+        view = await asyncio.to_thread(self.rebuild_context_view, session_id)
         history = view.messages if view is not None else None
         from .session.projector import project_user_message
 
@@ -1502,11 +1515,15 @@ class PlatformContext:
 
     async def ensure_conversation(self, session_id: str) -> None:
         """把 checkpoint 增量投影到 session.db（幂等，懒回填入口）。"""
-        from .session.projector import project_checkpoint_messages
-
         raw = await self._raw_messages(session_id)
+        # 投影/修复都是同步 sqlite 写；放线程里，避免长历史阻塞事件循环。
+        await asyncio.to_thread(self._project_and_repair, session_id, raw)
+
+    def _project_and_repair(self, session_id: str, raw: list[Any]) -> None:
+        from .session import repository as _repo
+
         if raw:
-            from .session import repository as _repo
+            from .session.projector import project_checkpoint_messages
 
             sess = self.sessions.get(session_id)
             hidden = set(getattr(sess, "hidden_ids", None) or [])
@@ -1524,7 +1541,6 @@ class PlatformContext:
         # Reconcile the epoch cache from the authoritative (and visible)
         # compaction row.  Undo-hidden checkpoints must not be resurrected.
         try:
-            from .session import repository as _repo
             from .session.compaction import CompactionCheckpoint
 
             stored = _repo.require_session(session_id)
@@ -1571,24 +1587,14 @@ class PlatformContext:
 
     @staticmethod
     def stable_message_id(session_id: str, msg: Any) -> str:
-        """稳定消息 id：优先 checkpoint 消息 id（跨模型/协议切换不变）。
+        """稳定消息 id：与 projector/DB 投影使用同一实现（单一口径）。
 
-        无 id 时按「角色 + 内容」生成确定性摘要 id；同一消息重复计算结果一致。
+        优先 checkpoint 消息 id；无 id 时按「角色 + 内容 + 工具信息」生成确定性摘要 id。
         禁止用 index 兜底（位置会随压缩/撤回/分叉漂移）。
         """
-        mid = getattr(msg, "id", None)
-        if mid:
-            return str(mid)
-        content = _msg_content(msg)
-        raw = (
-            content
-            if isinstance(content, str)
-            else json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
-        )
-        digest = hashlib.sha256(
-            f"{_msg_role(msg)}|{raw}".encode("utf-8")
-        ).hexdigest()[:16]
-        return f"msg_{digest}"
+        from .session.projector import stable_message_id as _stable
+
+        return _stable(session_id, msg)
 
     async def session_messages(self, session_id: str) -> list[dict[str, Any]]:
         """把图状态消息映射成前端 `frontend/src/api/sessions.ts:SessionMessage` 形状。
@@ -1906,11 +1912,10 @@ class PlatformContext:
 
         CompactionCheckpoint.record(session_id, event)
 
-    async def compact_session(self, session_id: str, keep_last: int = 10) -> dict[str, Any]:
+    async def compact_session(self, session_id: str) -> dict[str, Any]:
         """手动压缩：生成摘要、更新 checkpoint、写压缩检查点。
 
-        `keep_last` 已废弃（保留参数兼容旧调用）；tail 由
-        `compaction_keep_tokens` 决定。不物理删除历史；模型视角按
+        tail 由 `compaction_keep_tokens` 决定。不物理删除历史；模型视角按
         `context_summary` + `context_tail_start_id` 过滤。LLM 失败时降级为
         确定性摘要，仍写入压缩事件。
         """

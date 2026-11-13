@@ -130,11 +130,11 @@ class SessionService:
                 title=f"{original.title} (fork)",
             )
             for m in source[:cut]:
-                self._copy_message(session_id, child.id, m)
+                self._copy_message(child.id, m)
         return child
 
     @staticmethod
-    def _copy_message(source_session: str, target_session: str, m: Message) -> None:
+    def _copy_message(target_session: str, m: Message) -> None:
         """重放一条消息（含其 parts）到目标会话，保持类型/数据。"""
         new_msg = repository.append_message(target_session, m.type, m.data)
         for part in repository.list_parts(m.id):
@@ -277,11 +277,6 @@ class SessionService:
         self._authorized(user_id, session_id)
         async with self.write_lock(session_id):
             return repository.remove_input(session_id, input_id)
-
-    async def pop_prompt(self, session_id: str) -> Optional[dict]:
-        """服务端 drain：原子取出最新一条待处理任务并出队（不校验归属 —— 仅供执行器调用）。"""
-        async with self.write_lock(session_id):
-            return repository.promote_newest(session_id)
 
     # ── 内部 ─────────────────────────────────────────────────────────────
 

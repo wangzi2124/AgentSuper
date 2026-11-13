@@ -1048,7 +1048,9 @@ class ModelRuntime:
         try:
             resp = await litellm.acompletion(**call_kwargs)
         except Exception as exc:  # noqa: BLE001
-            retry = self._apply_overflow_retry(messages, tools, kwargs, exc)
+            retry = await asyncio.to_thread(
+                self._apply_overflow_retry, messages, tools, kwargs, exc
+            )
             if retry is None:
                 raise
             call_kwargs, endpoint, fit = retry
@@ -1130,7 +1132,10 @@ class ModelRuntime:
             if not _adapter_for(endpoint).supports_overflow_retry(endpoint):
                 raise
             rendered = [render_message(m) for m in messages]
-            refit_after_overflow(str(endpoint.get("model") or ""), rendered, tools)
+            # 重新探测窗口可能发同步 HTTP；放到线程里，避免阻塞事件循环。
+            await asyncio.to_thread(
+                refit_after_overflow, str(endpoint.get("model") or ""), rendered, tools
+            )
             return await self._stream_once(
                 messages, tools, on_text, disable_thinking, extra
             )

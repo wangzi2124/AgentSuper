@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -16,6 +17,13 @@ from typing import Any, Awaitable, Callable
 from .compression import CompressionError, CompressionPlan, compress_messages, estimate_messages
 
 logger = logging.getLogger(__name__)
+
+# 会话 ID 会拼进备份文件名；即使上游校验被绕过，也不允许路径分隔符逃逸。
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _safe_filename_component(value: str) -> str:
+    return _UNSAFE_FILENAME_CHARS.sub("_", str(value or "")) or "session"
 
 
 class ModelSwitchError(Exception):
@@ -95,7 +103,8 @@ class SwitchService:
 
         os.makedirs(self.deps.backup_dir, exist_ok=True)
         stamp = int(time.time() * 1000)
-        path = os.path.join(self.deps.backup_dir, f"{session_id}_{stamp}.json")
+        safe_id = _safe_filename_component(session_id)
+        path = os.path.join(self.deps.backup_dir, f"{safe_id}_{stamp}.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(
                 {
@@ -160,7 +169,10 @@ class SwitchService:
             reason = f"目标模型上下文窗口未知，已拒绝切换：{target}"
             self._audit(session_id, sess.model, target, "rejected", error=reason)
             raise ModelSwitchError(reason, 400)
-        if not force and (sess.status == "running" or self.deps.is_running(session_id)):
+        if not force and (
+            sess.status in ("running", "busy", "retry")
+            or self.deps.is_running(session_id)
+        ):
             reason = "会话正在运行，请等待本轮完成后再切换模型"
             self._audit(session_id, sess.model, target, "rejected", error=reason)
             raise ModelSwitchError(reason, 409)

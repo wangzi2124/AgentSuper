@@ -74,7 +74,6 @@ ALLOWED_AUDIO_EXTS = {".webm", ".ogg", ".wav", ".mp3", ".m4a"}
 
 @router.post("/message")
 async def voice_message_upload(
-    request: Request,
     audio: UploadFile = File(...),
     duration: str = Form("0"),
     waveform: str = Form(""),

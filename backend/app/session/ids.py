@@ -9,10 +9,14 @@ ID 形如 `<prefix><time_encoded><random>`：
 """
 
 import os
+import re
 import threading
 import time
 
 _ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+# 会话 ID 会进入文件系统路径（模型切换备份等），只允许路径安全的字符。
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 _counter = 0
 _counter_lock = threading.Lock()
@@ -41,3 +45,13 @@ def _time_encoded() -> str:
 def new_id(prefix: str) -> str:
     """生成带前缀的可排序 ID。"""
     return f"{prefix}{_time_encoded()}{os.urandom(3).hex()}"
+
+
+def validate_session_id(session_id: str) -> str:
+    """校验调用方提供的会话 ID；非法值抛 ValueError（不做静默修正）。"""
+    value = (session_id or "").strip()
+    if not _SESSION_ID_RE.fullmatch(value):
+        raise ValueError(
+            "会话 ID 非法：只允许字母、数字、下划线和连字符（1-128 个字符）"
+        )
+    return value

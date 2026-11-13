@@ -138,16 +138,6 @@ def _get_typhoon_data() -> list:
         return []
 
 
-def _get_typhoon_details(typhoon_id: str) -> dict:
-    """Get detailed typhoon information."""
-    try:
-        url = f"https://typhoon.nmc.cn/weatherservice/typhoon/jsons/view_{typhoon_id}"
-        data = _fetch_url(url, timeout=15)
-        return data
-    except Exception:
-        return {}
-
-
 def tool_get_weather_alert(city: str) -> str:
     """Get current weather with alert information for a city.
 

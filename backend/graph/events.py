@@ -5,7 +5,7 @@
 part 顺序渲染（`text` / `tool` / `step-start` / `step-finish`），并把工具参数、
 结果挂到同一条 part 上（可展开查看）。
 
-事件形状（字段与前端 `AgentStep`、后端 `models/schemas.py:StepEvent` 对齐）::
+事件形状（字段与前端 `AgentStep` 对齐）::
 
     {
         "type": "tool_start" | "tool_end" | "step_start" | "step_end" | "agent_end",
@@ -31,21 +31,6 @@ from contextvars import ContextVar, Token
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-# 平台图节点 → 前端 agent 标识/展示名。
-# 执行节点（graph/nodes/execute.py）与 API 兼容层（app/api/compat.py）共用一份，
-# 避免「工具事件挂在哪个面板」与「节点完成事件挂在哪个面板」两处漂移。
-NODE_AGENT: dict[str, tuple[str, str]] = {
-    "filter": ("build", "build"),
-    "plan": ("plan", "plan"),
-    "rag": ("build", "build"),
-    "memory_recall": ("build", "build"),
-    "context_compress": ("build", "build"),
-    "execute_subagent": ("build", "build"),
-    "parallel": ("build", "build"),
-    "synthesize": ("build", "build"),
-    "memory_store": ("build", "build"),
-}
 
 # 本回合的事件队列（asyncio.Queue）。None = 没有人在听（后台任务/单测）。
 _event_queue: ContextVar[Any | None] = ContextVar("graph_event_queue", default=None)
@@ -79,8 +64,3 @@ def push_event(event: dict[str, Any]) -> None:
         queue.put_nowait(event)
     except Exception:  # noqa: BLE001 - 事件推送失败不得影响主流程
         logger.debug("push_event failed", exc_info=True)
-
-
-def agent_of(node: str) -> tuple[str, str]:
-    """节点名 → (agent_id, agent_name)。未知节点按节点名自成一档。"""
-    return NODE_AGENT.get(node, (node, node))

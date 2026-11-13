@@ -76,10 +76,6 @@ def set_session_workspace(directory: str) -> contextvars.Token:
     return _session_workspace_var.set(str(Path(d).resolve()) if d else "")
 
 
-def reset_session_workspace(token: contextvars.Token) -> None:
-    _session_workspace_var.reset(token)
-
-
 def current_session_workspace() -> str:
     """当前上下文（本会话）绑定的工作目录；未设置返回空串�?"""
     return _session_workspace_var.get()

@@ -21,11 +21,3 @@ def initialize_epoch(session_id: str, baseline: str, snapshot: dict) -> ContextE
     repository.upsert_epoch(session_id, baseline, baseline_seq, snapshot)
     return ContextEpoch(session_id=session_id, baseline=baseline,
                         baseline_seq=baseline_seq, snapshot=snapshot)
-
-
-def replace_epoch_after_compaction(session_id: str, baseline: str, snapshot: dict) -> ContextEpoch:
-    """压缩后重建上下文纪元水位（对齐 SessionContextEpoch.replace）。"""
-    baseline_seq = repository.latest_seq(session_id)
-    repository.upsert_epoch(session_id, baseline, baseline_seq, snapshot)
-    return ContextEpoch(session_id=session_id, baseline=baseline,
-                        baseline_seq=baseline_seq, snapshot=snapshot)

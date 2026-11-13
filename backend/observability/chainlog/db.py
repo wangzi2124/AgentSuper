@@ -73,14 +73,3 @@ def init_db() -> None:
     conn = _get_db()
     if not backends.is_sqlite():
         conn.close()
-
-
-def close_thread_conn() -> None:
-    """关闭当前线程复用的 sqlite 连接（测试/后台线程退出时调用）。"""
-    conn = getattr(_tls, "conn", None)
-    if conn is not None:
-        _tls.conn = None
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            pass

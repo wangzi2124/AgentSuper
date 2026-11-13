@@ -338,43 +338,6 @@ def get_recent_stats(window_hours: float = 24.0) -> dict:
     }
 
 
-def reset_stats():
-    """清空统计并删除持久化文件（累积统计 + 时间窗指标，用于调试）。"""
-    global _stats, _metrics_buffer
-    with _stats_lock:
-        _stats = {
-            "requests_total": 0,
-            "requests_by_path": defaultdict(int),
-            "requests_by_status": defaultdict(int),
-            "model_calls_total": 0,
-            "model_calls_by_model": defaultdict(int),
-            "total_prompt_tokens": 0,
-            "total_completion_tokens": 0,
-            "total_reasoning_tokens": 0,
-            "total_cache_read": 0,
-            "total_cache_write": 0,
-            "total_duration_ms": 0,
-            "total_cost": 0.0,
-            "tool_rounds_total": 0,
-            "tool_calls_total": 0,
-            "prompt_tokens_by_model": defaultdict(int),
-            "completion_tokens_by_model": defaultdict(int),
-            "reasoning_tokens_by_model": defaultdict(int),
-            "cache_read_by_model": defaultdict(int),
-            "cache_write_by_model": defaultdict(int),
-            "cost_by_model": defaultdict(float),
-        }
-        _metrics_buffer = []
-    try:
-        _STATS_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
-    try:
-        _METRICS_FILE.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-
 class RequestLogMiddleware:
     """ASGI 中间件，记录每个 HTTP 请求的方法、路径、状态码和耗时。"""
 

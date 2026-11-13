@@ -9,6 +9,7 @@ from harness.adapter import (
     stable_call_id,
 )
 from harness.delimiters import NAME_CLOSE, NAME_OPEN, render_tool_call
+from harness.history import normalize_native
 from models.router import ChatResult, ToolCall
 
 TOOLS = [
@@ -121,3 +122,22 @@ def test_empty_arguments_ok():
     parsed, error = call_argument_error(ToolCall(id="1", name="tool_x", arguments=""))
     assert parsed == {}
     assert error == ""
+
+
+def test_native_missing_tool_id_is_deterministic() -> None:
+    message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "type": "function",
+                "function": {"name": "read_file", "arguments": '{"path": "a"}'},
+            }
+        ],
+    }
+    first = normalize_native([dict(message)])
+    second = normalize_native([dict(message)])
+    assert first == second
+    call_id = first[0]["tool_calls"][0]["id"]
+    assert call_id.startswith("call_")
+    assert call_id == stable_call_id("read_file", '{"path": "a"}', 0)

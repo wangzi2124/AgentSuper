@@ -373,7 +373,6 @@ SESSION_TABLES = (
 )
 CATALOG_TABLES = (catalog_settings.name, providers.name, catalog_entries.name)
 CHAPTER_TABLES = (chapters.name,)
-TASK_TABLES = (tasks.name,)
 CHAIN_LOG_TABLES = (chain_logs.name,)
 
 

@@ -20,9 +20,6 @@ from typing import Any
 TCC_NAME_KEYS = ("name", "function", "tool", "tool_name", "action")
 TCC_ARGS_KEYS = ("arguments", "parameters", "args", "params", "input")
 TCC_MARKER_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
-TCC_PATTERN = re.compile(
-    r'^\s*\{\s*"name"\s*:\s*"([^"]*)"\s*,\s*"arguments"\s*:\s*(\{.*\})\s*\}\s*$', re.S
-)
 # 未知工具名时优先抽取的内嵌回复字段（qwen 常把答话放到 arguments.message/content）
 TCC_INNER_KEYS = ("message", "content", "text", "answer", "result", "response")
 

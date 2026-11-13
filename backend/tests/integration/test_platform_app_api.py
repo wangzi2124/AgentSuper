@@ -456,6 +456,21 @@ def test_interrupt_cancels_in_flight_turn(client):
     assert event.is_set() is True
 
 
+def test_overlapping_turns_share_cancel_event(client):
+    sid = client.post("/api/sessions", json={}).json()["id"]
+    ctx = client.app.state.platform
+
+    first = ctx.begin_turn(sid)
+    second = ctx.begin_turn(sid)
+    assert first is second
+
+    ctx.end_turn(sid)
+    assert ctx.is_running(sid) is True
+
+    ctx.end_turn(sid)
+    assert ctx.is_running(sid) is False
+
+
 # ── SSE 新事件：model_switched / queued / queue_drain / turn_done ─────────────
 
 

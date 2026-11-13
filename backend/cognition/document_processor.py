@@ -36,7 +36,6 @@ PARENT_SUMMARY_LENGTH = 300
 
 # --- agent-2.md §13.2 结构感知分块参数 ---
 # Markdown/技术文档：按标题层级（H2→H3）切分，父块 800~1200、子块 300~400 字符。
-MARKDOWN_PARENT_MIN = 800
 MARKDOWN_PARENT_MAX = 1200
 MARKDOWN_CHILD_MIN = 300
 MARKDOWN_CHILD_MAX = 400
@@ -48,7 +47,6 @@ PARAGRAPH_CHUNK_OVERLAP = 64
 _HEADING_PATTERN = re.compile(r'^(#{1,3})\s+(.+?)\s*#*\s*$', re.MULTILINE)
 # FAQ / Q&A：Q: / A: 或 问： / 答： 或 问题N ...
 _FAQ_Q_PATTERN = re.compile(r'^\s*(?:Q[:：]|问[:：]|问题\s*\d*\s*[:：]?)\s*', re.IGNORECASE)
-_FAQ_A_PATTERN = re.compile(r'^\s*(?:A[:：]|答[:：]|回答[:：])\s*', re.IGNORECASE)
 # Markdown 表格：连续以 | 开头/结尾的行
 _TABLE_ROW_PATTERN = re.compile(r'^\s*\|.*\|\s*$')
 

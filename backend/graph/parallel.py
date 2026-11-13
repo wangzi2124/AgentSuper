@@ -114,9 +114,7 @@ def make_worker_node(
     return worker_node
 
 
-def make_merge_node(
-    agents: tuple[str, ...] = WORKER_AGENTS,
-) -> Callable[[dict[str, Any]], dict[str, Any]]:
+def make_merge_node() -> Callable[[dict[str, Any]], dict[str, Any]]:
     """merge：汇总各 worker 结果，标记 task_plan 完成，生成 draft_output。"""
 
     def merge_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -159,7 +157,7 @@ def build_parallel_graph(
     builder.add_node("dispatch", make_dispatch_node(agents))
     for agent in agents:
         builder.add_node(f"{agent}_worker", make_worker_node(agent, runner))
-    builder.add_node("merge", make_merge_node(agents))
+    builder.add_node("merge", make_merge_node())
 
     builder.set_entry_point("dispatch")
     for agent in agents:

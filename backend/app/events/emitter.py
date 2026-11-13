@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -17,6 +18,23 @@ from app.contracts.v2 import (
 from app.session import repository as repo
 
 logger = logging.getLogger(__name__)
+
+
+def _session_location(ctx: Any, session_id: str) -> Any:
+    """优先用内存会话补 location，避免每条事件（含每个文本增量）查一次库。"""
+    sessions = getattr(ctx, "sessions", None)
+    getter = getattr(sessions, "get", None)
+    if callable(getter):
+        try:
+            info = getter(session_id)
+        except Exception:  # noqa: BLE001 - 事件不能因会话缓存缺失而失败
+            info = None
+        if info is not None:
+            return info
+    try:
+        return repo.get_session(session_id)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def emit_event(
@@ -39,15 +57,18 @@ async def emit_event(
         "durable": None,
     }
     if session_id:
-        info = repo.get_session(session_id)
+        info = _session_location(ctx, session_id)
         if info is not None:
             event["location"] = {
                 "directory": info.directory,
-                "project_id": info.project_id,
+                "project_id": getattr(info, "project_id", None),
             }
     if event_type in DURABLE_EVENT_TYPES:
         agg = aggregate_id or session_id or "global"
-        seq = repo.append_event(event["id"], agg, event_type, data, created)
+        # durable outbox 写库放线程，避免 BEGIN IMMEDIATE 竞争时卡住事件循环。
+        seq = await asyncio.to_thread(
+            repo.append_event, event["id"], agg, event_type, data, created
+        )
         event["durable"] = {"aggregate_id": agg, "seq": seq, "version": 2}
     elif event_type in VOLATILE_EVENT_TYPES:
         event["durable"] = None

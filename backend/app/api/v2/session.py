@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 import uuid
@@ -16,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.contracts.v2 import ModelRef as ContractModelRef
 from app.contracts.v2 import PromptInput
-from app.deps import PlatformContext, get_context
+from app.deps import ModelSwitchError, PlatformContext, get_context
 from app.events.emitter import emit_event
 from app.image_processor import enrich_image_files
 from app.session import repository as repo
@@ -603,7 +604,7 @@ async def interrupt(
     ctx: PlatformContext = Depends(get_context),
 ) -> dict[str, Any]:
     _must_get(ctx, session_id)
-    interrupted = ctx.v2_coordinator.interrupt(session_id)
+    interrupted = ctx.v2_coordinator.interrupt(session_id, resume=resume)
     return {"data": {"interrupted": bool(interrupted), "resume": resume}}
 
 
@@ -617,7 +618,9 @@ async def list_messages(
 ) -> dict[str, Any]:
     _must_get(ctx, session_id)
     return {
-        "data": _messages_v2(session_id, limit=limit, order=order, type_filter=type),
+        "data": await asyncio.to_thread(
+            _messages_v2, session_id, limit=limit, order=order, type_filter=type
+        ),
         "cursor": {"previous": None, "next": None},
     }
 
@@ -781,8 +784,8 @@ async def switch_model(
     _must_get(ctx, session_id)
     try:
         await ctx.switch_model(session_id, body.model.id)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ModelSwitchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     payload = _session_v2(ctx, session_id)
     await emit_event(
         ctx,

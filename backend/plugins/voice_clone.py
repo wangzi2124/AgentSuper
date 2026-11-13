@@ -62,17 +62,6 @@ def _run_voice(args: list[str], timeout: int = 600) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-AVAILABLE_SPEAKERS = [
-    "Vivian", "Serena", "Uncle_fu", "Dylan", "Eric",
-    "Ryan", "Aiden", "Ono_anna", "Sohee",
-]
-
-AVAILABLE_LANGUAGES = [
-    "Auto", "Chinese", "English", "Japanese", "Korean",
-    "French", "German", "Spanish", "Portuguese", "Russian", "Italian",
-]
-
-
 def tool_voice_clone(
     text: str,
     ref_audio: str,

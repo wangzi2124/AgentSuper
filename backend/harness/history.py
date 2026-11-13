@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .adapter import stable_call_id
 from .delimiters import render_tool_call, render_tool_result
 
 
@@ -52,7 +53,7 @@ def _native_calls(calls: list[Any]) -> list[dict[str, Any]]:
             continue
         out.append(
             {
-                "id": ident or f"call_{len(out)}",
+                "id": ident or stable_call_id(name, args, len(out)),
                 "type": "function",
                 "function": {"name": name, "arguments": args},
             }

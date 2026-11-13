@@ -108,10 +108,6 @@ def _summarize(update: object) -> dict:
     return out
 
 
-def _agents_snapshot(seen: list[str]) -> list[dict]:
-    return [{"agent_id": a, "agent_name": a, "status": "done"} for a in seen]
-
-
 _AGENT_EVENT_TYPES = {"agent_start", "agent_step", "agent_done", "agent_error"}
 
 
@@ -260,22 +256,6 @@ def _part_event_to_sse(
     return []
 
 
-def _turn_meta(
-    agents_map: dict[str, dict[str, Any]],
-    files_changed: list[dict[str, Any]],
-    *,
-    partial_error: str | None = None,
-) -> dict[str, Any]:
-    """本轮 UI 细节（随 assistant 消息持久化，刷新/重开后历史回放可见）。"""
-    meta: dict[str, Any] = {
-        "agents": list(agents_map.values()),
-        "files_changed": files_changed,
-    }
-    if partial_error:
-        meta["partial_error"] = partial_error
-    return meta
-
-
 async def _discard(event: dict) -> None:  # 非流式路径：审批事件无需下发
     return None
 
@@ -320,89 +300,6 @@ async def _append_assistant(
     await ctx.graph.aupdate_state(
         {"configurable": {"thread_id": session_id}}, {"messages": [msg]}
     )
-
-
-def _error_info(
-    *,
-    error_type: str,
-    message: str,
-    retryable: bool,
-    status_code: int | None = None,
-    error_code: str | None = None,
-) -> dict[str, Any]:
-    """Frontend `ChatError` shape (see frontend/src/types/index.ts)."""
-    if retryable:
-        if status_code == 429:
-            kind = "rate_limit"
-        elif status_code and status_code >= 500:
-            kind = "server_error"
-        else:
-            kind = "network"
-    else:
-        kind = "unknown"
-    return {
-        "type": kind,
-        "message": message,
-        "retryable": retryable,
-        "statusCode": status_code,
-        "errorType": error_type,
-        "errorCode": error_code,
-    }
-
-
-def _format_error_text(info: dict[str, Any]) -> str:
-    kind = info.get("type")
-    code = info.get("statusCode")
-    if kind == "rate_limit":
-        return f"请求过于频繁（{code or 429}），请稍后重试"
-    if kind == "server_error":
-        return f"服务器错误（{code or 500}），请稍后重试"
-    if kind == "network":
-        return "网络连接中断，请检查网络后重试"
-    if kind == "timeout":
-        return "请求超时，请稍后重试"
-    return f"出错了: {info.get('message') or 'Unknown error'}"
-
-
-async def _persist_turn_error(
-    ctx: PlatformContext,
-    session_id: str,
-    *,
-    user_msg_id: str,
-    question: str,
-    files: list[Any] | None,
-    info: dict[str, Any],
-    agents: dict[str, dict[str, Any]] | None = None,
-) -> None:
-    """Persist a visible error bubble so a refresh doesn't drop it.
-
-    The user message is projected here too: a pre-turn failure (model switch /
-    queue full) happens before the normal ``project_user_message`` call.
-    """
-    from ..session.projector import project_user_message
-
-    try:
-        project_user_message(session_id, user_msg_id, question, files)
-    except Exception:  # noqa: BLE001 - persistence must never mask the error
-        logger.debug("failed to project user message before error", exc_info=True)
-
-    ui = {
-        "agents": list((agents or {}).values()),
-        "files_changed": [],
-        "is_error": True,
-        "error_info": info,
-    }
-    try:
-        await _append_assistant(
-            ctx,
-            session_id,
-            _format_error_text(info),
-            ui=ui,
-            message_id=f"am_{uuid4().hex[:12]}",
-        )
-        await ctx.ensure_conversation(session_id)
-    except Exception:  # noqa: BLE001 - persistence must never mask the error
-        logger.warning("failed to persist turn error for %s", session_id, exc_info=True)
 
 
 async def _graph_events(
@@ -575,9 +472,23 @@ async def _graph_events(
                     yield done_ev
                 next_task = asyncio.ensure_future(agen.__anext__())
     finally:
-        for task in (next_task, get_task, part_task, cancel_task):
-            if task is not None and not task.done():
+        tasks = [task for task in (next_task, get_task, part_task, cancel_task) if task is not None]
+        for task in tasks:
+            if not task.done():
                 task.cancel()
+        if tasks:
+            # 取消后必须回收，否则断开连接会留下仍在跑的图任务/挂起协程。
+            _done, pending = await asyncio.wait(tasks, timeout=5)
+            if pending:
+                logger.debug(
+                    "graph tasks still pending after cancel: %s", len(pending)
+                )
+        aclose = getattr(agen, "aclose", None)
+        if callable(aclose):
+            try:
+                await aclose()
+            except Exception:  # noqa: BLE001 - 清理失败不影响断连
+                logger.debug("graph async generator aclose failed", exc_info=True)
         reset_event_queue(event_token)
         reset_permission_hook(token)
         reset_request_model(model_token)
@@ -723,7 +634,6 @@ async def multi_agent(
 async def restore_snapshot(
     body: RestoreSnapshotRequest,
     ctx: PlatformContext = Depends(get_context),
-    x_user_id: str | None = Header(default=None),
 ) -> dict:
     """撤回某轮文件改动：把该轮 assistant 消息对应的快照还原到磁盘。"""
     from ..snapshot import restore
@@ -749,7 +659,6 @@ async def restore_snapshot(
 async def multi_agent_diff(
     body: DiffRequest,
     ctx: PlatformContext = Depends(get_context),
-    x_user_id: str | None = Header(default=None),
 ) -> dict:
     """渲染某轮 diff 文本（聊天卡片展开用）。"""
     from ..snapshot import render_diff

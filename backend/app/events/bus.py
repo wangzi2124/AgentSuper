@@ -16,6 +16,7 @@ class EventSubscription:
         self._types = set(types) if types else None
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=max_queue)
         self.closed = False
+        self.dropped = 0
 
     def matches(self, event: dict[str, Any]) -> bool:
         return self._types is None or event.get("type") in self._types
@@ -27,8 +28,13 @@ class EventSubscription:
             self._queue.put_nowait(event)
             return True
         except asyncio.QueueFull:
-            self.close()
-            return False
+            if event.get("durable") is not None:
+                # durable 事件丢失会让客户端状态错位：断开订阅，靠重连 hydration 恢复。
+                self.close()
+                return False
+            # volatile（文本/进度增量）可丢，最终 durable 事件会补全文本，不必断连。
+            self.dropped += 1
+            return True
 
     async def get(self, timeout: float | None = None) -> dict[str, Any] | None:
         if self.closed:
