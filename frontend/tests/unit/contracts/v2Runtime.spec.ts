@@ -75,6 +75,35 @@ describe('v2 runtime reducer', () => {
     expect(runtime.status.type).toBe('idle')
   })
 
+  it('tracks the running assistant message and clears it when the turn ends', () => {
+    let runtime = emptyRuntime('s1')
+    runtime = applyV2Event(runtime, evt('session.execution.started', { session_id: 's1' }))
+    runtime = applyV2Event(runtime, evt('session.step.started', {
+      session_id: 's1', assistant_message_id: 'a1', agent: null, model: null, started: 1,
+    }))
+    expect(runtime.activeAssistantId).toBe('a1')
+    runtime = applyV2Event(runtime, evt('session.execution.succeeded', { session_id: 's1' }))
+    expect(runtime.activeAssistantId).toBeNull()
+  })
+
+  it('tracks live compaction progress during the turn', () => {
+    let runtime = emptyRuntime('s1')
+    runtime = applyV2Event(runtime, evt('session.execution.started', { session_id: 's1' }))
+    runtime = applyV2Event(runtime, evt('session.compaction.started', {
+      session_id: 's1', reason: 'auto',
+    }))
+    runtime = applyV2Event(runtime, evt('session.compaction.delta', {
+      session_id: 's1', text: '摘要',
+    }))
+    expect(runtime.compaction).toMatchObject({ status: 'running', text: '摘要' })
+    runtime = applyV2Event(runtime, evt('session.compaction.ended', {
+      session_id: 's1', reason: 'auto', text: '摘要完成',
+    }))
+    expect(runtime.compaction).toMatchObject({ status: 'completed', text: '摘要完成' })
+    runtime = applyV2Event(runtime, evt('session.execution.succeeded', { session_id: 's1' }))
+    expect(runtime.compaction).toBeNull()
+  })
+
   it('drops the optimistic user message when its inbox item is cancelled', () => {
     const runtime = emptyRuntime('s1')
     runtime.messages.push({ type: 'user', id: 'in1', time_created: 1, text: 'hi' })

@@ -13,6 +13,13 @@ import type {
   V2Event,
 } from '../contracts/v2'
 
+export interface LiveCompaction {
+  reason: 'auto' | 'manual'
+  status: 'running' | 'completed' | 'failed'
+  text: string
+  error: string
+}
+
 export interface V2SessionRuntime {
   id: string
   info: SessionInfoV2 | null
@@ -22,6 +29,10 @@ export interface V2SessionRuntime {
   permissions: PermissionRequest[]
   forms: FormInfo[]
   error: StructuredError | null
+  /** Assistant message of the running turn; drives the transient execution panel. */
+  activeAssistantId: string | null
+  /** Live compaction progress for the running turn. */
+  compaction: LiveCompaction | null
   hydrated: boolean
   seenEventIds: string[]
 }
@@ -38,6 +49,8 @@ export function emptyRuntime(id: string): V2SessionRuntime {
     permissions: [],
     forms: [],
     error: null,
+    activeAssistantId: null,
+    compaction: null,
     hydrated: false,
     seenEventIds: [],
   }
@@ -60,6 +73,8 @@ function clone(runtime: V2SessionRuntime): V2SessionRuntime {
     permissions: runtime.permissions.slice(),
     forms: runtime.forms.slice(),
     error: runtime.error,
+    activeAssistantId: runtime.activeAssistantId,
+    compaction: runtime.compaction ? { ...runtime.compaction } : null,
     seenEventIds: runtime.seenEventIds.slice(),
   }
 }
@@ -178,6 +193,11 @@ export function applyV2Event(
     next.seenEventIds.splice(0, next.seenEventIds.length - MAX_SEEN_EVENTS)
   }
 
+  const eventData = event.data as unknown as Record<string, unknown>
+  if (typeof eventData.assistant_message_id === 'string' && eventData.assistant_message_id) {
+    next.activeAssistantId = eventData.assistant_message_id
+  }
+
   switch (event.type) {
     case 'session.created':
       next.info = event.data.session
@@ -207,20 +227,30 @@ export function applyV2Event(
       break
     case 'session.status':
       next.status = event.data.status
+      if (event.data.status.type === 'idle') {
+        next.activeAssistantId = null
+        next.compaction = null
+      }
       if (next.info) next.info = { ...next.info, status: event.data.status.type }
       break
     case 'session.idle':
       next.status = { type: 'idle' }
+      next.activeAssistantId = null
+      next.compaction = null
       if (next.info && event.data.outcome) next.info = { ...next.info, outcome: event.data.outcome }
       break
     case 'session.execution.started':
       next.status = { type: 'busy' }
       next.error = null
+      next.activeAssistantId = null
+      next.compaction = null
       if (next.info) next.info = { ...next.info, status: 'busy' }
       break
     case 'session.execution.succeeded':
     case 'session.execution.interrupted':
       next.status = { type: 'idle' }
+      next.activeAssistantId = null
+      next.compaction = null
       if (next.info) {
         next.info = {
           ...next.info,
@@ -232,6 +262,8 @@ export function applyV2Event(
     case 'session.execution.failed':
       next.status = { type: 'idle' }
       next.error = event.data.error
+      next.activeAssistantId = null
+      next.compaction = null
       if (next.info) next.info = { ...next.info, status: 'idle', outcome: 'failed' }
       break
     case 'session.retry.scheduled':
@@ -413,6 +445,38 @@ export function applyV2Event(
           },
         }),
       ))
+      break
+    case 'session.compaction.started':
+      next.compaction = {
+        reason: event.data.reason,
+        status: 'running',
+        text: '',
+        error: '',
+      }
+      break
+    case 'session.compaction.delta':
+      next.compaction = {
+        reason: next.compaction?.reason ?? 'auto',
+        status: 'running',
+        text: (next.compaction?.text ?? '') + event.data.text,
+        error: '',
+      }
+      break
+    case 'session.compaction.ended':
+      next.compaction = {
+        reason: event.data.reason,
+        status: 'completed',
+        text: event.data.text,
+        error: '',
+      }
+      break
+    case 'session.compaction.failed':
+      next.compaction = {
+        reason: event.data.reason,
+        status: 'failed',
+        text: '',
+        error: event.data.error.message,
+      }
       break
     case 'session.message.content.updated': {
       const index = messageIndex(next, event.data.message_id)

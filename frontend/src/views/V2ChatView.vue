@@ -28,6 +28,8 @@ import type {
   MessagePart,
   MessageV2,
   PermissionRequest,
+  ReasoningPart,
+  TextPart,
   ToolPart,
   VoiceAttachment,
 } from '../contracts/v2'
@@ -670,36 +672,87 @@ function textParts(message: MessageV2): MessagePart[] {
   return value ? value.content : []
 }
 
-function toolPart(part: MessagePart): ToolPart | null {
-  return part.type === 'tool' ? part : null
+/** 最终答案只渲染正文；工具、推理、压缩等只在执行中展示。 */
+function answerParts(message: MessageV2): TextPart[] {
+  return textParts(message).filter((part): part is TextPart => part.type === 'text')
 }
 
-/** 时间线只保留最新一条工具记录，避免多轮工具调用堆满聊天区。 */
-function visibleParts(message: MessageV2): MessagePart[] {
-  const parts = textParts(message)
-  let latest = -1
-  parts.forEach((part, index) => {
-    if (part.type === 'tool') latest = index
-  })
-  if (latest < 0) return parts
-  return parts.filter((part, index) => part.type !== 'tool' || index === latest)
-}
-
-/** 回合进行中且尚未产生工具/正文时，展示模型的 think 状态。 */
-const thinking = computed(() => {
-  if (status.value !== 'busy' && status.value !== 'retry') return false
-  const last = messages.value[messages.value.length - 1]
-  if (!last || last.type !== 'assistant') return true
-  const parts = last.content
-  if (parts.some((part) => part.type === 'tool')) return false
-  return !parts.some(
-    (part) => (part.type === 'text' || part.type === 'reasoning') && part.text.trim().length > 0,
-  )
+const executing = computed(() => status.value === 'busy' || status.value === 'retry')
+const activeAssistantId = computed(
+  () => (executing.value ? runtime.value?.activeAssistantId ?? null : null),
+)
+const activeAssistant = computed<AssistantMessage | null>(() => {
+  const id = activeAssistantId.value
+  if (!id) return null
+  const message = messages.value.find((item) => item.id === id)
+  return message?.type === 'assistant' ? message : null
 })
+const liveCompaction = computed(() => (executing.value ? runtime.value?.compaction ?? null : null))
 
-function asTool(part: MessagePart): ToolPart {
-  return part as ToolPart
+function isActiveMessage(message: MessageV2): boolean {
+  return message.type === 'assistant' && message.id === activeAssistantId.value
 }
+
+function execTools(message: MessageV2): ToolPart[] {
+  return textParts(message).filter((part): part is ToolPart => part.type === 'tool')
+}
+
+function execReasoning(message: MessageV2): ReasoningPart[] {
+  return textParts(message).filter(
+    (part): part is ReasoningPart => part.type === 'reasoning' && part.text.trim().length > 0,
+  )
+}
+
+/** 回合进行中的模型输出属于执行信息；回合结束同一段文本才作为最终答案。 */
+function outputParts(message: MessageV2): TextPart[] {
+  return answerParts(message).filter((part) => part.text.trim().length > 0)
+}
+
+function hasExecInfo(message: MessageV2): boolean {
+  return (
+    execTools(message).length > 0
+    || execReasoning(message).length > 0
+    || outputParts(message).length > 0
+    || liveCompaction.value !== null
+  )
+}
+
+/**
+ * 一轮工具调用在 DB 里会投影成多条 assistant（每个 AI tool_calls 一条 + 最终答案一条）。
+ * 时间线只保留：进行中的那条，以及不含工具调用且有正文的最终答案；其余隐藏，
+ * 避免出现「一条空回答 / 中间旁白被当成回答」。
+ */
+const renderedMessages = computed(() =>
+  messages.value.filter((message) => {
+    if (message.type === 'compaction') return false
+    if (message.type !== 'assistant') return true
+    if (isActiveMessage(message)) return true
+    const parts = textParts(message)
+    if (parts.some((part) => part.type === 'tool')) return false
+    return parts.some((part) => part.type === 'text' && part.text.trim().length > 0)
+  }),
+)
+
+function toolStateText(part: ToolPart): string {
+  switch (part.state.status) {
+    case 'streaming':
+      return '生成参数中…'
+    case 'running':
+      return '执行中…'
+    case 'completed':
+      return '完成'
+    case 'error':
+      return '失败'
+  }
+}
+
+const compactionStateText = computed(() => {
+  const value = liveCompaction.value
+  if (!value) return ''
+  if (value.status === 'running') return value.reason === 'auto' ? '自动压缩中…' : '压缩中…'
+  if (value.status === 'failed') return value.error || '压缩失败'
+  return '压缩完成'
+})
 
 function onFieldSelect(form: FormInfo, fieldId: string, event: Event) {
   setFieldValue(form, fieldId, (event.target as HTMLSelectElement).value)
@@ -707,24 +760,6 @@ function onFieldSelect(form: FormInfo, fieldId: string, event: Event) {
 
 function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
   setFieldValue(form, fieldId, (event.target as HTMLInputElement).value)
-}
-
-function toolArgsText(part: ToolPart): string {
-  const state = part.state
-  if (state.status === 'streaming') return state.input || '\u751f\u6210\u53c2\u6570\u4e2d\u2026'
-  return JSON.stringify(state.input ?? {}, null, 2)
-}
-
-function toolResultText(part: ToolPart): string {
-  const state = part.state
-  if (state.status === 'streaming') return '\u751f\u6210\u53c2\u6570\u4e2d\u2026'
-  if (state.status === 'running') return '\u6267\u884c\u4e2d\u2026'
-  if (state.status === 'error') {
-    const content = (state.content || []).map(item => item.type === 'text' ? item.text : item.uri).join('\n')
-    return [state.error.message, content].filter(Boolean).join('\n')
-  }
-  const content = (state.content || []).map(item => item.type === 'text' ? item.text : item.uri).join('\n')
-  return content || '\u65e0\u8fd4\u56de\u5185\u5bb9'
 }
 </script>
 
@@ -771,7 +806,7 @@ function toolResultText(part: ToolPart): string {
       </div>
 
       <div
-        v-for="message in messages"
+        v-for="message in renderedMessages"
         :key="message.id"
         class="v2-message"
         :class="message.type"
@@ -805,28 +840,44 @@ function toolResultText(part: ToolPart): string {
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M12 3v4M8 12h.01M16 12h.01M9 16h6"/></svg>
           </div>
           <div class="v2-assistant">
-            <template v-for="(part, index) in visibleParts(message)" :key="part.type === 'tool' ? part.id : `${message.id}-${index}`">
-              <div v-if="part.type === 'text'" class="v2-bubble assistant">{{ part.text }}</div>
-              <div v-else-if="part.type === 'reasoning'" class="v2-reasoning">
-                <span>推理</span>
-                <p>{{ part.text }}</p>
+            <template v-if="isActiveMessage(message)">
+              <div class="v2-think" role="status" aria-label="Thinking">
+                <span class="v2-think-text">Thinking</span>
               </div>
-              <details v-else-if="toolPart(part)" class="v2-tool" :class="asTool(part).state.status">
-                <summary class="v2-tool-head">
-                  <span class="v2-tool-name">{{ asTool(part).name }}</span>
-                  <span class="v2-tool-state">{{ asTool(part).state.status }}</span>
-                </summary>
-                <div class="v2-tool-body">
-                  <div class="v2-tool-section">
-                    <span class="v2-tool-label">参数</span>
-                    <pre>{{ toolArgsText(asTool(part)) }}</pre>
-                  </div>
-                  <div class="v2-tool-section">
-                    <span class="v2-tool-label">返回</span>
-                    <pre>{{ toolResultText(asTool(part)) }}</pre>
-                  </div>
+              <div v-if="hasExecInfo(message)" class="v2-exec">
+                <div v-if="liveCompaction" class="v2-exec-row" :class="liveCompaction.status">
+                  <span class="v2-exec-name">上下文压缩</span>
+                  <span class="v2-exec-state">{{ compactionStateText }}</span>
                 </div>
-              </details>
+                <div v-if="liveCompaction?.text" class="v2-exec-note">{{ liveCompaction.text }}</div>
+                <div v-for="tool in execTools(message)" :key="tool.id" class="v2-exec-row">
+                  <span class="v2-exec-name">{{ tool.name }}</span>
+                  <span class="v2-exec-state" :class="tool.state.status">{{ toolStateText(tool) }}</span>
+                </div>
+                <div
+                  v-for="(part, index) in execReasoning(message)"
+                  :key="`${message.id}-reason-${index}`"
+                  class="v2-exec-reason"
+                >
+                  <span class="v2-exec-name">推理</span>
+                  <p>{{ part.text }}</p>
+                </div>
+                <div
+                  v-for="(part, index) in outputParts(message)"
+                  :key="`${message.id}-output-${index}`"
+                  class="v2-exec-output"
+                >
+                  <span class="v2-exec-name">输出</span>
+                  <p>{{ part.text }}</p>
+                </div>
+              </div>
+            </template>
+            <template v-if="!isActiveMessage(message)">
+              <div
+                v-for="(part, index) in answerParts(message)"
+                :key="`${message.id}-text-${index}`"
+                class="v2-bubble assistant"
+              >{{ part.text }}</div>
             </template>
             <div class="v2-message-actions">
               <button class="v2-copy" title="复制这条回复" @click="copyMessage(message)">
@@ -848,25 +899,26 @@ function toolResultText(part: ToolPart): string {
           </div>
         </template>
 
-        <template v-else-if="message.type === 'compaction'">
-          <details class="v2-compaction">
-            <summary>上下文已压缩 · {{ message.reason }}</summary>
-            <p>{{ message.summary }}</p>
-          </details>
-        </template>
-
         <template v-else-if="message.type === 'system'">
           <div class="v2-system">{{ message.text }}</div>
         </template>
       </div>
 
-      <div v-if="thinking" class="v2-message assistant v2-thinking-row">
+      <div v-if="executing && !activeAssistant" class="v2-message assistant v2-thinking-row">
         <div class="v2-avatar assistant">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M12 3v4M8 12h.01M16 12h.01M9 16h6"/></svg>
         </div>
-        <div class="v2-think">
-          <span class="v2-think-dots"><i></i><i></i><i></i></span>
-          <span class="v2-think-label">think</span>
+        <div class="v2-assistant">
+          <div class="v2-think" role="status" aria-label="Thinking">
+            <span class="v2-think-text">Thinking</span>
+          </div>
+          <div v-if="liveCompaction" class="v2-exec">
+            <div class="v2-exec-row" :class="liveCompaction.status">
+              <span class="v2-exec-name">上下文压缩</span>
+              <span class="v2-exec-state">{{ compactionStateText }}</span>
+            </div>
+            <div v-if="liveCompaction.text" class="v2-exec-note">{{ liveCompaction.text }}</div>
+          </div>
         </div>
       </div>
 

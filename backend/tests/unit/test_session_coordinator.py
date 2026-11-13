@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.session.coordinator import ExecutionCoordinator
+from app.session.coordinator import ExecutionCoordinator, _final_answer
 
 
 class _Sessions:
@@ -151,6 +151,14 @@ async def test_interrupt_stop_leaves_queue_pending(env):
     assert runs == ["in_1"]
     assert [item["id"] for item in env.repo.pending] == ["in_2"]
     assert "session.execution.interrupted" in env.events
+
+
+def test_final_answer_prefers_graph_state_over_streamed_commentary():
+    streamed = ["我先看看目录。", "这是最终答案。"]
+    assert _final_answer({"final_output": "这是最终答案。"}, streamed) == "这是最终答案。"
+    assert _final_answer({"draft_output": "草稿答案"}, streamed) == "草稿答案"
+    assert _final_answer({}, streamed) == "我先看看目录。这是最终答案。"
+    assert _final_answer(None, []) == ""
 
 
 async def test_interrupt_resume_continues_steer_but_not_queue(env):

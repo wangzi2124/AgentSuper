@@ -14,6 +14,21 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _final_answer(final_state: dict[str, Any] | None, streamed: list[str]) -> str:
+    """Return the turn's final answer, not the intermediate streamed commentary.
+
+    ``text_delta`` events carry model text emitted during tool rounds. The final
+    answer lives in graph state (``synthesize`` → ``final_output``); only fall
+    back to streamed text when the graph produced nothing.
+    """
+    state = final_state or {}
+    for key in ("final_output", "draft_output"):
+        value = state.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return "".join(streamed)
+
+
 class ExecutionCoordinator:
     def __init__(self, ctx: Any) -> None:
         self.ctx = ctx
@@ -344,7 +359,7 @@ class ExecutionCoordinator:
         final_state = await self.ctx.state(session_id)
         _files_changed, descriptor = snapshot_end(self.ctx.vfs, snap_begin)
         self.ctx.save_snapshot(session_id, assistant_id, descriptor)
-        final = "".join(text_chunks) or str((final_state or {}).get("final_output") or "")
+        final = _final_answer(final_state, text_chunks)
         if final and not text_started:
             # 短路径（寒暄/固定回复/非流式模型）没有 text_delta，直接补发开始+结束，
             # 否则前端在回合期间看不到任何 assistant 记录，只能等 hydration。

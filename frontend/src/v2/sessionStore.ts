@@ -89,6 +89,11 @@ export const useV2SessionStore = defineStore('v2Session', () => {
         forms,
         hydrated: true,
       }
+      const previous = runtimes.value[sessionId]
+      if (info.status === 'busy' || info.status === 'retry') {
+        base.activeAssistantId = previous?.activeAssistantId ?? null
+        base.compaction = previous?.compaction ?? null
+      }
       const buffered = buffers.get(sessionId) ?? []
       let next = base
       for (const event of buffered) next = applyV2Event(next, event)
