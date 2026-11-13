@@ -30,7 +30,6 @@ import type {
   PermissionRequest,
   ReasoningPart,
   TextPart,
-  ToolPart,
   VoiceAttachment,
 } from '../contracts/v2'
 import { uploadVoiceMessage } from '../api/voice'
@@ -693,10 +692,6 @@ function isActiveMessage(message: MessageV2): boolean {
   return message.type === 'assistant' && message.id === activeAssistantId.value
 }
 
-function execTools(message: MessageV2): ToolPart[] {
-  return textParts(message).filter((part): part is ToolPart => part.type === 'tool')
-}
-
 function execReasoning(message: MessageV2): ReasoningPart[] {
   return textParts(message).filter(
     (part): part is ReasoningPart => part.type === 'reasoning' && part.text.trim().length > 0,
@@ -710,8 +705,7 @@ function outputParts(message: MessageV2): TextPart[] {
 
 function hasExecInfo(message: MessageV2): boolean {
   return (
-    execTools(message).length > 0
-    || execReasoning(message).length > 0
+    execReasoning(message).length > 0
     || outputParts(message).length > 0
     || liveCompaction.value !== null
   )
@@ -732,19 +726,6 @@ const renderedMessages = computed(() =>
     return parts.some((part) => part.type === 'text' && part.text.trim().length > 0)
   }),
 )
-
-function toolStateText(part: ToolPart): string {
-  switch (part.state.status) {
-    case 'streaming':
-      return '生成参数中…'
-    case 'running':
-      return '执行中…'
-    case 'completed':
-      return '完成'
-    case 'error':
-      return '失败'
-  }
-}
 
 const compactionStateText = computed(() => {
   const value = liveCompaction.value
@@ -850,10 +831,6 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
                   <span class="v2-exec-state">{{ compactionStateText }}</span>
                 </div>
                 <div v-if="liveCompaction?.text" class="v2-exec-note">{{ liveCompaction.text }}</div>
-                <div v-for="tool in execTools(message)" :key="tool.id" class="v2-exec-row">
-                  <span class="v2-exec-name">{{ tool.name }}</span>
-                  <span class="v2-exec-state" :class="tool.state.status">{{ toolStateText(tool) }}</span>
-                </div>
                 <div
                   v-for="(part, index) in execReasoning(message)"
                   :key="`${message.id}-reason-${index}`"
