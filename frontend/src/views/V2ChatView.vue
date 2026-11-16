@@ -1275,7 +1275,7 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
           ref="composerRef"
           v-model="draft"
           rows="2"
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行；/skills 选择技能"
+          placeholder="输入消息，Enter 发送，Shift+Enter 换行；/skills 选技能，@ 选 Agent"
           @keydown="onComposerKeydown"
         ></textarea>
         <div class="input-actions">

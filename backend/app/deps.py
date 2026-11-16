@@ -55,6 +55,11 @@ logger = logging.getLogger(__name__)
 
 _AUTO_WORKSPACE_ROOT = Path(tempfile.gettempdir()) / "agentsuper"
 
+# Chat ``@mention`` shortcuts exposed by the frontend picker. Keeping the list
+# explicit stops internal role agents (title/summary/compaction/role_*) from
+# being triggered by a stray ``@name`` token.
+_MENTION_AGENTS = frozenset({"general", "explore"})
+
 
 def is_auto_workspace(directory: str | Path | None) -> bool:
     """True when the directory is the default per-session temp workspace."""
@@ -925,6 +930,46 @@ class PlatformContext:
             logger.warning("project skill loader failed, using global", exc_info=True)
             return self.skill_loader
 
+    def _parse_agent_mention(self, question: str, session_id: str) -> tuple[str, str]:
+        """Parse ``@general`` / ``@explore`` style mentions into a subtask agent.
+
+        Matching ``@name`` tokens are stripped from the task text; the agent then
+        runs as an isolated subtask (same path as ``subtask: true`` commands).
+        """
+        text = question or ""
+        if "@" not in text:
+            return "", text
+        matches = [
+            match
+            for match in re.finditer(r"(^|\s)@([A-Za-z0-9_.-]+)\b", text)
+            if match.group(2).lower() in _MENTION_AGENTS
+        ]
+        if not matches:
+            return "", text
+        try:
+            from agents.registry import load_registry
+
+            registry = load_registry(self.session_workspace(session_id))
+        except Exception:  # noqa: BLE001
+            logger.debug("agent mention registry load failed", exc_info=True)
+            return "", text
+        chosen = ""
+        spans: list[tuple[int, int]] = []
+        for match in matches:
+            defn = registry.get(match.group(2))
+            if defn is None or not defn.is_subagent or defn.disabled:
+                continue
+            if not chosen:
+                chosen = defn.name
+            spans.append((match.start(2) - 1, match.end(2)))
+        if not chosen:
+            return "", text
+        cleaned = text
+        for start, end in reversed(spans):
+            cleaned = cleaned[:start] + cleaned[end:]
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+        return chosen, cleaned or text.strip()
+
     def instruction_blocks(self, session_id: str) -> list[Any]:
         """Resolve instruction blocks for this session's workspace (never raises)."""
         try:
@@ -1184,6 +1229,9 @@ class PlatformContext:
         from .commands.context import consume_command_override
 
         command_override = consume_command_override()
+        mention_agent, question = self._parse_agent_mention(question, session_id)
+        if mention_agent and not command_override.get("agent"):
+            command_override = {**command_override, "agent": mention_agent, "subtask": True}
         token = set_allowed_roots(self.allowed_roots_for(session_id))
         sess_for_root = self.sessions.get(session_id)
         root_token = set_active_root(sess_for_root.directory if sess_for_root else "")
@@ -1227,6 +1275,7 @@ class PlatformContext:
                     agent=selected_agent,
                     workspace=self.session_workspace(session_id),
                     model_override=command_override.get("model") or "",
+                    subtask=bool(command_override.get("subtask")),
                 ),
                 config={"configurable": {"thread_id": session_id}},
             )
@@ -1317,6 +1366,9 @@ class PlatformContext:
         from .commands.context import consume_command_override
 
         command_override = consume_command_override()
+        mention_agent, question = self._parse_agent_mention(question, session_id)
+        if mention_agent and not command_override.get("agent"):
+            command_override = {**command_override, "agent": mention_agent, "subtask": True}
         binding = await self.resolve_context_binding(session_id)
         sess = self.sessions.get(session_id)
         staged_attachments = stage_attachments(files, sess.directory if sess else None)
@@ -1405,6 +1457,9 @@ class PlatformContext:
         from .commands.context import consume_command_override
 
         command_override = consume_command_override()
+        mention_agent, question = self._parse_agent_mention(question, session_id)
+        if mention_agent and not command_override.get("agent"):
+            command_override = {**command_override, "agent": mention_agent, "subtask": True}
         model = command_override.get("model") or self.session_model(session_id)
         binding = await self.resolve_context_binding(session_id)
         sess = self.sessions.get(session_id)
@@ -1438,6 +1493,7 @@ class PlatformContext:
             agent=selected_agent,
             workspace=self.session_workspace(session_id),
             model_override=command_override.get("model") or "",
+            subtask=bool(command_override.get("subtask")),
         )
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))
