@@ -228,13 +228,22 @@ const slashAll = computed<SlashItem[]>(() => [
     kind: 'command' as const,
   })),
 ])
-const agentPickItems = computed<SlashItem[]>(() =>
-  agentOptions.value.map((agent) => ({
-    name: agent.name,
-    description: agent.description || agent.mode || '',
-    kind: 'agent' as const,
-  })),
-)
+const AGENT_MENTION_ALLOW = ['general', 'explore'] as const
+const AGENT_MENTION_DEFAULT_DESC: Record<string, string> = {
+  general: '通用任务处理',
+  explore: '代码库探索与搜索',
+}
+const agentPickItems = computed<SlashItem[]>(() => {
+  const byName = new Map(agentOptions.value.map((agent) => [agent.name, agent]))
+  return AGENT_MENTION_ALLOW.map((name) => {
+    const agent = byName.get(name)
+    return {
+      name,
+      description: agent?.description || AGENT_MENTION_DEFAULT_DESC[name] || agent?.mode || '',
+      kind: 'agent' as const,
+    }
+  })
+})
 const pickerSource = computed(() => (pickerMode.value === 'agent' ? agentPickItems.value : slashAll.value))
 async function ensureCommands() {
   if (commandsLoading.value) return
