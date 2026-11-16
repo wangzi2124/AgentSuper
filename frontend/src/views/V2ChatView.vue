@@ -68,6 +68,11 @@ const formAnswers = ref<Record<string, Record<string, string>>>({})
 const activeDiff = ref<{ messageId: string; diff: TurnDiff } | null>(null)
 const diffLoading = ref(false)
 const copiedId = ref('')
+const speakingId = ref('')
+const speakingPaused = ref(false)
+const speakingMode = ref<'audio' | 'native' | ''>('')
+const speakingTime = ref(0)
+const speakingDuration = ref(0)
 const composerRef = ref<HTMLTextAreaElement | null>(null)
 const slashDismissed = ref(false)
 const slashActive = ref(0)
@@ -793,6 +798,14 @@ const prevExecuting = ref(false)
 const spokenKeys = new Set<string>()
 let currentTtsAudio: HTMLAudioElement | null = null
 
+function resetSpeakingState() {
+  speakingId.value = ''
+  speakingPaused.value = false
+  speakingMode.value = ''
+  speakingTime.value = 0
+  speakingDuration.value = 0
+}
+
 function stopAutoRead() {
   stopNative()
   if (currentTtsAudio) {
@@ -803,26 +816,127 @@ function stopAutoRead() {
       try { URL.revokeObjectURL(src) } catch { /* noop */ }
     }
   }
+  resetSpeakingState()
 }
 
-async function autoReadText(text: string) {
+function fmtSpeakTime(sec: number) {
+  if (!Number.isFinite(sec) || sec < 0) return '0:00'
+  const m = Math.floor(sec / 60)
+  const s = Math.floor(sec % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+function speakingPercent(messageId: string) {
+  if (speakingId.value !== messageId) return 0
+  const d = speakingDuration.value
+  if (!d || !Number.isFinite(d)) return 0
+  return Math.max(0, Math.min(100, (speakingTime.value / d) * 100))
+}
+
+function bindAudioProgress(audio: HTMLAudioElement, id: string, url: string) {
+  speakingMode.value = 'audio'
+  speakingPaused.value = false
+  speakingTime.value = 0
+  speakingDuration.value = Number.isFinite(audio.duration) ? audio.duration : 0
+  audio.onloadedmetadata = () => {
+    if (speakingId.value === id) speakingDuration.value = Number.isFinite(audio.duration) ? audio.duration : 0
+  }
+  audio.ontimeupdate = () => {
+    if (speakingId.value === id) speakingTime.value = audio.currentTime || 0
+  }
+  audio.onplay = () => { if (speakingId.value === id) speakingPaused.value = false }
+  audio.onpause = () => {
+    if (speakingId.value === id && currentTtsAudio === audio && !audio.ended) speakingPaused.value = true
+  }
+  audio.onended = () => {
+    if (currentTtsAudio === audio) currentTtsAudio = null
+    if (speakingId.value === id) resetSpeakingState()
+    if (url.startsWith('blob:')) {
+      try { URL.revokeObjectURL(url) } catch { /* noop */ }
+    }
+  }
+}
+
+function startNativeSpeak(text: string, id: string) {
+  speakingMode.value = 'native'
+  speakingPaused.value = false
+  speakingTime.value = 0
+  speakingDuration.value = text.length
+  try {
+    const synth = window.speechSynthesis
+    if (!synth) { resetSpeakingState(); return }
+    synth.cancel()
+    const u = new SpeechSynthesisUtterance(text)
+    const lang = ({ Auto: 'zh-CN', Chinese: 'zh-CN', English: 'en-US', Japanese: 'ja-JP', Korean: 'ko-KR', French: 'fr-FR', German: 'de-DE', Spanish: 'es-ES', Portuguese: 'pt-PT', Russian: 'ru-RU', Italian: 'it-IT' } as Record<string,string>)[chatSettings.ttsLang || 'Auto'] || 'zh-CN'
+    u.lang = lang
+    try {
+      const primary = lang.split('-')[0].toLowerCase()
+      const pick = synth.getVoices().find(v => (v.lang || '').toLowerCase().startsWith(primary))
+      if (pick) u.voice = pick
+    } catch { /* noop */ }
+    u.onboundary = (e) => {
+      if (speakingId.value !== id) return
+      const idx = (e as any).charIndex ?? 0
+      speakingTime.value = Math.max(speakingTime.value, idx)
+    }
+    u.onend = () => { if (speakingId.value === id) resetSpeakingState() }
+    u.onerror = () => { if (speakingId.value === id) resetSpeakingState() }
+    synth.speak(u)
+  } catch {
+    if (speakingId.value === id) resetSpeakingState()
+  }
+}
+
+async function autoReadText(text: string, id = '') {
   const content = (text || '').trim()
   if (!content) return
   stopAutoRead()
+  speakingId.value = id
   try {
     const url = await synthesize(content, undefined, chatSettings.ttsLang || 'Auto')
     const audio = new Audio(url)
     currentTtsAudio = audio
+    bindAudioProgress(audio, id, url)
     await audio.play()
-    audio.onended = () => {
-      if (currentTtsAudio === audio) currentTtsAudio = null
-      if (url.startsWith('blob:')) {
-        try { URL.revokeObjectURL(url) } catch { /* noop */ }
-      }
-    }
   } catch {
-    if (!chatSettings.autoRead) return
-    speakNative(content, chatSettings.ttsLang || 'Auto')
+    if (!chatSettings.autoRead && !id) {
+      resetSpeakingState()
+      return
+    }
+    startNativeSpeak(content, id)
+  }
+}
+
+async function speakMessage(message: MessageV2) {
+  const text = messageText(message).trim()
+  if (!text) return
+  if (speakingId.value === message.id) {
+    if (speakingMode.value === 'audio' && currentTtsAudio) {
+      if (currentTtsAudio.paused) { try { await currentTtsAudio.play() } catch { /* noop */ } }
+      else { try { currentTtsAudio.pause() } catch { /* noop */ } }
+      return
+    }
+    if (speakingMode.value === 'native') {
+      try {
+        const synth = window.speechSynthesis
+        if (synth?.speaking && !synth.paused) { synth.pause(); speakingPaused.value = true }
+        else if (synth?.paused) { synth.resume(); speakingPaused.value = false }
+      } catch { /* noop */ }
+      return
+    }
+    stopAutoRead()
+    return
+  }
+  stopAutoRead()
+  speakingId.value = message.id
+  try {
+    const url = await synthesize(text, undefined, chatSettings.ttsLang || 'Auto')
+    const audio = new Audio(url)
+    currentTtsAudio = audio
+    bindAudioProgress(audio, message.id, url)
+    await audio.play()
+  } catch {
+    startNativeSpeak(text, message.id)
   }
 }
 
@@ -850,7 +964,7 @@ watch(
     const text = messageText(last).trim()
     if (!text) return
     spokenKeys.add(key)
-    await autoReadText(text)
+    await autoReadText(text, last.id)
   },
 )
 
@@ -980,10 +1094,32 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
               >{{ part.text }}</div>
             </template>
             <div class="v2-message-actions">
-              <button class="v2-copy" title="复制这条回复" @click="copyMessage(message)">
+              <button class="v2-copy" title="复制完整回复" @click="copyMessage(message)">
                 {{ copiedId === message.id ? '已复制' : '复制' }}
               </button>
+              <button
+                v-if="answerParts(message).some(p => p.text.trim())"
+                class="v2-copy"
+                :title="speakingId === message.id ? (speakingPaused ? '继续朗读' : '暂停朗读') : '朗读回复'"
+                @click="speakMessage(message)"
+              >
+                {{ speakingId === message.id ? (speakingPaused ? '继续' : '暂停') : '朗读' }}
+              </button>
+              <button
+                v-if="speakingId === message.id"
+                class="v2-copy"
+                title="停止朗读"
+                @click="stopAutoRead()"
+              >停止</button>
               <button class="v2-revert" title="查看本轮文件改动" @click="showDiff(message.id)">改动</button>
+            </div>
+            <div v-if="speakingId === message.id" class="v2-tts-progress" aria-label="朗读进度">
+              <div class="v2-tts-bar"><div class="v2-tts-bar-fill" :style="{ width: speakingPercent(message.id) + '%' }"></div></div>
+              <span class="v2-tts-time">
+                {{ speakingMode === 'audio' ? fmtSpeakTime(speakingTime) : Math.round(speakingPercent(message.id)) + '%' }}
+                <template v-if="speakingMode === 'audio' && speakingDuration"> / {{ fmtSpeakTime(speakingDuration) }}</template>
+                <template v-if="speakingMode === 'native'"> · 浏览器朗读</template>
+              </span>
             </div>
             <div v-if="activeDiff?.messageId === message.id" class="v2-diff">
               <div class="v2-diff-actions"><button @click="restoreFiles(message.id)">还原文件改动</button></div>
