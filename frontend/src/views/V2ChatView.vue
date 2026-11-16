@@ -34,12 +34,13 @@ import type {
   TextPart,
   VoiceAttachment,
 } from '../contracts/v2'
-import { uploadVoiceMessage } from '../api/voice'
+import { uploadVoiceMessage, synthesize, speakNative, stopNative } from '../api/voice'
 import { PressToTalkRecorder } from '../voice/recorder'
 import { useModelManagerStore } from '../stores/modelManager'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { useAuthStore } from '../stores/auth'
 import { useSkillStore } from '../stores/skills'
+import { useChatSettingsStore } from '../stores/chatSettings'
 import { useV2SessionStore } from '../v2/sessionStore'
 
 
@@ -50,6 +51,7 @@ const models = useModelManagerStore()
 const legacy = useMultiAgentStore()
 const auth = useAuthStore()
 const skillStore = useSkillStore()
+const chatSettings = useChatSettingsStore()
 
 const draft = ref('')
 const sending = ref(false)
@@ -120,6 +122,23 @@ async function ensureAgents() {
     agentOptions.value = agents.filter(agent => !agent.disabled && !agent.hidden)
   } catch {
     agentOptions.value = []
+  }
+  if (!agentOptions.value.some(agent => agent.name === 'rag')) {
+    agentOptions.value.push({
+      name: 'rag',
+      description: '知识库问答：检索向量库并基于证据回答。',
+      mode: 'primary',
+      tier: 'medium',
+      model: '',
+      tools: [],
+      permission: {},
+      request: {},
+      hidden: false,
+      disabled: false,
+      color: '',
+      steps: 0,
+      source: 'builtin',
+    })
   }
 }
 
@@ -768,6 +787,75 @@ const compactionStateText = computed(() => {
   if (value.status === 'running') return value.reason === 'auto' ? '自动压缩中…' : '压缩中…'
   if (value.status === 'failed') return value.error || '压缩失败'
   return '压缩完成'
+})
+
+const prevExecuting = ref(false)
+const spokenKeys = new Set<string>()
+let currentTtsAudio: HTMLAudioElement | null = null
+
+function stopAutoRead() {
+  stopNative()
+  if (currentTtsAudio) {
+    try { currentTtsAudio.pause() } catch { /* noop */ }
+    const src = currentTtsAudio.src
+    currentTtsAudio = null
+    if (src && src.startsWith('blob:')) {
+      try { URL.revokeObjectURL(src) } catch { /* noop */ }
+    }
+  }
+}
+
+async function autoReadText(text: string) {
+  const content = (text || '').trim()
+  if (!content) return
+  stopAutoRead()
+  try {
+    const url = await synthesize(content, undefined, chatSettings.ttsLang || 'Auto')
+    const audio = new Audio(url)
+    currentTtsAudio = audio
+    await audio.play()
+    audio.onended = () => {
+      if (currentTtsAudio === audio) currentTtsAudio = null
+      if (url.startsWith('blob:')) {
+        try { URL.revokeObjectURL(url) } catch { /* noop */ }
+      }
+    }
+  } catch {
+    if (!chatSettings.autoRead) return
+    speakNative(content, chatSettings.ttsLang || 'Auto')
+  }
+}
+
+watch(sessionId, () => {
+  prevExecuting.value = false
+  stopAutoRead()
+})
+
+watch(
+  [executing, () => status.value, () => runtime.value?.info?.outcome, () => messages.value.length],
+  async () => {
+    const was = prevExecuting.value
+    prevExecuting.value = executing.value
+    if (!sessionId.value || !chatSettings.autoRead) return
+    if (!was || executing.value) return
+    if (status.value !== 'idle') return
+    if (runtime.value?.info?.outcome && runtime.value.info.outcome !== 'succeeded') return
+
+    const last = [...renderedMessages.value].reverse().find(
+      (m) => m.type === 'assistant' && !isActiveMessage(m),
+    )
+    if (!last) return
+    const key = `${sessionId.value}:${last.id}`
+    if (spokenKeys.has(key)) return
+    const text = messageText(last).trim()
+    if (!text) return
+    spokenKeys.add(key)
+    await autoReadText(text)
+  },
+)
+
+onBeforeUnmount(() => {
+  stopAutoRead()
 })
 
 function onFieldSelect(form: FormInfo, fieldId: string, event: Event) {

@@ -315,9 +315,6 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
             @click="showModelPicker = true"
           />
         </div>
-        <van-button block round class="form-save" @click="showSettingsForm = false; router.push('/agent-settings')">
-          Agent 配置
-        </van-button>
         <van-button type="primary" block round class="form-save" @click="saveSettings">
           保存设置
         </van-button>
