@@ -151,17 +151,6 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
       // 后端不可达：保留上面的本地快照（若有），尽量保持选择器可用
     }
   }
-  // 「用户设置 → 知识库检索」开关：持久化到 localStorage，刷新后保持上次选择
-  // （此前 ref(false) 每次刷新都重置为关闭，用户会误以为开关不生效）。
-  const USE_VECTOR_DB_KEY = 'agent-super:use-vector-db'
-  function _readUseVectorDb(): boolean {
-    try { return localStorage.getItem(USE_VECTOR_DB_KEY) === '1' }
-    catch { return false }
-  }
-  const useVectorDb = ref(_readUseVectorDb())
-  watch(useVectorDb, (v) => {
-    try { localStorage.setItem(USE_VECTOR_DB_KEY, v ? '1' : '0') } catch { /* 隐私模式等忽略 */ }
-  })
   // 新会话可绑定侧边栏选中的白名单目录（activeDirectory）；已有会话的根不可修改。
   // Agent 模式选择（对齐 opencode agent modes）：顶层命令只有 default(build)/plan；explore 由委派进入
   const agentMode = ref<'default' | 'plan'>('default')
@@ -889,7 +878,7 @@ export const useMultiAgentStore = defineStore('multiAgent', () => {
   }
 
   return {
-    sessions, activeSessionId, conversations, routingStatus, activeDirectory, setActiveDirectory, selectedModel, useVectorDb,
+    sessions, activeSessionId, conversations, routingStatus, activeDirectory, setActiveDirectory, selectedModel,
     models, modelOptions, defaultModelId, smallModelId, smallModelInfo, loadModels, persistSelectedModel,
     imageCaptionModelId, imageCaptionModelInfo, voiceModelSize,
     agentMode,

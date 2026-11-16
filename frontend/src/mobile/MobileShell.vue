@@ -315,10 +315,9 @@ const currentView = computed(() => mobileViews[route.name as string] || null)
             @click="showModelPicker = true"
           />
         </div>
-        <div class="form-field form-row">
-          <div class="form-label">向量库检索</div>
-          <van-switch v-model="agent.useVectorDb" size="22" />
-        </div>
+        <van-button block round class="form-save" @click="showSettingsForm = false; router.push('/agent-settings')">
+          Agent 配置
+        </van-button>
         <van-button type="primary" block round class="form-save" @click="saveSettings">
           保存设置
         </van-button>

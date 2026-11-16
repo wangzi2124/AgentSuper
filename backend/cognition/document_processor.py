@@ -1,4 +1,5 @@
-import re
+﻿import re
+import uuid
 from pathlib import Path
 from typing import List, Tuple
 
@@ -34,46 +35,59 @@ MAX_CHUNK_SIZE = 500
 CHUNK_OVERLAP = 200
 PARENT_SUMMARY_LENGTH = 300
 
-# --- agent-2.md §13.2 结构感知分块参数 ---
-# Markdown/技术文档：按标题层级（H2→H3）切分，父块 800~1200、子块 300~400 字符。
-MARKDOWN_PARENT_MAX = 1200
 MARKDOWN_CHILD_MIN = 300
-MARKDOWN_CHILD_MAX = 400
-# PDF/Word：按段落 + 重叠窗口，512 token（≈512 字符近似），overlap 10~15%。
-PARAGRAPH_CHUNK_SIZE = 512
-PARAGRAPH_CHUNK_OVERLAP = 64
 
-# Markdown 标题：H1~H3（# / ## / ###）。H2 视作父小节，H3 视作子小节。
 _HEADING_PATTERN = re.compile(r'^(#{1,3})\s+(.+?)\s*#*\s*$', re.MULTILINE)
-# FAQ / Q&A：Q: / A: 或 问： / 答： 或 问题N ...
-_FAQ_Q_PATTERN = re.compile(r'^\s*(?:Q[:：]|问[:：]|问题\s*\d*\s*[:：]?)\s*', re.IGNORECASE)
-# Markdown 表格：连续以 | 开头/结尾的行
+_FAQ_Q_PATTERN = re.compile(r'^\s*(?:Q[:：]|问[:：]|问题\s*\d*\s*[:：]?)\s*', re.IGNORECASE | re.MULTILINE)
+_FAQ_A_PATTERN = re.compile(r'^\s*(?:A[:：]|答[:：]|回答[:：])', re.IGNORECASE | re.MULTILINE)
 _TABLE_ROW_PATTERN = re.compile(r'^\s*\|.*\|\s*$')
+
+_PROCESS_TITLE_PATTERN = re.compile(
+    r'^\s*(?:流程(?:名称)?|过程|操作流程|作业流程|业务流程|处理流程|SOP)\s*[:：]\s*(.+?)\s*$',
+    re.MULTILINE | re.IGNORECASE,
+)
+_STEP_PATTERN = re.compile(
+    r'^\s*(?:'
+    r'步骤\s*(?P<cn>[一二三四五六七八九十百千\d]+)'
+    r'|Step\s*(?P<en>\d+)'
+    r'|(?P<num>\d{1,2})[\.、\)]'
+    r'|[（(](?P<pnum>\d{1,2})[)）]'
+    r')\s*[:：\s\-]*(?P<title>.*)$',
+    re.IGNORECASE | re.MULTILINE,
+)
+_PROCESS_FIELD_PATTERNS = {
+    "role": re.compile(r'(?:角色|负责人|执行人|参与人|岗位)\s*[:：]\s*([^\n；;]+)', re.IGNORECASE),
+    "precondition": re.compile(r'(?:前置条件|前提|触发条件)\s*[:：]\s*([^\n]+)', re.IGNORECASE),
+    "input": re.compile(r'(?:输入|入参|所需资料|材料)\s*[:：]\s*([^\n]+)', re.IGNORECASE),
+    "output": re.compile(r'(?:输出|产出|结果)\s*[:：]\s*([^\n]+)', re.IGNORECASE),
+    "exception": re.compile(r'(?:异常|例外|失败处理)\s*[:：]\s*([^\n]+)', re.IGNORECASE),
+    "branch": re.compile(r'(?:分支|判断|条件)\s*[:：]\s*([^\n]+)', re.IGNORECASE),
+}
 
 
 class DocumentProcessor:
-    """文档处理器，负责加载、分章、分块和对话提取。
+    """文档处理器：结构感知分块（Markdown/段落/FAQ/表格/流程步骤）。"""
 
-    §13.2 结构感知分块：按文档类型选择策略（Markdown 标题层级 / PDF·Word 段落重叠 /
-    FAQ 一问一答 / 表格单独成块），每个 chunk 强制携带 parent_id / source_file /
-    section_title / department 四个 metadata 字段。
-    """
-
-    def __init__(self, chunk_size: int = MAX_CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP, parent_summary_length: int = PARENT_SUMMARY_LENGTH, department: str = "default"):
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+    def __init__(
+        self,
+        chunk_size: int = MAX_CHUNK_SIZE,
+        chunk_overlap: int = CHUNK_OVERLAP,
+        parent_summary_length: int = PARENT_SUMMARY_LENGTH,
+        department: str = "default",
+    ):
+        self.chunk_size = int(chunk_size) if chunk_size else MAX_CHUNK_SIZE
+        self.chunk_overlap = int(chunk_overlap) if chunk_overlap else CHUNK_OVERLAP
         self.parent_summary_length = parent_summary_length
         self.department = department
+        self.paragraph_chunk_size = max(200, self.chunk_size)
+        self.paragraph_chunk_overlap = min(max(0, self.chunk_overlap), max(0, self.paragraph_chunk_size - 1))
+        self.child_max = max(200, self.chunk_size)
+        self.child_min = max(120, min(MARKDOWN_CHILD_MIN, self.child_max - 20))
+        self.hard_max = max(self.child_max, self.paragraph_chunk_size)
 
     def _read_text_file(self, file_path: str) -> str:
-        """读取文本文件，自动尝试多种编码。
-
-        不含 latin-1 兜底：latin-1 对所有字节都能解码，会把损坏/二进制文件
-        静默当作正常文本入库，因此只尝试常见真实文本编码。
-        """
         with open(file_path, "rb") as f:
             data = f.read()
-
         for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "cp1252"):
             try:
                 text = data.decode(encoding)
@@ -82,8 +96,6 @@ class DocumentProcessor:
                 continue
         else:
             text = data.decode("utf-8", errors="ignore")
-
-        # 乱码检测：不可打印控制字符占比过高时视为非文本文件
         if text:
             control = sum(1 for ch in text if ord(ch) < 32 and ch not in "\t\n\r")
             if control / len(text) > 0.01:
@@ -91,57 +103,143 @@ class DocumentProcessor:
         return text
 
     def load(self, file_path: str) -> str:
-        """加载文件内容，支持 txt/md/pdf 格式。"""
         ext = Path(file_path).suffix.lower()
         if ext in (".txt", ".md"):
             return self._read_text_file(file_path)
         elif ext == ".pdf":
             try:
                 import pypdf
-
                 reader = pypdf.PdfReader(file_path)
-                return "\n".join(
-                    page.extract_text() for page in reader.pages
-                )
+                return "\n".join(page.extract_text() or "" for page in reader.pages)
             except ImportError:
-                raise ImportError(
-                    "pypdf is required to process PDF files. "
-                    "Install it with: pip install pypdf"
-                )
+                raise ImportError("pypdf is required to process PDF files. Install it with: pip install pypdf")
         else:
             raise ValueError(f"Unsupported file type: {ext}")
 
-    def _split_chapters(self, text: str) -> List[Tuple[str, str]]:
-        """按章节标题分割文本，返回 [(章节内容, 章节标题), ...]。"""
+    def _force_meta(self, meta: dict, source_file: str, section_title: str, parent_id: str, department: str) -> dict:
+        out = {**meta}
+        out["source_file"] = meta.get("source_file") or source_file
+        out["section_title"] = meta.get("section_title") or section_title or source_file
+        out["parent_id"] = meta.get("parent_id") or parent_id
+        out["department"] = meta.get("department") or department
+        return out
+
+    def _hard_split(self, text: str, max_len: int, overlap: int) -> List[Tuple[str, int, int]]:
+        text = text or ""
+        if not text:
+            return []
+        max_len = max(50, int(max_len))
+        overlap = min(max(0, int(overlap)), max_len - 1)
+        out = []
+        start = 0
+        n = len(text)
+        while start < n:
+            end = min(start + max_len, n)
+            raw = text[start:end]
+            piece = raw.strip()
+            if piece:
+                ltrim = len(raw) - len(raw.lstrip())
+                rtrim = len(raw) - len(raw.rstrip())
+                out.append((piece, start + ltrim, end - rtrim))
+            if end >= n:
+                break
+            start = end - overlap
+        return out
+
+    @staticmethod
+    def _find_span(haystack: str, needle: str, start_at: int = 0) -> Tuple[int, int]:
+        if not needle:
+            return (start_at, start_at)
+        idx = haystack.find(needle, start_at)
+        if idx >= 0:
+            return (idx, idx + len(needle))
+        # fallback: locate by first/last significant tokens with flexible whitespace
+        tokens = [t for t in re.split(r'\s+', needle.strip()) if t]
+        if not tokens:
+            return (start_at, min(len(haystack), start_at + len(needle)))
+        first = tokens[0]
+        i = haystack.find(first, start_at)
+        if i < 0:
+            return (start_at, min(len(haystack), start_at + len(needle)))
+        last = tokens[-1]
+        j = haystack.find(last, i)
+        if j >= 0:
+            j += len(last)
+            return (i, min(len(haystack), max(j, i + len(needle.strip()))))
+        return (i, min(len(haystack), i + len(needle)))
+
+    @staticmethod
+    def _extract_table_blocks_with_spans(text: str) -> List[Tuple[str, int, int]]:
+        lines = text.splitlines(keepends=True)
+        blocks = []
+        cur = []
+        cur_start = 0
+        pos = 0
+        for line in lines:
+            is_row = bool(_TABLE_ROW_PATTERN.match(line.rstrip('\r\n')))
+            if is_row:
+                if not cur:
+                    cur_start = pos
+                cur.append(line)
+            else:
+                if len(cur) >= 2:
+                    block = "".join(cur).rstrip('\r\n')
+                    blocks.append((block, cur_start, cur_start + len(block)))
+                cur = []
+            pos += len(line)
+        if len(cur) >= 2:
+            block = "".join(cur).rstrip('\r\n')
+            blocks.append((block, cur_start, cur_start + len(block)))
+        return blocks
+
+    @staticmethod
+    def _remove_spans(text: str, spans: List[Tuple[int, int]]) -> str:
+        if not spans:
+            return text
+        spans = sorted([(max(0, s), min(len(text), e)) for s, e in spans if e > s])
+        merged = []
+        for s, e in spans:
+            if not merged or s > merged[-1][1]:
+                merged.append([s, e])
+            else:
+                merged[-1][1] = max(merged[-1][1], e)
+        out = []
+        last = 0
+        for s, e in merged:
+            out.append(text[last:s])
+            out.append("\n")
+            last = e
+        out.append(text[last:])
+        return re.sub(r'\n{3,}', '\n\n', "".join(out))
+
+    def _split_chapters(self, text: str) -> List[Tuple[str, str, int]]:
         matches = list(CHAPTER_PATTERN.finditer(text))
         if not matches:
-            return [(text, "")]
-
+            return [(text, "", 0)]
         chapters = []
         for i, m in enumerate(matches):
-            title = m.group().strip()
             start = m.start()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            content = text[start:end].strip()
-            chapters.append((content, title))
-
+            line_end = text.find('\n', m.end())
+            if line_end == -1:
+                line_end = m.end()
+            title = text[m.start():line_end].strip() or m.group().strip()
+            chapters.append((text[start:end].strip(), title, start))
         return chapters
 
     def _parse_chapter_number(self, chapter_title: str) -> Tuple[int, str]:
-        """从章节标题中解析章节序号，支持阿拉伯数字和中文数字。"""
         raw = chapter_title
         num_str = re.sub(r'[^\d]', '', raw)
         if num_str:
-            return int(num_str), raw
-
-        cn_digits = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4,
-                     '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+            try:
+                return int(num_str), raw
+            except Exception:
+                pass
+        cn_digits = {'零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
         cn_scale = {'十': 10, '百': 100, '千': 1000}
-
         chars = [ch for ch in chapter_title if ch in cn_digits or ch in cn_scale or ch.isdigit()]
         if not chars:
             return 0, chapter_title
-
         result = 0
         tmp = 0
         for ch in chars:
@@ -151,432 +249,368 @@ class DocumentProcessor:
                 tmp = cn_digits[ch]
             elif ch in cn_scale:
                 scale = cn_scale[ch]
-                if tmp == 0:
-                    tmp = scale
-                else:
-                    tmp *= scale
+                tmp = scale if tmp == 0 else tmp * scale
                 result += tmp
                 tmp = 0
         result += tmp
         return result if result > 0 else 0, chapter_title
 
-    def _chunk_text(self, text: str, metadata: dict) -> List[Tuple[str, dict]]:
-        """将文本按固定大小和重叠进行分块。"""
-        chunks = []
-        start = 0
-        text_len = len(text)
-
-        while start < text_len:
-            end = min(start + self.chunk_size, text_len)
-            chunk_text = text[start:end]
-            chunk_metadata = {
-                **metadata,
-                "chunk_start": start,
-                "chunk_end": end,
-            }
-            chunks.append((chunk_text, chunk_metadata))
-            if end >= text_len:
-                break
-            start = end - self.chunk_overlap
-
-        return chunks
-
-    # ------------------------------------------------------------------
-    # §13.2 结构感知分块
-    # ------------------------------------------------------------------
-
-    def _force_meta(self, meta: dict, source_file: str, section_title: str,
-                    parent_id: str, department: str) -> dict:
-        """补齐 §13.2.1 的强制 metadata 字段（不覆盖已有显式值，除非为空）。"""
-        out = {**meta}
-        out["source_file"] = meta.get("source_file") or source_file
-        out["section_title"] = meta.get("section_title") or section_title
-        out["parent_id"] = meta.get("parent_id") or parent_id
-        out["department"] = meta.get("department") or department
-        return out
-
-    def _split_markdown_sections(self, text: str) -> List[Tuple[str, str, str, int]]:
-        """按 H1~H3 标题切分 Markdown。
-
-        Returns: [(section_title, body_text, parent_title, level), ...]
-        - H2 作为父小节（父）标题；H3 归属于最近的 H2（level=3）。
-        - 无标题的正文归入 section_title=""、level=0 的默认小节。
-        """
+    def _split_markdown_sections(self, text: str) -> List[Tuple[str, str, str, int, int, int]]:
         matches = list(_HEADING_PATTERN.finditer(text))
         if not matches:
-            return [("", text, "", 0)]
-
-        sections: List[Tuple[str, str, str, int]] = []
-        # 标题之前的引言正文
+            return [("", text, "", 0, 0, 0)]
+        sections = []
         if matches[0].start() > 0:
-            preamble = text[:matches[0].start()].strip()
-            if preamble:
-                sections.append(("", preamble, "", 0))
-
+            preamble = text[:matches[0].start()]
+            if preamble.strip():
+                ls = len(preamble) - len(preamble.lstrip())
+                sections.append(("", preamble.strip(), "", 0, ls, ls))
         current_parent = ""
         for i, m in enumerate(matches):
             level = len(m.group(1))
             title = m.group(2).strip()
             body_start = m.end()
             body_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            body = text[body_start:body_end].strip()
-
+            raw_body = text[body_start:body_end]
+            body = raw_body.strip()
             if level <= 2:
                 current_parent = title
                 parent_title = ""
             else:
                 parent_title = current_parent
-            sections.append((title, body, parent_title, level))
-
+            b_off = body_start + (len(raw_body) - len(raw_body.lstrip())) if body else body_start
+            sections.append((title, body, parent_title, level, m.start(), b_off))
         return sections
 
-    def _window_chunks(
-        self, text: str, metadata: dict,
-        size: int, overlap: int,
-    ) -> List[Tuple[str, dict]]:
-        """按段落 + 重叠窗口切分（PDF/Word 策略）。优先在段落边界断开。"""
-        text = text.strip()
-        if not text:
-            return []
-        paragraphs = [p for p in re.split(r'\n\s*\n', text) if p.strip()]
-        chunks: List[Tuple[str, dict]] = []
-        buf = ""
-        for para in paragraphs:
-            if buf and len(buf) + len(para) + 2 > size:
-                chunks.append(buf)
-                # 重叠窗口：保留尾部 overlap 字符
-                tail = buf[-overlap:] if overlap > 0 else ""
-                buf = (tail + "\n\n" + para).strip()
-            else:
-                buf = (buf + "\n\n" + para).strip() if buf else para
-            # 单段本身超长 → 硬切
-            while len(buf) > size:
-                chunks.append(buf[:size])
-                tail = buf[size - overlap:size] if overlap > 0 else ""
-                buf = (tail + buf[size:]).strip()
-        if buf:
-            chunks.append(buf)
-        return [(c, {**metadata, "chunk_start": 0, "chunk_end": len(c)}) for c in chunks]
-
-    def _chunk_markdown_section(
-        self, body: str, metadata: dict,
-    ) -> List[Tuple[str, dict]]:
-        """子块 300~400 字符：在 section 内按句子/段落累积到目标长度。"""
-        body = body.strip()
+    def _chunk_markdown_section(self, body: str, metadata: dict, body_offset: int = 0) -> List[Tuple[str, dict]]:
+        body = (body or "").strip()
         if not body:
             return []
-        # 先按段落分；段落过大再按句切分
-        units: List[str] = []
-        for para in re.split(r'\n\s*\n', body):
-            para = para.strip()
-            if not para:
-                continue
-            if len(para) <= MARKDOWN_CHILD_MAX:
-                units.append(para)
+        # preserve paragraph boundaries as units for better offset fidelity
+        units = [p.strip() for p in re.split(r'\n\s*\n', body) if p.strip()]
+        expanded = []
+        for para in units:
+            if len(para) <= self.child_max:
+                expanded.append(para)
             else:
-                # 中文句末标点切句，累积到接近子块上限
-                sentences = re.split(r'(?<=[。！？!?；;])', para)
+                sentences = re.split(r'(?<=[。！？!?；;\n])', para)
                 cur = ""
                 for s in sentences:
                     s = s.strip()
                     if not s:
                         continue
-                    if len(cur) + len(s) > MARKDOWN_CHILD_MAX and len(cur) >= MARKDOWN_CHILD_MIN:
-                        units.append(cur)
+                    if len(cur) + len(s) > self.child_max and len(cur) >= self.child_min:
+                        expanded.append(cur)
                         cur = s
                     else:
                         cur = (cur + s) if cur else s
                 if cur:
-                    units.append(cur)
-        chunks: List[Tuple[str, dict]] = []
+                    expanded.append(cur)
+        chunks = []
         cur = ""
-        for u in units:
-            if cur and len(cur) + len(u) + 1 > MARKDOWN_CHILD_MAX:
+        for u in expanded:
+            if cur and len(cur) + len(u) + 2 > self.child_max:
                 chunks.append(cur)
                 cur = u
             else:
-                cur = (cur + "\n" + u) if cur else u
+                cur = (cur + "\n\n" + u) if cur else u
         if cur:
             chunks.append(cur)
-        return [(c, {**metadata, "chunk_start": 0, "chunk_end": len(c)}) for c in chunks]
+
+        out = []
+        search_from = 0
+        for c in chunks:
+            pieces = [(c, 0, len(c))] if len(c) <= self.hard_max else self._hard_split(c, self.child_max, min(40, self.child_max // 8))
+            base_pos = body.find(c, search_from)
+            if base_pos < 0:
+                base_pos, base_end = self._find_span(body, c, search_from)
+            else:
+                base_end = base_pos + len(c)
+            if base_pos >= 0:
+                search_from = base_pos + 1
+            for piece, rs, re_ in pieces:
+                abs_s = body_offset + (base_pos if base_pos >= 0 else 0) + rs
+                abs_e = body_offset + (base_pos if base_pos >= 0 else 0) + re_
+                out.append((piece, {**metadata, "chunk_start": abs_s, "chunk_end": abs_e}))
+        return out
+
+    def _window_chunks(self, text: str, metadata: dict, base_offset: int = 0) -> List[Tuple[str, dict]]:
+        text = text.strip()
+        if not text:
+            return []
+        paragraphs = [p for p in re.split(r'\n\s*\n', text) if p.strip()]
+        chunks = []
+        buf = ""
+        size = self.paragraph_chunk_size
+        overlap = self.paragraph_chunk_overlap
+        for para in paragraphs:
+            para = para.strip()
+            para_parts = [para] if len(para) <= self.hard_max else [p for p, _, _ in self._hard_split(para, size, overlap)]
+            for part in para_parts:
+                if buf and len(buf) + len(part) + 2 > size:
+                    chunks.append(buf)
+                    tail = buf[-overlap:] if overlap > 0 else ""
+                    buf = (tail + "\n\n" + part).strip()
+                else:
+                    buf = (buf + "\n\n" + part).strip() if buf else part
+                while len(buf) > size:
+                    chunks.append(buf[:size].strip())
+                    tail = buf[size - overlap:size] if overlap > 0 else ""
+                    buf = (tail + buf[size:]).strip()
+        if buf:
+            if len(buf) > self.hard_max:
+                for p, _, _ in self._hard_split(buf, size, overlap):
+                    chunks.append(p)
+            else:
+                chunks.append(buf)
+
+        out = []
+        search_from = 0
+        for c in chunks:
+            if not c:
+                continue
+            idx = text.find(c, search_from)
+            if idx < 0:
+                idx, end = self._find_span(text, c, search_from)
+            else:
+                end = idx + len(c)
+            if idx >= 0:
+                search_from = max(search_from, idx + 1
+                )
+                out.append((c, {**metadata, "chunk_start": base_offset + idx, "chunk_end": base_offset + end}))
+            else:
+                out.append((c, {**metadata, "chunk_start": base_offset, "chunk_end": base_offset + len(c)}))
+        return out
 
     def _is_faq(self, text: str) -> bool:
-        """启发式判断：FAQ/Q&A 文档（出现成对的 Q:/A: 或 问：/答：）。"""
-        q_count = len(re.findall(r'^\s*(?:Q[:：]|问[:：]|问题\s*\d*\s*[:：]?)', text, re.MULTILINE | re.IGNORECASE))
-        a_count = len(re.findall(r'^\s*(?:A[:：]|答[:：]|回答[:：])', text, re.MULTILINE | re.IGNORECASE))
+        q_count = len(_FAQ_Q_PATTERN.findall(text))
+        a_count = len(_FAQ_A_PATTERN.findall(text))
         return q_count >= 1 and a_count >= 1 and q_count >= a_count
 
-    def _split_faq(self, text: str) -> List[str]:
-        """一问一答为一个 chunk（不拆分）。以 Q 行为起点聚合到下一个 Q 之前。"""
-        lines = text.splitlines()
-        blocks: List[str] = []
-        cur: List[str] = []
+    def _split_faq(self, text: str) -> List[Tuple[str, int, int]]:
+        lines = text.splitlines(keepends=True)
+        blocks = []
+        cur = []
+        cur_start = 0
+        pos = 0
         for line in lines:
             if _FAQ_Q_PATTERN.match(line) and cur:
-                blocks.append("\n".join(cur).strip())
+                block = "".join(cur).strip()
+                if block:
+                    blocks.append((block, cur_start, cur_start + len("".join(cur).rstrip('\r\n'))))
                 cur = [line]
+                cur_start = pos
             else:
+                if not cur:
+                    cur_start = pos
                 cur.append(line)
+            pos += len(line)
         if cur:
-            blocks.append("\n".join(cur).strip())
-        return [b for b in blocks if b]
+            block = "".join(cur).strip()
+            if block:
+                blocks.append((block, cur_start, cur_start + len("".join(cur).rstrip('\r\n'))))
+        return blocks
 
-    def _faq_question(self, block: str) -> str:
-        """从 FAQ 块中提取问题行作为 section_title（去 Q:/问： 前缀）。"""
+    @staticmethod
+    def _faq_question(block: str) -> str:
         for line in block.splitlines():
             if _FAQ_Q_PATTERN.match(line):
                 return _FAQ_Q_PATTERN.sub("", line).strip()
         return ""
 
-    def _extract_table_blocks(self, text: str) -> List[str]:
-        """提取连续的 Markdown 表格行，作为一个独立块（保留原 Markdown 表格）。"""
-        lines = text.splitlines()
-        blocks: List[str] = []
-        cur: List[str] = []
-        for line in lines:
-            if _TABLE_ROW_PATTERN.match(line):
-                cur.append(line)
+    def _extract_dialogues(self, text: str, base_meta: dict, base_offset: int = 0) -> List[Tuple[str, dict]]:
+        anchors = []
+        seen = set()
+        for m in list(DIALOGUE_PREFIX.finditer(text)) + list(DIALOGUE_SUFFIX.finditer(text)):
+            if m.re is DIALOGUE_PREFIX:
+                speaker = m.group(1).strip()
+                dialogue = m.group(2).strip()
             else:
-                if len(cur) >= 2:
-                    blocks.append("\n".join(cur))
-                cur = []
-        if len(cur) >= 2:
-            blocks.append("\n".join(cur))
-        return blocks
-
-    def _extract_dialogues(self, text: str, base_meta: dict) -> List[Tuple[str, dict]]:
-        """从文本中提取对话片段，生成对话锚点文档块。"""
-        anchors: List[Tuple[str, dict]] = []
-        seen: set[str] = set()
-
-        for m in DIALOGUE_PREFIX.finditer(text):
-            speaker = m.group(1).strip()
-            dialogue = m.group(2).strip()
+                dialogue = m.group(1).strip()
+                speaker = m.group(2).strip()
             if not speaker or not dialogue:
                 continue
             key = f"{speaker}:{dialogue[:50]}"
             if key in seen:
                 continue
             seen.add(key)
-            text_content = f"{speaker}说：“{dialogue}”"
+            text_content = f"{speaker}说：\u201c{dialogue}\u201d"
             anchors.append((text_content, {
-                **base_meta,
-                "is_dialogue": True,
-                "speaker": speaker,
-                "dialogue": dialogue,
+                **base_meta, "is_dialogue": True, "speaker": speaker, "dialogue": dialogue,
+                "chunk_start": base_offset + m.start(), "chunk_end": base_offset + m.end(),
             }))
-
-        for m in DIALOGUE_SUFFIX.finditer(text):
-            dialogue = m.group(1).strip()
-            speaker = m.group(2).strip()
-            if not speaker or not dialogue:
-                continue
-            key = f"{speaker}:{dialogue[:50]}"
-            if key in seen:
-                continue
-            seen.add(key)
-            text_content = f"{speaker}说：“{dialogue}”"
-            anchors.append((text_content, {
-                **base_meta,
-                "is_dialogue": True,
-                "speaker": speaker,
-                "dialogue": dialogue,
-            }))
-
         return anchors
 
-    def process(
-        self, file_path: str, doc_id: str, filename: str,
-        department: str | None = None,
-    ) -> Tuple[List[Tuple[str, dict]], List[dict]]:
-        """
-        Returns:
-          all_chunks: list of (text, metadata) for vector store (parent + children + dialogue anchors)
-          chapter_metas: list of dicts for ChapterStore
+    def _is_process_doc(self, text: str) -> bool:
+        step_hits = list(_STEP_PATTERN.finditer(text))
+        if len(step_hits) < 2:
+            return False
+        field_hits = sum(1 for pat in _PROCESS_FIELD_PATTERNS.values() if pat.search(text))
+        return field_hits >= 1 or bool(_PROCESS_TITLE_PATTERN.search(text)) or len(step_hits) >= 3
 
-        §13.2：按文档类型选择分块策略，chunk 均带 parent_id/source_file/section_title/department。
-        """
+    @staticmethod
+    def _process_name(text: str, filename: str) -> str:
+        m = _PROCESS_TITLE_PATTERN.search(text or "")
+        if m:
+            return m.group(1).strip()[:80]
+        for line in (text or "").splitlines():
+            line = line.strip().strip('#').strip()
+            if line:
+                return line[:80]
+        return Path(filename).stem
+
+    @staticmethod
+    def _step_no(match: re.Match) -> str:
+        for k in ("cn", "en", "num", "pnum"):
+            v = match.groupdict().get(k)
+            if v:
+                return str(v)
+        return ""
+
+    @staticmethod
+    def _extract_process_fields(block: str) -> dict:
+        out = {}
+        for key, pat in _PROCESS_FIELD_PATTERNS.items():
+            matches = pat.findall(block or "")
+            if matches:
+                out[key] = matches[-1].strip() if isinstance(matches[-1], str) else str(matches[-1]).strip()
+        return out
+
+    def _process_process_doc(self, text: str, doc_id: str, filename: str, dept: str, base_metadata: dict):
+        all_chunks = []
+        chapter_metas = []
+        process_name = self._process_name(text, filename)
+        matches = list(_STEP_PATTERN.finditer(text))
+        if not matches:
+            return self._process_generic(text, doc_id, filename, dept, base_metadata)
+
+        parent_id = f"{doc_id}#proc"
+        parent_text = (f"流程：{process_name}\n" + text[:self.parent_summary_length]).strip()
+        parent_meta = self._force_meta(
+            {**base_metadata, "is_parent": True, "process_name": process_name, "chunk_start": 0, "chunk_end": min(len(text), len(parent_text))},
+            filename, process_name, parent_id, dept,
+        )
+        all_chunks.append((parent_text, parent_meta))
+        chapter_metas.append({"document_id": doc_id, "filename": filename, "chapter_number": None, "chapter_title": process_name, "summary": text[:self.parent_summary_length], "parent_chunk_text": parent_text})
+
+        steps = []
+        for i, m in enumerate(matches):
+            start = m.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            block = text[start:end].strip()
+            b_start, b_end = self._find_span(text, block, start)
+            title = (m.group('title') or '').strip() or f"步骤{self._step_no(m) or i + 1}"
+            steps.append({"idx": i, "step_no": self._step_no(m) or str(i + 1), "title": title, "block": block, "start": b_start, "end": b_end})
+
+        for i, step in enumerate(steps):
+            fields = self._extract_process_fields(step["block"])
+            section_title = f"{process_name} / 步骤{step['step_no']} {step['title']}".strip()
+            meta = self._force_meta({
+                **base_metadata, "is_parent": False, "is_process_step": True, "process_name": process_name,
+                "step_no": step["step_no"], "step_index": i,
+                "prev_step": steps[i - 1]["step_no"] if i > 0 else "", "next_step": steps[i + 1]["step_no"] if i + 1 < len(steps) else "",
+                "role": fields.get("role", ""), "precondition": fields.get("precondition", ""), "input": fields.get("input", ""),
+                "output": fields.get("output", ""), "exception": fields.get("exception", ""), "branch": fields.get("branch", ""),
+            }, filename, section_title, parent_id, dept)
+            block = step["block"]
+            if len(block) <= self.hard_max:
+                all_chunks.append((block, {**meta, "chunk_start": step["start"], "chunk_end": step["end"]}))
+            else:
+                for piece, rs, re_ in self._hard_split(block, self.paragraph_chunk_size, self.paragraph_chunk_overlap):
+                    all_chunks.append((piece, {**meta, "chunk_start": step["start"] + rs, "chunk_end": step["start"] + re_}))
+        return all_chunks, chapter_metas
+
+    def process(self, file_path: str, doc_id: str, filename: str, department: str | None = None):
         text = self.load(file_path)
         dept = department or self.department
         ext = Path(file_path).suffix.lower()
-        base_metadata = {
-            "document_id": doc_id,
-            "filename": filename,
-            "source": filename,
-            "source_file": filename,
-            "department": dept,
-        }
+        base_metadata = {"document_id": doc_id, "filename": filename, "source": filename, "source_file": filename, "department": dept}
 
-        all_chunks: List[Tuple[str, dict]] = []
-        chapter_metas: List[dict] = []
+        table_blocks = self._extract_table_blocks_with_spans(text)
+        body_text = self._remove_spans(text, [(s, e) for _, s, e in table_blocks]) if table_blocks else text
 
         if self._is_faq(text):
-            all_chunks, chapter_metas = self._process_faq(
-                text, doc_id, filename, dept, base_metadata
-            )
+            all_chunks, chapter_metas = self._process_faq(text, doc_id, filename, dept, base_metadata)
+        elif self._is_process_doc(text):
+            all_chunks, chapter_metas = self._process_process_doc(body_text or text, doc_id, filename, dept, base_metadata)
         elif ext == ".md":
-            all_chunks, chapter_metas = self._process_markdown(
-                text, doc_id, filename, dept, base_metadata
-            )
+            all_chunks, chapter_metas = self._process_markdown(body_text, doc_id, filename, dept, base_metadata)
         else:
-            all_chunks, chapter_metas = self._process_generic(
-                text, doc_id, filename, dept, base_metadata
-            )
+            all_chunks, chapter_metas = self._process_generic(body_text, doc_id, filename, dept, base_metadata)
 
-        # 表格块：无论何种文档，Markdown 表格单独成 chunk（§13.2.1）
-        for tbl_idx, tbl in enumerate(self._extract_table_blocks(text)):
-            meta = self._force_meta(
-                {**base_metadata, "is_table": True},
-                filename, "表格", f"{doc_id}#table{tbl_idx}", dept,
-            )
+        for tbl_idx, (tbl, ts, te) in enumerate(table_blocks):
+            meta = self._force_meta({**base_metadata, "is_table": True, "chunk_start": ts, "chunk_end": te}, filename, "表格", f"{doc_id}#table{tbl_idx}", dept)
             all_chunks.append((tbl, meta))
-
         return all_chunks, chapter_metas
 
-    def _process_markdown(
-        self, text: str, doc_id: str, filename: str, dept: str, base_metadata: dict,
-    ) -> Tuple[List[Tuple[str, dict]], List[dict]]:
-        """Markdown：按 H2→H3 标题层级，父块 800~1200 / 子块 300~400 字符。"""
+    def _process_markdown(self, text: str, doc_id: str, filename: str, dept: str, base_metadata: dict):
         sections = self._split_markdown_sections(text)
-        all_chunks: List[Tuple[str, dict]] = []
-        chapter_metas: List[dict] = []
-
+        all_chunks = []
+        chapter_metas = []
         from collections import defaultdict
-        children_by_parent: dict = defaultdict(list)
-        section_records: List[dict] = []
+        children_by_parent = defaultdict(list)
 
         parent_seq = 0
         current_parent_id = ""
-        for title, body, parent_title, level in sections:
+        ordered_parent_records = []
+        for title, body, parent_title, level, sec_start, body_start in sections:
             if level >= 3 and current_parent_id:
-                # H3（及更深）作为子小节：复用所在 H2 父块的 parent_id
                 parent_id = current_parent_id
             else:
                 parent_id = f"{doc_id}#s{parent_seq}"
                 parent_seq += 1
                 current_parent_id = parent_id
-            record = {
-                "parent_id": parent_id,
-                "section_title": title,
-                "parent_title": parent_title,
-                "level": level,
-                "body": body,
-            }
-            section_records.append(record)
-            children = self._chunk_markdown_section(
-                body,
-                self._force_meta(
-                    {**base_metadata, "is_parent": False},
-                    filename, title, parent_id, dept,
-                ),
-            )
+            child_meta = self._force_meta({**base_metadata, "is_parent": False}, filename, title, parent_id, dept)
+            children = self._chunk_markdown_section(body, child_meta, body_offset=body_start)
             children_by_parent[parent_id].extend(children)
+            if level < 3:
+                ordered_parent_records.append((parent_id, title, body, sec_start))
 
-        # 父块：父小节（H2/H1 及无标题段）标题 + 正文摘要
-        for record in section_records:
-            parent_id = record["parent_id"]
-            title = record["section_title"]
-            if record["level"] >= 3:
-                # H3 小节不单独产父块（其父为 H2 小节）
-                continue
-            body = record["body"]
-            summary = body[:MARKDOWN_PARENT_MAX].strip()
+        for parent_id, title, body, sec_start in ordered_parent_records:
+            summary = (body or "")[:self.parent_summary_length].strip()
             parent_text = f"{title}\n{summary}".strip() if title else summary
-            parent_meta = self._force_meta(
-                {**base_metadata, "is_parent": True, "chunk_start": 0,
-                 "chunk_end": len(summary)},
-                filename, title, parent_id, dept,
-            )
+            parent_meta = self._force_meta({**base_metadata, "is_parent": True, "chunk_start": sec_start, "chunk_end": sec_start + len(parent_text)}, filename, title, parent_id, dept)
             all_chunks.append((parent_text, parent_meta))
-            chapter_metas.append({
-                "document_id": doc_id,
-                "filename": filename,
-                "chapter_number": self._parse_chapter_number(title)[0] if title else None,
-                "chapter_title": title or "",
-                "summary": summary,
-                "parent_chunk_text": parent_text,
-            })
+            chapter_metas.append({"document_id": doc_id, "filename": filename, "chapter_number": self._parse_chapter_number(title)[0] if title else None, "chapter_title": title or "", "summary": summary, "parent_chunk_text": parent_text})
 
-        # 子块：写入全部子块（带 parent_id 指向所属小节）
         for children in children_by_parent.values():
             all_chunks.extend(children)
-
         return all_chunks, chapter_metas
 
-    def _process_faq(
-        self, text: str, doc_id: str, filename: str, dept: str, base_metadata: dict,
-    ) -> Tuple[List[Tuple[str, dict]], List[dict]]:
-        """FAQ/Q&A：一问一答为一个 chunk，不拆分。"""
-        all_chunks: List[Tuple[str, dict]] = []
-        chapter_metas: List[dict] = []
-        blocks = self._split_faq(text)
-        for idx, block in enumerate(blocks):
-            parent_id = f"{doc_id}#faq{idx}"
-            question = self._faq_question(block)
-            meta = self._force_meta(
-                {**base_metadata, "is_parent": False, "is_faq": True},
-                filename, question or f"FAQ{idx + 1}", parent_id, dept,
-            )
-            all_chunks.append((block, {**meta, "chunk_start": 0, "chunk_end": len(block)}))
-            chapter_metas.append({
-                "document_id": doc_id,
-                "filename": filename,
-                "chapter_number": None,
-                "chapter_title": "",
-                "summary": block[:self.parent_summary_length],
-                "parent_chunk_text": block,
-            })
+    def _process_faq(self, text: str, doc_id: str, filename: str, dept: str, base_metadata: dict):
+        all_chunks = []
+        chapter_metas = []
+        parent_id = f"{doc_id}#faq"
+        parent_text = text[:self.parent_summary_length].strip()
+        parent_meta = self._force_meta({**base_metadata, "is_parent": True, "chunk_start": 0, "chunk_end": min(len(text), len(parent_text))}, filename, "FAQ", parent_id, dept)
+        all_chunks.append((parent_text, parent_meta))
+        chapter_metas.append({"document_id": doc_id, "filename": filename, "chapter_number": None, "chapter_title": "FAQ", "summary": parent_text, "parent_chunk_text": parent_text})
+        for idx, (block, start, end) in enumerate(self._split_faq(text)):
+            question = self._faq_question(block) or f"FAQ{idx + 1}"
+            meta = self._force_meta({**base_metadata, "is_parent": False, "is_faq": True, "chunk_start": start, "chunk_end": end}, filename, question, parent_id, dept)
+            all_chunks.append((block, meta))
         return all_chunks, chapter_metas
 
-    def _process_generic(
-        self, text: str, doc_id: str, filename: str, dept: str, base_metadata: dict,
-    ) -> Tuple[List[Tuple[str, dict]], List[dict]]:
-        """PDF/Word/纯文本：先按章节（第X章/Chapter X）分章，无章节时按段落+重叠窗口。"""
+    def _process_generic(self, text: str, doc_id: str, filename: str, dept: str, base_metadata: dict):
         chapters = self._split_chapters(text)
-        all_chunks: List[Tuple[str, dict]] = []
-        chapter_metas: List[dict] = []
-
-        for idx, (content, chapter_title) in enumerate(chapters):
+        all_chunks = []
+        chapter_metas = []
+        for idx, (content, chapter_title, c_start) in enumerate(chapters):
             parent_id = f"{doc_id}#c{idx}"
             meta = {**base_metadata}
             if chapter_title:
                 chapter_number, _ = self._parse_chapter_number(chapter_title)
                 meta["chapter_title"] = chapter_title
                 meta["chapter_number"] = chapter_number
-
-            # 父块：章节标题 + 摘要
+            if c_start < 0:
+                c_start = 0
             summary = content[:self.parent_summary_length]
-            parent_meta = self._force_meta(
-                {**meta, "is_parent": True, "chunk_start": 0,
-                 "chunk_end": len(summary)},
-                filename, chapter_title, parent_id, dept,
-            )
             parent_text = f"{chapter_title}\n{summary}" if chapter_title else summary
+            section_title = chapter_title or (content[:20].strip() or filename)
+            parent_meta = self._force_meta({**meta, "is_parent": True, "chunk_start": c_start, "chunk_end": c_start + len(parent_text)}, filename, section_title, parent_id, dept)
             all_chunks.append((parent_text, parent_meta))
-
-            chapter_metas.append({
-                "document_id": doc_id,
-                "filename": filename,
-                "chapter_number": meta.get("chapter_number"),
-                "chapter_title": chapter_title or "",
-                "summary": summary,
-                "parent_chunk_text": parent_text,
-            })
-
-            # 子块：段落 + 重叠窗口（512 字符 / overlap≈12%）
-            child_meta = self._force_meta(
-                {**meta, "is_parent": False},
-                filename, chapter_title, parent_id, dept,
-            )
-            all_chunks.extend(
-                self._window_chunks(content, child_meta,
-                                    PARAGRAPH_CHUNK_SIZE, PARAGRAPH_CHUNK_OVERLAP)
-            )
-
-            # 对话锚点
-            dialogue_anchors = self._extract_dialogues(content, {
-                **self._force_meta(child_meta, filename, chapter_title, parent_id, dept),
-            })
-            all_chunks.extend(dialogue_anchors)
-
+            chapter_metas.append({"document_id": doc_id, "filename": filename, "chapter_number": meta.get("chapter_number"), "chapter_title": chapter_title or "", "summary": summary, "parent_chunk_text": parent_text})
+            child_meta = self._force_meta({**meta, "is_parent": False}, filename, section_title, parent_id, dept)
+            all_chunks.extend(self._window_chunks(content, child_meta, base_offset=c_start))
+            all_chunks.extend(self._extract_dialogues(content, child_meta, base_offset=c_start))
         return all_chunks, chapter_metas

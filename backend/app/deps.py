@@ -1206,11 +1206,13 @@ class PlatformContext:
         if history is not None:
             history = [m for m in history if getattr(m, "id", None) != user_msg_id]
         project_user_message(session_id, user_msg_id, question, files)
+        selected_agent = command_override.get("agent") or self.session_agent(session_id)
+        effective_use_vector_db = bool(use_vector_db) or str(selected_agent or "").strip().lower() == "rag"
         try:
             result = await self.graph.ainvoke(
                 initial_state(
                     question, user_id, files=files, model=model,
-                    use_vector_db=use_vector_db,
+                    use_vector_db=effective_use_vector_db,
                     message_id=user_msg_id,
                     staged_attachments=staged_attachments,
                     history_messages=history,
@@ -1222,9 +1224,9 @@ class PlatformContext:
                     keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
                     session_id=session_id,
                     instructions=self.turn_instructions(session_id, question),
-                    agent=command_override.get("agent") or self.session_agent(session_id),
+                    agent=selected_agent,
                     workspace=self.session_workspace(session_id),
-            model_override=command_override.get("model") or "",
+                    model_override=command_override.get("model") or "",
                 ),
                 config={"configurable": {"thread_id": session_id}},
             )
@@ -1325,9 +1327,11 @@ class PlatformContext:
         if history is not None:
             history = [m for m in history if getattr(m, "id", None) != user_msg_id]
         project_user_message(session_id, user_msg_id, question, files, voice)
+        selected_agent = command_override.get("agent") or self.session_agent(session_id)
+        effective_use_vector_db = bool(use_vector_db) or str(selected_agent or "").strip().lower() == "rag"
         state = initial_state(
             question, user_id, files=files, model=self.session_model(session_id),
-            use_vector_db=use_vector_db,
+            use_vector_db=effective_use_vector_db,
             staged_attachments=staged_attachments,
             history_messages=history,
             message_id=user_msg_id,
@@ -1339,7 +1343,7 @@ class PlatformContext:
             keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
             session_id=session_id,
             instructions=self.turn_instructions(session_id, question),
-            agent=command_override.get("agent") or self.session_agent(session_id),
+            agent=selected_agent,
             workspace=self.session_workspace(session_id),
             model_override=command_override.get("model") or "",
             subtask=bool(command_override.get("subtask")),
@@ -1416,8 +1420,10 @@ class PlatformContext:
         if history is not None:
             history = [m for m in history if getattr(m, "id", None) != user_msg_id]
         project_user_message(session_id, user_msg_id, question, files)
+        selected_agent = command_override.get("agent") or self.session_agent(session_id)
+        effective_use_vector_db = bool(use_vector_db) or str(selected_agent or "").strip().lower() == "rag"
         state = initial_state(
-            question, user_id, files=files, model=model, use_vector_db=use_vector_db,
+            question, user_id, files=files, model=model, use_vector_db=effective_use_vector_db,
             staged_attachments=staged_attachments,
             history_messages=history,
             message_id=user_msg_id,
@@ -1429,10 +1435,9 @@ class PlatformContext:
             keep_recent_tokens_override=binding.get("keep_recent_tokens", 0),
             session_id=session_id,
             instructions=self.turn_instructions(session_id, question),
-            agent=command_override.get("agent") or self.session_agent(session_id),
+            agent=selected_agent,
             workspace=self.session_workspace(session_id),
             model_override=command_override.get("model") or "",
-            subtask=bool(command_override.get("subtask")),
         )
         yield {"event": "start", "data": {"session_id": session_id}}
         token = set_allowed_roots(self.allowed_roots_for(session_id))

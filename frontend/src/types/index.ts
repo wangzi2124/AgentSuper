@@ -396,7 +396,6 @@ export interface MultiAgentChatRequest {
   model?: string
   /** 已有会话的按轮模型：后端在回合开始前切换，不等点击时 PATCH。 */
   target_model?: string
-  use_vector_db?: boolean
   /** [S2/B4] 客户端消息幂等 id：自动/手动重试复用同一 id，服务端据此去重 */
   client_msg_id?: string
   /** [F8] 多模态附件（拖拽/粘贴/选择），data 为 base64 编码内容 */

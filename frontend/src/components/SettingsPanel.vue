@@ -1,15 +1,22 @@
 ﻿<script setup lang="ts">
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useMultiAgentStore } from '../stores/multiAgent'
 import { useChatSettingsStore, TTS_LANGUAGES } from '../stores/chatSettings'
 
 const emit = defineEmits<{ close: [] }>()
 
+const router = useRouter()
 const agent = useMultiAgentStore()
 const chatSettings = useChatSettingsStore()
 
 const messages = computed(() => agent.messages)
 const autoRead = computed(() => chatSettings.autoRead)
+
+function openAgentConfig() {
+  emit('close')
+  router.push('/agent-settings')
+}
 
 function handleClearConversation() {
   if (!confirm('确定清空当前对话？此操作不可撤销。')) return
@@ -23,13 +30,10 @@ function handleClearConversation() {
     <!-- 选项 -->
     <div class="drawer-section">
       <div class="drawer-label">选项</div>
-      <div class="toggle-row">
-        <span class="toggle-row-label">知识库检索</span>
-        <label class="toggle">
-          <input type="checkbox" v-model="agent.useVectorDb" :disabled="agent.loading" />
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
+      <button class="drawer-action" type="button" @click="openAgentConfig">
+        <span>Agent 配置</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
       <div class="toggle-row">
         <span class="toggle-row-label">自动朗读回复</span>
         <label class="toggle">
