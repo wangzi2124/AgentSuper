@@ -21,7 +21,6 @@ import {
 } from '../api/v2'
 import type { AgentInfoV2, TurnDiff } from '../api/v2'
 import { listCommands, type SlashCommandInfo } from '../api/commands'
-import { listReferences, type ReferenceItem } from '../api/references'
 import type {
   AssistantMessage,
   FileAttachment,
@@ -162,25 +161,6 @@ async function pickAgent(name: string) {
     error.value = err instanceof Error ? err.message : String(err)
   }
 }
-const referenceItems = ref<ReferenceItem[]>([])
-const referenceMenuOpen = ref(false)
-
-async function ensureReferences() {
-  try {
-    referenceItems.value = (await listReferences(sessionId.value || null)).filter(
-      (item) => !item.hidden,
-    )
-  } catch {
-    referenceItems.value = []
-  }
-}
-
-function useReference(name: string) {
-  referenceMenuOpen.value = false
-  const prefix = draft.value && !draft.value.endsWith(' ') ? ' ' : ''
-  draft.value = `${draft.value}${prefix}@ref:${name} `
-  void nextTick(() => composerRef.value?.focus())
-}
 const userInitial = computed(() => (auth.displayName || 'U').slice(0, 1).toUpperCase())
 
 function hasImageAvatar(): boolean {
@@ -200,9 +180,8 @@ function scrollToBottom() {
 
 watch(() => [messages.value.length, status.value], scrollToBottom)
 
-// ── `/skills` 技能选择器 ──────────────────────────────────────────
-// 在行首或空白之后输入 `/skills` 弹出技能/命令；选中后把 `/技能名 ` 写回输入框，
-// 发送时后端 `apply_slash_skill` 会加载该技能正文并注入模型上下文。
+// ── `/skills` 技能/命令与 `@` Agent 选择（参考 /skills 交互）────────────
+// 输入 `/skills` 弹出技能/命令；输入 `@` 弹出可用 Agent（如 general/explore）并插入 `@name`。
 const slashToken = computed(() => {
   const match = /(^|\s)(\/\S*)$/.exec(draft.value)
   if (!match) return null
@@ -215,13 +194,26 @@ const slashRest = computed(() => {
   const trigger = slashToken.value
   return trigger ? draft.value.slice(trigger.start + trigger.token.length) : ''
 })
+const atToken = computed(() => {
+  const match = /(^|\s)(@\S*)$/.exec(draft.value)
+  if (!match) return null
+  return { start: draft.value.length - match[2].length, token: match[2] }
+})
+const agentTrigger = computed(() => (atToken.value ? atToken.value.start : -1))
+const agentRest = computed(() => (atToken.value ? atToken.value.token.slice(1) : ''))
+const pickerMode = computed<'slash' | 'agent' | null>(() => {
+  if (slashTrigger.value >= 0) return 'slash'
+  if (agentTrigger.value >= 0) return 'agent'
+  return null
+})
 interface SlashItem {
   name: string
   description: string
-  kind: 'skill' | 'command'
+  kind: 'skill' | 'command' | 'agent'
 }
 const commandItems = ref<SlashCommandInfo[]>([])
 const commandsLoading = ref(false)
+const agentsLoading = ref(false)
 const slashAll = computed<SlashItem[]>(() => [
   ...skillStore.skills
     .filter((skill) => skill.enabled)
@@ -236,6 +228,14 @@ const slashAll = computed<SlashItem[]>(() => [
     kind: 'command' as const,
   })),
 ])
+const agentPickItems = computed<SlashItem[]>(() =>
+  agentOptions.value.map((agent) => ({
+    name: agent.name,
+    description: agent.description || agent.mode || '',
+    kind: 'agent' as const,
+  })),
+)
+const pickerSource = computed(() => (pickerMode.value === 'agent' ? agentPickItems.value : slashAll.value))
 async function ensureCommands() {
   if (commandsLoading.value) return
   commandsLoading.value = true
@@ -247,15 +247,16 @@ async function ensureCommands() {
     commandsLoading.value = false
   }
 }
-const slashOpen = computed(() => !slashDismissed.value && slashTrigger.value >= 0)
+const slashOpen = computed(() => !slashDismissed.value && pickerMode.value !== null)
 const slashQuery = computed(() => {
   const typed = slashSearch.value.trim()
   if (typed) return typed.toLowerCase()
-  return slashRest.value.trim().toLowerCase()
+  const rest = pickerMode.value === 'agent' ? agentRest.value : slashRest.value
+  return rest.trim().toLowerCase()
 })
 const slashFiltered = computed(() => {
   const query = slashQuery.value
-  const available = slashAll.value
+  const available = pickerSource.value
   if (!query) return available
   return available.filter(
     (item) =>
@@ -264,12 +265,17 @@ const slashFiltered = computed(() => {
   )
 })
 
-watch(slashOpen, (open) => {
+watch([slashOpen, pickerMode], ([open, mode]) => {
   if (!open) return
   slashActive.value = 0
   slashSearch.value = ''
-  if (!skillStore.initialized) void skillStore.fetchAll()
-  void ensureCommands()
+  if (mode === 'slash') {
+    if (!skillStore.initialized) void skillStore.fetchAll()
+    void ensureCommands()
+  } else if (mode === 'agent') {
+    agentsLoading.value = true
+    void ensureAgents().finally(() => { agentsLoading.value = false })
+  }
   void nextTick(() => {
     if (slashListRef.value) slashListRef.value.scrollTop = 0
     slashSearchRef.value?.focus()
@@ -307,9 +313,11 @@ function closeSlash() {
 }
 
 function slashUse(item: SlashItem) {
-  const i = slashTrigger.value
+  const mode = pickerMode.value
+  const i = mode === 'agent' ? agentTrigger.value : slashTrigger.value
   const prefix = i >= 0 ? draft.value.slice(0, i) : ''
-  draft.value = `${prefix}/${item.name} `
+  const token = mode === 'agent' ? `@${item.name}` : `/${item.name}`
+  draft.value = `${prefix}${token} `
   slashDismissed.value = true
   slashSearch.value = ''
   void nextTick(() => {
@@ -384,7 +392,6 @@ async function loadSession() {
 onMounted(() => {
   v2.start()
   void models.load()
-  void ensureReferences()
   void ensureAgents()
   void loadSession()
 })
@@ -1215,7 +1222,7 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
         <div v-if="slashOpen" class="slash-mask" @click="closeSlash"></div>
         <div v-if="slashOpen" class="slash-panel">
           <div class="slash-head">
-            <span class="slash-title">技能与命令</span>
+            <span class="slash-title">{{ pickerMode === 'agent' ? 'Agent' : '技能与命令' }}</span>
             <button class="slash-close" type="button" title="关闭" @click="closeSlash">✕</button>
           </div>
           <input
@@ -1223,11 +1230,11 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
             v-model="slashSearch"
             class="slash-search"
             type="text"
-            placeholder="搜索技能或命令…（↑↓ 选择，Enter 插入，Esc 关闭）"
+            :placeholder="pickerMode === 'agent' ? '搜索 Agent…（↑↓ 选择，Enter 插入，Esc 关闭）' : '搜索技能或命令…（↑↓ 选择，Enter 插入，Esc 关闭）'"
             @keydown="onSlashSearchKeydown"
           />
-          <div v-if="(skillStore.loading || commandsLoading) && !slashFiltered.length" class="slash-empty">加载中…</div>
-          <div v-else-if="!slashFiltered.length" class="slash-empty">没有匹配的技能或命令</div>
+          <div v-if="(pickerMode === 'agent' ? agentsLoading : (skillStore.loading || commandsLoading)) && !slashFiltered.length" class="slash-empty">加载中…</div>
+          <div v-else-if="!slashFiltered.length" class="slash-empty">{{ pickerMode === 'agent' ? '没有可用 Agent' : '没有匹配的技能或命令' }}</div>
           <div v-else ref="slashListRef" class="slash-list">
             <button
               v-for="(item, index) in slashFiltered"
@@ -1238,8 +1245,9 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
               @mousemove="slashActive = index"
               @click="slashUse(item)"
             >
-              <span class="slash-name">/{{ item.name }}</span>
+              <span class="slash-name">{{ pickerMode === 'agent' ? `@${item.name}` : `/${item.name}` }}</span>
               <span v-if="item.kind === 'command'" class="slash-kind">命令</span>
+              <span v-else-if="item.kind === 'agent'" class="slash-kind">Agent</span>
               <span class="slash-desc">{{ item.description || '暂无描述' }}</span>
             </button>
           </div>
@@ -1266,25 +1274,7 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
           <button class="attach-btn" type="button" title="添加附件" @click="chooseFiles">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>
           </button>
-          <div class="ref-picker">
-            <button class="attach-btn" type="button" title="插入引用" @click="referenceMenuOpen = !referenceMenuOpen">
-              @
-            </button>
-            <div v-if="referenceMenuOpen" class="ref-menu">
-              <button
-                v-for="item in referenceItems"
-                :key="item.name"
-                type="button"
-                class="ref-item"
-                @click="useReference(item.name)"
-              >
-                <strong>{{ item.name }}</strong>
-                <span>{{ item.kind }} · {{ item.status }}</span>
-                <small>{{ item.description }}</small>
-              </button>
-              <div v-if="!referenceItems.length" class="ref-empty">未配置引用</div>
-            </div>
-          </div>
+
           <button
             class="mic-btn"
             :class="{ recording }"
