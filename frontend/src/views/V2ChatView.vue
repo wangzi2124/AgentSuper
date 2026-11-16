@@ -72,6 +72,16 @@ const speakingPaused = ref(false)
 const speakingMode = ref<'audio' | 'native' | ''>('')
 const speakingTime = ref(0)
 const speakingDuration = ref(0)
+interface SpeakSegment {
+  part: number
+  start: number
+  end: number
+  globalStart: number
+  globalEnd: number
+}
+const speakingSegments = ref<SpeakSegment[]>([])
+const speakingLead = ref(0)
+const speakingTrimmedLength = ref(0)
 const composerRef = ref<HTMLTextAreaElement | null>(null)
 const slashDismissed = ref(false)
 const slashActive = ref(0)
@@ -820,6 +830,9 @@ function resetSpeakingState() {
   speakingMode.value = ''
   speakingTime.value = 0
   speakingDuration.value = 0
+  speakingSegments.value = []
+  speakingLead.value = 0
+  speakingTrimmedLength.value = 0
 }
 
 function stopAutoRead() {
@@ -847,6 +860,100 @@ function speakingPercent(messageId: string) {
   const d = speakingDuration.value
   if (!d || !Number.isFinite(d)) return 0
   return Math.max(0, Math.min(100, (speakingTime.value / d) * 100))
+}
+
+/** Split text into sentence-sized ranges for spoken-text highlighting. */
+function sentenceRanges(text: string): { start: number; end: number }[] {
+  const ranges: { start: number; end: number }[] = []
+  const push = (start: number, end: number) => {
+    if (text.slice(start, end).trim()) ranges.push({ start, end })
+  }
+  let start = 0
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    const cjkEnd = ch === '。' || ch === '！' || ch === '？' || ch === '；' || ch === '\n'
+    const asciiEnd = (ch === '.' || ch === '!' || ch === '?' || ch === ';')
+      && (i + 1 >= text.length || /\s/.test(text[i + 1]))
+    if (cjkEnd || asciiEnd) {
+      push(start, i + 1)
+      start = i + 1
+    }
+  }
+  if (start < text.length) push(start, text.length)
+  return ranges.length ? ranges : (text.trim() ? [{ start: 0, end: text.length }] : [])
+}
+
+/**
+ * Build the spoken-text segment map for a message. Audio TTS has no timestamps,
+ * so the active sentence is estimated from playback progress by character
+ * count; native speech uses `onboundary` char indices.
+ */
+function prepareSpeaking(message: MessageV2 | null, spoken: string) {
+  const parts = message ? answerParts(message) : []
+  const full = parts.length ? parts.map((part) => part.text).join('\n\n') : spoken
+  speakingLead.value = full.length - full.trimStart().length
+  speakingTrimmedLength.value = full.trim().length || spoken.length
+  const segments: SpeakSegment[] = []
+  if (parts.length) {
+    let base = 0
+    parts.forEach((part, partIndex) => {
+      for (const range of sentenceRanges(part.text)) {
+        segments.push({
+          part: partIndex,
+          start: range.start,
+          end: range.end,
+          globalStart: base + range.start,
+          globalEnd: base + range.end,
+        })
+      }
+      base += part.text.length + 2
+    })
+  } else {
+    for (const range of sentenceRanges(spoken)) {
+      segments.push({
+        part: 0,
+        start: range.start,
+        end: range.end,
+        globalStart: range.start,
+        globalEnd: range.end,
+      })
+    }
+  }
+  speakingSegments.value = segments
+}
+
+const speakingActiveSegment = computed(() => {
+  const segments = speakingSegments.value
+  if (!segments.length) return -1
+  let offset: number
+  if (speakingMode.value === 'audio') {
+    const duration = speakingDuration.value
+    if (!duration || !Number.isFinite(duration)) return 0
+    offset = speakingLead.value + Math.round((speakingTime.value / duration) * speakingTrimmedLength.value)
+  } else if (speakingMode.value === 'native') {
+    offset = speakingLead.value + Math.round(speakingTime.value)
+  } else {
+    return -1
+  }
+  for (let i = 0; i < segments.length; i += 1) {
+    if (offset >= segments[i].globalStart && offset < segments[i].globalEnd) return i
+  }
+  return offset >= segments[segments.length - 1].globalEnd ? segments.length - 1 : 0
+})
+
+function speakSpans(message: MessageV2, partIndex: number, partText: string): { text: string; active: boolean }[] {
+  const plain = [{ text: partText, active: false }]
+  if (speakingId.value !== message.id) return plain
+  const active = speakingActiveSegment.value
+  const segments = speakingSegments.value
+  if (active < 0 || active >= segments.length) return plain
+  const segment = segments[active]
+  if (segment.part !== partIndex) return plain
+  const spans: { text: string; active: boolean }[] = []
+  if (segment.start > 0) spans.push({ text: partText.slice(0, segment.start), active: false })
+  spans.push({ text: partText.slice(segment.start, segment.end), active: true })
+  if (segment.end < partText.length) spans.push({ text: partText.slice(segment.end), active: false })
+  return spans
 }
 
 function bindAudioProgress(audio: HTMLAudioElement, id: string, url: string) {
@@ -908,6 +1015,8 @@ async function autoReadText(text: string, id = '') {
   if (!content) return
   stopAutoRead()
   speakingId.value = id
+  const message = id ? messages.value.find((item) => item.id === id) ?? null : null
+  prepareSpeaking(message, content)
   try {
     const url = await synthesize(content, undefined, chatSettings.ttsLang || 'Auto')
     const audio = new Audio(url)
@@ -945,6 +1054,7 @@ async function speakMessage(message: MessageV2) {
   }
   stopAutoRead()
   speakingId.value = message.id
+  prepareSpeaking(message, text)
   try {
     const url = await synthesize(text, undefined, chatSettings.ttsLang || 'Auto')
     const audio = new Audio(url)
@@ -1107,7 +1217,11 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
                 v-for="(part, index) in answerParts(message)"
                 :key="`${message.id}-text-${index}`"
                 class="v2-bubble assistant"
-              >{{ part.text }}</div>
+              ><span
+                v-for="(span, spanIndex) in speakSpans(message, index, part.text)"
+                :key="spanIndex"
+                :class="{ 'v2-tts-active': span.active }"
+              >{{ span.text }}</span></div>
             </template>
             <div class="v2-message-actions">
               <button class="v2-copy" title="复制完整回复" @click="copyMessage(message)">
