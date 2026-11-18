@@ -112,6 +112,14 @@ class ToolRegistry:
                 new._tools[name] = td
         return new
 
+    def excluding(self, names: set[str] | frozenset[str]) -> "ToolRegistry":
+        """Return a copy without the given tools (agent capability policy)."""
+        new = ToolRegistry()
+        for name, td in self._tools.items():
+            if name not in names:
+                new._tools[name] = td
+        return new
+
     def get_tools(self, scope: str | None = None) -> list[Callable[..., Any]]:
         return [
             td.fn

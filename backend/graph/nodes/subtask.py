@@ -48,7 +48,7 @@ def make_subtask_node(
     async def subtask_node(state: dict[str, Any]) -> dict[str, Any]:
         agent_def = None
         try:
-            from agents.registry import load_registry
+            from agents.registry import QUESTION_TOOL_NAME, load_registry, question_allowed
             from agents.resolver import AgentResolver
 
             agent_def = AgentResolver(
@@ -85,6 +85,10 @@ def make_subtask_node(
             if agent_def is not None and agent_def.tools
             else None
         )
+        if registry is not None and agent_def is not None and not question_allowed(agent_def.question):
+            allowed_tools = (
+                set(registry.names()) if allowed_tools is None else set(allowed_tools)
+            ) - {QUESTION_TOOL_NAME}
 
         user_blocks = _multimodal_user_content(state)
         image_turn = bool(user_blocks) and _has_image_block(user_blocks)

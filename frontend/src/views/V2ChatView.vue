@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
+  cancelForm,
   cancelInbox,
   commitRevert,
   compactSession,
@@ -21,10 +22,10 @@ import {
 } from '../api/v2'
 import type { AgentInfoV2, TurnDiff } from '../api/v2'
 import { listCommands, type SlashCommandInfo } from '../api/commands'
+import FormCard from '../v2/FormCard.vue'
 import type {
   AssistantMessage,
   FileAttachment,
-  FormInfo,
   InboxInfo,
   MessagePart,
   MessageV2,
@@ -63,7 +64,6 @@ const recordSeconds = ref(0)
 const voiceBusy = ref(false)
 const recorder = new PressToTalkRecorder()
 const scroller = ref<HTMLElement | null>(null)
-const formAnswers = ref<Record<string, Record<string, string>>>({})
 const activeDiff = ref<{ messageId: string; diff: TurnDiff } | null>(null)
 const diffLoading = ref(false)
 const copiedId = ref('')
@@ -690,20 +690,21 @@ async function answerPermission(request: PermissionRequest, decision: 'once' | '
   }
 }
 
-function fieldValue(form: FormInfo, fieldId: string): string {
-  return formAnswers.value[form.id]?.[fieldId] ?? ''
-}
-
-function setFieldValue(form: FormInfo, fieldId: string, value: string) {
-  const answers = { ...(formAnswers.value[form.id] || {}), [fieldId]: value }
-  formAnswers.value = { ...formAnswers.value, [form.id]: answers }
-}
-
-async function submitForm(form: FormInfo) {
+async function submitForm(formId: string, response: Record<string, unknown>) {
   const id = sessionId.value
   if (!id) return
   try {
-    await replyForm(id, form.id, formAnswers.value[form.id] || {})
+    await replyForm(id, formId, response)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function cancelFormRequest(formId: string) {
+  const id = sessionId.value
+  if (!id) return
+  try {
+    await cancelForm(id, formId)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   }
@@ -1098,13 +1099,6 @@ onBeforeUnmount(() => {
   stopAutoRead()
 })
 
-function onFieldSelect(form: FormInfo, fieldId: string, event: Event) {
-  setFieldValue(form, fieldId, (event.target as HTMLSelectElement).value)
-}
-
-function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
-  setFieldValue(form, fieldId, (event.target as HTMLInputElement).value)
-}
 </script>
 
 <template>
@@ -1315,28 +1309,13 @@ function onFieldInput(form: FormInfo, fieldId: string, event: Event) {
       </div>
 
       <div v-if="forms.length" class="v2-cards">
-        <div v-for="form in forms" :key="form.id" class="v2-form">
-          <div class="v2-card-title">{{ form.title || '请选择' }}</div>
-          <label v-for="field in form.fields" :key="field.id" class="v2-field">
-            <span>{{ field.label || field.id }}</span>
-            <select
-              v-if="field.options.length"
-              :value="fieldValue(form, field.id)"
-              @change="onFieldSelect(form, field.id, $event)"
-            >
-              <option value="">请选择</option>
-              <option v-for="option in field.options" :key="option" :value="option">{{ option }}</option>
-            </select>
-            <input
-              v-else
-              :value="fieldValue(form, field.id)"
-              @input="onFieldInput(form, field.id, $event)"
-            />
-          </label>
-          <div class="v2-card-actions">
-            <button @click="submitForm(form)">提交</button>
-          </div>
-        </div>
+        <FormCard
+          v-for="form in forms"
+          :key="form.id"
+          :form="form"
+          @submit="response => submitForm(form.id, response)"
+          @cancel="cancelFormRequest(form.id)"
+        />
       </div>
     </div>
 

@@ -354,18 +354,30 @@ export interface PermissionReplied {
   reply: PermissionReply
 }
 
+export interface FormOption {
+  label: string
+  description: string
+  recommended: boolean
+}
+
 export interface FormField {
   id: string
   type: string
   label: string
   required: boolean
   options: string[]
+  option_details?: FormOption[]
+  multiple?: boolean
+  allow_custom?: boolean
 }
 
 export interface FormInfo {
   id: string
   session_id: string
   title: string
+  kind?: 'question' | 'form'
+  header?: string
+  question?: string
   fields: FormField[]
   state: 'pending' | 'replied' | 'cancelled'
   response: Record<string, unknown>

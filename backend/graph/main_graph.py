@@ -82,15 +82,20 @@ def default_registry(
 
     register_web_tools(registry)
     register_weather_tools(registry)
-    from execution.tools.question_tools import ask_question
+    from execution.tools.question_tools import (
+        QUESTION_TOOL_NAME,
+        QUESTION_TOOL_PARAMETERS,
+        ask_question,
+    )
 
     registry.register_function(
         ask_question,
-        name="ask_question",
+        name=QUESTION_TOOL_NAME,
         description=(ask_question.__doc__ or "").strip(),
         scope="global",
         require_approval=False,
         mutating=False,
+        parameters=QUESTION_TOOL_PARAMETERS,
     )
     if with_shell:
         registry.register_function(

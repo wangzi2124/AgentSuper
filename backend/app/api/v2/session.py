@@ -874,10 +874,39 @@ async def reply_form(
     _must_get(ctx, session_id)
     if not repo.reply_form(session_id, form_id, body.response):
         raise HTTPException(status_code=404, detail="form not found")
+    try:
+        from execution.tools.question_tools import wake_form
+
+        wake_form(form_id)
+    except Exception:  # noqa: BLE001 - no in-process waiter is fine
+        pass
     await emit_event(
         ctx,
         "form.replied",
         {"session_id": session_id, "form_id": form_id, "response": body.response},
+        session_id=session_id,
+    )
+
+
+@router.post("/session/{session_id}/form/{form_id}/cancel", status_code=204)
+async def cancel_form(
+    session_id: str,
+    form_id: str,
+    ctx: PlatformContext = Depends(get_context),
+) -> None:
+    _must_get(ctx, session_id)
+    if not repo.cancel_form(session_id, form_id):
+        raise HTTPException(status_code=404, detail="form not found")
+    try:
+        from execution.tools.question_tools import wake_form
+
+        wake_form(form_id)
+    except Exception:  # noqa: BLE001 - no in-process waiter is fine
+        pass
+    await emit_event(
+        ctx,
+        "form.cancelled",
+        {"session_id": session_id, "form_id": form_id},
         session_id=session_id,
     )
 

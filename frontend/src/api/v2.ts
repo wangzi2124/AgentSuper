@@ -291,3 +291,10 @@ export async function replyForm(
     json('POST', { response }),
   )
 }
+
+export async function cancelForm(sessionId: string, formId: string): Promise<void> {
+  await request(
+    `/session/${encodeURIComponent(sessionId)}/form/${encodeURIComponent(formId)}/cancel`,
+    json('POST', {}),
+  )
+}

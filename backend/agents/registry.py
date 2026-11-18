@@ -20,7 +20,13 @@ import yaml
 logger = logging.getLogger(__name__)
 
 VALID_MODES = {"primary", "subagent", "all"}
+QUESTION_TOOL_NAME = "ask_question"
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
+
+
+def question_allowed(value: str | None) -> bool:
+    """Whether an agent may ask the user via ``ask_question``."""
+    return str(value or "").strip().lower() == "allow"
 
 
 @dataclass(frozen=True)
@@ -33,6 +39,7 @@ class AgentDef:
     tools: tuple[str, ...] = ()
     permission: dict[str, str] = field(default_factory=dict)
     request: dict[str, Any] = field(default_factory=dict)
+    question: str = "deny"
     max_rounds: int = 6
     hidden: bool = False
     disabled: bool = False
@@ -155,6 +162,11 @@ def parse_agent_file(path: Path, source: str, root: Path | None = None) -> Agent
     request = meta.get("request") or {}
     if not isinstance(request, dict):
         request = {}
+    question = str(
+        meta.get("question") or ("allow" if mode in ("primary", "all") else "deny")
+    ).strip().lower()
+    if question not in ("allow", "deny"):
+        question = "deny"
 
     return AgentDef(
         name=name,
@@ -165,6 +177,7 @@ def parse_agent_file(path: Path, source: str, root: Path | None = None) -> Agent
         tools=_as_list(meta.get("tools")),
         permission={str(k): str(v) for k, v in permission.items() if isinstance(v, (str, int, float, bool))},
         request=request,
+        question=question,
         max_rounds=max(1, max_rounds),
         hidden=bool(meta.get("hidden") or False),
         disabled=bool(meta.get("disabled") or False),
@@ -203,6 +216,7 @@ class AgentRegistry:
             tools=agent.tools or existing.tools,
             permission=merged_permission,
             request=merged_request,
+            question=agent.question or existing.question,
             max_rounds=agent.max_rounds,
             hidden=agent.hidden,
             disabled=agent.disabled,
@@ -280,6 +294,7 @@ def _dump_frontmatter(spec: dict[str, Any]) -> tuple[dict[str, Any], str]:
         "hidden": "hidden",
         "disabled": "disabled",
         "color": "color",
+        "question": "question",
         "prompt_path": "prompt",
     }
     for key, meta_key in mapping.items():
@@ -340,10 +355,12 @@ def load_registry(workspace: str | Path | None = None) -> AgentRegistry:
 __all__ = [
     "AgentDef",
     "AgentRegistry",
+    "QUESTION_TOOL_NAME",
     "VALID_MODES",
     "delete_agent",
     "load_registry",
     "parse_agent_file",
+    "question_allowed",
     "request_kwargs",
     "save_agent",
 ]

@@ -194,7 +194,7 @@ def make_execute_node(
         agent_def = None
         agent_registry = None
         try:
-            from agents.registry import load_registry
+            from agents.registry import QUESTION_TOOL_NAME, load_registry, question_allowed
             from agents.resolver import AgentResolver
 
             agent_registry = load_registry(state.get("workspace") or None)
@@ -222,6 +222,10 @@ def make_execute_node(
         if model is None:
             model = resolve_model(state, default_tier="medium")
         registry = _registry
+        if registry is not None and agent_def is not None and not question_allowed(agent_def.question):
+            allowed_tools = (
+                set(registry.names()) if allowed_tools is None else set(allowed_tools)
+            ) - {QUESTION_TOOL_NAME}
         plan = [dict(t) for t in (state.get("task_plan") or [])]
         pending = [t for t in plan if t.get("status") != "done"]
         if not pending:

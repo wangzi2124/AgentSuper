@@ -113,6 +113,38 @@ describe('v2 runtime reducer', () => {
     expect(next.messages.find(message => message.id === 'in1')).toBeUndefined()
   })
 
+  it('upserts a structured question form and removes it on cancel', () => {
+    let runtime = emptyRuntime('s1')
+    runtime = applyV2Event(runtime, evt('form.created', {
+      session_id: 's1',
+      id: 'form_q',
+      kind: 'question',
+      title: '下一步怎么做？',
+      header: '实现方向',
+      question: '下一步怎么做？',
+      state: 'pending',
+      response: {},
+      fields: [{
+        id: 'answer',
+        type: 'select',
+        label: '下一步怎么做？',
+        required: true,
+        options: ['先补测试', '直接实现'],
+        option_details: [
+          { label: '先补测试', description: '先写契约测试', recommended: true },
+          { label: '直接实现', description: '立即写代码', recommended: false },
+        ],
+        multiple: false,
+        allow_custom: true,
+      }],
+    }))
+    expect(runtime.forms[0]?.fields[0]?.option_details?.[0]?.recommended).toBe(true)
+    runtime = applyV2Event(runtime, evt('form.cancelled', {
+      session_id: 's1', form_id: 'form_q',
+    }))
+    expect(runtime.forms).toHaveLength(0)
+  })
+
   it('surfaces execution failures and clears them on the next run', () => {
     let runtime = emptyRuntime('s1')
     runtime = applyV2Event(runtime, evt('session.execution.failed', {

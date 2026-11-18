@@ -395,18 +395,30 @@ class PermissionReplied(StrictModel):
     reply: PermissionReply
 
 
+class FormOption(StrictModel):
+    label: str
+    description: str = ""
+    recommended: bool = False
+
+
 class FormField(StrictModel):
     id: str
     type: str
     label: str = ""
     required: bool = False
     options: list[str] = Field(default_factory=list)
+    option_details: list[FormOption] = Field(default_factory=list)
+    multiple: bool = False
+    allow_custom: bool = False
 
 
 class FormInfo(StrictModel):
     id: str
     session_id: str
     title: str = ""
+    kind: Literal["question", "form"] = "form"
+    header: str = ""
+    question: str = ""
     fields: list[FormField] = Field(default_factory=list)
     state: Literal["pending", "replied", "cancelled"] = "pending"
     response: dict[str, Any] = Field(default_factory=dict)

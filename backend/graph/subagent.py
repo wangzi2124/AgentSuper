@@ -20,7 +20,13 @@ from execution.access import reset_agent_policy, set_agent_policy, statements_fr
 from execution.tool_registry import ToolRegistry
 from models.router import TierModel, get_model
 from prompts.loader import PromptLoader, model_id_of
-from agents.registry import AgentDef, AgentRegistry, load_registry
+from agents.registry import (
+    QUESTION_TOOL_NAME,
+    AgentDef,
+    AgentRegistry,
+    load_registry,
+    question_allowed,
+)
 
 from .events import push_event
 from .nodes.base import run_tool_loop
@@ -44,6 +50,7 @@ class SubAgent:
     model: str = ""
     permission: dict[str, Any] = field(default_factory=dict)
     request: dict[str, Any] = field(default_factory=dict)
+    question: str = "deny"
 
     def system_prompt(self, model: Any | None = None) -> str:
         if self.prompt_body.strip():
@@ -68,6 +75,7 @@ def _to_subagent(defn: AgentDef) -> SubAgent:
         model=defn.model,
         permission=dict(defn.permission),
         request=dict(defn.request),
+        question=defn.question,
     )
 
 
@@ -94,6 +102,8 @@ async def run_subagent(
     """
     model = model or get_model(spec.tier)
     scoped = registry.subset(spec.tools) if spec.tools else registry
+    if not question_allowed(spec.question):
+        scoped = scoped.excluding({QUESTION_TOOL_NAME})
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": spec.system_prompt(model)},

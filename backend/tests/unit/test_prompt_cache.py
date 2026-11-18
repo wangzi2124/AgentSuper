@@ -18,8 +18,8 @@ from prompts.loader import PromptLoader
 # Golden hashes for the cacheable head. Update only when the stable prompt head
 # is intentionally changed; volatile turn content must never move before it.
 _GOLDEN_HEAD = {
-    ("file_agent", "openai/gpt-4o"): "8cc1a1fe877dd2bbc6e56da0e89a12a12ed65bce1c1f583367f6380cfb3c4e99",
-    ("supervisor", "deepseek/deepseek-v4-pro"): "f16ee55be3fa489547622a2328a867ab280b2633b0baa19b10fd97534bccb564",
+    ("file_agent", "openai/gpt-4o"): "3696ecf79eb79533c65314670e699d7d0db08a95bff39f272ffa24b4de930ba9",
+    ("supervisor", "deepseek/deepseek-v4-pro"): "d8b90ce50f35afb8c2e84eb3e22dfc26462c5ba07ae799ee6b5d8a37dbf2ccb7",
 }
 
 

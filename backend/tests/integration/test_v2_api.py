@@ -201,3 +201,14 @@ def test_v2_permission_and_form_endpoints(client) -> None:
     )
     assert form_reply.status_code == 204
     assert client.get(f"/api/v2/session/{session_id}/form").json()["data"][0]["state"] == "replied"
+
+    repo.create_form(session_id, "form_cancel_api", [{"id": "answer", "type": "select"}])
+    cancelled = client.post(
+        f"/api/v2/session/{session_id}/form/form_cancel_api/cancel"
+    )
+    assert cancelled.status_code == 204
+    states = {
+        item["id"]: item["state"]
+        for item in client.get(f"/api/v2/session/{session_id}/form").json()["data"]
+    }
+    assert states["form_cancel_api"] == "cancelled"
