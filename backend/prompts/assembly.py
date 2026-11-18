@@ -7,8 +7,8 @@ it. Tool definitions stay outside this module and are ordered deterministically
 by the registry.
 
 The volatile tail is a small ordered section pipeline. Section order is stable
-and intentional: skills (``extra``) come before project instructions so the
-model reads "how to work" before "what this repo is".
+and intentional: turn-specific ``extra`` content comes before project
+instructions so the model reads "how to work" before "what this repo is".
 """
 
 from __future__ import annotations

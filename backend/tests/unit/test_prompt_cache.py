@@ -18,8 +18,8 @@ from prompts.loader import PromptLoader
 # Golden hashes for the cacheable head. Update only when the stable prompt head
 # is intentionally changed; volatile turn content must never move before it.
 _GOLDEN_HEAD = {
-    ("file_agent", "openai/gpt-4o"): "3696ecf79eb79533c65314670e699d7d0db08a95bff39f272ffa24b4de930ba9",
-    ("supervisor", "deepseek/deepseek-v4-pro"): "d8b90ce50f35afb8c2e84eb3e22dfc26462c5ba07ae799ee6b5d8a37dbf2ccb7",
+    ("file_agent", "openai/gpt-4o"): "294636f9be5571f3df1f47d93033746c093d547a7b8099e1d3bbac4ff7d21f2f",
+    ("supervisor", "deepseek/deepseek-v4-pro"): "097a633f0a3a92fd4c4497d30c444f4351e0137e90afcbbb7b786cf53d34f6e6",
 }
 
 
@@ -28,6 +28,17 @@ def test_stable_head_golden_hashes():
         text = stable_head(agent, model)
         actual = hashlib.sha256(text.encode("utf-8")).hexdigest()
         assert actual == expected, f"stable head changed: {agent} / {model}"
+
+
+def test_file_agent_head_has_no_duplicate_global_rules():
+    text = stable_head("file_agent", "openai/gpt-4o")
+    assert text.count("## 寒暄与非任务输入") == 1
+    assert text.count("## 禁止臆造") == 1
+    assert "## 决策流程（每轮先自检）" not in text
+    assert "## 工具使用策略" not in text
+    assert "不要用 `shell_exec` 代替" in text
+    assert "根据之前的 ls 结果" not in text
+    assert "再次强调" not in text
 
 
 def test_volatile_turn_context_stays_after_stable_head():
