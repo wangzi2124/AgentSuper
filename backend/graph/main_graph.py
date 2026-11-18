@@ -119,7 +119,6 @@ def build_main_graph(
     store: Any | None = None,
     checkpointer: Any | None = None,
     system_prompt: str | None = None,
-    skills_catalog: str = "",
     compress_model: Any | None = None,
     compressor: Any | None = None,
     synthesize_model: Any | None = None,
@@ -136,13 +135,8 @@ def build_main_graph(
     model = model or get_model("medium")
     if registry is None:
         registry, _ = default_registry(vfs)
-    # 未显式注入 system_prompt 时，execute 节点在运行时按本轮模型选择 provider profile；
-    # 技能清单作为附加段在运行时拼接，避免构建期绑定模型。
+    # 未显式注入 system_prompt 时，execute 节点在运行时按本轮模型选择 provider profile。
     extra_system = ""
-    if system_prompt is not None and skills_catalog:
-        system_prompt = f"{system_prompt}\n\n{skills_catalog}"
-    elif system_prompt is None:
-        extra_system = skills_catalog
 
     # 压缩模型（agent-1.md §1）：压缩=信息压缩而非推理 → simple tier，输出硬上限
     # `compress_max_tokens`（默认 800）；可用 COMPRESS_MODEL 独立别名隔离成本（§1.3）。

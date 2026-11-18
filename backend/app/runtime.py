@@ -101,29 +101,25 @@ def _do_init(app):
     _base_dir = Path(__file__).resolve().parents[1]
 
     # 技能源：受管库 <data>/skills（自动创建）+ 用户追加的外部源（持久化于
-    # <data>/skills_sources.json）+ 随包发布的内置技能（app/skills/bundled/）。
-    # 开箱即有可用空库，不再出现「目录不存在」WARNING。
+    # <data>/skills_sources.json）。不播种随包内置技能；技能只在聊天框通过
+    # `/skills` 显式选择时加载。
     from app.skills.loader import SkillLoader
     from app.skills import registry as skills_registry
     from app.skills.discovery import global_skill_dirs, merge_dirs
 
     _managed, _extras = skills_registry.load_sources()
     _extras = merge_dirs(_extras, global_skill_dirs())
-    # 内置技能播种进受管库：幂等/非破坏/尊重删除（详见 registry.seed_bundled）
-    _seeded = skills_registry.seed_bundled(_managed)
     skill_loader = SkillLoader(
         _managed, create=True, extra_dirs=_extras,
-        bundled_names=skills_registry.bundled_names(_managed),
+        bundled_names=set(),
     )
     skill_loader.load_all()
     skills_registry.save_sources(str(skill_loader.skills_dir), skill_loader.extra_dir_strings())
     logger.info(
-        "Skills: managed=%s extras=%s bundled=%d (%d skills)",
+        "Skills: managed=%s extras=%s (%d skills)",
         skill_loader.skills_dir, skill_loader.extra_dir_strings() or "[]",
-        len(skill_loader.bundled_names), len(skill_loader.list()),
+        len(skill_loader.list()),
     )
-    if _seeded:
-        logger.info("Seeded bundled skills: %s", ", ".join(_seeded[:10]) + ("…" if len(_seeded) > 10 else ""))
 
     # 免审目录只有三类：会话默认临时目录、程序内部数据目录、用户「工作目录白名单」
     # （持久化于 <data>/runtime_workspaces.json，前端侧边栏「工作目录」维护）。

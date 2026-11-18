@@ -1,8 +1,7 @@
-"""L1 单元测试：技能接线（1+2）——`load_skill_*` 工具、技能清单、`/技能名` 强制加载。"""
+"""L1 单元测试：技能只在 `/技能名` 时注入，不注册模型工具或清单。"""
 
 from app.skills.loader import SkillLoader
 from app.skills.slash import apply_slash_skill, parse_slash_command
-from app.skills.tools import make_skill_tools, skills_catalog
 
 
 class _Skill:
@@ -26,36 +25,6 @@ class _Loader:
 
     def get_skill_body(self, name):
         return self._bodies.get(name)
-
-
-# ── 工具 / 清单 ──────────────────────────────────────────────────────────
-
-def test_enabled_skills_become_tools():
-    loader = _Loader(
-        [_Skill("novel-writing", "写小说"), _Skill("docx", "编辑文档")],
-        {"novel-writing": "# 小说创作\n流程..."},
-    )
-    tools = make_skill_tools(loader)
-    names = [t[1] for t in tools]
-    assert names == ["load_skill_novel-writing", "load_skill_docx"]
-    assert tools[0][0]() == "# 小说创作\n流程..."
-
-
-def test_disabled_and_user_only_skills_excluded():
-    loader = _Loader([
-        _Skill("off", enabled=False),
-        _Skill("manual-only", dmi=True),
-        _Skill("ok"),
-    ])
-    assert [t[1] for t in make_skill_tools(loader)] == ["load_skill_ok"]
-
-
-def test_catalog_lists_tool_mapping_and_skips_disabled():
-    loader = _Loader([_Skill("novel-writing", "写小说"), _Skill("off", enabled=False)])
-    text = skills_catalog(loader)
-    assert "novel-writing" in text and "load_skill_novel-writing" in text
-    assert "load_skill_off" not in text
-    assert "无需再次调用工具" in text
 
 
 # ── 斜杠命令 ──────────────────────────────────────────────────────────────
@@ -90,8 +59,8 @@ def test_slash_unknown_or_disabled_leaves_message_untouched():
         assert out == msg and name is None
 
 
-def test_build_context_registers_skill_tools(tmp_path):
-    """接线回归：技能必须进入主图工具表。"""
+def test_build_context_does_not_register_skill_tools(tmp_path):
+    """接线回归：技能不得进入主图工具表，只能由斜杠显式注入。"""
     from app.deps import build_context
 
     class _Model:
@@ -102,7 +71,7 @@ def test_build_context_registers_skill_tools(tmp_path):
 
     loader = _Loader([_Skill("docx", "编辑文档")], {"docx": "body"})
     ctx = build_context(model=_Model(), skill_loader=loader)
-    assert "load_skill_docx" in ctx.registry.names()
+    assert not [n for n in ctx.registry.names() if n.startswith("load_skill_")]
     assert ctx.skill_loader is loader
 
 

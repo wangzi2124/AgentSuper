@@ -833,7 +833,7 @@ class PlatformContext:
     queue_counter: int = 0
     # 审批桥接：非 None 时替代 PermissionManager 决策（测试/自定义）
     permission_hook: Callable[..., Any] | None = None
-    # 技能加载器（斜杠命令 / `load_skill_*` 工具）；None = 未接线
+    # 技能加载器（仅 `/技能名` 斜杠注入，不注册模型工具）；None = 未接线
     skill_loader: Any | None = None
     # 插件加载器（`/插件名` 斜杠注入；含用户自定义工具）；None = 未接线
     plugin_loader: Any | None = None
@@ -2508,13 +2508,8 @@ def build_context(
         if registered:
             logger.info("custom tool(s) registered: %s", ", ".join(registered))
 
-    # 技能接线（1+2）：已启用技能 → `load_skill_*` 工具（模型自发现）；
-    # 技能清单并入 system prompt；`/技能名` 由 ctx.run/stream 在轮次入口强制加载。
-    skills_catalog_text = ""
-    if skill_loader is not None:
-        from .skills.tools import skills_catalog
-
-        skills_catalog_text = skills_catalog(skill_loader)
+    # 技能只在用户显式输入 `/技能名` 时由 ctx.run/stream 在轮次入口注入正文；
+    # 不注册 `load_skill_*` 工具，也不把技能清单拼进 system prompt。
 
     # 长期记忆持久化：memory_persist_path 指向 SQLite Store；失败则回落图默认
     # InMemoryStore（重启即丢），不阻断启动。
@@ -2527,19 +2522,8 @@ def build_context(
         memory_store = None
     graph = build_main_graph(
         model=model, registry=registry, vfs=vfs, retrieve=retrieve, reranker=reranker,
-        checkpointer=checkpointer, store=memory_store, skills_catalog=skills_catalog_text,
+        checkpointer=checkpointer, store=memory_store,
     )
-    # 技能工具在 `build_main_graph`（注册 `task`）之后再挂载：registry 是同一对象，
-    # 后注册仍对图生效。这样 global 工具顺序为「web/weather → task → load_skill_*」，
-    # 技能库很大时也不会把 task / 联网工具挤出 MAX_TOOL_DEFS。
-    if skill_loader is not None:
-        from .skills.tools import make_skill_tools
-
-        for fn, name, desc in make_skill_tools(skill_loader):
-            try:
-                registry.register_function(fn, name=name, description=desc, scope="global")
-            except ValueError:  # 与内置工具重名：保留内置
-                logger.warning("skill tool name conflict, skipped: %s", name)
     # 并发上限统一读 Settings（与 session.db 连接池 sizing 同源）；
     # 此前直接 os.environ.get("MAX_CONCURRENT_AGENTS") 会造成双真相源漂移。
     from config import settings

@@ -109,7 +109,7 @@ const pinCandidates = () => {
     <h2>自定义工具</h2>
     <p>创建脚本工具或固定已有工具，使其 schema 始终挂载（token 优化 v6）</p>
     <p class="cross-link">
-      Markdown 技能（<code>load_skill_*</code>）已独立成页：
+      Markdown 技能已独立成页，可在聊天框通过 <code>/skills</code> 选择：
       <RouterLink to="/skills">前往技能管理 →</RouterLink>
     </p>
   </div>

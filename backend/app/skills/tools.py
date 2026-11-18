@@ -1,12 +1,8 @@
-"""技能 → 模型工具 / 系统清单（对齐 opencode Skill 语义）。
+"""历史技能工具/清单辅助模块（当前未接线）。
 
-之前技能只存在于「技能页 / API」，**没有进入主图工具表**，聊天里的模型既看不到
-技能清单，也无法调用 —— 只能回答「没有这个技能 / 工作区是空的」。本模块补上：
-
-- `make_skill_tools(loader)` → 每个已启用技能一个无参工具 `load_skill_<name>`，
-  调用返回该技能 SKILL.md 正文（含工作流与输出规范）。
-- `skills_catalog(loader)` → 系统提示里的技能清单（名称 + 描述 + 对应工具名），
-  正文不常驻，按需加载，避免稀释注意力。
+技能现在只在用户显式输入 `/技能名` 时由 `app.skills.slash.apply_slash_skill`
+把正文注入用户消息；不注册 `load_skill_*` 工具，也不把技能清单拼进 system prompt。
+下方函数保留仅为兼容旧调用方，主图构建不再使用。
 """
 
 from __future__ import annotations

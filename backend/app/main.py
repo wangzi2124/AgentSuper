@@ -316,8 +316,8 @@ def create_app(
             getattr(app.state, "retriever", None)
         )
         options["reranker"] = options.get("reranker") or getattr(app.state, "reranker", None)
-        # 技能接线（1+2）：注册 load_skill_* 工具 + 注入技能清单，
-        # 并把 loader 交给 PlatformContext 处理 `/技能名` 强制加载。
+        # 技能仅交给 PlatformContext 处理 `/技能名` 斜杠注入；
+        # 不注册模型工具，也不把技能清单拼进 system prompt。
         options["skill_loader"] = options.get("skill_loader") or getattr(
             app.state, "skill_loader", None
         )

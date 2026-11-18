@@ -55,18 +55,7 @@ const filtered = computed(() => {
 })
 
 const enabledCount = computed(() => skillStore.skills.filter((s) => s.enabled).length)
-/** 可挂载为 load_skill_* 工具的数量（仅手动 的技能不算） */
-const toolCount = computed(
-  () => skillStore.skills.filter((s) => s.enabled && !s.disable_model_invocation).length,
-)
 const managedCount = computed(() => skillStore.skills.filter((s) => s.managed).length)
-/** 随系统发布的内置技能（后端 app/skills/bundled 播种进受管库） */
-const bundledCount = computed(() => skillStore.skills.filter((s) => s.bundled).length)
-
-/** 技能挂载为 load_skill_<name> 工具（后端 app/agent/tools.py:create_skill_tools 同款命名） */
-function toolNameOf(name: string): string {
-  return 'load_skill_' + name.replace(/-/g, '_').replace(/ /g, '_')
-}
 
 function isManaged(s: Skill): boolean {
   return s.managed !== false
@@ -181,7 +170,7 @@ async function submitForm() {
         enabled: f.enabled,
         disable_model_invocation: f.disable_model_invocation,
       })
-      notice.value = `已创建「${f.name.trim()}」并挂载为 ${toolNameOf(f.name.trim())}`
+      notice.value = `已创建「${f.name.trim()}」，可在 /skills 中选择`
     }
     editor.value = false
   } catch (err: any) {
@@ -211,10 +200,10 @@ async function handleDelete() {
 <template>
   <div class="page-header">
     <h2>技能（Skills）</h2>
-    <p>
-      技能是带说明的 Markdown 说明书。启用的技能挂载为
-      <code>load_skill_*</code> 工具，模型按需加载其完整内容。
-    </p>
+      <p>
+        技能是带说明的 Markdown 说明书。在聊天框输入 <code>/skills</code>
+        选择技能后，正文会注入当前请求；模型不会自动调用技能。
+      </p>
   </div>
 
   <div class="page-content skills-wrap">
@@ -229,16 +218,8 @@ async function handleDelete() {
         <div class="stat-label">已启用</div>
       </div>
       <div class="stat">
-        <div class="stat-num">{{ toolCount }}</div>
-        <div class="stat-label">可被模型调用</div>
-      </div>
-      <div class="stat">
         <div class="stat-num">{{ managedCount }}</div>
         <div class="stat-label">受管（可编辑）</div>
-      </div>
-      <div class="stat">
-        <div class="stat-num">{{ bundledCount }}</div>
-        <div class="stat-label">内置</div>
       </div>
       <div class="stat-actions">
         <input v-model="search" class="ctrl search" placeholder="搜索技能…" />
@@ -254,7 +235,7 @@ async function handleDelete() {
       <div class="src-head">
         <div class="src-title">技能源</div>
         <div class="src-hint">
-          受管库由系统自动创建，<b>新建的技能保存在这里</b>；<b>{{ bundledCount }} 个内置技能</b>随系统发布、首次启动自动播种进来（和自建技能一样可编辑可删除，删掉不会自动恢复）。默认只加载受管库；外部源需手动追加已有的技能仓库，同名以受管库优先。
+          受管库由系统自动创建，<b>新建的技能保存在这里</b>。技能只在聊天框通过 <code>/skills</code> 选择时加载；默认只加载受管库，外部源需手动追加已有的技能仓库，同名以受管库优先。
         </div>
       </div>
       <div class="src-row">
@@ -301,9 +282,7 @@ async function handleDelete() {
         <div class="skill-info">
           <div class="skill-name">
             <span class="skill-title">{{ s.name }}</span>
-            <span class="badge mono">{{ toolNameOf(s.name) }}</span>
-            <span v-if="s.bundled" class="badge builtin" title="随系统发布的内置技能（可编辑/删除，删掉不会自动恢复）">内置</span>
-            <span v-if="s.disable_model_invocation" class="badge warn" title="仅由用户显式触发，不暴露为模型工具">仅手动</span>
+            <span v-if="s.disable_model_invocation" class="badge warn" title="仅由用户通过 /skills 显式触发">仅手动</span>
             <span v-if="!isManaged(s)" class="badge" title="来自外部技能源，只读">只读</span>
           </div>
           <div class="skill-desc">{{ s.description || '（无描述）' }}</div>
@@ -343,15 +322,12 @@ async function handleDelete() {
               v-model="form.name"
               class="ctrl"
               :disabled="!!editing"
-              placeholder="my-skill（字母/数字/连字符，将生成 load_skill_my_skill 工具）"
+              placeholder="my-skill（字母/数字/连字符，/skills 中显示的名称）"
             />
-            <span v-if="!editing && form.name" class="field-hint">
-              工具名：<code>{{ toolNameOf(form.name) }}</code>
-            </span>
           </label>
           <label class="field">
             <span class="field-label">描述</span>
-            <input v-model="form.description" class="ctrl" placeholder="一句话说明这个技能做什么（会进工具 schema，≤200 字符）" />
+            <input v-model="form.description" class="ctrl" placeholder="一句话说明这个技能做什么（≤200 字符）" />
           </label>
           <label class="field">
             <span class="field-label">正文（Markdown）</span>
@@ -359,14 +335,14 @@ async function handleDelete() {
               v-model="form.content"
               class="ctrl mono-area"
               rows="14"
-              placeholder="# 技能标题&#10;&#10;模型加载本技能后读到的完整说明书。&#10;写清步骤、约束与产出格式。"
+              placeholder="# 技能标题&#10;&#10;通过 /skills 选中后注入当前请求的完整说明书。&#10;写清步骤、约束与产出格式。"
             ></textarea>
-            <span class="field-hint">模型调用工具时读到的就是这段正文，写清步骤与产出格式。</span>
+            <span class="field-hint">通过 /skills 选中后注入的就是这段正文，写清步骤与产出格式。</span>
           </label>
           <div class="field checks">
             <label class="chk">
               <input v-model="form.enabled" type="checkbox" />
-              <span>启用（挂载为 load_skill_* 工具）</span>
+              <span>启用（可在 /skills 中选择）</span>
             </label>
             <label class="chk">
               <input v-model="form.disable_model_invocation" type="checkbox" />
