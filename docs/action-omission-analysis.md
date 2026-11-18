@@ -1,7 +1,7 @@
 # Action Omission 问题分析与实现报告
 
 > 范围：会话 `ses_1466d545ceaa417d`，用户请求“帮我把这个代码写到 `C:\tool\code\dpn-platform-bciblp` 目录下”。
-> 状态：根因已定位；已实现“任务门禁 + 前置约束 + 事后校验 + 任务级结构化工具调用回退”，配置开关齐备，fake model 单测与全量后端回归通过。
+> 状态：根因已定位；已实现“任务门禁 + 前置约束 + 事后校验 + 任务级结构化工具调用回退 + harness 指标/事件 + 前端未执行警告卡”，fake model 单测、前端单测与全量回归通过。
 > 证据来源：`C:\Users\Administrator\AppData\Local\agentsuper\session.db`、`C:\Users\Administrator\AppData\Local\agentsuper\logs\litellm-debug.log`、`backend/graph/nodes/base.py`。
 
 ## 1. 结论摘要
@@ -14,7 +14,7 @@
 
 这是一个 **Action Omission（意图与动作缺失）** 失败模式：模型说“我将执行”，但没有执行动作；平台原本没有二次校验“承诺动作与工具证据是否一致”。
 
-当前修复已在 `run_tool_loop` 加入任务门禁：只有识别到写入/修改/删除类任务且存在相应工具时，才启用前置约束和事后校验；普通问答完全走原路径。若同时满足门禁任务且配置了本地 Ollama 模型，会先在首轮用 JSON schema 约束输出工具调用并强制走非流式，解析成功即进入工具执行；若模型仍只承诺执行，则按配置上限 nudge；最终仍无 mutating 工具证据时返回明确的“未执行”提示，不再伪装成成功答案。
+当前修复已在 `run_tool_loop` 加入任务门禁：只有识别到写入/修改/删除类任务且存在相应工具时，才启用前置约束和事后校验；普通问答完全走原路径。若同时满足门禁任务且配置了本地 Ollama 模型，会先在首轮用 JSON schema 约束输出工具调用并强制走非流式，解析成功即进入工具执行；若模型仍只承诺执行，则按配置上限 nudge；最终仍无 mutating 工具证据时返回明确的“未执行”提示，将回合标记为 `execution.failed`，持久化一条 warning 并在前端时间线显示警告卡，不再伪装成成功答案。
 
 ## 2. 现象与证据
 
@@ -140,6 +140,21 @@ model → tool_calls? → execute → backfill → model → ... → text final 
 - 结构化只用于工具决策轮；工具结果后的最终答复仍可流式输出。
 - 配置开关：`harness_structured_tool_call_fallback_enabled`、`harness_structured_tool_call_fallback_local_ollama_only`。
 
+### 3.6 可观测性与用户可见语义
+
+- `observability.monitor.record_harness_signal()` 新增 5 类治理信号，并进入 `get_stats()` / `get_recent_stats()`（`/api/monitor/stats`）：
+  - `structured_attempt`：任务门禁命中且注入了 `response_format`。
+  - `structured_hit`：结构化 JSON 成功解析为至少一个 `ToolCall`。
+  - `structured_fallback_degraded`：schema 调用失败（`reason=call_error`）或输出不可用（`reason=no_parsed_call`）。
+  - `action_nudge`：承诺动作但未调用工具，触发一次纠偏。
+  - `action_not_executed`：最终确认无 mutating 工具证据，返回未执行提示。
+- `run_tool_loop` 返回 `action_not_executed` 布尔标记，经 `execute` 节点写入 `AgentState`。
+- `ExecutionCoordinator` 检测到该标记后：
+  - 把回合终态改为 `session.execution.failed`（`error.type=action_not_executed`），不再记录 `execution.succeeded`。
+  - 持久化一条 `type=synthetic`、`description=action_not_executed` 的稳定 warning 消息，保证 hydration 后仍可见。
+  - 发出 durable `session.synthetic` 事件供当前连接即时渲染。
+- 前端 `V2ChatView` 对 synthetic 消息渲染 `.v2-warning-card`，`v2/runtime.ts` 按 `metadata.warning_id` 幂等 upsert。
+
 ## 4. 成熟的行业方案
 
 该失败模式在业界通常不靠“再写一条 prompt”解决，而是靠以下成熟模式组合：
@@ -213,13 +228,16 @@ AND 本轮存在 mutating 工具
 
 1. **已实现**：方案 B（任务门禁 + 前置 system 约束 + 事后 verifier + 可配置 nudge + 明确未执行提示）。
 2. **已实现**：方案 C（任务级 structured tool-call 回退，默认仅本地 Ollama，非流式决策轮，统一 tool id）。
-3. **已验证**：fake model 单测覆盖恢复成功、连续承诺失败、普通问答不误伤、无写工具不 nudge、读工具证据不算写完成，以及结构化 JSON 解析、非流式、配置开关与本地 Ollama 限制。
-4. **待观测**：记录 nudge 次数、结构化命中率与后续成功率，确认真实本地 3B 是否仍频繁失败。
-5. **长期（未实现）**：结合方案 D 做能力路由与 Plan-and-Execute 任务拆分。
+3. **已实现**：治理信号（nudge / 未执行 / 结构化尝试 / 命中 / 降级）进入 monitor stats；失败回合标记 `execution.failed`。
+4. **已实现**：前端 warning 卡与持久化 synthetic warning 消息，避免 hydration 后丢失。
+5. **待实测**：用真实本地 3B/Ollama 验证 schema 命中率、参数质量与多工具场景。
+6. **长期（未实现）**：结合方案 D 做能力路由与 Plan-and-Execute 任务拆分。
 
 ## 7. 验证结果
 
 - 新增 `backend/tests/unit/test_action_omission_guard.py`、`backend/tests/unit/test_structured_tool_call_fallback.py`，全部使用 fake model 模拟模型，不调用真实/本地模型。
+- 新增 `backend/tests/unit/test_v2_warning_message.py`、`backend/tests/unit/test_session_coordinator.py` 用例，验证 warning 持久化映射与失败终态语义。
+- 新增 `frontend/tests/unit/contracts/v2Runtime.spec.ts` 用例，验证 synthetic warning 的稳定 id 与幂等 upsert。
 - Guard 覆盖场景：
   - 承诺文本 → nudge → `write_file` tool call → 工具执行并按工具结果收尾。
   - 连续承诺文本 → 最多一次 nudge → 返回“还没有实际执行”提示。
@@ -233,16 +251,22 @@ AND 本轮存在 mutating 工具
   - 结构化决策轮强制非流式，工具结果后的最终答复仍流式。
   - 关闭结构化回退后不注入 `response_format`。
   - 默认限制非本地模型不注入；关闭限制后可注入。
+- 可观测性 / 语义覆盖场景：
+  - `action_nudge`、`action_not_executed` 信号写入 monitor stats。
+  - `run_tool_loop` 返回 `action_not_executed` 标记。
+  - coordinator 在失败时发出 `session.execution.failed` 与 `session.synthetic`，并把 session outcome 设为 `failed`。
+  - synthetic warning 映射为 v2 message；前端按 warning id 幂等渲染。
 - 运行命令与结果：
-  - `.venv\Scripts\python.exe -m pytest tests/unit/test_action_omission_guard.py tests/unit/test_structured_tool_call_fallback.py tests/unit/test_config_example.py -q` → `20 passed`。
+  - `.venv\Scripts\python.exe -m pytest tests/unit/test_action_omission_guard.py tests/unit/test_structured_tool_call_fallback.py tests/unit/test_session_coordinator.py tests/unit/test_v2_warning_message.py tests/unit/test_config_example.py -q` → 全通过。
   - `.venv\Scripts\python.exe -m pytest tests/unit tests/contract tests/reliability tests/security -q` → 全量通过，仅 pydantic `ReadOnly` warning。
+  - `npm test` → `100 passed | 118 skipped (218)`。
+  - `npm run build` → 通过。
 
 ## 8. 仍待确认问题
 
-1. 是否需要把“未执行”结果在前端标记为 warning 而非普通成功？当前实现默认不改前端 contract。
-2. 是否需要把 nudge 次数、结构化命中率与降级次数做成 metrics 事件？当前仅 warning 日志。
-3. 是否用真实本地 3B/Ollama 做一轮兼容性验收？当前严格使用 fake model，未调用真实模型。
-4. 是否把能力路由 / Plan-and-Execute 纳入后续排期？当前未改模型选择行为。
+1. 是否用真实本地 3B/Ollama 做一轮兼容性验收？当前严格使用 fake model，未调用真实模型。
+2. 结构化回退是否扩展到多 tool 选择、每工具严格参数 schema 与非本地 provider 支持矩阵？当前仅任务门禁 + 本地 Ollama + 松散单工具 schema。
+3. 是否把能力路由 / Plan-and-Execute 纳入后续排期？当前未改模型选择行为。
 
 ## 9. 附录：关键引用
 
@@ -254,17 +278,28 @@ AND 本轮存在 mutating 工具
   - `backend/graph/nodes/base.py:125` `_NUDGE_ACTION_OMISSION`
   - `backend/graph/nodes/base.py:130` `_ACTION_NOT_EXECUTED_TEXT`
   - `backend/graph/nodes/base.py:134` `_ACTION_GATE_SYSTEM_NOTE`
-  - `backend/graph/nodes/base.py:170` `_needs_action_evidence()` 任务门禁
-  - `backend/graph/nodes/base.py:195` `_structured_response_format()`
-  - `backend/graph/nodes/base.py:214` `_parse_structured_tool_calls()`
-  - `backend/graph/nodes/base.py:253` `_is_local_ollama_model()`
-  - `backend/graph/nodes/base.py:921` 配置读取
-  - `backend/graph/nodes/base.py:936` 任务门禁组装
-  - `backend/graph/nodes/base.py:1005` `structured_round` / `response_format` 注入
-  - `backend/graph/nodes/base.py:1146` 结构化 JSON 解析为 `ToolCall`
-  - `backend/graph/nodes/base.py:1156` 无 tool_calls 分支
-  - `backend/graph/nodes/base.py:1223` `action_nudge_max` 上限
+  - `backend/graph/nodes/base.py:171` `_needs_action_evidence()` 任务门禁
+  - `backend/graph/nodes/base.py:196` `_structured_response_format()`
+  - `backend/graph/nodes/base.py:215` `_parse_structured_tool_calls()`
+  - `backend/graph/nodes/base.py:254` `_is_local_ollama_model()`
+  - `backend/graph/nodes/base.py:937` 任务门禁组装
+  - `backend/graph/nodes/base.py:962` `_signal()` / harness 指标入口
+  - `backend/graph/nodes/base.py:1016` `structured_round` / `response_format` 注入
+  - `backend/graph/nodes/base.py:1159` 结构化 JSON 解析为 `ToolCall`
+  - `backend/graph/nodes/base.py:1172` 无 tool_calls 分支
+  - `backend/graph/nodes/base.py:1243` `action_nudge_max` 上限
+  - `backend/observability/monitor.py:240` `record_harness_signal()`
+  - `backend/graph/state.py:62` `action_not_executed` 状态字段
+  - `backend/graph/nodes/execute.py:349` 状态传播
+  - `backend/app/session/coordinator.py:96` 失败回合标记消费
+  - `backend/app/session/coordinator.py:408` warning 持久化 / durable 事件
+  - `backend/app/api/v2/session.py:338` synthetic message 映射
+  - `frontend/src/v2/runtime.ts:516` warning 幂等 upsert
+  - `frontend/src/views/V2ChatView.vue:1294` warning 卡
+  - `frontend/src/styles/v2Chat.css:64` `.v2-warning-card`
   - `backend/config.py:461-464` 新增配置字段
   - `backend/config.example.json:660-663` 配置示例
   - `backend/tests/unit/test_action_omission_guard.py` guard fake model 单测
   - `backend/tests/unit/test_structured_tool_call_fallback.py` structured fallback fake model 单测
+  - `backend/tests/unit/test_v2_warning_message.py` warning 映射单测
+  - `frontend/tests/unit/contracts/v2Runtime.spec.ts` warning reducer 单测

@@ -81,6 +81,7 @@ class ExecutionCoordinator:
 
         seen = self._wake_seq.get(session_id, 0)
         interrupted = False
+        action_not_executed = False
         try:
             while True:
                 item = repo.promote_next(session_id)
@@ -92,7 +93,7 @@ class ExecutionCoordinator:
                             seen = current
                             continue
                     break
-                await self._run_item(session_id, item)
+                action_not_executed = bool(await self._run_item(session_id, item))
                 mode = self._interrupt.get(session_id)
                 if mode is None:
                     continue
@@ -120,17 +121,25 @@ class ExecutionCoordinator:
             )
             await self._finish(session_id, "interrupted" if interrupted else "failed")
         else:
-            outcome = "interrupted" if interrupted else "succeeded"
-            await emit_event(
-                self.ctx,
-                "session.execution.interrupted" if interrupted else "session.execution.succeeded",
-                (
-                    {"session_id": session_id, "reason": "user"}
-                    if interrupted
-                    else {"session_id": session_id}
-                ),
-                session_id=session_id,
-            )
+            if interrupted:
+                outcome = "interrupted"
+                event_type = "session.execution.interrupted"
+                payload = {"session_id": session_id, "reason": "user"}
+            elif action_not_executed:
+                outcome = "failed"
+                event_type = "session.execution.failed"
+                payload = {
+                    "session_id": session_id,
+                    "error": {
+                        "type": "action_not_executed",
+                        "message": "模型承诺执行但未产生工具调用，操作未完成。",
+                    },
+                }
+            else:
+                outcome = "succeeded"
+                event_type = "session.execution.succeeded"
+                payload = {"session_id": session_id}
+            await emit_event(self.ctx, event_type, payload, session_id=session_id)
             await self._finish(session_id, outcome)
         finally:
             self._interrupt.pop(session_id, None)
@@ -176,7 +185,7 @@ class ExecutionCoordinator:
             session_id=session_id,
         )
 
-    async def _run_item(self, session_id: str, item: dict[str, Any]) -> None:
+    async def _run_item(self, session_id: str, item: dict[str, Any]) -> bool:
         from . import repository as repo
         from app.events.emitter import emit_event
         from app.session.context import set_session_context
@@ -396,6 +405,39 @@ class ExecutionCoordinator:
             },
             session_id=session_id,
         )
+        action_not_executed = bool((final_state or {}).get("action_not_executed"))
+        if action_not_executed:
+            warning_id = f"{assistant_id}_action_warning"
+            warning_text = final or "我还没有实际执行写入/修改/删除等工具调用，无法确认操作已完成。"
+            repo.upsert_message(
+                session_id,
+                warning_id,
+                "synthetic",
+                {
+                    "text": warning_text,
+                    "description": "action_not_executed",
+                    "metadata": {
+                        "assistant_message_id": assistant_id,
+                        "warning_id": warning_id,
+                    },
+                },
+                session_id=session_id,
+            )
+
+            await emit_event(
+                self.ctx,
+                "session.synthetic",
+                {
+                    "session_id": session_id,
+                    "text": warning_text,
+                    "description": "action_not_executed",
+                    "metadata": {
+                        "assistant_message_id": assistant_id,
+                        "warning_id": warning_id,
+                    },
+                },
+                session_id=session_id,
+            )
         if final:
             from langchain_core.messages import AIMessage
 
@@ -432,3 +474,4 @@ class ExecutionCoordinator:
                 },
                 session_id=session_id,
             )
+        return action_not_executed

@@ -156,6 +156,27 @@ describe('v2 runtime reducer', () => {
     runtime = applyV2Event(runtime, evt('session.execution.started', { session_id: 's1' }))
     expect(runtime.error).toBeNull()
   })
+
+  it('surfaces action-not-executed warnings with stable ids', () => {
+    let runtime = emptyRuntime('s1')
+    runtime = applyV2Event(runtime, evt('session.synthetic', {
+      session_id: 's1',
+      text: '我还没有实际执行写入/修改/删除等工具调用，无法确认操作已完成。',
+      description: 'action_not_executed',
+      metadata: { warning_id: 'a1_action_warning' },
+    }, 'evt_1'))
+    const warning = runtime.messages[0]
+    expect(warning?.type).toBe('synthetic')
+    expect(warning?.id).toBe('a1_action_warning')
+
+    runtime = applyV2Event(runtime, evt('session.synthetic', {
+      session_id: 's1',
+      text: '我还没有实际执行写入/修改/删除等工具调用，无法确认操作已完成。',
+      description: 'action_not_executed',
+      metadata: { warning_id: 'a1_action_warning' },
+    }, 'evt_2'))
+    expect(runtime.messages).toHaveLength(1)
+  })
 })
 
 describe('v2 SSE parser', () => {

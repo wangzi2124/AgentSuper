@@ -346,6 +346,9 @@ def make_execute_node(
             "current_task_id": task_id,
             "sub_results": sub_results,
             "draft_output": result["text"],
+            "action_not_executed": bool(
+                state.get("action_not_executed") or result.get("action_not_executed")
+            ),
             "tool_rounds": state.get("tool_rounds", 0) + result["rounds"],
             "token_usage": result.get("usage") or {},
             "messages": _tool_history_to_lc(result.get("tool_history") or []),

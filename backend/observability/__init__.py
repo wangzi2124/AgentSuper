@@ -7,6 +7,7 @@
 
 from .cost import estimate_cost
 from .metrics import MetricsRecorder, get_recorder, record_llm_call
+from .monitor import record_harness_signal
 from .tracing import TraceSpan, get_trace_handler, trace_span
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "MetricsRecorder",
     "get_recorder",
     "record_llm_call",
+    "record_harness_signal",
     "TraceSpan",
     "get_trace_handler",
     "trace_span",

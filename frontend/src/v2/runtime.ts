@@ -513,6 +513,23 @@ export function applyV2Event(
     case 'form.cancelled':
       next.forms = next.forms.filter((item) => item.id !== event.data.form_id)
       break
+    case 'session.synthetic': {
+      const metadata = event.data.metadata ?? {}
+      const warningId = typeof metadata.warning_id === 'string' && metadata.warning_id
+        ? metadata.warning_id
+        : `synthetic_${event.id}`
+      if (messageIndex(next, warningId) < 0) {
+        next.messages.push({
+          type: 'synthetic',
+          id: warningId,
+          time_created: event.created,
+          text: event.data.text,
+          description: event.data.description ?? null,
+          metadata,
+        })
+      }
+      break
+    }
     default:
       break
   }

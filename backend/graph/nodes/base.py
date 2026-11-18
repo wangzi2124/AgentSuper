@@ -29,6 +29,7 @@ from harness.retry import retry_async
 from harness.schema import ToolSchemaCache
 from models.router import TierModel, ToolCall, normalize_finish_reason
 from observability.metrics import record_llm_call
+from observability.monitor import record_harness_signal
 from observability.tracing import trace_span
 from utils.json_repair import (
     is_tool_call_markup,
@@ -957,6 +958,16 @@ async def run_tool_loop(
         model_id = str(model_id or "")
     except Exception:  # noqa: BLE001 - accounting only
         model_id = ""
+
+    def _signal(name: str, **fields: Any) -> None:
+        record_harness_signal(
+            name,
+            model=model_id,
+            session_id=session_id,
+            round=rounds,
+            **fields,
+        )
+
     rounds = 0
     usage_total = empty_usage()
     tool_trace: list[dict[str, Any]] = []
@@ -1013,6 +1024,7 @@ async def run_tool_loop(
         if structured_round:
             effective_params = dict(request_params or {})
             effective_params["response_format"] = _structured_response_format(tool_defs)
+            _signal("structured_attempt")
         try:
             if stream and getattr(tool_adapter, "can_stream", lambda: False)() and not structured_round:
                 with trace_span("llm.call", rounds=rounds):
@@ -1043,6 +1055,7 @@ async def run_tool_loop(
 
                             if is_overflow_error(exc):
                                 raise
+                            _signal("structured_fallback_degraded", reason="call_error")
                             logger.warning(
                                 "structured tool-call fallback failed, retrying plain: %s",
                                 exc,
@@ -1150,6 +1163,9 @@ async def run_tool_loop(
             if parsed:
                 result.tool_calls = parsed
                 result.content = ""
+                _signal("structured_hit", tool_calls=len(parsed))
+            else:
+                _signal("structured_fallback_degraded", reason="no_parsed_call")
 
         last_finish = _finish_reason(result.finish_reason)
 
@@ -1182,14 +1198,17 @@ async def run_tool_loop(
                     )
                     continue
                 answer = "".join(continued_parts + ([text] if text else []))
-                if requires_action_evidence and not _has_action_evidence(tool_trace):
+                action_not_executed = requires_action_evidence and not _has_action_evidence(tool_trace)
+                if action_not_executed:
                     answer = _ACTION_NOT_EXECUTED_TEXT
+                    _signal("action_not_executed", reason="length")
                 elif requires_tool_evidence and not tool_trace:
                     answer = _NO_TOOL_EVIDENCE_TEXT
                 if not answer.strip():
                     answer = _NUDGE_CONTINUE_LENGTH
                 return {
                     "text": answer + _TRUNCATION_NOTICE,
+                    "action_not_executed": action_not_executed,
                     "rounds": rounds,
                     "tool_trace": tool_trace,
                     "tool_history": cap_tool_history(tool_history),
@@ -1216,7 +1235,8 @@ async def run_tool_loop(
             if answer.strip():
                 if continued_parts:
                     answer = "".join(continued_parts) + answer
-                if requires_action_evidence and not _has_action_evidence(tool_trace):
+                action_not_executed = requires_action_evidence and not _has_action_evidence(tool_trace)
+                if action_not_executed:
                     if (
                         action_tools_available
                         and _promises_action(answer)
@@ -1224,6 +1244,7 @@ async def run_tool_loop(
                         and rounds < max_rounds
                     ):
                         action_nudges += 1
+                        _signal("action_nudge", count=action_nudges, max=action_nudge_max)
                         logger.warning(
                             "action omitted: promise without tool call (model=%s round=%d)",
                             label,
@@ -1233,10 +1254,12 @@ async def run_tool_loop(
                         convo.append({"role": "user", "content": _NUDGE_ACTION_OMISSION})
                         continue
                     answer = _ACTION_NOT_EXECUTED_TEXT
+                    _signal("action_not_executed", reason="nudge_exhausted")
                 elif requires_tool_evidence and not tool_trace:
                     answer = _NO_TOOL_EVIDENCE_TEXT
                 return {
                     "text": answer,
+                    "action_not_executed": action_not_executed,
                     "rounds": rounds,
                     "tool_trace": tool_trace,
                     "tool_history": cap_tool_history(tool_history),
@@ -1386,8 +1409,10 @@ async def run_tool_loop(
             final_text = envelope or final_text
         if final_finish == "length" and final_text:
             final_text += _TRUNCATION_NOTICE
-        if requires_action_evidence and not _has_action_evidence(tool_trace):
+        action_not_executed = requires_action_evidence and not _has_action_evidence(tool_trace)
+        if action_not_executed:
             final_text = _ACTION_NOT_EXECUTED_TEXT
+            _signal("action_not_executed", reason="final")
         elif requires_tool_evidence and not tool_trace:
             final_text = _NO_TOOL_EVIDENCE_TEXT
         if (final_text or "").strip():
@@ -1395,6 +1420,7 @@ async def run_tool_loop(
                 final_text = "".join(continued_parts) + final_text
             return {
                 "text": final_text,
+                "action_not_executed": action_not_executed,
                 "rounds": rounds,
                 "tool_trace": tool_trace,
                 "tool_history": cap_tool_history(tool_history),
@@ -1408,8 +1434,10 @@ async def run_tool_loop(
     # 若已有工具调用，用工具轨迹摘要兜底（让用户看到「写被拒/报错」等真实原因）；
     # 否则退回既有的占位文案。
     tool_fallback = _fallback_text(tool_trace)
-    if requires_action_evidence and not _has_action_evidence(tool_trace):
+    action_not_executed = requires_action_evidence and not _has_action_evidence(tool_trace)
+    if action_not_executed:
         fallback_text = _ACTION_NOT_EXECUTED_TEXT
+        _signal("action_not_executed", reason="fallback")
     elif requires_tool_evidence and not tool_trace:
         fallback_text = _NO_TOOL_EVIDENCE_TEXT
     elif tool_fallback:
@@ -1422,6 +1450,7 @@ async def run_tool_loop(
             fallback_text = "".join(continued_parts) + _TRUNCATION_NOTICE
     return {
         "text": fallback_text,
+        "action_not_executed": action_not_executed,
         "rounds": rounds,
         "tool_trace": tool_trace,
         "tool_history": cap_tool_history(tool_history),

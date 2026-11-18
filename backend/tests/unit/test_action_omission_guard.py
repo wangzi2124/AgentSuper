@@ -8,6 +8,7 @@ from execution.tool_registry import ToolDefinition, ToolRegistry
 from graph.nodes.base import run_tool_loop
 from harness.tool_adapter import ToolAdapter
 from models.router import ChatResult, ToolCall
+from observability import monitor
 
 ACTION_USER = r"帮我把这个代码写到 C:\tool\code\dpn-platform-bciblp 目录下"
 
@@ -234,3 +235,20 @@ async def test_nudge_max_two_allows_two_corrections(monkeypatch):
 
     assert [trace["name"] for trace in out["tool_trace"]] == ["write_file"]
     assert model.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_action_not_executed_flag_and_signals():
+    before = monitor.get_stats()["harness"]["by_signal"]
+    model = _ScriptedModel([_promise(), _promise()])
+    out = await run_tool_loop(
+        model,
+        [{"role": "user", "content": ACTION_USER}],
+        _registry("write_file"),
+        adapter=ToolAdapter(model, mode="native"),
+    )
+
+    assert out["action_not_executed"] is True
+    after = monitor.get_stats()["harness"]["by_signal"]
+    assert after.get("action_nudge", 0) > before.get("action_nudge", 0)
+    assert after.get("action_not_executed", 0) > before.get("action_not_executed", 0)

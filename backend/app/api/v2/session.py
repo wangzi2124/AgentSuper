@@ -335,6 +335,15 @@ def _message_v2(raw: Any) -> dict[str, Any] | None:
             "time_created": int(raw.time_created or 0),
             "text": str(data.get("content") or ""),
         }
+    if raw.type == "synthetic":
+        return {
+            "type": "synthetic",
+            "id": raw.id,
+            "time_created": int(raw.time_created or 0),
+            "text": str(data.get("text") or data.get("content") or ""),
+            "description": data.get("description"),
+            "metadata": data.get("metadata") or {},
+        }
     if raw.type == "compaction":
         return {
             "type": "compaction",

@@ -183,3 +183,20 @@ async def test_interrupt_resume_continues_steer_but_not_queue(env):
 
     assert runs == ["steer_1", "steer_2"]
     assert [item["id"] for item in env.repo.pending] == ["queue_3"]
+
+
+async def test_action_not_executed_marks_execution_failed(env):
+    coord = ExecutionCoordinator(env.ctx)
+    sid = "ses_action"
+
+    async def run_item(_sid, item):  # noqa: ANN001
+        return True
+
+    coord._run_item = run_item
+    env.repo.pending = [_item("in_1")]
+
+    await coord.wake(sid)
+    await _wait_idle(coord, sid)
+
+    assert "session.execution.failed" in env.events
+    assert (sid, "idle", "failed") in env.repo.statuses

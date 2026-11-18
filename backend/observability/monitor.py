@@ -33,6 +33,8 @@ _stats = {
     "total_cost": 0.0,
     "tool_rounds_total": 0,
     "tool_calls_total": 0,
+    "harness_signals_total": 0,
+    "harness_signals_by_name": defaultdict(int),
     # per-model 分解
     "prompt_tokens_by_model": defaultdict(int),
     "completion_tokens_by_model": defaultdict(int),
@@ -70,7 +72,7 @@ def _load_persisted():
             with open(_STATS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             for key in ("requests_by_path", "requests_by_status", "model_calls_by_model",
-                        "prompt_tokens_by_model", "completion_tokens_by_model",
+                        "harness_signals_by_name", "prompt_tokens_by_model", "completion_tokens_by_model",
                         "reasoning_tokens_by_model", "cache_read_by_model", "cache_write_by_model"):
                 if key in data:
                     data[key] = defaultdict(int, data[key])
@@ -235,6 +237,15 @@ def record_model_call(
     _save_persisted()
 
 
+def record_harness_signal(name: str, **fields):
+    """记录 harness 治理信号（guard 命中、结构化回退、未执行收尾）。"""
+    with _stats_lock:
+        _stats["harness_signals_total"] += 1
+        _stats["harness_signals_by_name"][name] += 1
+    _record_metric("harness_signal", signal=name, **fields)
+    _save_persisted()
+
+
 def get_stats() -> dict:
     """获取当前累积的请求和模型调用统计，返回格式化字典。"""
     with _stats_lock:
@@ -266,6 +277,10 @@ def get_stats() -> dict:
                 "cache_write_by_model": dict(_stats["cache_write_by_model"]),
                 "cost_by_model": dict(_stats["cost_by_model"]),
             },
+            "harness": {
+                "total": _stats["harness_signals_total"],
+                "by_signal": dict(_stats["harness_signals_by_name"]),
+            },
             "total_cost": round(_stats["total_cost"], 6),
         }
 
@@ -291,6 +306,7 @@ def get_recent_stats(window_hours: float = 24.0) -> dict:
     cost = 0.0
     requests = 0
     by_status: dict = defaultdict(int)
+    harness_signals: dict = defaultdict(int)
     try:
         if _METRICS_FILE.exists():
             with open(_METRICS_FILE, "r", encoding="utf-8") as f:
@@ -318,6 +334,8 @@ def get_recent_stats(window_hours: float = 24.0) -> dict:
                     elif kind == "request":
                         requests += 1
                         by_status[int(r.get("status") or 0)] += 1
+                    elif kind == "harness_signal":
+                        harness_signals[str(r.get("signal") or "?")] += 1
     except Exception as e:
         logger.warning("Failed to read recent metrics: %s", e)
     return {
@@ -335,6 +353,10 @@ def get_recent_stats(window_hours: float = 24.0) -> dict:
             "by_model": dict(by_model),
         },
         "requests": {"total": requests, "by_status": dict(by_status)},
+        "harness_signals": {
+            "total": sum(harness_signals.values()),
+            "by_signal": dict(harness_signals),
+        },
     }
 
 

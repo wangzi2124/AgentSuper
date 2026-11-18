@@ -59,6 +59,7 @@ class AgentState(TypedDict, total=False):
     final_output: str
     user_id: str
     draft_output: str
+    action_not_executed: bool
     tool_rounds: int
     # Bounded tool call/result history from the most recent tool-bearing turn.
     # Kept separate from ``messages`` so frontend history stays user/assistant only.
