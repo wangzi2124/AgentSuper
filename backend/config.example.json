@@ -657,6 +657,11 @@
   // 示例：["ollama_chat/qwen3.5:4b"]
   "harness_fallback_models": [],
 
+  "harness_action_omission_guard_enabled": true,
+  "harness_action_omission_nudge_max": 1,
+  "harness_structured_tool_call_fallback_enabled": true,
+  "harness_structured_tool_call_fallback_local_ollama_only": true,
+
   // ══════════════════════════════════════════════════════════════════════════
   // 二十二、真实模型验收测试（pytest 专用，默认关闭）
   // ══════════════════════════════════════════════════════════════════════════

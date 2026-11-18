@@ -22,12 +22,12 @@ from execution.tools.file_tools import (
     READ_TOOLS as _FILE_READ_TOOLS,
     WRITE_TOOLS as _FILE_WRITE_TOOLS,
 )
-from harness.adapter import call_argument_error
+from harness.adapter import call_argument_error, stable_call_id
 from harness.budget import BudgetExceeded, BudgetLedger
 from harness.hooks import run_post_tool, run_pre_tool
 from harness.retry import retry_async
 from harness.schema import ToolSchemaCache
-from models.router import TierModel, normalize_finish_reason
+from models.router import TierModel, ToolCall, normalize_finish_reason
 from observability.metrics import record_llm_call
 from observability.tracing import trace_span
 from utils.json_repair import (
@@ -122,6 +122,35 @@ _NO_TOOL_EVIDENCE_TEXT = (
     "我还没有实际执行列目录/读文件工具，无法确认目录或文件内容。"
     "请切换到支持工具调用的模型，或授权目标路径后重试。"
 )
+_NUDGE_ACTION_OMISSION = (
+    "你上一条只是描述或承诺要执行操作，但没有实际调用工具。"
+    "请立刻直接调用可用工具完成用户的写入/修改/删除请求；"
+    "不要只描述步骤，也不要输出工具调用 JSON。"
+)
+_ACTION_NOT_EXECUTED_TEXT = (
+    "我还没有实际执行写入/修改/删除等工具调用，无法确认操作已完成。"
+    "请切换到支持工具调用的模型后重试，或提供可手动执行的步骤。"
+)
+_ACTION_GATE_SYSTEM_NOTE = (
+    "本轮任务门禁：用户要求写入/修改文件。必须直接调用可用工具完成；"
+    "禁止只回复“我将执行”或仅描述步骤。工具结果返回后再给最终答复。"
+)
+_ACTION_TASK_RE = re.compile(
+    r"(?:写入|写|保存|创建|新建|修改|编辑|更新|删除|移除|复制|拷贝|移动|重命名|覆盖)"
+    r".{0,40}(?:文件|目录|文件夹|路径|\.[\w]{1,8})"
+    r"|(?:写入|保存|落地|落到)"
+    r".{0,40}(?:代码|脚本|内容|文案|文件|\.[\w]{1,8})"
+    r"|(?:把|将).{0,60}(?:写入|写|保存|创建|新建|复制|拷贝|移动|重命名|删除|编辑|修改|更新|生成文件)"
+    r"|(?:文件|目录|代码).{0,24}(?:写到|保存到|创建到|放到|写入到|生成到)",
+    re.IGNORECASE,
+)
+_PROMISE_ACTION_RE = re.compile(
+    r"(?:我将|我会|我要|接下来我将|下一步我将|首先我将|然后我将|请稍等|稍等片刻|让我先)"
+    r".{0,48}(?:调用|执行|运行|创建|新建|写入|写|保存|修改|编辑|更新|删除|复制|移动|生成|添加|读取|查看|列出|检查)"
+    r"|(?:我将|我会|我要|接下来|下一步|请稍等|稍等片刻)"
+    r".{0,32}(?:步骤|操作|工具|执行这些|执行以下|处理|完成)",
+    re.IGNORECASE,
+)
 _FILE_TASK_RE = re.compile(
     r"(?:列出|查看|看看|看|显示|读取|打开|read|ls|dir|find|grep|glob)"
     r".{0,24}(?:文件|目录|文件夹|路径|盘|[\\w./-]+\\.\\w{1,8})"
@@ -135,6 +164,100 @@ def _needs_tool_evidence(messages: list[Any]) -> bool:
         if msg.get("role") in ("user", "human"):
             text = content_text(msg.get("content", ""))
             return bool(_FILE_TASK_RE.search(text))
+    return False
+
+
+def _needs_action_evidence(messages: list[Any]) -> bool:
+    for msg in reversed(messages):
+        if msg.get("role") in ("user", "human"):
+            text = content_text(msg.get("content", ""))
+            return bool(_ACTION_TASK_RE.search(text))
+    return False
+
+
+def _promises_action(text: str) -> bool:
+    return bool(_PROMISE_ACTION_RE.search(text or ""))
+
+
+def _has_action_evidence(tool_trace: list[dict[str, Any]]) -> bool:
+    return any(trace.get("name") in _MUTATING_TOOL_NAMES for trace in tool_trace)
+
+
+def _tool_names(tool_defs: list[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for spec in tool_defs:
+        name = spec.get("function", {}).get("name")
+        if name:
+            names.add(str(name))
+    return names
+
+
+def _structured_response_format(tool_defs: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "tool_call",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "enum": sorted(_tool_names(tool_defs))},
+                    "arguments": {"type": "object", "additionalProperties": True},
+                },
+                "required": ["name", "arguments"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def _parse_structured_tool_calls(
+    text: str,
+    tool_defs: list[dict[str, Any]],
+    *,
+    sequence: int = 0,
+) -> list[ToolCall]:
+    obj = _json_object_candidate(text)
+    if obj is None:
+        return []
+    allowed = _tool_names(tool_defs)
+    raw_calls = obj.get("tool_calls")
+    items = raw_calls if isinstance(raw_calls, list) else [obj]
+    calls: list[ToolCall] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("tool") or item.get("function")
+        arguments = item.get("arguments", item.get("parameters", item.get("args")))
+        if isinstance(name, dict):
+            arguments = name.get("arguments", arguments)
+            name = name.get("name")
+        if not isinstance(name, str) or name not in allowed:
+            continue
+        if isinstance(arguments, str):
+            arguments_text = arguments
+        elif isinstance(arguments, dict):
+            arguments_text = json.dumps(arguments, ensure_ascii=False)
+        else:
+            continue
+        calls.append(
+            ToolCall(
+                id=stable_call_id(name, arguments_text, sequence + len(calls) + 1),
+                name=name,
+                arguments=arguments_text,
+            )
+        )
+    return calls
+
+
+def _is_local_ollama_model(model: Any) -> bool:
+    try:
+        endpoint_fn = getattr(model, "_endpoint", None)
+        check_fn = getattr(model, "_is_local_ollama", None)
+        if callable(endpoint_fn) and callable(check_fn):
+            return bool(check_fn(endpoint_fn()))
+    except Exception:  # noqa: BLE001 - capability probe must never break the loop
+        return False
     return False
 
 
@@ -793,14 +916,40 @@ async def run_tool_loop(
     tool_defs = build_tool_defs(registry, scope)
     if allowed_tools is not None:
         tool_defs = [spec for spec in tool_defs if spec.get("function", {}).get("name") in allowed_tools]
-    max_parallel_tools = max(1, int(getattr(get_settings(), "tool_concurrency", 10) or 10))
+    current = get_settings()
+    max_parallel_tools = max(1, int(getattr(current, "tool_concurrency", 10) or 10))
+    guard_enabled = bool(getattr(current, "harness_action_omission_guard_enabled", True))
+    action_nudge_max = max(0, int(getattr(current, "harness_action_omission_nudge_max", 1) or 0))
+    structured_fallback_enabled = bool(
+        getattr(current, "harness_structured_tool_call_fallback_enabled", True)
+    )
+    structured_local_only = bool(
+        getattr(current, "harness_structured_tool_call_fallback_local_ollama_only", True)
+    )
+    local_ollama = _is_local_ollama_model(model)
     convo = [dict(m) for m in messages]
     requires_tool_evidence = _needs_tool_evidence(messages)
+    action_tools_available = any(
+        spec.get("function", {}).get("name") in _MUTATING_TOOL_NAMES
+        for spec in tool_defs
+    )
+    requires_action_evidence = (
+        guard_enabled and _needs_action_evidence(messages) and action_tools_available
+    )
     roots_note = _authorized_roots_note()
     if roots_note and convo and convo[0].get("role") == "system":
         content = convo[0].get("content")
         if isinstance(content, str):
             convo[0]["content"] = f"{content}\n\n{roots_note}"
+    if requires_action_evidence:
+        if convo and convo[0].get("role") == "system":
+            content = convo[0].get("content")
+            if isinstance(content, str):
+                convo[0]["content"] = f"{content}\n\n{_ACTION_GATE_SYSTEM_NOTE}"
+            else:
+                convo.insert(0, {"role": "system", "content": _ACTION_GATE_SYSTEM_NOTE})
+        else:
+            convo.insert(0, {"role": "system", "content": _ACTION_GATE_SYSTEM_NOTE})
     try:
         model_id = model.model_name() if hasattr(model, "model_name") else ""
         if callable(model_id):
@@ -815,6 +964,7 @@ async def run_tool_loop(
     continued_parts: list[str] = []
     last_finish = "stop"
     empty_nudges = 0
+    action_nudges = 0
     overflow_retried = False
 
     while rounds < max_rounds:
@@ -852,8 +1002,19 @@ async def run_tool_loop(
         round_sem = asyncio.Semaphore(max_parallel_tools)
         workspace_lock = _AsyncRWLock()
         permission_lock = asyncio.Lock()
+        structured_round = (
+            structured_fallback_enabled
+            and requires_action_evidence
+            and bool(_tool_names(tool_defs))
+            and not _has_action_evidence(tool_trace)
+            and (not structured_local_only or local_ollama)
+        )
+        effective_params = request_params
+        if structured_round:
+            effective_params = dict(request_params or {})
+            effective_params["response_format"] = _structured_response_format(tool_defs)
         try:
-            if stream and getattr(tool_adapter, "can_stream", lambda: False)():
+            if stream and getattr(tool_adapter, "can_stream", lambda: False)() and not structured_round:
                 with trace_span("llm.call", rounds=rounds):
                     result, early = await _stream_step(
                         tool_adapter,
@@ -869,11 +1030,32 @@ async def run_tool_loop(
                         request_params=request_params,
                     )
             else:
-                with trace_span("llm.call", rounds=rounds):
-                    if request_params:
+                with trace_span("llm.call", rounds=rounds, structured=structured_round):
+                    if structured_round:
+                        try:
+                            result = await retry_async(
+                                lambda: tool_adapter.complete(
+                                    convo, tool_defs or None, effective_params
+                                )
+                            )
+                        except Exception as exc:
+                            from models.context_guard import is_overflow_error
+
+                            if is_overflow_error(exc):
+                                raise
+                            logger.warning(
+                                "structured tool-call fallback failed, retrying plain: %s",
+                                exc,
+                            )
+                            result = await retry_async(
+                                lambda: tool_adapter.complete(
+                                    convo, tool_defs or None, request_params
+                                )
+                            )
+                    elif effective_params:
                         result = await retry_async(
                             lambda: tool_adapter.complete(
-                                convo, tool_defs or None, request_params
+                                convo, tool_defs or None, effective_params
                             )
                         )
                     else:
@@ -961,6 +1143,13 @@ async def run_tool_loop(
             result.usage.get("input", 0),
             result.usage.get("output", 0),
         )
+        if structured_round and not result.tool_calls:
+            parsed = _parse_structured_tool_calls(
+                result.content or "", tool_defs, sequence=rounds
+            )
+            if parsed:
+                result.tool_calls = parsed
+                result.content = ""
 
         last_finish = _finish_reason(result.finish_reason)
 
@@ -993,7 +1182,9 @@ async def run_tool_loop(
                     )
                     continue
                 answer = "".join(continued_parts + ([text] if text else []))
-                if requires_tool_evidence and not tool_trace:
+                if requires_action_evidence and not _has_action_evidence(tool_trace):
+                    answer = _ACTION_NOT_EXECUTED_TEXT
+                elif requires_tool_evidence and not tool_trace:
                     answer = _NO_TOOL_EVIDENCE_TEXT
                 if not answer.strip():
                     answer = _NUDGE_CONTINUE_LENGTH
@@ -1025,7 +1216,24 @@ async def run_tool_loop(
             if answer.strip():
                 if continued_parts:
                     answer = "".join(continued_parts) + answer
-                if requires_tool_evidence and not tool_trace:
+                if requires_action_evidence and not _has_action_evidence(tool_trace):
+                    if (
+                        action_tools_available
+                        and _promises_action(answer)
+                        and action_nudges < action_nudge_max
+                        and rounds < max_rounds
+                    ):
+                        action_nudges += 1
+                        logger.warning(
+                            "action omitted: promise without tool call (model=%s round=%d)",
+                            label,
+                            rounds,
+                        )
+                        convo.append({"role": "assistant", "content": text})
+                        convo.append({"role": "user", "content": _NUDGE_ACTION_OMISSION})
+                        continue
+                    answer = _ACTION_NOT_EXECUTED_TEXT
+                elif requires_tool_evidence and not tool_trace:
                     answer = _NO_TOOL_EVIDENCE_TEXT
                 return {
                     "text": answer,
@@ -1114,7 +1322,12 @@ async def run_tool_loop(
                 task.cancel()
             raise
 
-    _prior_nudges = {_FINAL_ROUND_NUDGE, _NUDGE_NOT_A_TOOL_CALL, _NUDGE_EMPTY_ANSWER}
+    _prior_nudges = {
+        _FINAL_ROUND_NUDGE,
+        _NUDGE_NOT_A_TOOL_CALL,
+        _NUDGE_EMPTY_ANSWER,
+        _NUDGE_ACTION_OMISSION,
+    }
     if not (convo and convo[-1].get("role") == "user" and convo[-1].get("content") in _prior_nudges):
         convo.append({"role": "user", "content": _FINAL_ROUND_NUDGE})
     convo = _maybe_prune_tool_outputs(
@@ -1173,7 +1386,9 @@ async def run_tool_loop(
             final_text = envelope or final_text
         if final_finish == "length" and final_text:
             final_text += _TRUNCATION_NOTICE
-        if requires_tool_evidence and not tool_trace:
+        if requires_action_evidence and not _has_action_evidence(tool_trace):
+            final_text = _ACTION_NOT_EXECUTED_TEXT
+        elif requires_tool_evidence and not tool_trace:
             final_text = _NO_TOOL_EVIDENCE_TEXT
         if (final_text or "").strip():
             if continued_parts:
@@ -1193,16 +1408,18 @@ async def run_tool_loop(
     # 若已有工具调用，用工具轨迹摘要兜底（让用户看到「写被拒/报错」等真实原因）；
     # 否则退回既有的占位文案。
     tool_fallback = _fallback_text(tool_trace)
-    if tool_fallback:
+    if requires_action_evidence and not _has_action_evidence(tool_trace):
+        fallback_text = _ACTION_NOT_EXECUTED_TEXT
+    elif requires_tool_evidence and not tool_trace:
+        fallback_text = _NO_TOOL_EVIDENCE_TEXT
+    elif tool_fallback:
         fallback_text = tool_fallback
     elif empty_nudges >= 2:
         fallback_text = "（模型未产出可展示内容，请换模型或重试）"
     else:
         fallback_text = "(达到最大工具轮数，未产出最终答案)"
-    if requires_tool_evidence and not tool_trace:
-        fallback_text = _NO_TOOL_EVIDENCE_TEXT
-    elif continued_parts and not tool_fallback:
-        fallback_text = "".join(continued_parts) + _TRUNCATION_NOTICE
+        if continued_parts:
+            fallback_text = "".join(continued_parts) + _TRUNCATION_NOTICE
     return {
         "text": fallback_text,
         "rounds": rounds,

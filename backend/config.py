@@ -458,6 +458,10 @@ class Settings(BaseSettings):
     # 额外声明原生支持 / 不支持原生的模型（JSON 数组或逗号分隔）。
     harness_native_models: list[str] = []
     harness_fallback_models: list[str] = []
+    harness_action_omission_guard_enabled: bool = True
+    harness_action_omission_nudge_max: int = 1
+    harness_structured_tool_call_fallback_enabled: bool = True
+    harness_structured_tool_call_fallback_local_ollama_only: bool = True
 
     # ── 真实模型验收测试（pytest 专用，默认关闭）──
     harness_real_test: bool = False
