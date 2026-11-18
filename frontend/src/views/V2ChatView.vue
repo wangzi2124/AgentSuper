@@ -67,6 +67,8 @@ const scroller = ref<HTMLElement | null>(null)
 const activeDiff = ref<{ messageId: string; diff: TurnDiff } | null>(null)
 const diffLoading = ref(false)
 const copiedId = ref('')
+const inboxBusy = ref<Record<string, string>>({})
+const inboxDone = ref<Record<string, string>>({})
 const speakingId = ref('')
 const speakingPaused = ref(false)
 const speakingMode = ref<'audio' | 'native' | ''>('')
@@ -710,23 +712,52 @@ async function cancelFormRequest(formId: string) {
   }
 }
 
+function setInboxFlag(kind: 'busy' | 'done', id: string, value: string): void {
+  const target = kind === 'busy' ? inboxBusy : inboxDone
+  target.value = { ...target.value, [id]: value }
+}
+
+function clearInboxFlag(kind: 'busy' | 'done', id: string, value: string): void {
+  const target = kind === 'busy' ? inboxBusy : inboxDone
+  if (target.value[id] !== value) return
+  const next = { ...target.value }
+  delete next[id]
+  target.value = next
+}
+
+function flashInboxDone(id: string, value: string): void {
+  setInboxFlag('done', id, value)
+  window.setTimeout(() => clearInboxFlag('done', id, value), 1500)
+}
+
 async function changeInbox(item: InboxInfo, delivery: 'steer' | 'queue') {
   const id = sessionId.value
-  if (!id) return
+  if (!id || inboxBusy.value[item.id]) return
+  setInboxFlag('busy', item.id, delivery)
   try {
-    await updateInboxDelivery(id, item.id, delivery)
+    const updated = await updateInboxDelivery(id, item.id, delivery)
+    v2.setInbox(id, updated)
+    flashInboxDone(item.id, delivery)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
+    flashInboxDone(item.id, 'failed')
+  } finally {
+    clearInboxFlag('busy', item.id, delivery)
   }
 }
 
 async function removeInbox(item: InboxInfo) {
   const id = sessionId.value
-  if (!id) return
+  if (!id || inboxBusy.value[item.id]) return
+  setInboxFlag('busy', item.id, 'cancel')
   try {
     await cancelInbox(id, item.id)
+    v2.removeInbox(id, item.id)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
+    flashInboxDone(item.id, 'failed')
+  } finally {
+    clearInboxFlag('busy', item.id, 'cancel')
   }
 }
 
@@ -1288,10 +1319,38 @@ onBeforeUnmount(() => {
           <span class="v2-inbox-text">
             {{ item.item.type === 'user' ? item.item.payload.text : item.item.type }}
           </span>
+          <span class="v2-inbox-badge" :class="item.item.delivery">
+            {{ item.item.delivery === 'steer' ? '插队' : '排队' }}
+          </span>
           <div class="v2-inbox-actions">
-            <button @click="changeInbox(item, 'steer')">插队</button>
-            <button @click="changeInbox(item, 'queue')">排队</button>
-            <button @click="removeInbox(item)">取消</button>
+            <button
+              :class="{ active: item.item.delivery === 'steer', done: inboxDone[item.id] === 'steer' }"
+              :disabled="!!inboxBusy[item.id]"
+              @click="changeInbox(item, 'steer')"
+            >
+              {{
+                inboxDone[item.id] === 'steer' ? '已插队'
+                  : inboxDone[item.id] === 'failed' ? '失败'
+                    : inboxBusy[item.id] === 'steer' ? '处理中…' : '插队'
+              }}
+            </button>
+            <button
+              :class="{ active: item.item.delivery === 'queue', done: inboxDone[item.id] === 'queue' }"
+              :disabled="!!inboxBusy[item.id]"
+              @click="changeInbox(item, 'queue')"
+            >
+              {{
+                inboxDone[item.id] === 'queue' ? '已排队'
+                  : inboxDone[item.id] === 'failed' ? '失败'
+                    : inboxBusy[item.id] === 'queue' ? '处理中…' : '排队'
+              }}
+            </button>
+            <button
+              :disabled="!!inboxBusy[item.id]"
+              @click="removeInbox(item)"
+            >
+              {{ inboxBusy[item.id] === 'cancel' ? '处理中…' : '取消' }}
+            </button>
           </div>
         </div>
       </div>

@@ -163,6 +163,24 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     return item
   }
 
+  function setInbox(sessionId: string, item: InboxInfo): void {
+    const runtime = ensureRuntime(sessionId)
+    const index = runtime.inbox.findIndex((entry) => entry.id === item.id)
+    const inbox = runtime.inbox.slice()
+    if (index >= 0) inbox[index] = item
+    else inbox.push(item)
+    setRuntime({ ...runtime, inbox })
+  }
+
+  function removeInbox(sessionId: string, inboxId: string): void {
+    const runtime = ensureRuntime(sessionId)
+    setRuntime({
+      ...runtime,
+      inbox: runtime.inbox.filter((entry) => entry.id !== inboxId),
+      messages: runtime.messages.filter((message) => message.id !== inboxId),
+    })
+  }
+
   function setInfo(sessionId: string, info: SessionInfoV2): void {
     const runtime = ensureRuntime(sessionId)
     setRuntime({ ...runtime, info, status: { type: info.status } })
@@ -183,6 +201,8 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     start,
     stop,
     send,
+    setInbox,
+    removeInbox,
     setInfo,
     setActive,
   }
