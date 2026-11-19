@@ -1366,9 +1366,6 @@ onBeforeUnmount(() => {
           <span class="v2-inbox-text">
             {{ item.item.type === 'user' ? item.item.payload.text : item.item.type }}
           </span>
-          <span class="v2-inbox-badge" :class="item.item.delivery">
-            {{ item.item.delivery === 'steer' ? '插队' : '排队' }}
-          </span>
           <div class="v2-inbox-actions">
             <button
               :class="{ active: item.item.delivery === 'steer', done: inboxDone[item.id] === 'steer' }"
