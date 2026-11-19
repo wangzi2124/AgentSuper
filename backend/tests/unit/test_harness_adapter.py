@@ -11,6 +11,7 @@ from harness.adapter import (
 from harness.delimiters import NAME_CLOSE, NAME_OPEN, render_tool_call
 from harness.history import normalize_native
 from models.router import ChatResult, ToolCall
+from utils.json_repair import repair_tool_args
 
 TOOLS = [
     {
@@ -122,6 +123,68 @@ def test_empty_arguments_ok():
     parsed, error = call_argument_error(ToolCall(id="1", name="tool_x", arguments=""))
     assert parsed == {}
     assert error == ""
+
+
+def test_valid_arguments_with_inner_code_fence_pass():
+    raw = json.dumps(
+        {"path": "C:/x.java", "content": "```java\nclass X {}\n```"},
+        ensure_ascii=False,
+    )
+    parsed, error = call_argument_error(ToolCall(id="1", name="write_file", arguments=raw))
+    assert parsed == {"path": "C:/x.java", "content": "```java\nclass X {}\n```"}
+    assert error == ""
+
+
+def test_repair_tool_args_coerces_stringified_values_and_drops_optional_null():
+    schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "count": {"type": "integer"},
+            "ratio": {"type": "number"},
+            "ok": {"type": "boolean"},
+            "tags": {"type": "array"},
+            "meta": {"type": "object"},
+            "limit": {"type": "integer"},
+        },
+        "required": ["path"],
+    }
+    repaired, error = repair_tool_args(
+        {
+            "path": "a.txt",
+            "count": "2",
+            "ratio": "1.5",
+            "ok": "true",
+            "tags": '["x"]',
+            "meta": '{"a": 1}',
+            "limit": None,
+        },
+        schema,
+        tool_name="probe",
+    )
+    assert error == ""
+    assert repaired == {
+        "path": "a.txt",
+        "count": 2,
+        "ratio": 1.5,
+        "ok": True,
+        "tags": ["x"],
+        "meta": {"a": 1},
+    }
+
+
+def test_repair_tool_args_rejects_unknown_fields_when_schema_is_closed():
+    schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    repaired, error = repair_tool_args(
+        {"path": "a.txt", "extra": 1}, schema, tool_name="probe"
+    )
+    assert repaired == {}
+    assert "未知字段" in error
+    assert "extra" in error
 
 
 def test_native_missing_tool_id_is_deterministic() -> None:

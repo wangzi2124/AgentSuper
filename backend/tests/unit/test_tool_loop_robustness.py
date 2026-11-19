@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 
 from execution.tool_registry import ToolDefinition, ToolRegistry
-from graph.nodes.base import MAX_TOOL_ROUNDS, run_tool_loop
+from graph.nodes.base import MAX_TOOL_ARG_REPAIR_RETRIES, MAX_TOOL_ROUNDS, run_tool_loop
 from models.router import ChatResult, ToolCall
 
 _TOOL_JSON = json.dumps(
@@ -328,5 +328,194 @@ async def test_empty_answer_all_success_falls_back_to_model_empty_notice():
         _registry(),
     )
     assert "模型未产出可展示内容" in out["text"]
+
+
+def _capture_registry(captured: dict, parameters: dict | None = None) -> ToolRegistry:
+    def write(**kwargs):
+        captured.update(kwargs)
+        return "written"
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolDefinition(
+            name="probe",
+            description="捕获参数",
+            fn=write,
+            parameters=parameters or {},
+        )
+    )
+    return reg
+
+
+class _BadArgsThenGoodModel:
+    def __init__(self) -> None:
+        self.tier = "fake"
+        self.calls = 0
+        self.seen: list[dict] = []
+
+    async def ainvoke(self, messages, *, tools=None, **kwargs):
+        self.calls += 1
+        self.seen.append(dict(messages[-1]))
+        if self.calls == 1:
+            return ChatResult(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="c_bad",
+                        name="probe",
+                        arguments="not json",
+                    )
+                ],
+                finish_reason="tool-calls",
+            )
+        if self.calls == 2:
+            return ChatResult(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="c_good",
+                        name="probe",
+                        arguments='{"path": "a.txt", "content": "ok"}',
+                    )
+                ],
+                finish_reason="tool-calls",
+            )
+        return ChatResult(content="done", finish_reason="stop")
+
+
+async def test_bad_tool_arguments_are_nudged_once_and_retried():
+    model = _BadArgsThenGoodModel()
+    captured: dict = {}
+    out = await run_tool_loop(
+        model,
+        [{"role": "user", "content": "go"}],
+        _capture_registry(captured),
+    )
+
+    assert captured == {"path": "a.txt", "content": "ok"}
+    assert out["text"] == "done"
+    assert out["rounds"] == 3
+    assert "argument_error" in out["tool_trace"][0]
+    assert "argument_error" not in out["tool_trace"][1]
+    nudge = model.seen[1]
+    assert nudge["role"] == "user"
+    assert "参数不是合法 JSON" in nudge["content"]
+
+
+class _AlwaysBadArgsModel:
+    def __init__(self) -> None:
+        self.tier = "fake"
+        self.calls = 0
+
+    async def ainvoke(self, messages, *, tools=None, **kwargs):
+        self.calls += 1
+        if self.calls <= MAX_TOOL_ARG_REPAIR_RETRIES + 1:
+            return ChatResult(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id=f"c_{self.calls}",
+                        name="probe",
+                        arguments="not json",
+                    )
+                ],
+                finish_reason="tool-calls",
+            )
+        return ChatResult(content="done", finish_reason="stop")
+
+
+async def test_bad_tool_arguments_retries_are_bounded():
+    model = _AlwaysBadArgsModel()
+    captured: dict = {}
+    out = await run_tool_loop(
+        model,
+        [{"role": "user", "content": "go"}],
+        _capture_registry(captured),
+    )
+
+    assert captured == {}
+    assert model.calls == MAX_TOOL_ARG_REPAIR_RETRIES + 2
+    assert len(out["tool_trace"]) == MAX_TOOL_ARG_REPAIR_RETRIES + 1
+    assert all("argument_error" in trace for trace in out["tool_trace"])
+    assert out["text"] == "done"
+
+
+class _ScriptedNativeModel:
+    def __init__(self, script: list[ChatResult]) -> None:
+        self.tier = "fake"
+        self.script = list(script)
+        self.seen: list[dict] = []
+
+    async def ainvoke(self, messages, *, tools=None, **kwargs):
+        self.seen.append(dict(messages[-1]))
+        return self.script.pop(0)
+
+
+def _native_call(arguments: str, call_id: str = "c1") -> ChatResult:
+    return ChatResult(
+        content="",
+        tool_calls=[ToolCall(id=call_id, name="probe", arguments=arguments)],
+        finish_reason="tool-calls",
+    )
+
+
+async def test_schema_repairs_stringified_arguments_before_call():
+    schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "count": {"type": "integer"},
+            "ok": {"type": "boolean"},
+            "tags": {"type": "array"},
+        },
+        "required": ["path"],
+    }
+    model = _ScriptedNativeModel(
+        [
+            _native_call(
+                json.dumps(
+                    {"path": "a.txt", "count": "2", "ok": "true", "tags": '["x"]'},
+                    ensure_ascii=False,
+                )
+            ),
+            ChatResult(content="done", finish_reason="stop"),
+        ]
+    )
+    captured: dict = {}
+    out = await run_tool_loop(
+        model,
+        [{"role": "user", "content": "go"}],
+        _capture_registry(captured, schema),
+    )
+
+    assert captured == {"path": "a.txt", "count": 2, "ok": True, "tags": ["x"]}
+    assert "argument_error" not in out["tool_trace"][0]
+    assert out["text"] == "done"
+
+
+async def test_closed_schema_unknown_field_triggers_retry():
+    schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "additionalProperties": False,
+    }
+    model = _ScriptedNativeModel(
+        [
+            _native_call('{"path": "a.txt", "extra": 1}'),
+            _native_call('{"path": "a.txt"}', call_id="c2"),
+            ChatResult(content="done", finish_reason="stop"),
+        ]
+    )
+    captured: dict = {}
+    out = await run_tool_loop(
+        model,
+        [{"role": "user", "content": "go"}],
+        _capture_registry(captured, schema),
+    )
+
+    assert captured == {"path": "a.txt"}
+    assert "未知字段" in out["tool_trace"][0]["argument_error"]
+    assert "未知字段" in model.seen[1]["content"]
+    assert out["text"] == "done"
 
 

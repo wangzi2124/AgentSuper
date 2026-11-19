@@ -34,6 +34,7 @@ from observability.tracing import trace_span
 from utils.json_repair import (
     is_tool_call_markup,
     parse_answer_envelope,
+    repair_tool_args,
 )
 
 from ..events import push_event
@@ -47,6 +48,7 @@ from ..usage import empty_usage, merge_usage, usage_from_result
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 8
+MAX_TOOL_ARG_REPAIR_RETRIES = 2
 
 # 写文件与 shell 独占工作区；文件读/搜索共享读锁，彼此仍可并行。
 _MUTATING_TOOL_NAMES = frozenset(_FILE_WRITE_TOOLS | {"shell_exec"})
@@ -110,6 +112,11 @@ _FINAL_ROUND_NUDGE = "工具调用轮数已达上限。请立即停止调用工�
 _NUDGE_EMPTY_ANSWER = (
     "你上一条回复是空的。请给出最终答案：需要实时/外部数据时调用可用工具；"
     "否则用纯文本回答，不要输出工具调用 JSON。"
+)
+_NUDGE_BAD_TOOL_ARGS = (
+    "上一次工具 {tool} 的参数不是合法 JSON，工具没有执行。"
+    "请重新发出同一个工具的调用，arguments 必须是合法 JSON 对象；"
+    "文件内容放在字符串值里，换行用 \\n 转义。\n错误详情：{detail}"
 )
 
 
@@ -622,6 +629,11 @@ async def _execute_tool_call(
     parsed_args, arg_error = call_argument_error(tc)
     args: dict[str, Any] = parsed_args or {}
     step_id = f"tool-{call_id}"
+    td = registry.get(tc.name)
+    if not arg_error and td is not None:
+        schema = td.parameters or json_schema_for(td.fn)
+        args, arg_error = repair_tool_args(args, schema, tool_name=tc.name)
+    started = time.perf_counter()
     push_event(
         {
             "type": "tool_start",
@@ -633,8 +645,6 @@ async def _execute_tool_call(
             "status": "running",
         }
     )
-    started = time.perf_counter()
-    td = registry.get(tc.name)
 
     async def _run() -> str:
         nonlocal args
@@ -724,6 +734,8 @@ async def _execute_tool_call(
         }
     )
     trace = {"name": tc.name, "args": args, "output": output}
+    if arg_error:
+        trace["argument_error"] = arg_error
     history = make_tool_result_message(
         call_id, tc.name, format_tool_output(tc.name, args, str(output))
     )
@@ -982,6 +994,7 @@ async def run_tool_loop(
     last_finish = "stop"
     empty_nudges = 0
     action_nudges = 0
+    arg_repair_retries = 0
     overflow_retried = False
 
     while rounds < max_rounds:
@@ -1350,6 +1363,34 @@ async def run_tool_loop(
             for task in round_tasks.values():
                 task.cancel()
             raise
+
+        bad_arg_trace = next(
+            (trace for trace in tool_trace if trace.get("argument_error")), None
+        )
+        if (
+            bad_arg_trace
+            and arg_repair_retries < MAX_TOOL_ARG_REPAIR_RETRIES
+            and rounds < max_rounds
+        ):
+            arg_repair_retries += 1
+            bad_tool = str(bad_arg_trace.get("name") or "?")
+            detail = str(bad_arg_trace.get("argument_error") or "")[:400]
+            _signal("tool_arg_repair_retry", count=arg_repair_retries, tool=bad_tool)
+            logger.warning(
+                "tool arguments invalid: retry %d/%d (model=%s round=%d tool=%s)",
+                arg_repair_retries,
+                MAX_TOOL_ARG_REPAIR_RETRIES,
+                label,
+                rounds,
+                bad_tool,
+            )
+            convo.append(
+                {
+                    "role": "user",
+                    "content": _NUDGE_BAD_TOOL_ARGS.format(tool=bad_tool, detail=detail),
+                }
+            )
+            continue
 
     _prior_nudges = {
         _FINAL_ROUND_NUDGE,

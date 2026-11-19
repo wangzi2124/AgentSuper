@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -111,11 +112,71 @@ def is_tool_call_markup(text: str | None) -> bool:
 
 
 def _strip_code_fence(text: str) -> str:
-    """去掉 ```json ... ``` / ``` ... ``` 围栏及其前后散文。"""
-    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
+    """去掉真正包裹 JSON 的围栏；不碰 JSON 字符串内部的围栏。"""
+    stripped = text.strip()
+    if not stripped:
+        return text
+    if stripped[0] in "{[":
+        return stripped
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", stripped, re.DOTALL | re.IGNORECASE):
+        inner = match.group(1).strip()
+        if inner[:1] in ("{", "["):
+            return inner
     return text
+
+
+def repair_tool_args(
+    parsed: dict[str, Any],
+    schema: dict[str, Any] | None,
+    *,
+    tool_name: str = "",
+) -> tuple[dict[str, Any], str]:
+    """按工具 schema 做保守 repair；只在 schema 明确时拒绝未知字段。"""
+    if not isinstance(parsed, dict) or not isinstance(schema, dict):
+        return parsed, ""
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return parsed, ""
+    allowed = set(properties)
+    unknown = sorted(str(key) for key in parsed if key not in allowed)
+    if unknown and schema.get("additionalProperties") is False:
+        return {}, (
+            f"工具 {tool_name} 的参数包含未知字段：{', '.join(unknown)}；"
+            f"允许字段：{', '.join(sorted(str(key) for key in allowed))}"
+        )
+    required = schema.get("required")
+    required_keys = set(required) if isinstance(required, list) else set()
+    repaired = dict(parsed)
+    for key, value in list(repaired.items()):
+        prop = properties.get(key)
+        if not isinstance(prop, dict):
+            continue
+        expected = prop.get("type")
+        if (
+            value is None
+            and key not in required_keys
+            and expected is not None
+            and expected != "null"
+        ):
+            repaired.pop(key)
+            continue
+        if expected in ("object", "array") and isinstance(value, str):
+            decoded = parse_json_value(value)
+            if isinstance(decoded, (dict, list)):
+                repaired[key] = decoded
+        elif expected in ("integer", "number") and isinstance(value, str):
+            text = value.strip()
+            try:
+                number = int(text) if expected == "integer" else float(text)
+            except ValueError:
+                continue
+            if expected != "integer" or float(number) == int(number):
+                repaired[key] = number
+        elif expected == "boolean" and isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("true", "false"):
+                repaired[key] = lowered == "true"
+    return repaired, ""
 
 
 def _light_fix(text: str) -> str:

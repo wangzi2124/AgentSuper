@@ -41,13 +41,18 @@ class _LocalOllamaModel:
         return self.script.pop(0)
 
 
-def _registry() -> ToolRegistry:
+def _registry(sink: dict | None = None) -> ToolRegistry:
+    def _write(**kwargs):
+        if sink is not None:
+            sink.update(kwargs)
+        return "written"
+
     registry = ToolRegistry()
     registry.register(
         ToolDefinition(
             name="write_file",
             description="write file",
-            fn=lambda **kwargs: "written",
+            fn=_write,
         )
     )
     return registry
@@ -115,14 +120,16 @@ async def test_structured_fallback_parses_json_with_inner_code_fence():
     model = _LocalOllamaModel(
         [_structured_call_with_fenced_code(), ChatResult(content="已写入", finish_reason="stop")]
     )
+    captured: dict = {}
     out = await run_tool_loop(
         model,
         [{"role": "user", "content": ACTION_USER}],
-        _registry(),
+        _registry(captured),
         adapter=_adapter(model),
     )
 
     assert [trace["name"] for trace in out["tool_trace"]] == ["write_file"]
+    assert captured["content"] == "```java\nclass BubbleSort {}\n```"
     assert out["text"] == "已写入"
 
 
