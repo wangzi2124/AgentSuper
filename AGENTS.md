@@ -265,6 +265,7 @@ npx vitest run tests/integration/
 - **移动端**：`MobileChat` 复用 `V2ChatView`；改聊天逻辑时先确认移动端不被破坏。
 - **模型列表过滤**：`ModelManagerView` 的表格/搜索/分页用 `utils/modelOrigin.ts` 过滤；默认/轻量/图片下拉保持全量。聊天输入框选择器（桌面 `modelManager.modelOptions` / 移动 `multiAgent.modelOptions`）用 `chatSelectableModels`，只展示已配置 Provider 实际返回/手动配置的模型（`origin` 为 override/extra/provider）外加显式默认模型，避免内置目录里与 Provider 无关的条目混入；没有 Provider 模型时回退全量。
 - **Chat surface**: `V2ChatView` is the single timeline; do not reintroduce per-agent blocks as the main render path.
+- **Markdown 回复**：最终正文统一经 `components/MarkdownContent.vue` 渲染（GFM 列表/代码块/highlight.js/复制按钮）；朗读期间才暂时切回 span 高亮。不要再用 `{{ part.text }}` 直接渲染 assistant 正文。
 - **只展示真实工具**：时间线过滤 `!step.tool_name` 的 Harness 图内节点（filter/plan/rag/execute_subagent 等）；不要渲染 `NODE_LABELS` 或 Agent 过滤 chips。
 - **工具步骤**：默认紧凑行，点击展开；不要默认展开所有参数/输出，避免长任务淹没最终答案。
 - **审批**：聊天页用 `PermissionInlineCard`，`Sidebar` 中的模态在 `/multi-agent` 路由隐藏；不要两套同时弹。

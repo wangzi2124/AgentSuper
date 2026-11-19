@@ -23,6 +23,7 @@ import {
 import type { AgentInfoV2, TurnDiff } from '../api/v2'
 import { listCommands, type SlashCommandInfo } from '../api/commands'
 import FormCard from '../v2/FormCard.vue'
+import MarkdownContent from '../components/MarkdownContent.vue'
 import type {
   AssistantMessage,
   FileAttachment,
@@ -1274,11 +1275,16 @@ onBeforeUnmount(() => {
                 v-for="(part, index) in answerParts(message)"
                 :key="`${message.id}-text-${index}`"
                 class="v2-bubble assistant"
-              ><span
-                v-for="(span, spanIndex) in speakSpans(message, index, part.text)"
-                :key="spanIndex"
-                :class="{ 'v2-tts-active': span.active }"
-              >{{ span.text }}</span></div>
+              >
+                <MarkdownContent v-if="speakingId !== message.id" :text="part.text" />
+                <template v-else>
+                  <span
+                    v-for="(span, spanIndex) in speakSpans(message, index, part.text)"
+                    :key="spanIndex"
+                    :class="{ 'v2-tts-active': span.active }"
+                  >{{ span.text }}</span>
+                </template>
+              </div>
             </template>
             <div class="v2-message-actions">
               <button class="v2-copy" title="复制完整回复" @click="copyMessage(message)">

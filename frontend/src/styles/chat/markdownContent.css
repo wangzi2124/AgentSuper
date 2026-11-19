@@ -1,5 +1,5 @@
 /* DeepSeek 风格 Markdown 渲染：16px 正文字号、1.75 行高、克制间距、扁平代码块 */
-.md { word-break: break-word; font-size: 16px; line-height: 1.75; color: var(--text); }
+.md { word-break: break-word; white-space: normal; font-size: 16px; line-height: 1.75; color: var(--text); }
 .md > *:first-child { margin-top: 0; }
 .md > *:last-child { margin-bottom: 0; }
 
