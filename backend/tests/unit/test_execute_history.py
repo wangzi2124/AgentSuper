@@ -108,6 +108,32 @@ async def test_execute_reports_system_and_tool_tokens():
     assert out["context_tool_tokens"] > 0
 
 
+async def test_action_not_executed_is_not_carried_over_between_turns():
+    model = _CaptureModel()
+    node = make_execute_node(model, ToolRegistry(), system_prompt="SYS")
+    state = _state([HumanMessage(content="你好")], action_not_executed=True)
+    out = await node(state)
+    assert out["action_not_executed"] is False
+
+
+async def test_action_not_executed_from_current_turn_is_preserved(monkeypatch):
+    async def failing_loop(*_args, **_kwargs):
+        return {
+            "text": "未执行",
+            "rounds": 0,
+            "tool_trace": [],
+            "tool_history": [],
+            "usage": {},
+            "action_not_executed": True,
+        }
+
+    monkeypatch.setattr(execute_module, "run_tool_loop", failing_loop)
+    model = _CaptureModel()
+    node = make_execute_node(model, ToolRegistry(), system_prompt="SYS")
+    out = await node(_state([HumanMessage(content="写入文件")]))
+    assert out["action_not_executed"] is True
+
+
 async def test_memory_context_merged_into_system():
     model = _CaptureModel()
     node = make_execute_node(model, ToolRegistry(), system_prompt="SYS")
