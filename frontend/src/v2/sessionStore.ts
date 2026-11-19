@@ -157,10 +157,6 @@ export const useV2SessionStore = defineStore('v2Session', () => {
   async function send(sessionId: string, body: PromptInput): Promise<InboxInfo> {
     const item = await promptApi(sessionId, body)
     const runtime = ensureRuntime(sessionId)
-    const index = runtime.inbox.findIndex((entry) => entry.id === item.id)
-    const inbox = runtime.inbox.slice()
-    if (index >= 0) inbox[index] = item
-    else inbox.push(item)
     // 立即把用户消息放进时间线（与历史消息同一套渲染），否则发送后到回合结束
     // hydration 之前看不到自己这条消息，样式也与上方的用户消息不一致。
     const messages = runtime.messages.slice()
@@ -179,7 +175,7 @@ export const useV2SessionStore = defineStore('v2Session', () => {
       }
       messages.push(user)
     }
-    setRuntime({ ...runtime, inbox, messages })
+    setRuntime({ ...runtime, messages })
     return item
   }
 
