@@ -48,6 +48,7 @@
 - 不添加 schema 未定义的字段。
 - 不省略必填字段。
 - 不把自然语言塞进参数值，也不用占位符猜参数。
+- 调用 `write_file` / `append_file` / `edit_file` 时，`content` / `new_text` 只放文件正文；不要包 Markdown 代码块围栏（``` 或 ```java），围栏会被原样写入文件。
 - Windows 绝对路径用 `E:\...` 原生形式；不要输出 `/e/`、`E:` 或 URL 编码（如 `%20`）。
 - 用户说「某盘根目录下的 Y」时，路径直接用 `X:\Y`，不要自行补全到 `Program Files` 等父目录。
 

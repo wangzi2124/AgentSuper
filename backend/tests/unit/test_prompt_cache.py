@@ -18,8 +18,8 @@ from prompts.loader import PromptLoader
 # Golden hashes for the cacheable head. Update only when the stable prompt head
 # is intentionally changed; volatile turn content must never move before it.
 _GOLDEN_HEAD = {
-    ("file_agent", "openai/gpt-4o"): "294636f9be5571f3df1f47d93033746c093d547a7b8099e1d3bbac4ff7d21f2f",
-    ("supervisor", "deepseek/deepseek-v4-pro"): "097a633f0a3a92fd4c4497d30c444f4351e0137e90afcbbb7b786cf53d34f6e6",
+    ("file_agent", "openai/gpt-4o"): "ff1abad9a16f9fe5a1b1a14ff9a2c758b65c7125353e1909da790b2312e5868b",
+    ("supervisor", "deepseek/deepseek-v4-pro"): "2febb38d96522e0dd8fb0ff040b510389b4a60fcf3c617f0f5e2335d8ff31c44",
 }
 
 
@@ -37,6 +37,7 @@ def test_file_agent_head_has_no_duplicate_global_rules():
     assert "## 决策流程（每轮先自检）" not in text
     assert "## 工具使用策略" not in text
     assert "不要用 `shell_exec` 代替" in text
+    assert "不要包 Markdown 代码块围栏" in text
     assert "根据之前的 ls 结果" not in text
     assert "再次强调" not in text
 
