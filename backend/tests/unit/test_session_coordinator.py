@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -200,3 +201,44 @@ async def test_action_not_executed_marks_execution_failed(env):
 
     assert "session.execution.failed" in env.events
     assert (sid, "idle", "failed") in env.repo.statuses
+
+
+async def test_action_not_executed_persists_warning_without_duplicate_session_id(env, monkeypatch):
+    import app.session.repository as repository
+
+    written: list[tuple] = []
+
+    def fake_upsert(session_id, message_id, msg_type, data):  # noqa: ANN001
+        written.append((session_id, message_id, msg_type, data))
+
+    monkeypatch.setattr(repository, "upsert_message", fake_upsert)
+
+    sess = SimpleNamespace(
+        user_id="user", model="ollama-local/qwen2.5:3b", tokens={}, cost=0.0
+    )
+    env.ctx.sessions.get = lambda _sid: sess
+    env.ctx.vfs = SimpleNamespace(_history=[])
+    env.ctx.graph = SimpleNamespace(aupdate_state=AsyncMock())
+    env.ctx.save_snapshot = lambda *_args: None
+    env.ctx.ensure_conversation = AsyncMock()
+
+    async def state(_sid):
+        return {"action_not_executed": True, "final_output": "未执行"}
+
+    env.ctx.state = state
+
+    async def no_events(*_args, **_kwargs):
+        if False:
+            yield
+
+    env.ctx.stream_turn_events = no_events
+
+    coord = ExecutionCoordinator(env.ctx)
+    assert await coord._run_item("ses_warning", _item("in_1")) is True
+    assert len(written) == 1
+    assert written[0][:3] == (
+        "ses_warning",
+        "in_1_assistant_action_warning",
+        "synthetic",
+    )
+    assert written[0][3]["description"] == "action_not_executed"

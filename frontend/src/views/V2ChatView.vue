@@ -1334,24 +1334,24 @@ onBeforeUnmount(() => {
           <div class="v2-inbox-actions">
             <button
               :class="{ active: item.item.delivery === 'steer', done: inboxDone[item.id] === 'steer' }"
-              :disabled="!!inboxBusy[item.id]"
+              :disabled="!!inboxBusy[item.id] || item.item.delivery === 'steer'"
               @click="changeInbox(item, 'steer')"
             >
               {{
-                inboxDone[item.id] === 'steer' ? '已插队'
-                  : inboxDone[item.id] === 'failed' ? '失败'
-                    : inboxBusy[item.id] === 'steer' ? '处理中…' : '插队'
+                inboxDone[item.id] === 'failed' ? '失败'
+                  : inboxBusy[item.id] === 'steer' ? '处理中…'
+                    : item.item.delivery === 'steer' ? '已插队' : '插队'
               }}
             </button>
             <button
               :class="{ active: item.item.delivery === 'queue', done: inboxDone[item.id] === 'queue' }"
-              :disabled="!!inboxBusy[item.id]"
+              :disabled="!!inboxBusy[item.id] || item.item.delivery === 'queue'"
               @click="changeInbox(item, 'queue')"
             >
               {{
-                inboxDone[item.id] === 'queue' ? '已排队'
-                  : inboxDone[item.id] === 'failed' ? '失败'
-                    : inboxBusy[item.id] === 'queue' ? '处理中…' : '排队'
+                inboxDone[item.id] === 'failed' ? '失败'
+                  : inboxBusy[item.id] === 'queue' ? '处理中…'
+                    : item.item.delivery === 'queue' ? '已排队' : '排队'
               }}
             </button>
             <button

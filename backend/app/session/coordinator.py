@@ -421,7 +421,6 @@ class ExecutionCoordinator:
                         "warning_id": warning_id,
                     },
                 },
-                session_id=session_id,
             )
 
             await emit_event(

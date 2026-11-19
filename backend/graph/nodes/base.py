@@ -278,21 +278,27 @@ def _json_object_candidate(text: str) -> dict[str, Any] | None:
     s = (text or "").strip()
     if len(s) < 2 or len(s) > 8000 or "{" not in s:
         return None
-    m = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL | re.IGNORECASE)
-    if m:
-        s = m.group(1).strip()
-    if not (s.startswith("{") and s.endswith("}")):
-        a, b = s.find("{"), s.rfind("}")
-        if not (0 <= a < b):
-            return None
-        s = s[a : b + 1]
-    if not (s.startswith("{") and s.endswith("}") and len(s) <= 8000):
-        return None
-    try:
-        obj = json.loads(s)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return obj if isinstance(obj, dict) else None
+    candidates = [s]
+    for match in re.finditer(r"```(?:json)?\s*(.*?)```", s, re.DOTALL | re.IGNORECASE):
+        inner = match.group(1).strip()
+        if inner.startswith("{"):
+            candidates.insert(0, inner)
+    for candidate in candidates:
+        body = candidate
+        if not (body.startswith("{") and body.endswith("}")):
+            a, b = body.find("{"), body.rfind("}")
+            if not (0 <= a < b):
+                continue
+            body = body[a : b + 1]
+        if not (body.startswith("{") and body.endswith("}") and len(body) <= 8000):
+            continue
+        try:
+            obj = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
 
 
 def _looks_like_tool_call_json(text: str) -> bool:

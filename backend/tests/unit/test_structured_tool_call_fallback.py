@@ -5,7 +5,7 @@ import json
 import pytest
 from config import settings
 from execution.tool_registry import ToolDefinition, ToolRegistry
-from graph.nodes.base import run_tool_loop
+from graph.nodes.base import _json_object_candidate, run_tool_loop
 from harness.tool_adapter import ToolAdapter
 from models.types import ChatResult
 
@@ -73,8 +73,57 @@ def _structured_call() -> ChatResult:
     )
 
 
+def _structured_call_with_fenced_code() -> ChatResult:
+    return ChatResult(
+        content=json.dumps(
+            {
+                "name": "write_file",
+                "arguments": {
+                    "path": "C:/tool/code/dpn-platform-bciblp/BubbleSort.java",
+                    "content": "```java\nclass BubbleSort {}\n```",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        finish_reason="stop",
+    )
+
+
 def _response_format(kwargs: dict) -> dict:
     return kwargs["response_format"]["json_schema"]["schema"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '```json\n{"name": "write_file", "arguments": {}}\n```',
+        '结果如下：\n```json\n{"name": "write_file", "arguments": {}}\n```',
+    ],
+)
+def test_json_object_candidate_accepts_fenced_json(text):
+    assert _json_object_candidate(text)["name"] == "write_file"
+
+
+def test_json_object_candidate_ignores_fence_inside_json_argument():
+    parsed = _json_object_candidate(_structured_call_with_fenced_code().content)
+    assert parsed["name"] == "write_file"
+    assert "```java" in parsed["arguments"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_structured_fallback_parses_json_with_inner_code_fence():
+    model = _LocalOllamaModel(
+        [_structured_call_with_fenced_code(), ChatResult(content="已写入", finish_reason="stop")]
+    )
+    out = await run_tool_loop(
+        model,
+        [{"role": "user", "content": ACTION_USER}],
+        _registry(),
+        adapter=_adapter(model),
+    )
+
+    assert [trace["name"] for trace in out["tool_trace"]] == ["write_file"]
+    assert out["text"] == "已写入"
 
 
 @pytest.mark.asyncio
