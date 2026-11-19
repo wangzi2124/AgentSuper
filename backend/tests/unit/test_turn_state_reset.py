@@ -40,3 +40,5 @@ def test_initial_state_resets_per_turn_plain_channels():
     assert state["final_output"] == ""
     assert state["current_task_id"] == ""
     assert state["iteration_count"] == 0
+    assert state["plan_id"] == ""
+    assert state["plan_revision"] == 0

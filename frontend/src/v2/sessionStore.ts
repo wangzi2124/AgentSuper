@@ -3,20 +3,38 @@ import { ref } from 'vue'
 
 import {
   getSession,
+  getSessionPlan,
   listForms,
   listInbox,
   listMessages,
   listPermissions,
   prompt as promptApi,
 } from '../api/v2'
-import type { InboxInfo, PromptInput, SessionInfoV2, UserMessage, V2Event } from '../contracts/v2'
+import type {
+  InboxInfo,
+  PromptInput,
+  PlanUpdatedData,
+  SessionInfoV2,
+  UserMessage,
+  V2Event,
+} from '../contracts/v2'
 import { getV2EventStream } from './eventStream'
 import {
   applyV2Event,
   emptyRuntime,
   eventSessionId,
+  type LivePlan,
   type V2SessionRuntime,
 } from './runtime'
+
+function _livePlan(plan: PlanUpdatedData): LivePlan {
+  return {
+    plan_id: plan.plan_id,
+    revision: plan.revision,
+    tier: plan.tier ?? null,
+    steps: plan.steps.map(step => ({ ...step })),
+  }
+}
 
 export const useV2SessionStore = defineStore('v2Session', () => {
   const runtimes = ref<Record<string, V2SessionRuntime>>({})
@@ -72,12 +90,13 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     hydrating.add(sessionId)
     buffers.set(sessionId, [])
     try {
-      const [info, messages, inbox, permissions, forms] = await Promise.all([
+      const [info, messages, inbox, permissions, forms, plan] = await Promise.all([
         getSession(sessionId),
         listMessages(sessionId, { limit: 500, order: 'asc' }),
         listInbox(sessionId),
         listPermissions(sessionId).catch(() => []),
         listForms(sessionId).catch(() => []),
+        getSessionPlan(sessionId).catch(() => null),
       ])
       const base: V2SessionRuntime = {
         ...emptyRuntime(sessionId),
@@ -87,6 +106,7 @@ export const useV2SessionStore = defineStore('v2Session', () => {
         inbox,
         permissions,
         forms,
+        plan: plan ? _livePlan(plan) : null,
         hydrated: true,
       }
       const previous = runtimes.value[sessionId]

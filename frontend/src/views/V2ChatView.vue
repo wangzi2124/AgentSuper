@@ -30,6 +30,7 @@ import type {
   MessagePart,
   MessageV2,
   PermissionRequest,
+  PlanStep,
   ReasoningPart,
   TextPart,
   VoiceAttachment,
@@ -804,6 +805,21 @@ const activeAssistant = computed<AssistantMessage | null>(() => {
   return message?.type === 'assistant' ? message : null
 })
 const liveCompaction = computed(() => (executing.value ? runtime.value?.compaction ?? null : null))
+const livePlan = computed(() => runtime.value?.plan ?? null)
+const planProgress = computed(() => {
+  const steps = livePlan.value?.steps ?? []
+  return {
+    done: steps.filter(step => step.status === 'completed').length,
+    total: steps.length,
+  }
+})
+
+function planStatusText(status: PlanStep['status']): string {
+  if (status === 'completed') return '完成'
+  if (status === 'in_progress') return '进行中'
+  if (status === 'cancelled') return '取消'
+  return '待执行'
+}
 
 function isActiveMessage(message: MessageV2): boolean {
   return message.type === 'assistant' && message.id === activeAssistantId.value
@@ -1172,6 +1188,22 @@ onBeforeUnmount(() => {
         </div>
         <p class="empty-title">基于 RAG 的知识库问答与 Agent 系统</p>
         <p class="empty-hint">知识库检索、代码编写、联网搜索一站完成</p>
+      </div>
+
+      <div v-if="livePlan && livePlan.steps.length > 1" class="v2-plan-card">
+        <details :open="executing">
+          <summary>
+            <span class="v2-plan-title">执行计划</span>
+            <span class="v2-plan-progress">{{ planProgress.done }}/{{ planProgress.total }}</span>
+          </summary>
+          <ol class="v2-plan-steps">
+            <li v-for="step in livePlan.steps" :key="step.id" :class="step.status">
+              <span class="v2-plan-status" :class="step.status">{{ planStatusText(step.status) }}</span>
+              <span class="v2-plan-text">{{ step.title }}</span>
+              <span v-if="step.agent" class="v2-plan-agent">{{ step.agent }}</span>
+            </li>
+          </ol>
+        </details>
       </div>
 
       <div

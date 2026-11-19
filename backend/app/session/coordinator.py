@@ -311,6 +311,15 @@ class ExecutionCoordinator:
                     },
                     session_id=session_id,
                 )
+            elif kind == "plan_updated":
+                plan = legacy.get("plan")
+                if isinstance(plan, dict):
+                    await emit_event(
+                        self.ctx,
+                        "session.plan.updated",
+                        {"session_id": session_id, **plan},
+                        session_id=session_id,
+                    )
             elif kind == "agent_step":
                 step = legacy.get("step") or {}
                 step_type = step.get("type")

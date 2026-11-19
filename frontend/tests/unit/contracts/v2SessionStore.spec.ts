@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 vi.mock('../../../src/api/v2', () => ({
   getSession: vi.fn(),
+  getSessionPlan: vi.fn(),
   listForms: vi.fn(),
   listInbox: vi.fn(),
   listMessages: vi.fn(),
@@ -19,7 +20,14 @@ vi.mock('../../../src/v2/eventStream', () => ({
   }),
 }))
 
-import { getSession, listForms, listInbox, listMessages, listPermissions } from '../../../src/api/v2'
+import {
+  getSession,
+  getSessionPlan,
+  listForms,
+  listInbox,
+  listMessages,
+  listPermissions,
+} from '../../../src/api/v2'
 import type { InboxInfo } from '../../../src/contracts/v2'
 import { useV2SessionStore } from '../../../src/v2/sessionStore'
 
@@ -43,6 +51,7 @@ describe('v2 session store inbox actions', () => {
     vi.mocked(listInbox).mockResolvedValue([inboxItem('steer')] as never)
     vi.mocked(listPermissions).mockResolvedValue([] as never)
     vi.mocked(listForms).mockResolvedValue([] as never)
+    vi.mocked(getSessionPlan).mockResolvedValue(null)
   })
 
   it('applies optimistic delivery change and cancel locally', async () => {
@@ -55,5 +64,23 @@ describe('v2 session store inbox actions', () => {
 
     store.removeInbox('s1', 'in1')
     expect(store.getRuntime('s1')?.inbox).toEqual([])
+  })
+
+  it('hydrates persisted plan snapshot', async () => {
+    vi.mocked(getSessionPlan).mockResolvedValue({
+      session_id: 's1',
+      plan_id: 'plan_1',
+      revision: 4,
+      tier: 'serial',
+      steps: [{ id: 's1', title: '读取文件', status: 'completed' }],
+    })
+    const store = useV2SessionStore()
+    await store.hydrate('s1')
+    expect(store.getRuntime('s1')?.plan).toEqual({
+      plan_id: 'plan_1',
+      revision: 4,
+      tier: 'serial',
+      steps: [{ id: 's1', title: '读取文件', status: 'completed' }],
+    })
   })
 })

@@ -254,6 +254,19 @@ session_tasks = Table(
     Index("idx_tasks_session", "session_id"),
 )
 
+session_plans = Table(
+    "session_plans", metadata,
+    Column("session_id", String(64), ForeignKey("sessions.id", ondelete="CASCADE"),
+           primary_key=True),
+    Column("plan_id", String(64), primary_key=True),
+    Column("revision", Integer, nullable=False, server_default=text("0")),
+    Column("tier", String(32), nullable=True),
+    Column("steps", Text().with_variant(LONGTEXT(), "mysql"), nullable=False),
+    Column("time_created", BigInteger, nullable=False),
+    Column("time_updated", BigInteger, nullable=False),
+    Index("idx_plans_session", "session_id", "revision"),
+)
+
 # 用户身份（设备 trust-on-first-use + 用户名/密码账号）；不再落 JSON 文件。
 # username_lower 唯一索引用于账号唯一性/登录；device_hash / pw_hash 只存哈希。
 auth_users = Table(
@@ -369,7 +382,7 @@ SESSION_TABLES = (
     message_parts.name, session_context_epoch.name, session_inputs.name,
     session_tasks.name, auth_users.name, session_permissions.name,
     session_permission_saved.name, session_forms.name, schema_migrations.name,
-    event_outbox.name, session_snapshots.name,
+    event_outbox.name, session_snapshots.name, session_plans.name,
 )
 CATALOG_TABLES = (catalog_settings.name, providers.name, catalog_entries.name)
 CHAPTER_TABLES = (chapters.name,)

@@ -37,6 +37,7 @@ ESSENTIAL_GLOBAL_TOOLS = frozenset(
         "http_request",
         "get_weather",
         "ask_question",
+        "todo_write",
         "task",
     }
 )

@@ -9,12 +9,15 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from app.session import repository as repo
+from app.session.plan import plan_event_data, steps_from_tasks, tasks_from_steps
 from execution.tool_registry import ToolRegistry
 from harness.budget import BudgetLedger
 from models.router import TierModel, resolve_model
 from prompts.assembly import compose_system
 from prompts.loader import model_id_of
 
+from ..events import push_event
 from .base import build_tool_defs, run_tool_loop
 
 TOOL_SCOPE = "location"
@@ -226,12 +229,56 @@ def make_execute_node(
             allowed_tools = (
                 set(registry.names()) if allowed_tools is None else set(allowed_tools)
             ) - {QUESTION_TOOL_NAME}
+        session_id = str(state.get("session_id") or "")
+        plan_id = str(state.get("plan_id") or "")
+        stored = repo.get_plan(session_id, plan_id) if session_id and plan_id else None
         plan = [dict(t) for t in (state.get("task_plan") or [])]
+        revision = int(state.get("plan_revision") or 0)
+        tier = str(state.get("plan_tier") or "")
+        if stored is not None and stored.get("steps"):
+            plan = tasks_from_steps(stored["steps"])
+            revision = int(stored["revision"])
+            tier = str(stored.get("tier") or "") or tier
         pending = [t for t in plan if t.get("status") != "done"]
         if not pending:
             return {}
 
         task = pending[0]
+        task_id = str(task.get("id") or "t?")
+
+        def _emit_plan_status(status: str) -> None:
+            nonlocal revision, tier
+            if not session_id or not plan_id:
+                return
+            latest = repo.get_plan(session_id, plan_id)
+            if latest is not None:
+                base_steps = [dict(step) for step in (latest.get("steps") or [])]
+                base_revision = int(latest.get("revision") or 0)
+                tier = str(latest.get("tier") or "") or tier
+            else:
+                base_steps = steps_from_tasks(plan)
+                base_revision = revision
+            matched = False
+            for step in base_steps:
+                if step.get("id") == task_id:
+                    step["status"] = status
+                    matched = True
+            if not matched:
+                base_steps.extend(steps_from_tasks([task for task in plan if task.get("id") == task_id]))
+                for step in base_steps:
+                    if step.get("id") == task_id:
+                        step["status"] = status
+            revision = base_revision + 1
+            if not repo.save_plan(session_id, plan_id, revision, base_steps, tier):
+                return
+            push_event(
+                {
+                    "type": "plan_updated",
+                    "plan": plan_event_data(session_id, plan_id, revision, base_steps, tier),
+                }
+            )
+
+        _emit_plan_status("in_progress")
         user_blocks = _multimodal_user_content(state)
         image_turn = bool(user_blocks) and _has_image_block(user_blocks)
         extra_system = _extra_system
@@ -335,14 +382,16 @@ def make_execute_node(
         finally:
             reset_agent_policy(policy_token)
 
-        task_id = task.get("id", "t?")
         for t in plan:
             if t.get("id") == task_id:
                 t["status"] = "done"
+        _emit_plan_status("completed")
         sub_results = dict(state.get("sub_results") or {})
         sub_results[task_id] = result["text"]
         return {
             "task_plan": plan,
+            "plan_id": plan_id,
+            "plan_revision": revision,
             "current_task_id": task_id,
             "sub_results": sub_results,
             "draft_output": result["text"],

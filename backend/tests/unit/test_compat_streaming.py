@@ -24,6 +24,17 @@ def test_empty_text_delta_is_dropped():
     assert _part_event_to_sse({"type": "text_delta", "delta": ""}, [], {}) == []
 
 
+def test_plan_updated_part_maps_to_sse():
+    plan = {
+        "plan_id": "plan_1",
+        "revision": 1,
+        "tier": "serial",
+        "steps": [{"id": "t1", "title": "读取文件", "status": "pending"}],
+    }
+    out = _part_event_to_sse({"type": "plan_updated", "plan": plan}, [], {})
+    assert out == [{"type": "plan_updated", "agent_id": "plan", "plan": plan}]
+
+
 class _BlockingGraph:
     """Pushes a part event, then blocks so the graph node never completes."""
 

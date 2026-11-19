@@ -946,3 +946,55 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.v2-plan-card {
+  margin: 0 0 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-elevated);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.v2-plan-card summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.v2-plan-card summary::-webkit-details-marker { display: none; }
+.v2-plan-card summary::before {
+  content: '▸';
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+.v2-plan-card details[open] summary::before { transform: rotate(90deg); }
+.v2-plan-title { font-weight: 600; color: var(--text-primary); }
+.v2-plan-progress { margin-left: auto; color: var(--text-muted); }
+.v2-plan-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0 12px 10px 30px;
+}
+.v2-plan-steps li { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.v2-plan-status {
+  flex: 0 0 auto;
+  min-width: 42px;
+  color: var(--text-muted);
+  text-align: right;
+}
+.v2-plan-status.in_progress { color: var(--primary); }
+.v2-plan-status.completed { color: var(--success); }
+.v2-plan-status.cancelled { color: var(--danger); }
+.v2-plan-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.v2-plan-agent {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', Consolas, monospace;
+}

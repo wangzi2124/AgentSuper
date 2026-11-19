@@ -60,16 +60,18 @@ def env(monkeypatch):
     repo = _Repo()
     ctx = _Ctx()
     events: list[str] = []
+    payloads: list[tuple[str, dict, str | None]] = []
 
     monkeypatch.setattr(repository, "promote_next", lambda sid: repo.promote_next(sid))
     monkeypatch.setattr(repository, "list_inputs", lambda sid: repo.list_inputs(sid))
     monkeypatch.setattr(repository, "set_session_status", repo.set_session_status)
 
-    async def fake_emit(_ctx, event_type, _payload, session_id=None):  # noqa: ANN001
+    async def fake_emit(_ctx, event_type, payload, session_id=None):  # noqa: ANN001
         events.append(event_type)
+        payloads.append((event_type, payload, session_id))
 
     monkeypatch.setattr(emitter, "emit_event", fake_emit)
-    return SimpleNamespace(repo=repo, ctx=ctx, events=events)
+    return SimpleNamespace(repo=repo, ctx=ctx, events=events, payloads=payloads)
 
 
 async def _wait_idle(coord: ExecutionCoordinator, session_id: str) -> None:
@@ -242,3 +244,44 @@ async def test_action_not_executed_persists_warning_without_duplicate_session_id
         "synthetic",
     )
     assert written[0][3]["description"] == "action_not_executed"
+
+
+async def test_plan_updated_legacy_event_is_published_to_v2(env):
+    sess = SimpleNamespace(user_id="user", model=None, tokens={}, cost=0.0)
+    env.ctx.sessions.get = lambda _sid: sess
+    env.ctx.vfs = SimpleNamespace(_history=[])
+    env.ctx.graph = SimpleNamespace(aupdate_state=AsyncMock())
+    env.ctx.save_snapshot = lambda *_args: None
+    env.ctx.ensure_conversation = AsyncMock()
+
+    async def state(_sid):
+        return {"final_output": "已按计划完成"}
+
+    env.ctx.state = state
+
+    async def legacy_events(*_args, **_kwargs):
+        yield {
+            "type": "plan_updated",
+            "plan": {
+                "plan_id": "p1",
+                "revision": 1,
+                "tier": "serial",
+                "steps": [
+                    {"id": "t1", "title": "读取文件", "status": "pending"},
+                    {"id": "t2", "title": "修改文件", "status": "pending"},
+                ],
+            },
+        }
+
+    env.ctx.stream_turn_events = legacy_events
+
+    coord = ExecutionCoordinator(env.ctx)
+    assert await coord._run_item("ses_plan", _item("in_1")) is False
+
+    payload = next(
+        data for event_type, data, _ in env.payloads if event_type == "session.plan.updated"
+    )
+    assert payload["session_id"] == "ses_plan"
+    assert payload["plan_id"] == "p1"
+    assert payload["revision"] == 1
+    assert [step["title"] for step in payload["steps"]] == ["读取文件", "修改文件"]

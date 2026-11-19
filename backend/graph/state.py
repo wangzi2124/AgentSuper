@@ -22,6 +22,8 @@ class AgentState(TypedDict, total=False):
     session_id: str
     task_plan: list[dict[str, Any]]
     plan_tier: str
+    plan_id: str
+    plan_revision: int
     current_task_id: str
     fanout_count: Annotated[int, add_ints]
     budget_total: float

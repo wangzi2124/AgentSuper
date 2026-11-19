@@ -1416,3 +1416,67 @@ def get_snapshot(session_id: str, message_id: str) -> Optional[dict[str, Any]]:
         return json.loads(row["descriptor"])
     finally:
         conn.close()
+
+
+# ── v2：会话计划 / todo 快照（持久化）───────────────────────────────────────
+
+def save_plan(
+    session_id: str,
+    plan_id: str,
+    revision: int,
+    steps: list[dict[str, Any]],
+    tier: str | None = None,
+) -> bool:
+    conn = _get_db()
+    now = int(time.time() * 1000)
+    try:
+        cur = conn.execute(
+            "INSERT INTO session_plans"
+            " (session_id, plan_id, revision, tier, steps, time_created, time_updated)"
+            " VALUES (?,?,?,?,?,?,?)"
+            " ON CONFLICT(session_id, plan_id) DO UPDATE SET"
+            " revision=excluded.revision, tier=excluded.tier, steps=excluded.steps,"
+            " time_updated=excluded.time_updated"
+            " WHERE excluded.revision > session_plans.revision",
+            (
+                session_id,
+                plan_id,
+                int(revision),
+                tier or None,
+                json.dumps(steps, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_plan(session_id: str, plan_id: str | None = None) -> Optional[dict[str, Any]]:
+    conn = _get_db()
+    try:
+        if plan_id:
+            row = conn.execute(
+                "SELECT plan_id, revision, tier, steps FROM session_plans"
+                " WHERE session_id = ? AND plan_id = ?",
+                (session_id, plan_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT plan_id, revision, tier, steps FROM session_plans"
+                " WHERE session_id = ? ORDER BY revision DESC, time_updated DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "session_id": session_id,
+            "plan_id": row["plan_id"],
+            "revision": int(row["revision"]),
+            "tier": row["tier"],
+            "steps": json.loads(row["steps"]),
+        }
+    finally:
+        conn.close()

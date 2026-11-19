@@ -260,3 +260,29 @@ def test_snapshot_roundtrip_is_persistent(store) -> None:
     repository.save_snapshot(sess.id, "am_1", {"files": [], "before_count": 0})
     assert repository.get_snapshot(sess.id, "am_1") == {"files": [], "before_count": 0}
     assert repository.get_snapshot(sess.id, "missing") is None
+
+
+def test_plan_roundtrip_and_revision_guard(store) -> None:
+    sess = _session(store)
+    steps = [
+        {"id": "s1", "title": "读取文件", "status": "completed", "agent": None},
+        {"id": "s2", "title": "总结结果", "status": "in_progress", "agent": "build"},
+    ]
+    assert repository.save_plan(sess.id, "p1", 1, steps, "serial") is True
+    assert repository.save_plan(sess.id, "p1", 1, [], "single") is False
+    assert repository.get_plan(sess.id, "p1") == {
+        "session_id": sess.id,
+        "plan_id": "p1",
+        "revision": 1,
+        "tier": "serial",
+        "steps": steps,
+    }
+
+    updated = [dict(step) for step in steps]
+    updated[1] = {**updated[1], "status": "completed"}
+    assert repository.save_plan(sess.id, "p1", 2, updated, "serial") is True
+    latest = repository.get_plan(sess.id)
+    assert latest is not None
+    assert latest["revision"] == 2
+    assert [step["status"] for step in latest["steps"]] == ["completed", "completed"]
+    assert repository.get_plan(sess.id, "missing") is None

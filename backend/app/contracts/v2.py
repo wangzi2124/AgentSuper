@@ -518,6 +518,21 @@ class InboxDeliveryChangedData(StrictModel):
     delivery: Delivery
 
 
+class PlanStep(StrictModel):
+    id: str
+    title: str
+    status: Literal["pending", "in_progress", "completed", "cancelled"] = "pending"
+    agent: str | None = None
+
+
+class PlanUpdatedData(StrictModel):
+    session_id: str
+    plan_id: str
+    revision: int
+    tier: str | None = None
+    steps: list[PlanStep] = Field(default_factory=list)
+
+
 class StepStartedData(StrictModel):
     session_id: str
     assistant_message_id: str
@@ -758,6 +773,7 @@ EventType = Literal[
     "session.inbox.delivered",
     "session.inbox.cancelled",
     "session.inbox.delivery.changed",
+    "session.plan.updated",
     "session.step.started",
     "session.step.streamed",
     "session.step.ended",
@@ -821,6 +837,7 @@ EVENT_DATA_MODELS: dict[str, type[StrictModel]] = {
     "session.inbox.delivered": InboxDeliveredData,
     "session.inbox.cancelled": InboxDeliveredData,
     "session.inbox.delivery.changed": InboxDeliveryChangedData,
+    "session.plan.updated": PlanUpdatedData,
     "session.step.started": StepStartedData,
     "session.step.streamed": StepStreamedData,
     "session.step.ended": StepEndedData,
@@ -881,6 +898,7 @@ DURABLE_EVENT_TYPES = frozenset(
         "session.inbox.delivered",
         "session.inbox.cancelled",
         "session.inbox.delivery.changed",
+        "session.plan.updated",
         "session.step.started",
         "session.step.streamed",
         "session.step.ended",
@@ -993,6 +1011,8 @@ __all__ = [
     "PermissionReply",
     "PermissionRequest",
     "PermissionReplied",
+    "PlanStep",
+    "PlanUpdatedData",
     "PromptInput",
     "ReasoningPart",
     "RevertState",

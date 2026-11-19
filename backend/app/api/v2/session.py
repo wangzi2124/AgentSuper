@@ -865,6 +865,15 @@ async def reply_permission(
     )
 
 
+@router.get("/session/{session_id}/plan")
+async def get_session_plan(
+    session_id: str,
+    ctx: PlatformContext = Depends(get_context),
+) -> dict[str, Any]:
+    _must_get(ctx, session_id)
+    return {"data": repo.get_plan(session_id)}
+
+
 @router.get("/session/{session_id}/form")
 async def list_forms(
     session_id: str, ctx: PlatformContext = Depends(get_context)

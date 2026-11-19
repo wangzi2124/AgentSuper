@@ -197,6 +197,11 @@ def _part_event_to_sse(
                 "delta": str(delta),
             }
         ]
+    if etype == "plan_updated":
+        plan = ev.get("plan")
+        if not isinstance(plan, dict):
+            return []
+        return [{"type": "plan_updated", "agent_id": "plan", "plan": plan}]
     if etype in ("tool_start", "tool_end"):
         agent_id, out = _ensure_agent_started(seen, agents_map, ev)
         step: dict[str, Any] = {

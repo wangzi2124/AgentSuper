@@ -419,6 +419,8 @@ def initial_state(
         "user_id": user_id,
         "task_plan": [],
         "plan_tier": "",
+        "plan_id": "",
+        "plan_revision": 0,
         "current_task_id": "",
         # sub_results 是 `merge_dicts` reducer 通道：直接传 `{}` 只会与上一轮
         # checkpoint 里的结果合并（空字典是 no-op），导致新一轮 synthesize 取到

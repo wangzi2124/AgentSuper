@@ -395,6 +395,21 @@ export interface SessionStatusState {
   next?: number | null
 }
 
+export interface PlanStep {
+  id: string
+  title: string
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled'
+  agent?: string | null
+}
+
+export interface PlanUpdatedData {
+  session_id: string
+  plan_id: string
+  revision: number
+  tier?: string | null
+  steps: PlanStep[]
+}
+
 export interface DurableRef {
   aggregate_id: string
   seq: number
@@ -661,6 +676,7 @@ export interface V2EventDataMap {
   'session.inbox.delivered': InboxDeliveredData
   'session.inbox.cancelled': InboxDeliveredData
   'session.inbox.delivery.changed': InboxDeliveryChangedData
+  'session.plan.updated': PlanUpdatedData
   'session.step.started': StepStartedData
   'session.step.streamed': StepStreamedData
   'session.step.ended': StepEndedData
@@ -725,6 +741,7 @@ export const V2_EVENT_TYPES = [
   'session.inbox.delivered',
   'session.inbox.cancelled',
   'session.inbox.delivery.changed',
+  'session.plan.updated',
   'session.step.started',
   'session.step.streamed',
   'session.step.ended',
@@ -806,6 +823,7 @@ export const DURABLE_EVENT_TYPES: ReadonlySet<V2EventType> = new Set<V2EventType
   'session.inbox.delivered',
   'session.inbox.cancelled',
   'session.inbox.delivery.changed',
+  'session.plan.updated',
   'session.step.started',
   'session.step.streamed',
   'session.step.ended',

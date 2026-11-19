@@ -100,6 +100,7 @@ HTTP / SSE
 - **Ollama prompt 适配**：`models/context_guard.py`，在 `TierModel` 传输层（`raw_invoke/raw_ainvoke/raw_stream`）执行。窗口 = 显式 override > `/api/ps` last-known > `OLLAMA_NUM_CTX`；输出预留 `max(512, 25%×窗口)`，估算裕量 `max(256, 8%×窗口)`；超预算先 `truncate_messages` + `sanitize_tool_messages`，保留 system + 最新 user；system+工具+当前 user 仍装不下时**自动扩展**：按所需最小窗口（2 的幂，上限 32768）随请求下发 `num_ctx`，让 Ollama 重载到更大窗口；只有超过自动上限才抛 `ContextOverflowError`。真实 `prompt_tokens` 按模型 EWMA 校准估算比；一次 overflow 会清窗口缓存、重探、重试一次。`OLLAMA_CONTEXT_GUARD=0` 关闭。
 - **治理**：`BudgetLedger`、`classify_error`、`retry_async`、`redact_secrets`、`ToolSchemaCache`。
 - **Web Chat v2（完成）**：`backend/app/api/v2/` 提供 session/prompt/inbox/message/interrupt/compact/revert/fork/model/agent；`app/session/coordinator.py` 串行 drain durable inbox；`app/events/` 提供全局事件总线与 durable outbox，`GET /api/v2/event` 为 SSE。旧 turn SSE 已删除；轮次快照持久化在 `session_snapshots`。
+- **计划/待办（对齐 opencode）**：`app/session/plan.py` + `session_plans` 持久化计划快照；`graph/nodes/plan.py` 生成 pending 计划，`execution/tools/todo_tools.py::todo_write` 补全/更新计划，`graph/nodes/execute.py::_emit_plan_status` 发每步 `in_progress`/`completed`。统一以 v2 `session.plan.updated` 事件推送（图内节点经 legacy `plan_updated` 转换，`todo_write` 直接 emit），`plan_id/revision` 单调递增，旧 revision 写入/事件被拒；`GET /api/v2/session/{id}/plan` 仅用于 hydrate 快照，SSE 不回放历史；`session.execution.started` 清空旧计划。前端计划卡只在 `steps.length > 1` 时显示。
 - **LiteLLM 调试**：`observability/litellm_debug.py`，默认 `litellm_debug=true`；启动时 `litellm._turn_on_debug()`，日志写 `data/logs/litellm-debug.log`（20MB×3 轮转，`redact_secrets` 过滤）。控制台仍保持 INFO；`LITELLM_DEBUG=0` 关闭。
 - **寒暄/自我介绍**：`filter`/`plan` 对 greeting/thanks/ack/test/intro 做全串锚定；intro 复用 `SELF_INTRO_MAIN`，命中即 `final_output`，零模型调用。不要用“包含介绍”这种宽匹配，避免误伤“介绍这个文件”。
 
@@ -120,6 +121,7 @@ V2ChatView
 - `frontend/src/harness/adapter.ts`：legacy 事件补 `turn_id`，缺 `seq` 保留 undefined。
 - `frontend/src/harness/reducer.ts`：`turn_id + seq` 去重、`step_id` 幂等 upsert、agent/text/permission/error/terminal。
 - `frontend/src/api/v2.ts` + `frontend/src/v2/`：Web Chat v2 前端基础（REST client、单连接 SSE、sessionRuntime、幂等事件 reducer）；`/multi-agent`、`/multi-agent/:id`、`/v2/chat` 已使用 `V2ChatView`，桌面与移动端共用。
+- **计划卡**：`frontend/src/v2/runtime.ts` 的 `LivePlan` + `session.plan.updated` reducer；`v2/sessionStore.hydrate` 通过 `api/v2.ts::getSessionPlan` 恢复 DB 快照；`V2ChatView` 仅多步计划显示卡片，逐步状态来自事件，不进入正文。
 - **本地模型下载（模型管理）**：`ModelManagerView.vue` 的「本地模型」区块 + `stores/localModels.ts`（1.5s 轮询任务，导入完成后刷新模型目录）+ `api/localModels.ts`；聊天选择器通过 `origin=extra` 自动可见。
 - **前端设计文档章节尚未补**；当前以代码与测试为准。
 
@@ -134,7 +136,7 @@ V2ChatView
 - **前端入口**：`/agent-settings`（Agents/命令/策略/指令/引用/配置）与 `/mcp`；导航见 `config/navigation.ts`。
 - **扩展治理**：`references/`（本地/Git 引用，异步 clone）；`net/egress.py`（统一代理/CA/超时）；`harness/warming.py`（空闲保活）；`execution/tools/websearch_policy.py`（provider/随机/429 冷却）；`models/variants.py`（`#variant` 合并）；`models/local_discovery.py`（LM Studio/vLLM）；`extensions/hooks.py`（插件 hook bus）；`execution/tools/patch_tools.py`（unified diff）；`execution/tools/question_tools.py`（`ask_question` durable form）；`execution/uri.py`（`file://#Lx-Ly`）。
 - **明确不做/保留差异**：JS/TS 插件、browser/execute/worktree 工具、`always` 审批、background/native compaction；见 `docs/adr/0002-browser-execute-tools.md`、`docs/adr/0003-js-plugins-and-native-compaction.md`。
-- **新增 API**：`/api/v2/references`、`/api/v2/config`（PATCH/rollback）、`/api/v2/network`、`/api/v2/websearch`、`/v1/chat/completions`。
+- **新增 API**：`/api/v2/references`、`/api/v2/config`（PATCH/rollback）、`/api/v2/network`、`/api/v2/websearch`、`/v1/chat/completions`、`GET /api/v2/session/{id}/plan`（计划快照 hydrate）。
 
 ## 3. 开发命令
 
@@ -198,6 +200,7 @@ npx vitest run tests/integration/
 - 终态：`done`（会话空闲）或 `turn_done`（还有排队轮次）；两者都必须被 store 收尾。
 - `replay_gap`：续流时事件日志已截断，部分历史缺失；前端渲染内联提示，不参与正文。
 - `context_truncated`：Ollama prompt 被裁剪时推送（`window`/`budget`/`reserve`/`estimated_before`/`estimated_after`/`dropped_messages`）；`compat` 透传，前端渲染为时间线内联提示，不进入正文。
+- `session.plan.updated`：durable 计划快照，payload 为 `plan_id` / `revision` / `steps` / `tier`；图内节点经 legacy `plan_updated` 转换，`todo_write` 直接 emit。前端按 `revision` 丢弃旧快照，纯正文流不回放历史；刷新/重连靠 `GET /api/v2/session/{id}/plan` hydrate，新回合 `session.execution.started` 清掉旧计划。
 
 ### 4.2 工具调用
 
@@ -238,7 +241,7 @@ npx vitest run tests/integration/
 - **用户身份**：账号/设备密钥哈希存 `session.db` 的 `auth_users` 表（`storage/schema.py`），不再写 JSON；旧 `auth_users.json` 仅首次访问时一次性导入并删除。
 - **`session_inputs`**：执行中追加任务走 `/api/sessions/{id}/prompts` 队列；旧单数 `/prompt` 已删除。
 - **权限**：无审批通道时 `require_approval` 工具一律拒绝；`.git` 路径永远拒绝；Shell 重定向目标要过写权限。
-- **工具名**：默认 registry 注册的是 `read_file` / `write_file` / `edit_file` / `ls` / `grep` / `glob` / `append_file` / `delete_file` / `create_directory` / `shell_exec` / `task`，以及内置联网/天气 `web_search` / `web_fetch` / `http_request` / `get_weather`；`http_request` 需人工审批。插件工具名以加载器注册结果为准，不要硬编码旧前缀。`backend/plugins` 下的内置插件仍存在，按同名 `.enabled` 文件启用（当前 11 个启用）；与内置工具同名时保留内置工具。`/api/plugins` 路由已挂载，前端「插件管理」页可启停。
+- **工具名**：默认 registry 注册的是 `read_file` / `write_file` / `edit_file` / `ls` / `grep` / `glob` / `append_file` / `delete_file` / `create_directory` / `shell_exec` / `task` / `todo_write`，以及内置联网/天气 `web_search` / `web_fetch` / `http_request` / `get_weather`；`http_request` 需人工审批。插件工具名以加载器注册结果为准，不要硬编码旧前缀。`backend/plugins` 下的内置插件仍存在，按同名 `.enabled` 文件启用（当前 11 个启用）；与内置工具同名时保留内置工具。`/api/plugins` 路由已挂载，前端「插件管理」页可启停。
 - **压缩**：`cognition/compressor.py` 是 canonical；`harness/compression.py` 是统一门面；`harness/compression_agent.py` 是纯摘要 Agent。不要再新增第三套压缩逻辑。
 - **自动压缩/手动 compact**：`ContextHarness` + `tail_snapshot` 语义；手动 compact 也要写 tail 起点。
 - **模型目录**：`models/catalog.py` 读取能力/窗口；`harness/capabilities.build_profile` 有 60s TTL，人工 override 优先。

@@ -104,6 +104,47 @@ describe('v2 runtime reducer', () => {
     expect(runtime.compaction).toBeNull()
   })
 
+  it('stores the latest plan snapshot and ignores stale revisions', () => {
+    let runtime = emptyRuntime('s1')
+    runtime = applyV2Event(runtime, evt('session.plan.updated', {
+      session_id: 's1',
+      plan_id: 'p1',
+      revision: 1,
+      tier: 'serial',
+      steps: [
+        { id: 't1', title: '读取文件', status: 'pending' },
+        { id: 't2', title: '修改文件', status: 'pending' },
+      ],
+    }))
+    expect(runtime.plan).toMatchObject({ plan_id: 'p1', revision: 1, tier: 'serial' })
+    expect(runtime.plan?.steps.map(step => step.title)).toEqual(['读取文件', '修改文件'])
+
+    runtime = applyV2Event(runtime, evt('session.plan.updated', {
+      session_id: 's1',
+      plan_id: 'p1',
+      revision: 1,
+      tier: 'serial',
+      steps: [{ id: 't1', title: '旧快照', status: 'completed' }],
+    }))
+    expect(runtime.plan?.steps[0]?.title).toBe('读取文件')
+
+    runtime = applyV2Event(runtime, evt('session.plan.updated', {
+      session_id: 's1',
+      plan_id: 'p1',
+      revision: 2,
+      tier: 'serial',
+      steps: [
+        { id: 't1', title: '读取文件', status: 'completed' },
+        { id: 't2', title: '修改文件', status: 'in_progress' },
+      ],
+    }))
+    expect(runtime.plan?.revision).toBe(2)
+    expect(runtime.plan?.steps[1]?.status).toBe('in_progress')
+
+    runtime = applyV2Event(runtime, evt('session.execution.started', { session_id: 's1' }))
+    expect(runtime.plan).toBeNull()
+  })
+
   it('drops the optimistic user message when its inbox item is cancelled', () => {
     const runtime = emptyRuntime('s1')
     runtime.messages.push({ type: 'user', id: 'in1', time_created: 1, text: 'hi' })

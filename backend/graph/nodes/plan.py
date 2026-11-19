@@ -11,9 +11,13 @@ import logging
 import re
 from typing import Any, Callable
 
+from app.session import repository as repo
+from app.session.context import current_session_id
+from app.session.plan import new_plan_id, plan_event_data, steps_from_tasks
 from models.router import TierModel, resolve_model
 from prompts.loader import PromptLoader
 
+from ..events import push_event
 from ..tasks import KNOWN_AGENTS, is_explicit_empty_plan, parse_task_specs
 from ..usage import usage_from_result
 from .base import content_text
@@ -169,6 +173,35 @@ def _single(text: str) -> list[dict[str, Any]]:
     return [{"id": "t1", "desc": text or "完成用户请求", "status": "pending"}]
 
 
+def _publish_plan(
+    tasks: list[dict[str, Any]],
+    tier: str,
+    session_id: str = "",
+) -> tuple[str, int]:
+    turn_id = ""
+    try:
+        from harness.kernel import current_turn
+
+        turn = current_turn()
+        if turn is not None:
+            turn_id = turn.turn_id
+    except Exception:
+        turn_id = ""
+    plan_id = new_plan_id(turn_id)
+    current = repo.get_plan(session_id, plan_id) if session_id else None
+    revision = (int(current["revision"]) + 1) if current else 1
+    steps = steps_from_tasks(tasks)
+    if session_id:
+        repo.save_plan(session_id, plan_id, revision, steps, tier)
+    push_event(
+        {
+            "type": "plan_updated",
+            "plan": plan_event_data(session_id, plan_id, revision, steps, tier),
+        }
+    )
+    return plan_id, revision
+
+
 def make_plan_node(
     model: Any | None = None,
     max_tasks: int = MAX_TASKS,
@@ -178,6 +211,7 @@ def make_plan_node(
             return {}
 
         request = _last_user_text(state)
+        session_id = current_session_id() or str(state.get("session_id") or "")
 
         if not _latest_human_has_blocks(state):
             kind = classify_smalltalk(request)
@@ -191,13 +225,27 @@ def make_plan_node(
                 }
 
         if model is None:
-            return {"task_plan": _single(request), "plan_tier": "single"}
+            tasks = _single(request)
+            plan_id, revision = _publish_plan(tasks, "single", session_id)
+            return {
+                "task_plan": tasks,
+                "plan_tier": "single",
+                "plan_id": plan_id,
+                "plan_revision": revision,
+            }
 
         # 三档策略（agent-1.md §2.2）：单任务快速路径**不调模型**。
         # 只有串行分解/并行扇出才需要 medium 模型生成本结构化计划。
         tier = classify_plan_tier(request)
         if tier == "single":
-            return {"task_plan": _single(request), "plan_tier": "single"}
+            tasks = _single(request)
+            plan_id, revision = _publish_plan(tasks, "single", session_id)
+            return {
+                "task_plan": tasks,
+                "plan_tier": "single",
+                "plan_id": plan_id,
+                "plan_revision": revision,
+            }
 
         usage: dict[str, Any] = {}
         raw_content = ""
@@ -226,7 +274,15 @@ def make_plan_node(
                     "plan LLM returned empty plan; fall back to single task: %r",
                     request[:80],
                 )
-            return {"task_plan": _single(request), "plan_tier": "single", "token_usage": usage}
+            tasks = _single(request)
+            plan_id, revision = _publish_plan(tasks, "single", session_id)
+            return {
+                "task_plan": tasks,
+                "plan_tier": "single",
+                "plan_id": plan_id,
+                "plan_revision": revision,
+                "token_usage": usage,
+            }
 
         tasks = [
             {
@@ -241,8 +297,16 @@ def make_plan_node(
             if s.agent in KNOWN_AGENTS
         ]
         if not tasks:
-            return {"task_plan": _single(request), "plan_tier": "single", "token_usage": usage}
+            tasks = _single(request)
+            tier = "single"
+        plan_id, revision = _publish_plan(tasks, tier, session_id)
         # 计划生成成功：携带档位（parallel 需 Step 3 门禁后才会真正扇出）。
-        return {"task_plan": tasks, "plan_tier": tier, "token_usage": usage}
+        return {
+            "task_plan": tasks,
+            "plan_tier": tier,
+            "plan_id": plan_id,
+            "plan_revision": revision,
+            "token_usage": usage,
+        }
 
     return plan_node

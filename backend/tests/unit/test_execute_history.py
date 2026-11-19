@@ -17,7 +17,10 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from app.session import repository as session_repo
 from execution.tool_registry import ToolDefinition, ToolRegistry
+from graph.events import reset_event_queue, set_event_queue
+from graph.nodes import execute as execute_module
 from graph.nodes.execute import _conversation_history, make_execute_node
 from models.router import ChatResult
 
@@ -197,3 +200,116 @@ async def test_attachment_context_injected_into_messages():
     joined = "\n".join(str(m.get("content")) for m in model.calls[0])
     assert "苹果 10 元" in joined
     assert "香蕉 20 元" in joined
+
+
+class _EventQueue:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def put_nowait(self, event: dict) -> None:
+        self.events.append(event)
+
+
+def _plan_state(**extra):
+    state = _state(
+        [HumanMessage(content="执行任务")],
+        session_id="s1",
+        plan_id="plan_1",
+        plan_revision=1,
+        plan_tier="serial",
+    )
+    state.update(extra)
+    return state
+
+
+async def test_execute_emits_plan_progress_events(monkeypatch):
+    stored = {
+        "session_id": "s1",
+        "plan_id": "plan_1",
+        "revision": 1,
+        "tier": "serial",
+        "steps": [
+            {"id": "t1", "title": "读取文件", "status": "pending", "agent": None},
+            {"id": "t2", "title": "总结结果", "status": "pending", "agent": None},
+        ],
+    }
+    monkeypatch.setattr(execute_module.repo, "get_plan", lambda sid, pid=None: stored)
+    monkeypatch.setattr(
+        execute_module.repo,
+        "save_plan",
+        lambda sid, pid, revision, steps, tier=None: (
+            stored.update(revision=revision, steps=steps, tier=tier) or True
+        ),
+    )
+    queue = _EventQueue()
+    token = set_event_queue(queue)
+    try:
+        model = _CaptureModel()
+        node = make_execute_node(model, ToolRegistry(), system_prompt="SYS")
+        out = await node(_plan_state())
+    finally:
+        reset_event_queue(token)
+
+    events = [event for event in queue.events if event.get("type") == "plan_updated"]
+    assert [event["plan"]["revision"] for event in events] == [2, 3]
+    assert [event["plan"]["steps"][0]["status"] for event in events] == [
+        "in_progress",
+        "completed",
+    ]
+    assert events[1]["plan"]["steps"][1]["status"] == "pending"
+    assert out["plan_id"] == "plan_1"
+    assert out["plan_revision"] == 3
+
+
+async def test_execute_progress_uses_latest_todo_revision(monkeypatch):
+    stored = {
+        "session_id": "s1",
+        "plan_id": "plan_1",
+        "revision": 1,
+        "tier": "serial",
+        "steps": [
+            {"id": "t1", "title": "读取文件", "status": "pending", "agent": None},
+            {"id": "t2", "title": "写入报告", "status": "pending", "agent": None},
+        ],
+    }
+    monkeypatch.setattr(execute_module.repo, "get_plan", lambda sid, pid=None: stored)
+    monkeypatch.setattr(
+        execute_module.repo,
+        "save_plan",
+        lambda sid, pid, revision, steps, tier=None: (
+            stored.update(revision=revision, steps=steps, tier=tier) or True
+        ),
+    )
+
+    original_loop = execute_module.run_tool_loop
+
+    async def loop_with_todo_update(*args, **kwargs):
+        result = await original_loop(*args, **kwargs)
+        stored["revision"] = 9
+        stored["steps"] = [
+            {"id": "t1", "title": "读取文件", "status": "in_progress", "agent": None},
+            {"id": "t2", "title": "写入报告", "status": "pending", "agent": None},
+            {"id": "t3", "title": "补充校验", "status": "pending", "agent": "review"},
+        ]
+        return result
+
+    monkeypatch.setattr(execute_module, "run_tool_loop", loop_with_todo_update)
+    queue = _EventQueue()
+    token = set_event_queue(queue)
+    try:
+        model = _CaptureModel()
+        node = make_execute_node(model, ToolRegistry(), system_prompt="SYS")
+        out = await node(_plan_state(plan_revision=20))
+    finally:
+        reset_event_queue(token)
+
+    events = [event for event in queue.events if event.get("type") == "plan_updated"]
+    assert [event["plan"]["revision"] for event in events] == [2, 10]
+    assert [step["title"] for step in events[-1]["plan"]["steps"]] == [
+        "读取文件",
+        "写入报告",
+        "补充校验",
+    ]
+    assert events[-1]["plan"]["steps"][0]["status"] == "completed"
+    assert out["plan_revision"] == 10
+    assert session_repo.get_plan is execute_module.repo.get_plan

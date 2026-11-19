@@ -97,6 +97,21 @@ def default_registry(
         mutating=False,
         parameters=QUESTION_TOOL_PARAMETERS,
     )
+    from execution.tools.todo_tools import (
+        TODO_TOOL_NAME,
+        TODO_TOOL_PARAMETERS,
+        todo_write,
+    )
+
+    registry.register_function(
+        todo_write,
+        name=TODO_TOOL_NAME,
+        description=(todo_write.__doc__ or "").strip(),
+        scope="global",
+        require_approval=False,
+        mutating=False,
+        parameters=TODO_TOOL_PARAMETERS,
+    )
     if with_shell:
         registry.register_function(
             shell_exec,

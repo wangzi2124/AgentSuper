@@ -1,8 +1,14 @@
 """L1 单元测试：计划档位判定（agent-1.md §2.2 / §2.4）。"""
 
+import asyncio
+import json
+
 from langchain_core.messages import HumanMessage
 
+from graph.events import reset_event_queue, set_event_queue
+from graph.nodes import plan as plan_module
 from graph.nodes.plan import classify_plan_tier, make_plan_node
+from models.router import ChatResult
 
 
 def test_short_request_is_single():
@@ -52,6 +58,85 @@ async def test_plan_node_single_skips_model():
             raise AssertionError("single tier must not call model")
 
     node = make_plan_node(_Boom())
-    out = await node({"messages": [HumanMessage(content="列出目录")]})
+    queue: asyncio.Queue = asyncio.Queue()
+    token = set_event_queue(queue)
+    try:
+        out = await node({"messages": [HumanMessage(content="列出目录")]})
+    finally:
+        reset_event_queue(token)
     assert out["plan_tier"] == "single"
     assert out["task_plan"][0]["status"] == "pending"
+    events = [queue.get_nowait() for _ in range(queue.qsize())]
+    plan_events = [event for event in events if event.get("type") == "plan_updated"]
+    assert len(plan_events) == 1
+    plan = plan_events[0]["plan"]
+    assert plan["plan_id"] == "plan_local"
+    assert plan["revision"] == 1
+    assert plan["tier"] == "single"
+    assert [step["title"] for step in plan["steps"]] == ["列出目录"]
+
+
+async def test_plan_node_persists_snapshot_with_session(monkeypatch):
+    stored: dict = {}
+
+    def fake_get_plan(session_id, plan_id=None):
+        return stored.get(plan_id or "") or None
+
+    def fake_save_plan(session_id, plan_id, revision, steps, tier=None):
+        stored[plan_id] = {
+            "session_id": session_id,
+            "plan_id": plan_id,
+            "revision": revision,
+            "tier": tier,
+            "steps": steps,
+        }
+        return True
+
+    monkeypatch.setattr(plan_module, "current_session_id", lambda: "s1")
+    monkeypatch.setattr(plan_module.repo, "get_plan", fake_get_plan)
+    monkeypatch.setattr(plan_module.repo, "save_plan", fake_save_plan)
+
+    node = make_plan_node(None)
+    out = await node({"messages": [HumanMessage(content="列出目录")], "session_id": "s1"})
+
+    assert out["plan_id"] == "plan_local"
+    assert out["plan_revision"] == 1
+    assert stored["plan_local"]["revision"] == 1
+    assert stored["plan_local"]["steps"][0]["title"] == "列出目录"
+
+
+async def test_plan_node_emits_multi_step_plan_event():
+    class _PlanModel:
+        tier = "fake"
+
+        async def ainvoke(self, *a, **k):
+            return ChatResult(
+                content=json.dumps(
+                    [
+                        {"id": "t1", "objective": "读取文件", "agent": "research"},
+                        {"id": "t2", "objective": "修改文件", "agent": "code"},
+                    ],
+                    ensure_ascii=False,
+                ),
+                finish_reason="stop",
+            )
+
+    node = make_plan_node(_PlanModel())
+    queue: asyncio.Queue = asyncio.Queue()
+    token = set_event_queue(queue)
+    try:
+        out = await node({"messages": [HumanMessage(content="先读取文件，然后修改文件")]})
+    finally:
+        reset_event_queue(token)
+
+    events = []
+    while not queue.empty():
+        events.append(queue.get_nowait())
+    plan_events = [event for event in events if event.get("type") == "plan_updated"]
+    assert len(plan_events) == 1
+    plan = plan_events[0]["plan"]
+    assert plan["plan_id"] == "plan_local"
+    assert plan["tier"] == "serial"
+    assert [step["title"] for step in plan["steps"]] == ["读取文件", "修改文件"]
+    assert all(step["status"] == "pending" for step in plan["steps"])
+    assert out["plan_tier"] == "serial"

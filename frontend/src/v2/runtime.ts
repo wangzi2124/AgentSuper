@@ -6,6 +6,7 @@ import type {
   MessagePart,
   MessageV2,
   PermissionRequest,
+  PlanStep,
   SessionInfoV2,
   SessionStatusState,
   StructuredError,
@@ -18,6 +19,13 @@ export interface LiveCompaction {
   status: 'running' | 'completed' | 'failed'
   text: string
   error: string
+}
+
+export interface LivePlan {
+  plan_id: string
+  revision: number
+  tier: string | null
+  steps: PlanStep[]
 }
 
 export interface V2SessionRuntime {
@@ -33,6 +41,7 @@ export interface V2SessionRuntime {
   activeAssistantId: string | null
   /** Live compaction progress for the running turn. */
   compaction: LiveCompaction | null
+  plan: LivePlan | null
   hydrated: boolean
   seenEventIds: string[]
 }
@@ -51,6 +60,7 @@ export function emptyRuntime(id: string): V2SessionRuntime {
     error: null,
     activeAssistantId: null,
     compaction: null,
+    plan: null,
     hydrated: false,
     seenEventIds: [],
   }
@@ -75,6 +85,7 @@ function clone(runtime: V2SessionRuntime): V2SessionRuntime {
     error: runtime.error,
     activeAssistantId: runtime.activeAssistantId,
     compaction: runtime.compaction ? { ...runtime.compaction } : null,
+    plan: runtime.plan ? { ...runtime.plan, steps: runtime.plan.steps.map(step => ({ ...step })) } : null,
     seenEventIds: runtime.seenEventIds.slice(),
   }
 }
@@ -244,6 +255,7 @@ export function applyV2Event(
       next.error = null
       next.activeAssistantId = null
       next.compaction = null
+      next.plan = null
       if (next.info) next.info = { ...next.info, status: 'busy' }
       break
     case 'session.agent.selected':
@@ -449,6 +461,23 @@ export function applyV2Event(
         }),
       ))
       break
+    case 'session.plan.updated': {
+      const current = next.plan
+      if (
+        current
+        && current.plan_id === event.data.plan_id
+        && current.revision >= event.data.revision
+      ) {
+        break
+      }
+      next.plan = {
+        plan_id: event.data.plan_id,
+        revision: event.data.revision,
+        tier: event.data.tier ?? null,
+        steps: event.data.steps.map(step => ({ ...step })),
+      }
+      break
+    }
     case 'session.compaction.started':
       next.compaction = {
         reason: event.data.reason,

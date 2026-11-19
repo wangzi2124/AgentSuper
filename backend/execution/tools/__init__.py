@@ -12,6 +12,7 @@ from .envelope import envelope, unwrap  # noqa: F401
 
 from .file_tools import make_file_tools, register_file_tools
 from .mcp_client import MCPToolClient, register_mcp_tools
+from .todo_tools import TODO_TOOL_NAME, TODO_TOOL_PARAMETERS, make_todo_tools, todo_write
 from .weather_tools import get_weather, register_weather_tools
 from .web_tools import (
     http_request,
@@ -35,4 +36,8 @@ __all__ = [
     "register_weather_tools",
     "MCPToolClient",
     "register_mcp_tools",
+    "TODO_TOOL_NAME",
+    "TODO_TOOL_PARAMETERS",
+    "make_todo_tools",
+    "todo_write",
 ]

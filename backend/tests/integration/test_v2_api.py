@@ -45,6 +45,29 @@ def test_v2_prompt_runs_and_persists_messages(client) -> None:
     assert any(part["type"] == "text" for part in assistant["content"])
 
 
+def test_v2_session_plan_endpoint_returns_latest_snapshot(client) -> None:
+    created = client.post("/api/v2/session", json={"title": "v2 plan"})
+    session_id = created.json()["data"]["id"]
+    empty = client.get(f"/api/v2/session/{session_id}/plan")
+    assert empty.status_code == 200
+    assert empty.json()["data"] is None
+
+    steps = [
+        {"id": "s1", "title": "读取文件", "status": "completed", "agent": None},
+        {"id": "s2", "title": "汇总结果", "status": "pending", "agent": "build"},
+    ]
+    assert repo.save_plan(session_id, "plan_1", 1, steps, "serial") is True
+    response = client.get(f"/api/v2/session/{session_id}/plan")
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "session_id": session_id,
+        "plan_id": "plan_1",
+        "revision": 1,
+        "tier": "serial",
+        "steps": steps,
+    }
+
+
 def test_v2_prompt_accepts_attachment_data(client) -> None:
     created = client.post("/api/v2/session", json={"title": "v2 attach"})
     session_id = created.json()["data"]["id"]

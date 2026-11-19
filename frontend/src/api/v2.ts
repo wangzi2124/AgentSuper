@@ -4,6 +4,7 @@ import type {
   MessageV2,
   ModelRef,
   PermissionRequest,
+  PlanUpdatedData,
   PromptInput,
   SessionInfoV2,
 } from '../contracts/v2'
@@ -76,6 +77,10 @@ export async function listSessions(params: SessionListParams = {}): Promise<Sess
 
 export async function getSession(sessionId: string): Promise<SessionInfoV2> {
   return request(`/session/${encodeURIComponent(sessionId)}`)
+}
+
+export async function getSessionPlan(sessionId: string): Promise<PlanUpdatedData | null> {
+  return request(`/session/${encodeURIComponent(sessionId)}/plan`)
 }
 
 export async function updateSession(
