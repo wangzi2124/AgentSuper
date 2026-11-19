@@ -1291,12 +1291,12 @@ onBeforeUnmount(() => {
         </template>
 
         <template v-else-if="message.type === 'synthetic'">
-          <div class="v2-warning-card" role="status">
+          <!-- <div class="v2-warning-card" role="status">
             <div class="v2-warning-title">
               {{ message.description === 'action_not_executed' ? '操作未执行' : '系统提示' }}
             </div>
             <div class="v2-warning-text">{{ message.text }}</div>
-          </div>
+          </div> -->
         </template>
 
         <template v-else-if="message.type === 'system'">
