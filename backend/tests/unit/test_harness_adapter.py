@@ -173,6 +173,93 @@ def test_repair_tool_args_coerces_stringified_values_and_drops_optional_null():
     }
 
 
+def test_repair_tool_args_strips_wrapped_fence_from_write_file_content():
+    schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"],
+    }
+    repaired, error = repair_tool_args(
+        {
+            "path": "C:/x.java",
+            "content": '```java\npublic class X {}\n```',
+        },
+        schema,
+        tool_name="write_file",
+    )
+    assert error == ""
+    assert repaired["content"] == "public class X {}"
+
+
+def test_repair_tool_args_strips_wrapped_fence_from_edit_file_text_fields():
+    schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "old_text": {"type": "string"},
+            "new_text": {"type": "string"},
+        },
+        "required": ["path", "old_text", "new_text"],
+    }
+    repaired, error = repair_tool_args(
+        {
+            "path": "C:/x.java",
+            "old_text": "```java\nold\n```",
+            "new_text": "```java\nnew\n```",
+        },
+        schema,
+        tool_name="edit_file",
+    )
+    assert error == ""
+    assert repaired["old_text"] == "old"
+    assert repaired["new_text"] == "new"
+
+
+def test_repair_tool_args_strips_wrapped_fence_from_append_and_patch():
+    assert repair_tool_args(
+        {"path": "C:/x.java", "content": "```java\nmore\n```"},
+        {"properties": {"path": {"type": "string"}, "content": {"type": "string"}}},
+        tool_name="append_file",
+    )[0]["content"] == "more"
+    assert repair_tool_args(
+        {"diff": "```diff\n--- a/x.java\n+++ b/x.java\n```"},
+        {"properties": {"diff": {"type": "string"}}},
+        tool_name="apply_patch",
+    )[0]["diff"] == "--- a/x.java\n+++ b/x.java"
+
+
+def test_repair_tool_args_keeps_inner_fence_in_code_file():
+    schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"],
+    }
+    content = "before\n```java\nclass X {}\n```\nafter"
+    repaired, error = repair_tool_args(
+        {"path": "C:/x.java", "content": content},
+        schema,
+        tool_name="write_file",
+    )
+    assert error == ""
+    assert repaired["content"] == content
+
+
+def test_repair_tool_args_keeps_markdown_file_fence():
+    schema = {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"],
+    }
+    fenced = "```python\nprint('ok')\n```"
+    repaired, error = repair_tool_args(
+        {"path": "notes.md", "content": fenced},
+        schema,
+        tool_name="write_file",
+    )
+    assert error == ""
+    assert repaired["content"] == fenced
+
+
 def test_repair_tool_args_rejects_unknown_fields_when_schema_is_closed():
     schema = {
         "type": "object",

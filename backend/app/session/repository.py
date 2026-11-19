@@ -1430,6 +1430,8 @@ def save_plan(
     conn = _get_db()
     now = int(time.time() * 1000)
     try:
+        if conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone() is None:
+            return False
         cur = conn.execute(
             "INSERT INTO session_plans"
             " (session_id, plan_id, revision, tier, steps, time_created, time_updated)"
@@ -1450,6 +1452,8 @@ def save_plan(
         )
         conn.commit()
         return cur.rowcount > 0
+    except sqlite3.IntegrityError:
+        return False
     finally:
         conn.close()
 

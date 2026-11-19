@@ -129,7 +129,7 @@ async def test_structured_fallback_parses_json_with_inner_code_fence():
     )
 
     assert [trace["name"] for trace in out["tool_trace"]] == ["write_file"]
-    assert captured["content"] == "```java\nclass BubbleSort {}\n```"
+    assert captured["content"] == "class BubbleSort {}"
     assert out["text"] == "已写入"
 
 

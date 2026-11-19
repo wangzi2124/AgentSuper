@@ -125,6 +125,37 @@ def _strip_code_fence(text: str) -> str:
     return text
 
 
+_TOOL_TEXT_FIELDS: dict[str, tuple[str, ...]] = {
+    "write_file": ("content",),
+    "append_file": ("content",),
+    "edit_file": ("old_text", "new_text"),
+    "apply_patch": ("diff",),
+}
+_MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".mdx", ".txt"})
+_WRAPPED_FENCE_RE = re.compile(
+    r"^\s*```[^\r\n]*\r?\n(?P<body>.*?)\r?\n```\s*$",
+    re.DOTALL,
+)
+
+
+def _strip_wrapped_tool_fences(parsed: dict[str, Any], tool_name: str) -> dict[str, Any]:
+    fields = _TOOL_TEXT_FIELDS.get(tool_name)
+    if not fields:
+        return parsed
+    path = str(parsed.get("path") or "").strip().lower()
+    if path.endswith(tuple(_MARKDOWN_SUFFIXES)):
+        return parsed
+    repaired = dict(parsed)
+    for field in fields:
+        value = repaired.get(field)
+        if not isinstance(value, str):
+            continue
+        match = _WRAPPED_FENCE_RE.match(value)
+        if match is not None:
+            repaired[field] = match.group("body")
+    return repaired
+
+
 def repair_tool_args(
     parsed: dict[str, Any],
     schema: dict[str, Any] | None,
@@ -132,7 +163,10 @@ def repair_tool_args(
     tool_name: str = "",
 ) -> tuple[dict[str, Any], str]:
     """按工具 schema 做保守 repair；只在 schema 明确时拒绝未知字段。"""
-    if not isinstance(parsed, dict) or not isinstance(schema, dict):
+    if not isinstance(parsed, dict):
+        return parsed, ""
+    parsed = _strip_wrapped_tool_fences(parsed, tool_name)
+    if not isinstance(schema, dict):
         return parsed, ""
     properties = schema.get("properties")
     if not isinstance(properties, dict) or not properties:

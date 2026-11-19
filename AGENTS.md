@@ -242,6 +242,7 @@ npx vitest run tests/integration/
 - **`session_inputs`**：执行中追加任务走 `/api/sessions/{id}/prompts` 队列；旧单数 `/prompt` 已删除。
 - **权限**：无审批通道时 `require_approval` 工具一律拒绝；`.git` 路径永远拒绝；Shell 重定向目标要过写权限。
 - **工具名**：默认 registry 注册的是 `read_file` / `write_file` / `edit_file` / `ls` / `grep` / `glob` / `append_file` / `delete_file` / `create_directory` / `shell_exec` / `task` / `todo_write`，以及内置联网/天气 `web_search` / `web_fetch` / `http_request` / `get_weather`；`http_request` 需人工审批。插件工具名以加载器注册结果为准，不要硬编码旧前缀。`backend/plugins` 下的内置插件仍存在，按同名 `.enabled` 文件启用（当前 11 个启用）；与内置工具同名时保留内置工具。`/api/plugins` 路由已挂载，前端「插件管理」页可启停。
+- **文件内容围栏**：`utils/json_repair.repair_tool_args` 对 `write_file` / `append_file` / `edit_file` / `apply_patch` 的非 Markdown 文本字段整段剥离 ` ``` ` 围栏（模型忽略「文件内容不要包围栏」时的兜底）；`.md` / `.markdown` / `.mdx` / `.txt` 保留原文。不要再新增第二套剥离逻辑。
 - **压缩**：`cognition/compressor.py` 是 canonical；`harness/compression.py` 是统一门面；`harness/compression_agent.py` 是纯摘要 Agent。不要再新增第三套压缩逻辑。
 - **自动压缩/手动 compact**：`ContextHarness` + `tail_snapshot` 语义；手动 compact 也要写 tail 起点。
 - **模型目录**：`models/catalog.py` 读取能力/窗口；`harness/capabilities.build_profile` 有 60s TTL，人工 override 优先。
