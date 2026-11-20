@@ -2,7 +2,7 @@
 opencode 风格全局存储目录(XDG 分层)。
 
 对应 opencode packages/opencode/src/storage/storage.ts:
-  data   -> 持久数据(上传文件、权限白名单、pinned_tools 等)
+  data   -> 持久数据(上传文件、权限白名单等)
   cache  -> 可清理缓存(向量索引缓存、扫描缓存等)
   config -> 用户配置
   state  -> 运行状态(会话、项目命名空间)

@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
-"""自定义工具存储 [token 优化 v6]。
+"""自定义工具存储。
 
-前端「自定义工具」页面的后端支撑:
-  - 脚本型（script）: 用户粘贴的 Python 源码写入 plugins/custom_<name>.py,
-    复用 PluginLoader 的加载/启停/执行链路（tool_* 函数自动变为工具）。
-  - 固定型（pin）  : 用户从前端工具目录中选择已有工具名，写入 data/pinned_tools.json;
-    按需挂载（v5）时这些工具始终挂载 schema，解决"模型看不到工具"的顾虑。
+前端「自定义工具」页面的后端支撑：
+用户粘贴的 Python 源码写入 plugins/custom_<name>.py，
+复用 PluginLoader 的加载/启停/执行链路（tool_* 函数自动变为工具）。
 """
-import json
 import logging
 import re
 from pathlib import Path
@@ -32,17 +29,11 @@ PLUGIN_DESCRIPTION = "{description}"
 
 
 class CustomToolStore:
-    """自定义工具存储：管理脚本型（插件文件）与固定型（pin 列表）。"""
+    """自定义工具存储：管理脚本型插件文件。"""
 
-    def __init__(self, plugins_dir: str = "plugins", pinned_path: str | None = None):
+    def __init__(self, plugins_dir: str = "plugins"):
         self.plugins_dir = Path(plugins_dir)
         self.plugins_dir.mkdir(parents=True, exist_ok=True)
-        if pinned_path is None:
-            from storage.paths import data_path
-
-            pinned_path = str(data_path(None, "pinned_tools.json"))
-        self.pinned_path = Path(pinned_path)
-        self.pinned_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ── 名称净化（防路径穿越 / 非法文件名）──
     @staticmethod
@@ -84,42 +75,6 @@ class CustomToolStore:
         p = self.plugins_dir / f"{_SCRIPT_PREFIX}{slug}.py"
         return p if p.exists() else None
 
-    # ── 固定型 ──
-    def _load_pins(self) -> list:
-        try:
-            return json.loads(self.pinned_path.read_text(encoding="utf-8")).get("pins", [])
-        except Exception:
-            return []
-
-    def _save_pins(self, pins: list) -> None:
-        self.pinned_path.write_text(
-            json.dumps({"pins": pins}, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-    def create_pin(self, tool_name: str, description: str = "") -> dict:
-        pins = self._load_pins()
-        if any(p["tool_name"] == tool_name for p in pins):
-            raise ValueError(f"工具 {tool_name} 已在固定列表中")
-        pin = {"tool_name": tool_name, "description": description or tool_name, "enabled": True}
-        pins.append(pin)
-        self._save_pins(pins)
-        # API/front-end contract is the unified CustomToolItem shape (name/type/...),
-        # not the raw persisted pin record (tool_name/...).
-        return self.get(tool_name) or {
-            "name": tool_name,
-            "type": "pin",
-            "description": description or tool_name,
-            "path": str(self.pinned_path),
-            "enabled": True,
-            "tools": [tool_name],
-        }
-
-    def pinned_tools(self, enabled_only: bool = True) -> List[str]:
-        pins = self._load_pins()
-        if enabled_only:
-            pins = [p for p in pins if p.get("enabled", True)]
-        return [p["tool_name"] for p in pins]
-
     # ── 统一管理 ──
     def list(self) -> List[dict]:
         items: List[dict] = []
@@ -135,15 +90,6 @@ class CustomToolStore:
                 "path": str(p),
                 "enabled": enabled,
                 "tools": self._script_tools(code),
-            })
-        for pin in self._load_pins():
-            items.append({
-                "name": pin["tool_name"],
-                "type": "pin",
-                "description": pin.get("description", pin["tool_name"]),
-                "path": str(self.pinned_path),
-                "enabled": pin.get("enabled", True),
-                "tools": [pin["tool_name"]],
             })
         return items
 
@@ -162,12 +108,6 @@ class CustomToolStore:
             else:
                 ef.unlink(missing_ok=True)
             return True
-        pins = self._load_pins()
-        for pin in pins:
-            if pin["tool_name"] == name:
-                pin["enabled"] = enabled
-                self._save_pins(pins)
-                return True
         return False
 
     def remove(self, name: str) -> bool:
@@ -175,10 +115,5 @@ class CustomToolStore:
         if f:
             f.unlink(missing_ok=True)
             (self.plugins_dir / f"{f.stem}.enabled").unlink(missing_ok=True)
-            return True
-        pins = self._load_pins()
-        kept = [p for p in pins if p["tool_name"] != name]
-        if len(kept) != len(pins):
-            self._save_pins(kept)
             return True
         return False

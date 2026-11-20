@@ -87,7 +87,6 @@ let auth: typeof import('@/api/auth')
 let docs: typeof import('@/api/documents')
 let vectors: typeof import('@/api/vectors')
 let skills: typeof import('@/api/skills')
-let plugins: typeof import('@/api/plugins')
 let sessions: typeof import('@/api/sessions')
 let multiAgent: typeof import('@/api/multiAgent')
 let models: typeof import('@/api/models')
@@ -116,10 +115,10 @@ beforeAll(async () => {
 
   // 3) 安装 fetch 代理 + 加载模块
   installFetchProxy()
-  ;[auth, docs, vectors, skills, plugins, sessions, multiAgent, models,
+  ;[auth, docs, vectors, skills, sessions, multiAgent, models,
     monitor, logs, generated, customTools, permission, voice] = await Promise.all([
     import('@/api/auth'), import('@/api/documents'), import('@/api/vectors'),
-    import('@/api/skills'), import('@/api/plugins'), import('@/api/sessions'),
+    import('@/api/skills'), import('@/api/sessions'),
     import('@/api/multiAgent'), import('@/api/models'), import('@/api/monitor'),
     import('@/api/logs'), import('@/api/generated'), import('@/api/customTools'),
     import('@/api/permission'), import('@/api/voice'),
@@ -378,67 +377,6 @@ describe.skipIf(!RUN)('Skills /api/skills/*', () => {
   it('DELETE /api/skills/{name}（deleteSkill，清理）', async () => {
     await skills.deleteSkill(NAME)
     await expect(skills.getSkill(NAME)).rejects.toBeTruthy()
-  }, T_WRITE)
-})
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 6. Plugins（plugins.ts + 后端独有 status / call）
-// ═══════════════════════════════════════════════════════════════════════════
-describe.skipIf(!RUN)('Plugins /api/plugins/*', () => {
-  let list: any[] = []
-  it('GET /api/plugins/（listPlugins）', async () => {
-    list = await plugins.listPlugins()
-    expect(Array.isArray(list)).toBe(true)
-    expect(list.length).toBeGreaterThan(0)
-  })
-  it('GET /api/plugins/{name}/status（后端独有）', async () => {
-    const target = list[0]
-    const r = await raw('GET', `/api/plugins/${encodeURIComponent(target.name)}/status`)
-    expect(r.ok).toBe(true)
-    expect(typeof (await r.json()).enabled).toBe('boolean')
-  })
-  it('POST /api/plugins/{name}/toggle（开→关还原）', async () => {
-    const target = list.find(p => p.enabled !== undefined) || list[0]
-    const orig = target.enabled
-    await plugins.togglePlugin(target.name, !orig)
-    await plugins.togglePlugin(target.name, orig)
-  }, T_WRITE)
-  it('POST /api/plugins/{name}/call/{fn} 非白名单 → 403', async () => {
-    const r = await raw('POST', '/api/plugins/filesystem/call/tool_ls', { args: {} })
-    expect(r.status).toBe(403)
-  })
-  it('POST /api/plugins/{name}/call/{fn} 白名单（example-plugin/tool_hello，需先启用）', async () => {
-    // example-plugin 默认禁用 → 先启用（对齐 load_all），调用后再还原为禁用
-    const before = list.find(p => p.name === 'example-plugin')
-    const wasEnabled = !!before?.enabled
-    await plugins.togglePlugin('example-plugin', true)
-    try {
-      const r = await raw('POST', '/api/plugins/example-plugin/call/tool_hello', { args: { name: 'apitest' } })
-      expect(r.ok).toBe(true)
-      const j = await r.json()
-      expect(JSON.stringify(j)).toContain('apitest')
-    } finally {
-      if (!wasEnabled) await plugins.togglePlugin('example-plugin', false)
-    }
-  }, T_WRITE)
-  // toggle 触发 refresh_tools 重建图 + 工具走外网（NMC 台风数据）→ 耗时可达数秒，放大超时。
-  it('POST /api/plugins/weather-alert/call/tool_get_typhoon_info（WeatherAlert.vue 直连，非 api/ 包装）', async () => {
-    // 前端 WeatherAlert.vue 直接 fetch 该端点（bug 回归面：直连调用最易漏测）。
-    // 该工具走外网（NMC 台风数据），受限网络下插件内会抛错 → 500；两者都接受。
-    const before = list.find(p => p.name === 'weather-alert')
-    const wasEnabled = before ? !!before.enabled : false
-    await plugins.togglePlugin('weather-alert', true)
-    try {
-      const r = await raw('POST', '/api/plugins/weather-alert/call/tool_get_typhoon_info', { args: {} })
-      expect([200, 500]).toContain(r.status)
-      if (r.status === 200) {
-        expect(typeof (await r.json())).toBe('object')
-      } else {
-        console.warn('[skip] weather-alert 返回 500（外网受限），已容忍')
-      }
-    } finally {
-      if (!wasEnabled) await plugins.togglePlugin('weather-alert', false)
-    }
   }, T_WRITE)
 })
 
@@ -715,15 +653,9 @@ describe.skipIf(!RUN)('Custom tools /api/custom-tools/*', () => {
     '    return "echo:" + str(text)',
     '',
   ].join('\n')
-  let pinnedName = ''
   it('GET /api/custom-tools/（listCustomTools）', async () => {
     const list = await customTools.listCustomTools()
     expect(Array.isArray(list)).toBe(true)
-  })
-  it('GET /api/custom-tools/catalog（getToolCatalog）', async () => {
-    const cat = await customTools.getToolCatalog()
-    expect(Array.isArray(cat)).toBe(true)
-    pinnedName = cat[0]?.name || ''
   })
   it('POST /api/custom-tools/script（createScriptTool）', async () => {
     try { await customTools.deleteCustomTool(NAME) } catch { /* ignore */ }
@@ -733,14 +665,6 @@ describe.skipIf(!RUN)('Custom tools /api/custom-tools/*', () => {
   it('POST /api/custom-tools/{name}/toggle（toggleCustomTool）', async () => {
     await customTools.toggleCustomTool(NAME, false)
     await customTools.toggleCustomTool(NAME, true)
-  })
-  it('POST /api/custom-tools/pin（pinTool，自建自删）', async () => {
-    if (!pinnedName) return
-    // Make the test idempotent: a previous failed run may have left the pin behind.
-    try { await customTools.deleteCustomTool(pinnedName) } catch { /* ignore */ }
-    const pin = await customTools.pinTool({ tool_name: pinnedName, description: 'apitest pin' })
-    expect(pin.name).toBe(pinnedName)
-    await customTools.deleteCustomTool(pinnedName)
   })
   it('DELETE /api/custom-tools/{name}（deleteCustomTool，清理）', async () => {
     await customTools.deleteCustomTool(NAME)

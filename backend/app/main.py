@@ -46,7 +46,6 @@ def _include_app_routers(app: FastAPI) -> None:
         logs as logs_api,
         models as models_api,
         permission as perm_api,
-        plugins as plugins_api,
         skills,
         vectors,
         voice as voice_api,
@@ -64,7 +63,6 @@ def _include_app_routers(app: FastAPI) -> None:
     app.include_router(weather.router, prefix="/api", tags=["Weather"])
     app.include_router(models_api.router, prefix="/api", tags=["Models"])
     app.include_router(voice_api.router, prefix="/api/voice", tags=["Voice"])
-    app.include_router(plugins_api.router, prefix="/api/plugins", tags=["Plugins"])
     app.include_router(logs_api.router)
 
 

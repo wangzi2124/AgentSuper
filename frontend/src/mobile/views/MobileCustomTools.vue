@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useCustomToolsStore } from '../../stores/customTools'
-import { useSkillStore } from '../../stores/skills'
 import type { CustomToolItem } from '../../types/customTools'
 import { showConfirmDialog, showToast } from 'vant'
 
 const store = useCustomToolsStore()
-const skillStore = useSkillStore()
 
 const searchText = ref('')
 const filteredItems = computed(() => {
@@ -19,8 +17,6 @@ const filteredItems = computed(() => {
 
 onMounted(async () => {
   await store.fetchAll()
-  try { await store.fetchCatalog() } catch (e: any) { console.warn('加载工具目录失败:', e?.message || e) }
-  try { await skillStore.fetchAll() } catch (e: any) { console.warn('加载技能计数失败:', e?.message || e) }
 })
 
 // ── 创建脚本型 ──
@@ -51,24 +47,6 @@ async function handleCreateScript() {
   }
 }
 
-// ── 固定型 ──
-const showPinForm = ref(false)
-const pinForm = ref({ tool_name: '', description: '' })
-const pinnedNames = computed(() => new Set(store.items.filter((i) => i.type === 'pin').map((i) => i.name)))
-const pinCandidates = computed(() => store.catalog.filter((t) => !pinnedNames.value.has(t.name)))
-
-async function handlePin() {
-  if (!pinForm.value.tool_name) { showToast('请选择要固定的工具'); return }
-  try {
-    await store.pin({ tool_name: pinForm.value.tool_name, description: pinForm.value.description.trim() })
-    pinForm.value = { tool_name: '', description: '' }
-    showPinForm.value = false
-    showToast('已固定')
-  } catch (err: any) {
-    showToast(err?.message || '固定失败')
-  }
-}
-
 // ── 切换 / 删除 ──
 async function handleToggle(item: CustomToolItem, enabled: boolean) {
   try {
@@ -95,7 +73,6 @@ async function handleDelete(item: CustomToolItem) {
 
     <div class="cta">
       <van-button size="small" plain type="primary" icon="plus" @click="showScriptForm = true">创建脚本工具</van-button>
-      <van-button size="small" plain type="primary" icon="bookmark-o" @click="showPinForm = true">固定已有工具</van-button>
     </div>
 
     <van-loading v-if="store.loading" class="loading" />
@@ -107,7 +84,7 @@ async function handleDelete(item: CustomToolItem) {
         <van-cell
           :class="'t-' + item.type"
           :title="item.name"
-          :label="`${item.type === 'script' ? '🧩' : '📌'} ${item.description || ''} · ${item.tools.join(', ')}`"
+          :label="`🧩 ${item.description || ''} · ${item.tools.join(', ')}`"
           center
         >
           <template #right-icon>
@@ -118,15 +95,6 @@ async function handleDelete(item: CustomToolItem) {
           <div class="swipe-del" @click="handleDelete(item)">删除</div>
         </template>
       </van-swipe-cell>
-    </div>
-
-    <!-- 技能已独立成页（/skills） -->
-    <div class="skills-m">
-      <div class="skills-m-title">⚡ 技能</div>
-      <div class="skills-m-dir">
-        {{ skillStore.skills.length }} 个技能 · 受管库（外部源需手动追加）
-      </div>
-      <van-button size="small" plain type="primary" icon="fire-o" to="/skills">前往技能管理</van-button>
     </div>
 
     <van-popup v-model:show="showScriptForm" round position="bottom" :style="{ height: '80%' }">
@@ -151,28 +119,6 @@ async function handleDelete(item: CustomToolItem) {
       </div>
     </van-popup>
 
-    <van-popup v-model:show="showPinForm" round position="bottom" :style="{ height: '70%' }">
-      <div class="form-panel">
-        <div class="form-title">固定已有工具</div>
-        <van-field v-model="pinForm.description" label="备注" placeholder="选填" />
-        <div class="pin-options">
-          <van-cell
-            v-for="t in pinCandidates"
-            :key="t.name"
-            :title="t.name"
-            :label="t.description || ''"
-            clickable
-            :class="{ active: pinForm.tool_name === t.name }"
-            @click="pinForm.tool_name = t.name"
-          />
-          <van-empty v-if="pinCandidates.length === 0" description="没有可固定的工具" />
-        </div>
-        <div class="form-row">
-          <div style="flex:1"></div>
-          <van-button type="primary" size="small" @click="handlePin">固定</van-button>
-        </div>
-      </div>
-    </van-popup>
   </div>
 </template>
 
@@ -188,11 +134,6 @@ async function handleDelete(item: CustomToolItem) {
 .form-panel :deep(textarea.van-field__control) { min-height: 140px; }
 .form-row { display: flex; align-items: center; gap: 8px; padding: 16px 8px; }
 .row-label { font-size: 14px; color: var(--text); }
-.pin-options { flex: 1; overflow-y: auto; }
-.pin-options :deep(.van-cell.active) { background: var(--primary-soft); }
-.skills-m { padding: 20px 16px 4px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
-.skills-m-title { font-size: 15px; font-weight: 700; color: var(--text); }
-.skills-m-dir { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
 </style>
 
 <style scoped>
@@ -230,11 +171,9 @@ async function handleDelete(item: CustomToolItem) {
 .m-tools :deep(.van-cell__title) { font-size: 14px; font-weight: 600; color: var(--text, #1e293b); }
 .m-tools :deep(.van-cell__label) { font-size: 12px; color: var(--text-secondary, #64748b); }
 
-/* 工具类型语义色：script 粉 / pin 青 */
+/* 工具类型语义色：script 粉 */
 .m-tools :deep(.t-script .van-cell__value .van-switch) { --van-switch-on-background: #ec4899; }
-.m-tools :deep(.t-pin .van-cell__value .van-switch)    { --van-switch-on-background: #06b6d4; }
 .m-tools :deep(.t-script .van-cell__title) { border-left: 3px solid var(--sw-pink, #ec4899); padding-left: 8px; line-height: 1.4; }
-.m-tools :deep(.t-pin .van-cell__title)    { border-left: 3px solid var(--sw-cyan, #06b6d4); padding-left: 8px; line-height: 1.4; }
 .swipe-del { background: linear-gradient(135deg, #ee0a24, #f87171); font-weight: 600; }
 
 /* 表单面板：渐变标题头 + 选中项描边 */
@@ -249,11 +188,5 @@ async function handleDelete(item: CustomToolItem) {
   color: transparent;
 }
 .form-panel { background: var(--surface, #fff); }
-.pin-options :deep(.van-cell.active) {
-  background: var(--primary-soft, rgba(109, 94, 241, 0.10));
-  border: 1px solid var(--primary, #4f46e5);
-  border-radius: 12px;
-}
-.pin-options :deep(.van-cell) { border: 1px solid var(--border, #eef1f6); border-radius: 12px; margin-bottom: 6px; }
 </style>
 

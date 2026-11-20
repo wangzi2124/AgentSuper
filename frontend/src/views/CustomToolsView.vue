@@ -15,17 +15,7 @@ const filteredItems = computed(() => {
 })
 
 onMounted(async () => {
-  // 两个接口互不依赖，并行发起（原先串行 await = 2×RTT 才渲染完）
-  const [listRes, catalogRes] = await Promise.allSettled([
-    store.fetchAll(),
-    store.fetchCatalog(),
-  ])
-  if (catalogRes.status === 'rejected') {
-    console.warn('加载工具目录失败:', (catalogRes.reason as any)?.message || catalogRes.reason)
-  }
-  if (listRes.status === 'rejected') {
-    throw listRes.reason
-  }
+  await store.fetchAll()
 })
 
 const scriptForm = ref({ name: '', description: '', script: '', enabled: true })
@@ -56,26 +46,6 @@ async function handleCreateScript() {
   }
 }
 
-const pinForm = ref({ tool_name: '', description: '' })
-const pinError = ref('')
-
-async function handlePin() {
-  pinError.value = ''
-  if (!pinForm.value.tool_name) {
-    pinError.value = '请选择要固定的工具'
-    return
-  }
-  try {
-    await store.pin({
-      tool_name: pinForm.value.tool_name,
-      description: pinForm.value.description.trim(),
-    })
-    pinForm.value = { tool_name: '', description: '' }
-  } catch (err: any) {
-    pinError.value = err?.message || '固定失败'
-  }
-}
-
 async function handleToggle(item: CustomToolItem, enabled: boolean) {
   try {
     await store.toggle(item.name, !enabled)
@@ -92,26 +62,12 @@ async function handleDelete(item: CustomToolItem) {
     alert(err.message)
   }
 }
-
-const pinnedNames = () => new Set(store.items.filter((i) => i.type === 'pin').map((i) => i.name))
-const pinCandidates = () => {
-  const q = searchText.value.toLowerCase().trim()
-  const candidates = store.catalog.filter((t) => !pinnedNames().has(t.name))
-  if (!q) return candidates
-  return candidates.filter(
-    (t) => t.name.toLowerCase().includes(q) || (t.description && t.description.toLowerCase().includes(q))
-  )
-}
 </script>
 
 <template>
   <div class="page-header">
     <h2>自定义工具</h2>
-    <p>创建脚本工具或固定已有工具，使其 schema 始终挂载（token 优化 v6）</p>
-    <p class="cross-link">
-      Markdown 技能已独立成页，可在聊天框通过 <code>/skills</code> 选择：
-      <RouterLink to="/skills">前往技能管理 →</RouterLink>
-    </p>
+    <p>创建脚本工具，写入 plugins/custom_*.py 并热加载</p>
   </div>
   <div class="page-content tools-wrap">
     <!-- 创建入口 -->
@@ -119,29 +75,11 @@ const pinCandidates = () => {
       <button class="btn btn-primary" @click="showScriptForm = !showScriptForm">
         {{ showScriptForm ? '收起' : '+' }} 创建脚本工具
       </button>
-      <div class="pin-group">
-        <input
-          v-model="searchText"
-          placeholder="搜索工具名称或描述..."
-          class="ctrl"
-        />
-        <select
-          v-model="pinForm.tool_name"
-          class="ctrl"
-          title="选择已有工具固定"
-        >
-          <option value="" disabled>选择已有工具固定</option>
-          <option v-for="t in pinCandidates()" :key="t.name" :value="t.name" :title="t.name + ' — ' + (t.description || '无描述')">
-            {{ t.name.length > 12 ? t.name.slice(0, 12) + '…' : t.name }}{{ t.description ? ' — ' + (t.description.length > 16 ? t.description.slice(0, 16) + '…' : t.description) : '' }}
-          </option>
-        </select>
-      </div>
       <input
-        v-model="pinForm.description"
-        placeholder="固定备注（可选）"
-        class="ctrl desc-input"
+        v-model="searchText"
+        placeholder="搜索工具名称或描述..."
+        class="ctrl"
       />
-      <button class="btn btn-primary" @click="handlePin">固定</button>
     </div>
 
     <!-- 脚本型创建表单 -->
@@ -176,8 +114,6 @@ const pinCandidates = () => {
       </div>
     </div>
 
-    <span v-if="pinError" class="form-error">{{ pinError }}</span>
-
     <!-- 列表 -->
     <div v-if="store.loading" class="loading-wrap">
       <span class="spinner"></span>
@@ -186,7 +122,7 @@ const pinCandidates = () => {
     <div v-else-if="store.items.length === 0" class="empty-state">
       <div class="icon">🧰</div>
       <p>暂无自定义工具</p>
-      <p style="font-size:13px;margin-top:4px;">创建脚本工具或固定已有工具，使其 schema 始终挂载。</p>
+      <p style="font-size:13px;margin-top:4px;">创建脚本工具，写入 plugins/custom_*.py 并热加载。</p>
     </div>
 
     <div v-else class="tool-list">
@@ -194,11 +130,11 @@ const pinCandidates = () => {
         {{ filteredItems.length }} 个自定义工具
       </div>
       <div v-for="item in filteredItems" :key="item.type + ':' + item.name" class="card tool-card">
-        <div class="tool-icon">{{ item.type === 'script' ? '🧩' : '📌' }}</div>
+        <div class="tool-icon">🧩</div>
         <div class="tool-info">
           <div class="tool-title">
             {{ item.name }}
-            <span class="badge type-badge">{{ item.type === 'script' ? 'script' : 'pin' }}</span>
+            <span class="badge type-badge">script</span>
           </div>
           <div class="tool-desc">{{ item.description }}</div>
           <div class="tool-sub">
@@ -226,9 +162,6 @@ const pinCandidates = () => {
 
 <style scoped>
 .tools-wrap { display: flex; flex-direction: column; gap: 16px; }
-.cross-link { font-size: 12.5px; color: var(--text-secondary); margin: 6px 0 0; }
-.cross-link a { color: var(--primary); font-weight: 600; text-decoration: none; }
-.cross-link a:hover { text-decoration: underline; }
 .loading-wrap { display: flex; justify-content: center; padding: 48px; }
 
 .create-bar {
@@ -237,9 +170,7 @@ const pinCandidates = () => {
   gap: 12px;
   flex-wrap: wrap;
 }
-.pin-group { display: flex; gap: 8px; flex: 1; min-width: 200px; max-width: 420px; }
-.pin-group .ctrl { flex: 1; min-width: 0; }
-.desc-input { flex: 1; min-width: 160px; max-width: 240px; }
+.create-bar .ctrl { flex: 1; min-width: 200px; }
 
 .ctrl {
   padding: 9px 12px;

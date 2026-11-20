@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""自定义工具 API [token 优化 v6]。
+"""自定义工具 API。
 
-前端「Skills → 自定义工具」页面的后端接口：
-  - 脚本型：粘贴 Python 源码（含 tool_* 函数）→ 写入 plugins/custom_*.py → 热加载
-  - 固定型：把已有工具 pin 到常驻列表（按需挂载时始终挂载其 schema）
-所有写操作后都会 reload 插件并 refresh_tools（与插件 toggle 同一链路）。
+前端「自定义工具」页面的后端接口：
+  - 粘贴 Python 源码（含 tool_* 函数）→ 写入 plugins/custom_*.py → 热加载
+所有写操作后都会 reload 插件并 sync_plugin_tools。
 """
 import logging
 
@@ -22,11 +21,6 @@ class ScriptRequest(BaseModel):
     description: str = ""
     script: str
     enabled: bool = True
-
-
-class PinRequest(BaseModel):
-    tool_name: str
-    description: str = ""
 
 
 class ToggleRequest(BaseModel):
@@ -61,24 +55,8 @@ async def _reload(request: Request) -> None:
 
 @router.get("/")
 async def list_custom_tools(request: Request):
-    """列出所有自定义工具（脚本型 + 固定型）。"""
+    """列出所有自定义工具（脚本型）。"""
     return _store(request).list()
-
-
-@router.get("/catalog")
-async def tool_catalog(request: Request):
-    """返回当前所有可用工具目录（供前端「固定已有工具」下拉选择）。"""
-    platform = getattr(request.app.state, "platform", None)
-    registry = getattr(platform, "registry", None)
-    if registry is None:
-        return []
-    return [
-        {
-            "name": td.name,
-            "description": (td.description or "")[:120],
-        }
-        for td in registry.definitions()
-    ]
 
 
 @router.post("/script")
@@ -94,25 +72,9 @@ async def create_script(body: ScriptRequest, request: Request):
     return item
 
 
-@router.post("/pin")
-async def create_pin(body: PinRequest, request: Request):
-    """固定一个已有工具：按需挂载时始终保留其 schema。"""
-    require_admin(request)
-    store = _store(request)
-    catalog = {t["name"] for t in await tool_catalog(request)}
-    if body.tool_name.strip() not in catalog:
-        raise HTTPException(status_code=400, detail=f"工具不存在: {body.tool_name}")
-    try:
-        pin = store.create_pin(body.tool_name.strip(), body.description.strip())
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    await _reload(request)
-    return pin
-
-
 @router.post("/{name}/toggle")
 async def toggle_custom(name: str, body: ToggleRequest, request: Request):
-    """启用/禁用自定义工具（脚本型改 .enabled 文件，固定型改 pins 列表）。"""
+    """启用/禁用自定义工具（改 .enabled 文件）。"""
     require_admin(request)
     store = _store(request)
     if not store.toggle(name, body.enabled):
@@ -123,7 +85,7 @@ async def toggle_custom(name: str, body: ToggleRequest, request: Request):
 
 @router.delete("/{name}")
 async def delete_custom(name: str, request: Request):
-    """删除自定义工具（脚本型删文件，固定型删 pin 条目）。"""
+    """删除自定义工具（删脚本与 .enabled 文件）。"""
     require_admin(request)
     store = _store(request)
     if not store.remove(name):

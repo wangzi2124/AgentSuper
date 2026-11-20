@@ -147,13 +147,9 @@ def _do_init(app):
     # diff_full 出「本次改动的文件 + 行数」随 assistant 消息展示（原 /api/snapshot 管理路由已移除）。
     app.state.snapshot = Snapshot(worktree=project.worktree, data_dir=str(_data_dir))
 
-    # [token 优化 v6] 自定义工具存储：脚本型写 plugins/custom_*.py（复用插件加载链路），
-    # 固定型（pin）写 data/pinned_tools.json（按需挂载时始终保留该工具 schema）
+    # 自定义工具存储：脚本型写 plugins/custom_*.py（复用插件加载链路）
     from app.skills.custom_tools import CustomToolStore
-    custom_tools = CustomToolStore(
-        plugins_dir=settings.plugins_dir,
-        pinned_path=str(_data_dir / "pinned_tools.json"),
-    )
+    custom_tools = CustomToolStore(plugins_dir=settings.plugins_dir)
 
     perm_mgr = PermissionManager(
         workspace=str(_base_dir),

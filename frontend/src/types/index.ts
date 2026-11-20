@@ -151,18 +151,6 @@ export interface ChunkListResponse {
   limit: number
 }
 
-// 插件信息
-export interface Plugin {
-  name: string
-  version: string
-  description: string
-  enabled: boolean
-  module_path?: string
-  functions?: string[]
-  /** 插件详情页/斜杠面板用的完整说明正文 */
-  content?: string
-}
-
 // 生成的文件信息
 export interface GeneratedFile {
   filename: string
