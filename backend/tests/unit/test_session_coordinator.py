@@ -246,48 +246,6 @@ async def test_action_not_executed_persists_warning_without_duplicate_session_id
     assert written[0][3]["description"] == "action_not_executed"
 
 
-async def test_execution_failure_persists_synthetic_error_message(env, monkeypatch):
-    import app.session.repository as repository
-
-    written: list[tuple] = []
-
-    def fake_upsert(session_id, message_id, msg_type, data):  # noqa: ANN001
-        written.append((session_id, message_id, msg_type, data))
-
-    monkeypatch.setattr(repository, "upsert_message", fake_upsert)
-
-    coord = ExecutionCoordinator(env.ctx)
-    sid = "ses_failed"
-
-    async def run_item_raises(_sid, item):  # noqa: ANN001
-        raise RuntimeError("模型调用失败: 404 model not found")
-
-    coord._run_item = run_item_raises
-    env.repo.pending = [_item("in_7")]
-
-    await coord.wake(sid)
-    await _wait_idle(coord, sid)
-
-    assert len(written) == 1
-    wsid, wmsg_id, wtype, wdata = written[0]
-    assert wsid == sid
-    assert wmsg_id == "in_7_execution_error"
-    assert wtype == "synthetic"
-    assert wdata["description"] == "execution_error"
-    assert "404 model not found" in wdata["text"]
-    assert wdata["metadata"]["warning_id"] == "in_7_execution_error"
-    assert wdata["metadata"]["error"]["message"]
-
-    assert "session.synthetic" in env.events
-    synthetic = next(
-        data for event_type, data, _ in env.payloads if event_type == "session.synthetic"
-    )
-    assert synthetic["description"] == "execution_error"
-    assert synthetic["metadata"]["warning_id"] == "in_7_execution_error"
-    assert "session.execution.failed" in env.events
-    assert (sid, "idle", "failed") in env.repo.statuses
-
-
 async def test_plan_updated_legacy_event_is_published_to_v2(env):
     sess = SimpleNamespace(user_id="user", model=None, tokens={}, cost=0.0)
     env.ctx.sessions.get = lambda _sid: sess

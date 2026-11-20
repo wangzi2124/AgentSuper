@@ -82,12 +82,9 @@ class ExecutionCoordinator:
         seen = self._wake_seq.get(session_id, 0)
         interrupted = False
         action_not_executed = False
-        active_item_id = ""
         try:
             while True:
                 item = repo.promote_next(session_id)
-                if item is not None:
-                    active_item_id = str(item.get("id") or "")
                 if item is None:
                     # 与 wake/任务注销共用一个临界区：若期间有新唤醒，继续 drain 而不是退出。
                     async with self._lock:
@@ -113,10 +110,6 @@ class ExecutionCoordinator:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("v2 execution failed: %s", session_id, exc_info=True)
-            try:
-                await self._persist_execution_error(session_id, active_item_id, exc)
-            except Exception:  # noqa: BLE001 - 尽力而为，绝不影响回合收尾
-                logger.warning("持久化执行失败事件失败: %s", session_id, exc_info=True)
             await emit_event(
                 self.ctx,
                 "session.execution.failed",
@@ -162,43 +155,6 @@ class ExecutionCoordinator:
                         self._tasks[session_id] = asyncio.create_task(
                             self._drain(session_id)
                         )
-
-    async def _persist_execution_error(
-        self, session_id: str, item_id: str, exc: BaseException
-    ) -> None:
-        """把执行失败写成持久 synthetic 消息（时间线可见、刷新/重连可达）。
-
-        与 ``action_not_executed`` 的 warning 同一套机制：写 ``session_messages``
-        真相源 + emit ``session.synthetic``。错误文案做 friendly 化并限长，不把
-        LiteLLM 的完整 traceback 倒给用户；原始异常仍保留在日志里。
-        """
-        from . import repository as repo
-        from app.events.emitter import emit_event
-        from harness.errors import classify_error
-
-        err = classify_error(exc)
-        message_id = f"{item_id or session_id}_execution_error"
-        text = f"执行失败：{str(err)}"
-        if len(text) > 800:
-            text = text[:800] + "…"
-        data = {
-            "text": text,
-            "description": "execution_error",
-            "metadata": {
-                "warning_id": message_id,
-                "error": err.to_dict(),
-            },
-        }
-        try:
-            repo.upsert_message(session_id, message_id, "synthetic", data)
-        except Exception:  # noqa: BLE001 - 落库失败不应盖掉原始异常的处理流程
-            logger.warning("持久化执行失败消息失败: %s", session_id, exc_info=True)
-        await emit_event(
-            self.ctx,
-            "session.synthetic",
-            {"session_id": session_id, **data},
-            session_id=session_id,
-        )
 
     async def _reset_idle(self, session_id: str) -> None:
         """取消（shutdown/close）时把会话状态归零，避免永久卡在 busy。"""
