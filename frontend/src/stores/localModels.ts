@@ -26,6 +26,10 @@ export const useLocalModelsStore = defineStore('localModels', () => {
   const source = ref('auto')
   const results = ref<HubModel[]>([])
   const searching = ref(false)
+  const loadingMore = ref(false)
+  const page = ref(1)
+  const hasMore = ref(false)
+  const activeSource = ref('auto')
   const repo = ref<HubModel | null>(null)
   const files = ref<HubFile[]>([])
   const filesLoading = ref(false)
@@ -62,15 +66,47 @@ export const useLocalModelsStore = defineStore('localModels', () => {
     searching.value = true
     error.value = ''
     results.value = []
+    page.value = 1
+    hasMore.value = false
+    activeSource.value = source.value
     repo.value = null
     files.value = []
     selectedFile.value = ''
     try {
-      results.value = await searchHubModels(q, source.value, 20)
+      const res = await searchHubModels(q, source.value, 20, 1)
+      results.value = res.models
+      page.value = res.page
+      hasMore.value = res.hasMore
+      if (res.source) activeSource.value = res.source
     } catch (e) {
       setError(e)
     } finally {
       searching.value = false
+    }
+  }
+
+  async function loadMore() {
+    const q = query.value.trim()
+    if (!q || !hasMore.value || searching.value || loadingMore.value) return
+    loadingMore.value = true
+    error.value = ''
+    try {
+      const next = page.value + 1
+      const res = await searchHubModels(q, activeSource.value, 20, next)
+      const seen = new Set(results.value.map(m => `${m.source}/${m.id}`))
+      for (const m of res.models) {
+        const key = `${m.source}/${m.id}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          results.value.push(m)
+        }
+      }
+      page.value = res.page
+      hasMore.value = res.hasMore && res.models.length > 0
+    } catch (e) {
+      setError(e)
+    } finally {
+      loadingMore.value = false
     }
   }
 
@@ -195,9 +231,10 @@ export const useLocalModelsStore = defineStore('localModels', () => {
   }
 
   return {
-    endpoints, priority, query, source, results, searching, repo, files, filesLoading,
+    endpoints, priority, query, source, results, searching, loadingMore, page, hasMore,
+    activeSource, repo, files, filesLoading,
     selectedFile, selectedEntry, jobs, activeJobs, busyId, error,
-    init, search, openRepo, startDownload, refreshJobs, cancel, retry, remove,
+    init, search, loadMore, openRepo, startDownload, refreshJobs, cancel, retry, remove,
     startPolling, stopPolling,
   }
 })

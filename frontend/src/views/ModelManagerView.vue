@@ -603,6 +603,20 @@ function removeJob(job: LocalDownloadJob) {
           </div>
         </div>
 
+        <div v-if="lm.results.length" class="lm-more">
+          <span class="mm-count">第 {{ lm.page }} 页 · 已加载 {{ lm.results.length }} 个模型</span>
+          <button
+            v-if="lm.hasMore"
+            class="btn btn-sm lm-more-btn"
+            :disabled="lm.loadingMore"
+            @click="lm.loadMore()"
+          >
+            <span v-if="lm.loadingMore" class="spinner-mm"></span>
+            {{ lm.loadingMore ? '加载中…' : '加载更多' }}
+          </button>
+          <span v-else class="hint">已加载全部结果</span>
+        </div>
+
         <div v-if="lm.repo" ref="filesPanel" class="lm-files">
           <div class="lm-files-head">
             <strong>{{ lm.repo.id }}</strong>
@@ -1116,6 +1130,8 @@ function removeJob(job: LocalDownloadJob) {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.lm-more { display: flex; align-items: center; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+.lm-more-btn { display: inline-flex; align-items: center; gap: 6px; }
 .lm-table .mm-th, .lm-table .mm-tr { grid-template-columns: 2.4fr 0.7fr 0.8fr 0.9fr; min-width: 620px; }
 .lm-file-table .mm-th, .lm-file-table .mm-tr { grid-template-columns: 2.6fr 0.8fr 0.7fr 0.5fr; min-width: 620px; }
 .lm-file-row { cursor: pointer; }
