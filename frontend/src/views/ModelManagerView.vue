@@ -100,7 +100,16 @@ const providerForm = reactive<{ name: string; label: string; api_base: string; a
   package: '', litellm_prefix: '', compatibility: '', timeout: '', headers: '', body: '',
 })
 const providerPresetId = ref('')
+const presetQuery = ref('')
 const presetList = computed(() => mm.presets || [])
+const filteredPresetList = computed(() => {
+  const q = presetQuery.value.trim().toLowerCase()
+  if (!q) return presetList.value
+  return presetList.value.filter(p =>
+    [p.id, p.label, p.name, p.group, p.type, p.api_base, p.litellm_prefix, p.note]
+      .some(value => (value || '').toLowerCase().includes(q)),
+  )
+})
 const presetGroupOptions = computed(() => presetGroups(presetList.value))
 const presetTypeOptions = computed(() => {
   const types = presetTypes(presetList.value)
@@ -473,16 +482,25 @@ function removeJob(job: LocalDownloadJob) {
         <div class="form-title">
           供应商字典
           <span v-if="mm.presetsLoading" class="spinner-mm mm-refresh-spin" title="加载中"></span>
-          <button class="btn btn-primary mm-title-action" @click="openPresetForm()">+ 新增供应商</button>
-          <button class="btn mm-title-action" :disabled="!!mm.presetBusyId" @click="resetPresetList">恢复默认</button>
+          <div class="mm-title-actions">
+            <button class="btn" :disabled="!!mm.presetBusyId" @click="resetPresetList">恢复默认</button>
+            <button class="btn btn-primary" @click="openPresetForm()">+ 添加供应商</button>
+          </div>
         </div>
         <p class="hint">字典决定「新增 Provider」时自动填入的前缀、接口类型、api_base 与 litellm 路由前缀；修改字典不影响已有 Provider。</p>
-        <div v-if="!presetList.length" class="empty-tip">{{ mm.presetsLoading ? '字典加载中…' : '暂无字典项，请新增或恢复默认' }}</div>
+        <div class="mm-list-toolbar">
+          <label class="mm-search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input v-model="presetQuery" placeholder="按名称 / ID / 类型检索供应商字典…" />
+          </label>
+          <span class="mm-count">{{ filteredPresetList.length }} / {{ presetList.length }}</span>
+        </div>
+        <div v-if="!filteredPresetList.length" class="empty-tip">{{ presetQuery ? '未找到匹配的供应商字典项' : (mm.presetsLoading ? '字典加载中…' : '暂无字典项，请添加或恢复默认') }}</div>
         <div class="mm-table preset-table">
-          <div v-if="presetList.length" class="mm-th">
+          <div v-if="filteredPresetList.length" class="mm-th">
             <span>名称 / ID</span><span>分组 / 前缀</span><span>接口类型</span><span>api_base</span><span class="mm-ops">操作</span>
           </div>
-          <div v-for="p in presetList" :key="p.id" class="mm-tr">
+          <div v-for="p in filteredPresetList" :key="p.id" class="mm-tr">
             <span class="mm-main">{{ p.label }} <small class="mm-mono">{{ p.id }}</small></span>
             <span>{{ PRESET_GROUP_LABELS[p.group] || p.group }} / <code>{{ p.name || '—' }}</code></span>
             <span>{{ p.type }}</span>
@@ -936,6 +954,7 @@ function removeJob(job: LocalDownloadJob) {
 .mm-pill-caption { font-size: 12px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
 .mm-defaults-hint { margin: 8px 0 0; }
 .mm-title-action { margin-left: auto; }
+.mm-title-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .mm-save-btn { display: inline-flex; align-items: center; gap: 6px; }
 .mm-save-btn:disabled { cursor: not-allowed; }
 .spinner-mm {
