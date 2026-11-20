@@ -288,7 +288,6 @@ async def stream_chat(
         max_tokens=max_tokens,
         timeout=timeout,
         num_retries=num_retries,
-        cache_prompt=True,
         **extra,
     )
 

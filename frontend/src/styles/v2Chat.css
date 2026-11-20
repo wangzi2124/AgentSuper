@@ -80,6 +80,15 @@
   margin-top: 4px;
   font-size: 13px;
   line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.v2-warning-card--error {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+.v2-warning-card--error .v2-warning-title {
+  color: var(--danger);
 }
 .v2-messages {
   flex: 1;

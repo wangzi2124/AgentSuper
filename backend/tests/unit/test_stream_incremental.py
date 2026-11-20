@@ -107,3 +107,26 @@ async def test_interrupted_stream_does_not_replay_text(monkeypatch):
     # replay the full answer on top of it.
     assert seen == ["你"]
     assert result.content == "你完整回答"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_never_passes_cache_prompt_to_provider(monkeypatch):
+    """Google/Gemini rejects unknown ``cache_prompt``; provider caching is handled
+    per-provider in models.cache_hints / runtime._merge_cache_hints instead.
+    """
+    captured: dict[str, object] = {}
+
+    class _Done:
+        def __aiter__(self):
+            async def gen():
+                yield _chunk(content="ok", finish_reason="stop")
+
+            return gen()
+
+    async def fake_acompletion(**kwargs):
+        captured.update(kwargs)
+        return _Done()
+
+    monkeypatch.setattr(stream_mod.litellm, "acompletion", fake_acompletion)
+    await stream_chat([{"role": "user", "content": "hi"}], model="google/gemini-2.5-flash")
+    assert "cache_prompt" not in captured

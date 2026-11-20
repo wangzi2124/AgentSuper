@@ -198,6 +198,28 @@ describe('v2 runtime reducer', () => {
     expect(runtime.error).toBeNull()
   })
 
+  it('adds a durable execution-error synthetic message with a stable id', () => {
+    let runtime = emptyRuntime('s1')
+    runtime = applyV2Event(runtime, evt('session.synthetic', {
+      session_id: 's1',
+      text: '执行失败：模型调用失败 404',
+      description: 'execution_error',
+      metadata: { warning_id: 'in_7_execution_error', error: { type: 'unknown' } },
+    }, 'evt_1'))
+    const card = runtime.messages[0]
+    expect(card?.type).toBe('synthetic')
+    expect(card?.id).toBe('in_7_execution_error')
+    expect((card as { description?: string }).description).toBe('execution_error')
+
+    runtime = applyV2Event(runtime, evt('session.synthetic', {
+      session_id: 's1',
+      text: '执行失败：模型调用失败 404',
+      description: 'execution_error',
+      metadata: { warning_id: 'in_7_execution_error' },
+    }, 'evt_2'))
+    expect(runtime.messages).toHaveLength(1)
+  })
+
   it('surfaces action-not-executed warnings with stable ids', () => {
     let runtime = emptyRuntime('s1')
     runtime = applyV2Event(runtime, evt('session.synthetic', {
