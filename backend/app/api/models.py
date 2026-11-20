@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from app.api.deps import require_admin
 from app.api.responses import fail, ok
 from models import catalog
+from models import presets
 from models.deepseek_tokenizer import count_messages_tokens, count_or_estimate, tokenizer_available
 
 router = APIRouter()
@@ -55,6 +56,47 @@ async def get_models_config():
         "voice_model_size": catalog.voice_model_size(),
         "source_path": str(catalog.catalog_db_path()),
     })
+
+
+@router.get("/models/presets", dependencies=[Depends(require_admin)])
+async def get_presets():
+    items = await run_in_threadpool(presets.list_presets)
+    return ok({"presets": items, "source_path": str(presets.presets_path())})
+
+
+@router.post("/models/presets", dependencies=[Depends(require_admin)])
+async def create_preset(req: Request):
+    body = await req.json()
+    try:
+        entry = await run_in_threadpool(presets.upsert_preset, body)
+    except ValueError as e:
+        return fail(message=str(e))
+    items = await run_in_threadpool(presets.list_presets)
+    return ok({"preset": entry, "presets": items})
+
+
+@router.put("/models/presets/{pid}", dependencies=[Depends(require_admin)])
+async def update_preset(pid: str, req: Request):
+    body = await req.json()
+    try:
+        entry = await run_in_threadpool(presets.upsert_preset, body, pid)
+    except ValueError as e:
+        return fail(message=str(e))
+    items = await run_in_threadpool(presets.list_presets)
+    return ok({"preset": entry, "presets": items})
+
+
+@router.delete("/models/presets/{pid}", dependencies=[Depends(require_admin)])
+async def delete_preset(pid: str):
+    removed = await run_in_threadpool(presets.remove_preset, pid)
+    items = await run_in_threadpool(presets.list_presets)
+    return ok({"removed": removed, "presets": items})
+
+
+@router.post("/models/presets/reset", dependencies=[Depends(require_admin)])
+async def reset_presets_route():
+    items = await run_in_threadpool(presets.reset_presets)
+    return ok({"presets": items})
 
 
 @router.get("/models/show", dependencies=[Depends(require_admin)])

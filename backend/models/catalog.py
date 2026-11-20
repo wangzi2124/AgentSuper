@@ -33,6 +33,18 @@ from models.builtin_catalog import ZERO_COST as _ZERO_COST            # noqa: F8
 _PROVIDER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _PROVIDER_LABEL_MAX_LEN = 50
 
+# litellm 不认识 `google/` 前缀（provider_list 只有 `gemini`），但历史配置与
+# prompts/loader.py 的 profile 映射都把 `google` 当合法 provider。运行时按端点改写：
+# - Google Gemini 的 OpenAI 兼容端点（.../v1beta/openai）→ `openai/{model}`（/chat/completions）
+# - 其它（Google 原生 API / 未指定 base）→ `gemini/{model}`（litellm 原生 Gemini adapter）
+_LITELLM_PROVIDER_ALIASES = {"google": "gemini"}
+_OPENAI_COMPAT_BASE_SUFFIXES = ("/v1beta/openai", "/openai")
+
+
+def _is_openai_compatible_base(api_base: Optional[str]) -> bool:
+    base = str(api_base or "").strip().rstrip("/").lower()
+    return base.endswith(_OPENAI_COMPAT_BASE_SUFFIXES)
+
 # 目录条目来源（`origin` 字段）：模型管理页「模型列表」只展示 override/extra/provider。
 #   builtin  —— 内置目录（含 DB kind='builtin' 物化副本）
 #   override —— 用户编辑过的内置条目（含重新添加内置 ID）
@@ -748,6 +760,7 @@ def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
         "timeout",
         "headers",
         "body",
+        "litellm_prefix",
     ):
         if k in data and data[k] is not None:
             entry[k] = data[k]
@@ -769,6 +782,15 @@ def upsert_provider(name: str, data: dict[str, Any]) -> dict[str, Any]:
     if len(label) > _PROVIDER_LABEL_MAX_LEN:
         raise ValueError(f"Provider Label 最长 {_PROVIDER_LABEL_MAX_LEN} 个字符")
     entry["label"] = label
+    # litellm_prefix：服务商预设写入的强制路由前缀（如 openai），让自定义前缀
+    # 只做模型 ID 命名空间，不必是 litellm 认识的名字。空值 = 不改写（存量行为）。
+    forced_prefix = str(entry.get("litellm_prefix") or "").strip().lower()
+    if forced_prefix:
+        if not _PROVIDER_NAME_RE.fullmatch(forced_prefix):
+            raise ValueError("Provider litellm_prefix 只能包含小写字母、数字、下划线和连字符")
+        entry["litellm_prefix"] = forced_prefix
+    else:
+        entry.pop("litellm_prefix", None)
     entry.setdefault("api_key", "")
     entry.setdefault("enabled", True)
     entry.setdefault("api_base", "")
@@ -1102,8 +1124,13 @@ def probe_provider_models(provider_name: str, api_base: str, api_key: str,
         # 兼容 api_base 已带 /v1 的写法（OpenAI 兼容地址通常就是 <host>/v1，前端占位符
         # 就是 http://127.0.0.1:8001/v1）：先去掉尾部 /v1 再拼 /v1/models，否则会请求
         # <host>/v1/v1/models → 404 → 新增 Provider 后模型永远不自动注册（"模型数"恒 0）。
-        norm = base[:-3] if base.lower().endswith("/v1") else base
-        url = norm + "/v1/models"
+        # Google Gemini 的 OpenAI 兼容端点例外：<host>/v1beta/openai/models 没有 /v1，
+        # 按通用规则会拼成 <host>/v1beta/openai/v1/models → 404（模型数恒 0 的 bug）。
+        if _is_openai_compatible_base(base):
+            url = base + "/models"
+        else:
+            norm = base[:-3] if base.lower().endswith("/v1") else base
+            url = norm + "/v1/models"
         req = urllib.request.Request(url, headers={"User-Agent": "agentsuper/0.1",
                                                    **(dict({"Authorization": f"Bearer {api_key}"}) if api_key else {})})
         with urllib.request.urlopen(req, timeout=_probe_timeout()) as resp:
@@ -1421,6 +1448,20 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
             "provider_type": _provider_type(reg),
             "options": options,
         }
+        # 服务商预设写入的强制路由前缀优先：模型 ID 前缀只做命名空间（如
+        # `zhipu/glm-4`），实际 litellm 调用统一走 `openai/glm-4` 兼容端点。
+        # 存量配置没有该字段时保持原行为；`google` 别名继续兼容历史配置。
+        forced = str(reg.get("litellm_prefix") or "").strip()
+        if forced and _provider_type(reg) == "openai":
+            bare = mid.split("/", 1)[1] if "/" in mid else mid
+            result["litellm_model"] = f"{forced}/{bare}"
+        elif provider in _LITELLM_PROVIDER_ALIASES and _provider_type(reg) == "openai":
+            bare = mid.split("/", 1)[1] if "/" in mid else mid
+            alias = (
+                "openai" if _is_openai_compatible_base(result["api_base"])
+                else _LITELLM_PROVIDER_ALIASES[provider]
+            )
+            result["litellm_model"] = f"{alias}/{bare}"
         _merge_provider_extras(reg, result)
         return result
     return {"api_base": get_settings().llm_api_base, "api_key": get_settings().llm_api_key,
@@ -1579,7 +1620,7 @@ def provider_models_source() -> list[dict[str, Any]]:
                  "type": _provider_type(p),
                  "models": models}
         # 回传表单可编辑的扩展字段（编辑表单回填依赖；缺失会让已保存值看起来丢失）
-        for key in ("package", "compatibility", "timeout", "headers", "body"):
+        for key in ("package", "litellm_prefix", "compatibility", "timeout", "headers", "body"):
             if p.get(key) not in (None, ""):
                 entry[key] = p[key]
         out.append(entry)

@@ -72,13 +72,31 @@ export interface ProviderInfo {
   api_base: string
   api_key: string
   enabled: boolean
-  type?: 'openai' | 'ollama'
+  type?: string
   package?: string
+  litellm_prefix?: string
   compatibility?: string
   timeout?: number
   headers?: Record<string, string>
   body?: Record<string, unknown>
   models: ModelInfo[]
+}
+
+export interface ProviderPreset {
+  id: string
+  group: string
+  label: string
+  name: string
+  type: string
+  api_base: string
+  package: string
+  litellm_prefix: string
+  note?: string
+}
+
+export interface ProviderPresetList {
+  presets: ProviderPreset[]
+  source_path: string
 }
 
 export interface ModelManagerConfig {
@@ -147,6 +165,32 @@ export async function saveProvider(name: string, data: Partial<ProviderInfo>): P
 
 export async function deleteProvider(name: string): Promise<{ removed: boolean }> {
   return apiRequest(`/api/models/providers/${encodeURIComponent(name)}`, { method: 'DELETE' }, true)
+}
+
+export async function fetchProviderPresets(): Promise<ProviderPresetList> {
+  return apiRequest<ProviderPresetList>('/api/models/presets', { method: 'GET' }, true)
+}
+
+export async function saveProviderPreset(
+  data: Partial<ProviderPreset> & { id: string },
+  isEdit: boolean,
+): Promise<ProviderPreset> {
+  const url = isEdit
+    ? `/api/models/presets/${encodeURIComponent(data.id)}`
+    : '/api/models/presets'
+  return apiRequest<ProviderPreset>(url, {
+    method: isEdit ? 'PUT' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  }, true)
+}
+
+export async function deleteProviderPreset(id: string): Promise<{ removed: boolean }> {
+  return apiRequest(`/api/models/presets/${encodeURIComponent(id)}`, { method: 'DELETE' }, true)
+}
+
+export async function resetProviderPresets(): Promise<{ presets: ProviderPreset[] }> {
+  return apiRequest('/api/models/presets/reset', { method: 'POST' }, true)
 }
 
 export async function saveDefaults(

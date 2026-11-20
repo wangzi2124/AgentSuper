@@ -3,13 +3,18 @@ import { computed, ref } from 'vue'
 import {
   deleteCustomModel,
   deleteProvider,
+  deleteProviderPreset,
   fetchModelsConfig,
+  fetchProviderPresets,
+  resetProviderPresets,
   saveCustomModel,
   saveDefaults,
   saveProvider,
+  saveProviderPreset,
   type ModelInfo,
   type ModelManagerConfig,
   type ModelOption,
+  type ProviderPreset,
 } from '../api/models'
 import { useMultiAgentStore } from './multiAgent'
 import { loadModelCache, saveModelCache } from '../api/model-cache'
@@ -19,12 +24,15 @@ import { chatSelectableModels } from '../utils/modelOrigin'
 // 写操作直落后端 data/model_catalog.db（SQLite，旧 JSON 首启自动导入后仅作备份）并即时刷新多 Agent 选择器。
 export const useModelManagerStore = defineStore('modelManager', () => {
   const config = ref<ModelManagerConfig | null>(null)
+  const presets = ref<ProviderPreset[]>([])
+  const presetsLoading = ref(false)
   const loading = ref(false)
   const saving = ref(false)
   // 写后静默刷新期间的轻量"刷新中"指示（列表区小 spinner，不整页闪）
   const refreshing = ref(false)
   // 正在执行删除/更新的行 id（Provider 用 name），驱动该行按钮 loading
   const busyId = ref<string | null>(null)
+  const presetBusyId = ref<string | null>(null)
   const error = ref('')
   const notice = ref('')
   let _noticeTimer: ReturnType<typeof setTimeout> | null = null
@@ -42,9 +50,22 @@ export const useModelManagerStore = defineStore('modelManager', () => {
     _errorTimer = setTimeout(() => { error.value = '' }, 6000)
   }
 
+  async function loadPresets() {
+    presetsLoading.value = true
+    try {
+      const data = await fetchProviderPresets()
+      presets.value = data.presets || []
+    } catch {
+      presets.value = []
+    } finally {
+      presetsLoading.value = false
+    }
+  }
+
   async function load(showError = true, showLoading = true) {
     if (showLoading) loading.value = true
     error.value = ''
+    void loadPresets()
     try {
       config.value = await fetchModelsConfig()
       // 成功后同步本地快照（含 providers/source_path），供离线/重启兜底
@@ -127,7 +148,7 @@ export const useModelManagerStore = defineStore('modelManager', () => {
     }
   }
 
-  async function updateProvider(name: string, data: Partial<{ label: string; api_base: string; api_key: string; enabled: boolean; type: 'openai' | 'ollama'; package: string; compatibility: string; timeout: number; headers: Record<string, string>; body: Record<string, unknown> }>) {
+  async function updateProvider(name: string, data: Partial<{ label: string; api_base: string; api_key: string; enabled: boolean; type: string; package: string; litellm_prefix: string; compatibility: string; timeout: number; headers: Record<string, string>; body: Record<string, unknown> }>) {
     saving.value = true
     busyId.value = name
     try {
@@ -158,6 +179,51 @@ export const useModelManagerStore = defineStore('modelManager', () => {
     } finally {
       saving.value = false
       busyId.value = null
+    }
+  }
+
+  async function addOrUpdatePreset(entry: ProviderPreset, isEdit: boolean) {
+    presetBusyId.value = entry.id
+    try {
+      const saved = await saveProviderPreset(entry, isEdit)
+      await loadPresets()
+      setNotice(`${isEdit ? '保存成功' : '新增成功'}（供应商字典 ${saved.id}）`)
+      return true
+    } catch (e: any) {
+      setError(e.message || String(e))
+      return false
+    } finally {
+      presetBusyId.value = null
+    }
+  }
+
+  async function removePreset(id: string) {
+    presetBusyId.value = id
+    try {
+      await deleteProviderPreset(id)
+      await loadPresets()
+      setNotice(`删除成功（供应商字典 ${id}）`)
+      return true
+    } catch (e: any) {
+      setError(e.message || String(e))
+      return false
+    } finally {
+      presetBusyId.value = null
+    }
+  }
+
+  async function resetPresets() {
+    presetBusyId.value = '__reset__'
+    try {
+      await resetProviderPresets()
+      await loadPresets()
+      setNotice('供应商字典已恢复默认')
+      return true
+    } catch (e: any) {
+      setError(e.message || String(e))
+      return false
+    } finally {
+      presetBusyId.value = null
     }
   }
 
@@ -208,9 +274,10 @@ export const useModelManagerStore = defineStore('modelManager', () => {
   })
 
   return {
-    config, loading, saving, refreshing, busyId, error, notice,
+    config, presets, presetsLoading, loading, saving, refreshing, busyId, presetBusyId, error, notice,
     setNotice, setError,
-    load, addOrUpdateModel, removeModel, updateProvider, removeProvider, setDefaults,
+    load, loadPresets, addOrUpdateModel, removeModel, updateProvider, removeProvider,
+    addOrUpdatePreset, removePreset, resetPresets, setDefaults,
     emptyModel, modelOptions,
   }
 })

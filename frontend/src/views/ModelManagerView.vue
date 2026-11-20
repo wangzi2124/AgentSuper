@@ -2,9 +2,19 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useModelManagerStore } from '../stores/modelManager'
 import { useLocalModelsStore } from '../stores/localModels'
-import { fetchModelShow, type ModelInfo, type ProviderInfo } from '../api/models'
+import { fetchModelShow, type ModelInfo, type ProviderInfo, type ProviderPreset } from '../api/models'
 import type { LocalDownloadJob } from '../api/localModels'
-import { validateProviderForm } from '../utils/providerForm'
+import {
+  applyProviderPreset,
+  findPreset,
+  inferProviderPreset,
+  presetGroups,
+  presetTypes,
+  PRESET_GROUP_LABELS,
+  validatePresetForm,
+  validateProviderForm,
+  type ProviderPresetFormValues,
+} from '../utils/providerForm'
 import { managedModels } from '../utils/modelOrigin'
 
 const mm = useModelManagerStore()
@@ -85,33 +95,62 @@ async function saveDefaults() {
 const showProviderForm = ref(false)
 // 正在编辑已有 Provider（而非新增）：此时前缀不可改
 const providerIsEdit = ref(false)
-const providerForm = reactive<{ name: string; label: string; api_base: string; api_key: string; enabled: boolean; type: 'openai' | 'ollama'; package: string; compatibility: string; timeout: string; headers: string; body: string }>({
-  name: '', label: '', api_base: '', api_key: '', enabled: true, type: 'openai',
-  package: 'openai', compatibility: '', timeout: '', headers: '', body: '',
+const providerForm = reactive<{ name: string; label: string; api_base: string; api_key: string; enabled: boolean; type: string; package: string; litellm_prefix: string; compatibility: string; timeout: string; headers: string; body: string }>({
+  name: '', label: '', api_base: '', api_key: '', enabled: true, type: '',
+  package: '', litellm_prefix: '', compatibility: '', timeout: '', headers: '', body: '',
 })
+const providerPresetId = ref('')
+const presetList = computed(() => mm.presets || [])
+const presetGroupOptions = computed(() => presetGroups(presetList.value))
+const presetTypeOptions = computed(() => {
+  const types = presetTypes(presetList.value)
+  if (providerForm.type && !types.includes(providerForm.type)) types.unshift(providerForm.type)
+  return types
+})
+const selectedPreset = computed(() => findPreset(presetList.value, providerPresetId.value))
 
 function openProviderForm(p?: ProviderInfo) {
   providerIsEdit.value = !!p
+  providerPresetId.value = p
+    ? inferProviderPreset(presetList.value, { provider: p.provider, api_base: p.api_base, type: p.type })
+    : (presetList.value.find(x => x.id === 'custom')?.id || 'custom')
   providerForm.name = p?.provider || ''
   providerForm.label = p?.label || ''
   providerForm.api_base = p?.api_base || ''
   providerForm.api_key = p?.api_key || ''
   providerForm.enabled = p?.enabled ?? true
-  providerForm.type = p?.type === 'ollama' ? 'ollama' : 'openai'
-  providerForm.package = p?.package || (providerForm.type === 'ollama' ? 'ollama' : 'openai')
+  providerForm.type = p?.type || ''
+  providerForm.package = p?.package || ''
+  providerForm.litellm_prefix = p?.litellm_prefix || ''
   providerForm.compatibility = p?.compatibility || ''
   providerForm.timeout = p?.timeout ? String(p.timeout) : ''
   providerForm.headers = p?.headers ? JSON.stringify(p.headers, null, 2) : ''
   providerForm.body = p?.body ? JSON.stringify(p.body, null, 2) : ''
+  if (!p) applyPresetToForm()
   showProviderForm.value = true
 }
+
+function applyPresetToForm() {
+  const applied = applyProviderPreset(
+    presetList.value,
+    providerPresetId.value,
+    providerForm,
+    (mm.config?.providers || []).map(p => p.provider),
+  )
+  providerForm.label = applied.label
+  if (!providerIsEdit.value) providerForm.name = applied.name
+  providerForm.type = applied.type
+  providerForm.api_base = applied.api_base
+  providerForm.package = applied.package
+  providerForm.litellm_prefix = applied.litellm_prefix
+}
+
+function onProviderPresetChange() {
+  applyPresetToForm()
+}
 async function submitProvider() {
-  if (providerForm.type === 'ollama' && !providerForm.api_base.trim()) {
-    mm.setError('请填写 Ollama 服务地址（云端 https://ollama.com，本地 http://localhost:11434）')
-    return
-  }
   if (!providerForm.api_base.trim()) {
-    mm.setError('请填写 api_base（OpenAI 兼容服务地址，如 http://127.0.0.1:8001/v1）')
+    mm.setError(`请填写 api_base${selectedPreset.value.api_base ? `（如 ${selectedPreset.value.api_base}）` : ''}`)
     return
   }
   // Label 与模型前缀都必填、互不推导（规则见 utils/providerForm.ts）
@@ -141,7 +180,8 @@ async function submitProvider() {
     api_key: providerForm.api_key,
     enabled: providerForm.enabled,
     type: providerForm.type,
-    package: providerForm.package.trim() || (providerForm.type === 'ollama' ? 'ollama' : 'openai'),
+    package: providerForm.package.trim() || selectedPreset.value.package,
+    litellm_prefix: providerForm.litellm_prefix.trim(),
     compatibility: providerForm.compatibility.trim(),
     // v-model 对 type="number" 输入会把值转成 number，统一按 String 处理避免 .trim() 崩溃
     timeout: String(providerForm.timeout).trim() ? Number(providerForm.timeout) : 0,
@@ -156,6 +196,47 @@ async function toggleProvider(p: ProviderInfo) {
 async function delProvider(p: ProviderInfo) {
   if (!window.confirm(`删除 Provider「${p.label || p.provider}」？其自动注册的模型会一并消失。`)) return
   await mm.removeProvider(p.provider)
+}
+
+const showPresetForm = ref(false)
+const presetIsEdit = ref(false)
+const presetForm = reactive<ProviderPresetFormValues>({
+  id: '', group: 'custom', label: '', name: '', type: '',
+  api_base: '', package: '', litellm_prefix: '', note: '',
+})
+
+function openPresetForm(p?: ProviderPreset) {
+  presetIsEdit.value = !!p
+  presetForm.id = p?.id || ''
+  presetForm.group = p?.group || 'custom'
+  presetForm.label = p?.label || ''
+  presetForm.name = p?.name || ''
+  presetForm.type = p?.type || ''
+  presetForm.api_base = p?.api_base || ''
+  presetForm.package = p?.package || ''
+  presetForm.litellm_prefix = p?.litellm_prefix || ''
+  presetForm.note = p?.note || ''
+  showPresetForm.value = true
+}
+
+async function submitPreset() {
+  const validated = validatePresetForm(presetForm, presetIsEdit.value)
+  if (!validated.ok) {
+    mm.setError(validated.error || '供应商字典校验失败')
+    return
+  }
+  const ok = await mm.addOrUpdatePreset({ ...validated.values }, presetIsEdit.value)
+  if (ok) showPresetForm.value = false
+}
+
+async function delPreset(p: ProviderPreset) {
+  if (!window.confirm(`从供应商字典删除「${p.label}」（${p.id}）？已有 Provider 不受影响。`)) return
+  await mm.removePreset(p.id)
+}
+
+async function resetPresetList() {
+  if (!window.confirm('恢复内置供应商字典？自定义/修改过的字典项会丢失，已有 Provider 不受影响。')) return
+  await mm.resetPresets()
 }
 
 // ── 自定义模型编辑 ──
@@ -387,6 +468,33 @@ function removeJob(job: LocalDownloadJob) {
         <p class="hint mm-defaults-hint">轻量模型用于内部轻任务（子任务分类/会话标题等）；图片解析模型用于图像描述（可选全部 Provider 模型，如 ollama/llava）；语音模型为 Qwen3-TTS 合成规格（0.6B/1.7B）。不指定则跟随后端 .env；改动保存后聊天框立即跟随。</p>
       </section>
 
+      <!-- 供应商字典 -->
+      <section class="card mm-block">
+        <div class="form-title">
+          供应商字典
+          <span v-if="mm.presetsLoading" class="spinner-mm mm-refresh-spin" title="加载中"></span>
+          <button class="btn btn-primary mm-title-action" @click="openPresetForm()">+ 新增供应商</button>
+          <button class="btn mm-title-action" :disabled="!!mm.presetBusyId" @click="resetPresetList">恢复默认</button>
+        </div>
+        <p class="hint">字典决定「新增 Provider」时自动填入的前缀、接口类型、api_base 与 litellm 路由前缀；修改字典不影响已有 Provider。</p>
+        <div v-if="!presetList.length" class="empty-tip">{{ mm.presetsLoading ? '字典加载中…' : '暂无字典项，请新增或恢复默认' }}</div>
+        <div class="mm-table preset-table">
+          <div v-if="presetList.length" class="mm-th">
+            <span>名称 / ID</span><span>分组 / 前缀</span><span>接口类型</span><span>api_base</span><span class="mm-ops">操作</span>
+          </div>
+          <div v-for="p in presetList" :key="p.id" class="mm-tr">
+            <span class="mm-main">{{ p.label }} <small class="mm-mono">{{ p.id }}</small></span>
+            <span>{{ PRESET_GROUP_LABELS[p.group] || p.group }} / <code>{{ p.name || '—' }}</code></span>
+            <span>{{ p.type }}</span>
+            <span class="mm-mono">{{ p.api_base || '—' }}</span>
+            <span class="mm-ops">
+              <button class="btn btn-sm" :disabled="mm.presetBusyId === p.id" @click="openPresetForm(p)">编辑</button>
+              <button class="btn btn-sm btn-danger" :disabled="!!mm.presetBusyId" @click="delPreset(p)">删除</button>
+            </span>
+          </div>
+        </div>
+      </section>
+
       <!-- Providers -->
       <section class="card mm-block">
         <div class="form-title">
@@ -569,12 +677,81 @@ function removeJob(job: LocalDownloadJob) {
     </div>
   </div>
 
+  <div v-if="showPresetForm" class="overlay">
+    <div class="dialog wide">
+      <div class="form-title">{{ presetIsEdit ? '编辑供应商字典项' : '新增供应商字典项' }}</div>
+      <div class="form-row">
+        <label class="mm-field"><span>字典 ID</span>
+          <input v-model="presetForm.id" class="ctrl" placeholder="如 zhipu / my_provider" :disabled="presetIsEdit" />
+        </label>
+        <label class="mm-field"><span>显示名称</span>
+          <input v-model="presetForm.label" class="ctrl" placeholder="智谱 GLM" maxlength="50" />
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="mm-field"><span>分组</span>
+          <input v-model="presetForm.group" class="ctrl" list="preset-group-list" placeholder="intl / cn / local / custom" />
+          <datalist id="preset-group-list">
+            <option v-for="g in presetGroupOptions" :key="g.id" :value="g.id">{{ g.label }}</option>
+          </datalist>
+        </label>
+        <label class="mm-field"><span>模型前缀</span>
+          <input v-model="presetForm.name" class="ctrl" placeholder="如 zhipu（空 = 自定义）" />
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="mm-field"><span>接口类型</span>
+          <input v-model="presetForm.type" class="ctrl" list="preset-type-list" placeholder="openai / ollama" />
+          <datalist id="preset-type-list">
+            <option v-for="t in presetTypeOptions" :key="t" :value="t" />
+          </datalist>
+        </label>
+        <label class="mm-field"><span>package</span>
+          <input v-model="presetForm.package" class="ctrl" placeholder="openai" />
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="mm-field mm-wide"><span>api_base</span>
+          <input v-model="presetForm.api_base" class="ctrl" placeholder="https://api.example.com/v1" />
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="mm-field mm-wide"><span>litellm_prefix（强制路由前缀）</span>
+          <input v-model="presetForm.litellm_prefix" class="ctrl" placeholder="如 openai；空 = 按前缀原生路由" />
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="mm-field mm-wide"><span>说明</span>
+          <input v-model="presetForm.note" class="ctrl" placeholder="显示在新增 Provider 表单中" />
+        </label>
+      </div>
+      <div class="form-footer">
+        <button class="btn" @click="showPresetForm = false">取消</button>
+        <button class="btn btn-primary mm-save-btn" :disabled="!!mm.presetBusyId" @click="submitPreset">
+          <span v-if="mm.presetBusyId" class="spinner-mm"></span>
+          {{ mm.presetBusyId ? '保存中…' : '保存' }}
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Provider 编辑弹窗 -->
   <div v-if="showProviderForm" class="overlay">
     <div class="dialog">
-      <div class="form-title">{{ providerIsEdit ? '编辑 Provider' : '新增 Provider' }}</div>
-      <div class="form-row">
-        <label class="mm-field mm-wide"><span>Label（显示名称）</span>
+       <div class="form-title">{{ providerIsEdit ? '编辑 Provider' : '新增 Provider' }}</div>
+       <div class="form-row">
+         <label class="mm-field mm-wide"><span>服务商预设</span>
+           <select v-model="providerPresetId" class="ctrl" @change="onProviderPresetChange">
+             <optgroup v-for="g in presetGroupOptions" :key="g.id" :label="g.label">
+               <option v-for="p in presetList.filter(x => x.group === g.id)" :key="p.id" :value="p.id">{{ p.label }}</option>
+             </optgroup>
+           </select>
+         </label>
+       </div>
+       <p v-if="selectedPreset.note" class="hint provider-prefix-hint">{{ selectedPreset.note }}</p>
+       <div class="form-row">
+         <label class="mm-field mm-wide"><span>Label（显示名称）</span>
+
           <input v-model="providerForm.label" class="ctrl" placeholder="本地 vLLM" maxlength="50" />
         </label>
       </div>
@@ -589,20 +766,25 @@ function removeJob(job: LocalDownloadJob) {
           />
         </label>
       </div>
-      <p class="hint provider-prefix-hint">模型 id = <code>前缀/模型名</code>，前缀决定模型列表里的 id（如 <code>vllm/deepseek-r1:latest</code>）。前缀只能包含小写字母、数字、<code>_</code>、<code>-</code>。</p>
-      <div class="form-row">
-        <label class="mm-field mm-wide"><span>接口类型</span>
-          <select v-model="providerForm.type" class="ctrl">
-            <option value="openai">OpenAI 兼容（/v1）</option>
-            <option value="ollama">Ollama（原生 /api/chat）</option>
-          </select>
-        </label>
-      </div>
-      <div class="form-row">
-        <label class="mm-field"><span>package</span>
-          <input v-model="providerForm.package" class="ctrl" placeholder="openai / anthropic / google" />
-        </label>
-        <label class="mm-field"><span>compatibility</span>
+       <p class="hint provider-prefix-hint">模型 id = <code>前缀/模型名</code>，前缀决定模型列表里的 id（如 <code>vllm/deepseek-r1:latest</code>）。前缀只能包含小写字母、数字、<code>_</code>、<code>-</code>。<code>google</code> 前缀会自动适配 Gemini（兼容端点走 <code>openai/*</code>，原生 API 走 <code>gemini/*</code>）。</p>
+
+       <div class="form-row">
+         <label class="mm-field mm-wide"><span>接口类型（来自字典）</span>
+           <select v-model="providerForm.type" class="ctrl">
+             <option v-for="t in presetTypeOptions" :key="t" :value="t">{{ t }}</option>
+           </select>
+         </label>
+       </div>
+
+       <div class="form-row">
+         <label class="mm-field"><span>package</span>
+           <input v-model="providerForm.package" class="ctrl" placeholder="openai / anthropic / google" />
+         </label>
+         <label class="mm-field"><span>litellm 路由前缀（可选）</span>
+           <input v-model="providerForm.litellm_prefix" class="ctrl" placeholder="字典自动填入；空 = 不改写" />
+         </label>
+         <label class="mm-field"><span>compatibility</span>
+
           <input v-model="providerForm.compatibility" class="ctrl" placeholder="可选" />
         </label>
         <label class="mm-field"><span>timeout（秒）</span>
@@ -619,18 +801,18 @@ function removeJob(job: LocalDownloadJob) {
           <textarea v-model="providerForm.body" class="ctrl" rows="3" placeholder='{"some_flag": true}' />
         </label>
       </div>
-      <p v-if="providerForm.type === 'ollama'" class="hint provider-prefix-hint">
-        Ollama 类型会用 <code>/api/tags</code> 自动探测模型，并通过原生 <code>/api/chat</code> 调用。
-        云端填 <code>https://ollama.com</code> + API Key；本地填 <code>http://localhost:11434</code>（key 可留空）。
-      </p>
       <div class="form-row">
-        <label class="mm-field mm-wide"><span>api_base（OpenAI 兼容）</span>
-          <input v-model="providerForm.api_base" class="ctrl" :placeholder="providerForm.type === 'ollama' ? 'https://ollama.com 或 http://localhost:11434' : 'http://127.0.0.1:8001/v1'" />
+        <label class="mm-field mm-wide"><span>api_base</span>
+          <input
+            v-model="providerForm.api_base"
+            class="ctrl"
+            :placeholder="selectedPreset.api_base || 'https://api.example.com/v1'"
+          />
         </label>
       </div>
       <div class="form-row">
         <label class="mm-field mm-wide"><span>api_key（可选）</span>
-          <input v-model="providerForm.api_key" class="ctrl" type="password" :placeholder="providerForm.type === 'ollama' ? 'OLLAMA_API_KEY（本地可留空）' : 'sk-...'" />
+          <input v-model="providerForm.api_key" class="ctrl" type="password" placeholder="sk-...（本地服务可留空）" />
         </label>
       </div>
       <div class="form-footer">
@@ -745,6 +927,8 @@ function removeJob(job: LocalDownloadJob) {
 .mm-field > span { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
 .mm-field.mm-wide { flex: 2; }
 .provider-prefix-hint { margin: 0 0 2px; }
+.preset-table .mm-th, .preset-table .mm-tr { grid-template-columns: 1.4fr 1.4fr 0.8fr 2.2fr 1fr; min-width: 720px; }
+.preset-table small { font-size: 10px; }
 
 /* ── 默认/轻量模型选择：与聊天框模型胶囊同款样式（横向排列） ── */
 .mm-defaults-row { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; }
