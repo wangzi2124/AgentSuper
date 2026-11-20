@@ -308,6 +308,26 @@ catalog_entries = Table(
     Column("data", Text(), nullable=False),
 )
 
+provider_presets = Table(
+    "provider_presets", metadata,
+    Column("id", String(255), primary_key=True),
+    Column("group_name", String(64), nullable=False, server_default="custom"),
+    Column("label", String(255), nullable=False, server_default=""),
+    Column("name", String(255), nullable=False, server_default=""),
+    Column("api_type", String(64), nullable=False, server_default="openai"),
+    Column("api_base", Text(), nullable=False, server_default=""),
+    Column("package", String(64), nullable=False, server_default="openai"),
+    Column("litellm_prefix", String(64), nullable=False, server_default=""),
+    Column("note", Text(), nullable=False, server_default=""),
+    Column("sort_order", Integer, nullable=False, server_default=text("0")),
+)
+
+provider_presets_meta = Table(
+    "provider_presets_meta", metadata,
+    Column("key", String(64), primary_key=True),
+    Column("value", Text(), nullable=False),
+)
+
 # ── chapter_store.db ────────────────────────────────────────────────────────
 # chapter_title 需要被索引 → VARCHAR(768)（MySQL utf8mb4 索引限长 3072 字节）
 
@@ -384,7 +404,10 @@ SESSION_TABLES = (
     session_permission_saved.name, session_forms.name, schema_migrations.name,
     event_outbox.name, session_snapshots.name, session_plans.name,
 )
-CATALOG_TABLES = (catalog_settings.name, providers.name, catalog_entries.name)
+CATALOG_TABLES = (
+    catalog_settings.name, providers.name, catalog_entries.name,
+    provider_presets.name, provider_presets_meta.name,
+)
 CHAPTER_TABLES = (chapters.name,)
 CHAIN_LOG_TABLES = (chain_logs.name,)
 

@@ -110,6 +110,18 @@ const filteredPresetList = computed(() => {
       .some(value => (value || '').toLowerCase().includes(q)),
   )
 })
+const presetPage = ref(1)
+const presetPageSize = ref(10)
+const presetTotalPages = computed(() => Math.max(1, Math.ceil(filteredPresetList.value.length / presetPageSize.value)))
+const pagedPresetList = computed(() => {
+  const start = (presetPage.value - 1) * presetPageSize.value
+  return filteredPresetList.value.slice(start, start + presetPageSize.value)
+})
+watch(presetQuery, () => { presetPage.value = 1 })
+watch(presetPageSize, () => { presetPage.value = 1 })
+watch(presetTotalPages, (tp) => { if (presetPage.value > tp) presetPage.value = tp })
+function gotoPresetPage(n: number) { presetPage.value = Math.min(Math.max(1, n), presetTotalPages.value) }
+
 const presetGroupOptions = computed(() => presetGroups(presetList.value))
 const presetTypeOptions = computed(() => {
   const types = presetTypes(presetList.value)
@@ -241,11 +253,6 @@ async function submitPreset() {
 async function delPreset(p: ProviderPreset) {
   if (!window.confirm(`从供应商字典删除「${p.label}」（${p.id}）？已有 Provider 不受影响。`)) return
   await mm.removePreset(p.id)
-}
-
-async function resetPresetList() {
-  if (!window.confirm('恢复内置供应商字典？自定义/修改过的字典项会丢失，已有 Provider 不受影响。')) return
-  await mm.resetPresets()
 }
 
 // ── 自定义模型编辑 ──
@@ -482,10 +489,7 @@ function removeJob(job: LocalDownloadJob) {
         <div class="form-title">
           供应商字典
           <span v-if="mm.presetsLoading" class="spinner-mm mm-refresh-spin" title="加载中"></span>
-          <div class="mm-title-actions">
-            <button class="btn" :disabled="!!mm.presetBusyId" @click="resetPresetList">恢复默认</button>
-            <button class="btn btn-primary" @click="openPresetForm()">+ 添加供应商</button>
-          </div>
+          <button class="btn btn-primary mm-title-action" @click="openPresetForm()">+ 添加供应商</button>
         </div>
         <p class="hint">字典决定「新增 Provider」时自动填入的前缀、接口类型、api_base 与 litellm 路由前缀；修改字典不影响已有 Provider。</p>
         <div class="mm-list-toolbar">
@@ -495,12 +499,12 @@ function removeJob(job: LocalDownloadJob) {
           </label>
           <span class="mm-count">{{ filteredPresetList.length }} / {{ presetList.length }}</span>
         </div>
-        <div v-if="!filteredPresetList.length" class="empty-tip">{{ presetQuery ? '未找到匹配的供应商字典项' : (mm.presetsLoading ? '字典加载中…' : '暂无字典项，请添加或恢复默认') }}</div>
+        <div v-if="!filteredPresetList.length" class="empty-tip">{{ presetQuery ? '未找到匹配的供应商字典项' : (mm.presetsLoading ? '字典加载中…' : '暂无字典项，请添加') }}</div>
         <div class="mm-table preset-table">
           <div v-if="filteredPresetList.length" class="mm-th">
             <span>名称 / ID</span><span>分组 / 前缀</span><span>接口类型</span><span>api_base</span><span class="mm-ops">操作</span>
           </div>
-          <div v-for="p in filteredPresetList" :key="p.id" class="mm-tr">
+          <div v-for="p in pagedPresetList" :key="p.id" class="mm-tr">
             <span class="mm-main">{{ p.label }} <small class="mm-mono">{{ p.id }}</small></span>
             <span>{{ PRESET_GROUP_LABELS[p.group] || p.group }} / <code>{{ p.name || '—' }}</code></span>
             <span>{{ p.type }}</span>
@@ -510,6 +514,18 @@ function removeJob(job: LocalDownloadJob) {
               <button class="btn btn-sm btn-danger" :disabled="!!mm.presetBusyId" @click="delPreset(p)">删除</button>
             </span>
           </div>
+        </div>
+        <div v-if="filteredPresetList.length" class="mm-pager preset-pager">
+          <span class="mm-pager-info">第 {{ presetPage }} / {{ presetTotalPages }} 页</span>
+          <label class="mm-pagesize">每页
+            <select v-model.number="presetPageSize">
+              <option :value="10">10</option>
+              <option :value="20">20</option>
+              <option :value="50">50</option>
+            </select>
+          </label>
+          <button class="btn btn-sm" :disabled="presetPage <= 1" @click="gotoPresetPage(presetPage - 1)">上一页</button>
+          <button class="btn btn-sm" :disabled="presetPage >= presetTotalPages" @click="gotoPresetPage(presetPage + 1)">下一页</button>
         </div>
       </section>
 

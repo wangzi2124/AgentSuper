@@ -61,7 +61,7 @@ async def get_models_config():
 @router.get("/models/presets", dependencies=[Depends(require_admin)])
 async def get_presets():
     items = await run_in_threadpool(presets.list_presets)
-    return ok({"presets": items, "source_path": str(presets.presets_path())})
+    return ok({"presets": items, "source_path": str(presets.storage_path())})
 
 
 @router.post("/models/presets", dependencies=[Depends(require_admin)])
@@ -91,12 +91,6 @@ async def delete_preset(pid: str):
     removed = await run_in_threadpool(presets.remove_preset, pid)
     items = await run_in_threadpool(presets.list_presets)
     return ok({"removed": removed, "presets": items})
-
-
-@router.post("/models/presets/reset", dependencies=[Depends(require_admin)])
-async def reset_presets_route():
-    items = await run_in_threadpool(presets.reset_presets)
-    return ok({"presets": items})
 
 
 @router.get("/models/show", dependencies=[Depends(require_admin)])

@@ -6,7 +6,6 @@ import {
   deleteProviderPreset,
   fetchModelsConfig,
   fetchProviderPresets,
-  resetProviderPresets,
   saveCustomModel,
   saveDefaults,
   saveProvider,
@@ -212,21 +211,6 @@ export const useModelManagerStore = defineStore('modelManager', () => {
     }
   }
 
-  async function resetPresets() {
-    presetBusyId.value = '__reset__'
-    try {
-      await resetProviderPresets()
-      await loadPresets()
-      setNotice('供应商字典已恢复默认')
-      return true
-    } catch (e: any) {
-      setError(e.message || String(e))
-      return false
-    } finally {
-      presetBusyId.value = null
-    }
-  }
-
   async function setDefaults(
     default_model: string | null,
     small_model: string | null,
@@ -277,7 +261,7 @@ export const useModelManagerStore = defineStore('modelManager', () => {
     config, presets, presetsLoading, loading, saving, refreshing, busyId, presetBusyId, error, notice,
     setNotice, setError,
     load, loadPresets, addOrUpdateModel, removeModel, updateProvider, removeProvider,
-    addOrUpdatePreset, removePreset, resetPresets, setDefaults,
+    addOrUpdatePreset, removePreset, setDefaults,
     emptyModel, modelOptions,
   }
 })

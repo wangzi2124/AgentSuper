@@ -25,15 +25,15 @@ vi.mock('@/stores/modelManager', () => {
         model('ollama_chat/local', 'Local Ollama', 'local'),
       ],
       providers: [],
-      presets: [],
-      presetsLoading: false,
-      presetBusyId: null,
       default_model: null,
       small_model: null,
       image_caption_model: null,
       voice_model_size: null,
       source_path: 'data/model_catalog.db',
     },
+    presets: [],
+    presetsLoading: false,
+    presetBusyId: null,
     loading: false,
     saving: false,
     refreshing: false,
@@ -45,7 +45,6 @@ vi.mock('@/stores/modelManager', () => {
     setDefaults: vi.fn(),
     addOrUpdatePreset: vi.fn(),
     removePreset: vi.fn(),
-    resetPresets: vi.fn(),
     updateProvider: vi.fn(),
     removeProvider: vi.fn(),
     addOrUpdateModel: vi.fn(),
@@ -86,6 +85,7 @@ vi.mock('@/stores/localModels', () => {
 })
 
 import ModelManagerView from '@/views/ModelManagerView.vue'
+import { useModelManagerStore } from '@/stores/modelManager'
 
 describe('ModelManagerView 模型列表', () => {
   it('只展示手动/Provider 模型，内置与本机 Ollama 探测不进入表格', () => {
@@ -117,5 +117,30 @@ describe('ModelManagerView 模型列表', () => {
       .toBe('1000000')
     expect((wrapper.find('input[type="number"][min="256"]').element as HTMLInputElement).value)
       .toBe('64000')
+  })
+})
+
+describe('ModelManagerView 供应商字典', () => {
+  it('默认分页每页 10 条，可翻页并跟随检索结果', async () => {
+    const mm = useModelManagerStore() as any
+    mm.presets = Array.from({ length: 12 }, (_, i) => ({
+      id: `p${i}`, group: 'custom', label: `P${i}`, name: `p${i}`, type: 'openai',
+      api_base: '', package: 'openai', litellm_prefix: 'openai', note: '',
+    }))
+    const wrapper = mount(ModelManagerView)
+
+    const presetTable = wrapper.find('.preset-table')
+    expect(presetTable.findAll('.mm-tr').length).toBe(10)
+    expect(wrapper.find('.preset-pager').text()).toContain('第 1 / 2 页')
+
+    const nextBtn = wrapper.findAll('.preset-pager button').find(b => b.text() === '下一页')
+    await nextBtn!.trigger('click')
+    expect(presetTable.findAll('.mm-tr').length).toBe(2)
+    expect(presetTable.text()).toContain('P10')
+    expect(presetTable.text()).toContain('P11')
+
+    await wrapper.find('.preset-pager select').setValue('20')
+    expect(presetTable.findAll('.mm-tr').length).toBe(12)
+    mm.presets = []
   })
 })

@@ -189,10 +189,6 @@ export async function deleteProviderPreset(id: string): Promise<{ removed: boole
   return apiRequest(`/api/models/presets/${encodeURIComponent(id)}`, { method: 'DELETE' }, true)
 }
 
-export async function resetProviderPresets(): Promise<{ presets: ProviderPreset[] }> {
-  return apiRequest('/api/models/presets/reset', { method: 'POST' }, true)
-}
-
 export async function saveDefaults(
   default_model: string | null,
   small_model: string | null,

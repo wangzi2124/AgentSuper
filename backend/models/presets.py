@@ -6,11 +6,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from models import catalog_db
+
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_SEEDED_KEY = "provider_presets_seeded"
 
 _lock = threading.RLock()
-_cache: list[dict[str, Any]] | None = None
-_cache_path: str = ""
 
 
 def _p(pid, group, label, name, type_, api_base, package="openai", litellm_prefix="", note=""):
@@ -75,6 +76,10 @@ def presets_path() -> Path:
     return global_paths()["data"] / "provider_presets.json"
 
 
+def storage_path() -> Path:
+    return catalog_db.catalog_db_path()
+
+
 def _normalize(data: dict[str, Any], pid: str | None = None) -> dict[str, Any]:
     ident = str((data.get("id") or pid or "")).strip().lower()
     if not _ID_RE.fullmatch(ident):
@@ -107,75 +112,153 @@ def _normalize(data: dict[str, Any], pid: str | None = None) -> dict[str, Any]:
     }
 
 
-def _read_unlocked() -> list[dict[str, Any]]:
-    global _cache, _cache_path
-    path = presets_path()
-    key = str(path)
-    if _cache is not None and _cache_path == key:
-        return _cache
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        data = {"presets": [dict(p) for p in BUILTIN_PRESETS]}
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        _cache = data["presets"]
-    else:
+def _connect():
+    conn = catalog_db._connect()
+    try:
+        _ensure_seeded(conn)
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+def _ensure_seeded(conn) -> None:
+    row = conn.execute(
+        "SELECT value FROM provider_presets_meta WHERE key = ?", (_SEEDED_KEY,)
+    ).fetchone()
+    if row and str(row[0]) == "1":
+        return
+    count = conn.execute("SELECT COUNT(*) FROM provider_presets").fetchone()[0]
+    if count:
+        _mark_seeded(conn)
+        return
+
+    entries: dict[str, dict[str, Any]] = {p["id"]: dict(p) for p in BUILTIN_PRESETS}
+    legacy = presets_path()
+    if legacy.exists():
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            items = raw.get("presets") if isinstance(raw, dict) else raw
-            _cache = [dict(p) for p in (items or []) if isinstance(p, dict)]
+            raw = json.loads(legacy.read_text(encoding="utf-8"))
+            source = raw.get("presets") if isinstance(raw, dict) else raw
+            for item in source or []:
+                if isinstance(item, dict) and item.get("id"):
+                    entries[str(item["id"]).lower()] = dict(item)
         except (OSError, ValueError):
-            _cache = [dict(p) for p in BUILTIN_PRESETS]
-    _cache_path = key
-    return _cache
+            pass
+
+    seen: set[str] = set()
+    for raw_item in entries.values():
+        try:
+            entry = _normalize(raw_item)
+        except ValueError:
+            continue
+        if entry["id"] in seen:
+            continue
+        seen.add(entry["id"])
+        conn.execute(
+            "INSERT INTO provider_presets"
+            " (id, group_name, label, name, api_type, api_base, package, litellm_prefix, note, sort_order)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                entry["id"], entry["group"], entry["label"], entry["name"], entry["type"],
+                entry["api_base"], entry["package"], entry["litellm_prefix"], entry["note"],
+                len(seen) - 1,
+            ),
+        )
+    _mark_seeded(conn)
 
 
-def _write_unlocked(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    global _cache
-    path = presets_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"presets": items}, ensure_ascii=False, indent=2), encoding="utf-8"
+def _mark_seeded(conn) -> None:
+    conn.execute("DELETE FROM provider_presets_meta WHERE key = ?", (_SEEDED_KEY,))
+    conn.execute(
+        "INSERT INTO provider_presets_meta(key, value) VALUES (?, ?)", (_SEEDED_KEY, "1")
     )
-    _cache = items
-    _cache_path = str(path)
-    return items
+    conn.commit()
+
+
+def _row_to_preset(row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "group": row["group_name"],
+        "label": row["label"],
+        "name": row["name"],
+        "type": row["api_type"],
+        "api_base": row["api_base"],
+        "package": row["package"],
+        "litellm_prefix": row["litellm_prefix"],
+        "note": row["note"],
+    }
 
 
 def list_presets() -> list[dict[str, Any]]:
     with _lock:
-        return [dict(p) for p in _read_unlocked()]
+        conn = _connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, group_name, label, name, api_type, api_base, package,"
+                " litellm_prefix, note FROM provider_presets ORDER BY sort_order, id"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [_row_to_preset(row) for row in rows]
 
 
 def upsert_preset(data: dict[str, Any], pid: str | None = None) -> dict[str, Any]:
     with _lock:
-        items = _read_unlocked()
-        merged = dict(data)
-        if pid:
-            for existing in items:
-                if str(existing.get("id") or "").lower() == pid.lower():
-                    merged = {**existing, **{k: v for k, v in data.items() if v is not None}}
-                    break
-        entry = _normalize(merged, pid)
-        for i, existing in enumerate(items):
-            if str(existing.get("id") or "").lower() == entry["id"]:
-                items[i] = entry
-                break
-        else:
-            items.append(entry)
-        _write_unlocked(items)
-        return dict(entry)
+        conn = _connect()
+        try:
+            lookup = str(pid or data.get("id") or "").strip().lower()
+            existing = None
+            if lookup:
+                existing = conn.execute(
+                    "SELECT id, group_name, label, name, api_type, api_base, package,"
+                    " litellm_prefix, note, sort_order FROM provider_presets WHERE id = ?",
+                    (lookup,),
+                ).fetchone()
+            merged = dict(data)
+            if pid and existing is not None:
+                merged = {
+                    **_row_to_preset(existing),
+                    **{k: v for k, v in data.items() if v is not None},
+                }
+            entry = _normalize(merged, pid)
+            current = conn.execute(
+                "SELECT sort_order FROM provider_presets WHERE id = ?", (entry["id"],)
+            ).fetchone()
+            values = (
+                entry["group"], entry["label"], entry["name"], entry["type"],
+                entry["api_base"], entry["package"], entry["litellm_prefix"], entry["note"],
+            )
+            if current is not None:
+                conn.execute(
+                    "UPDATE provider_presets SET group_name = ?, label = ?, name = ?,"
+                    " api_type = ?, api_base = ?, package = ?, litellm_prefix = ?, note = ?"
+                    " WHERE id = ?",
+                    (*values, entry["id"]),
+                )
+            else:
+                next_order = conn.execute(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM provider_presets"
+                ).fetchone()[0]
+                conn.execute(
+                    "INSERT INTO provider_presets"
+                    " (id, group_name, label, name, api_type, api_base, package, litellm_prefix, note, sort_order)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (entry["id"], *values, next_order),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    return dict(entry)
 
 
 def remove_preset(pid: str) -> bool:
     with _lock:
-        items = _read_unlocked()
-        kept = [p for p in items if str(p.get("id") or "").lower() != pid.lower()]
-        if len(kept) == len(items):
-            return False
-        _write_unlocked(kept)
-        return True
-
-
-def reset_presets() -> list[dict[str, Any]]:
-    with _lock:
-        return [dict(p) for p in _write_unlocked([dict(p) for p in BUILTIN_PRESETS])]
+        conn = _connect()
+        try:
+            cursor = conn.execute(
+                "DELETE FROM provider_presets WHERE id = ?", (pid.strip().lower(),)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
