@@ -10,6 +10,8 @@ import { useV2SessionStore } from '../v2/sessionStore'
 import { estimateTokens } from '../api/models'
 import { usePermissionStore } from '../stores/permission'
 import DirPickerModal from './DirPickerModal.vue'
+import WorkspaceQuickSwitcher from './WorkspaceQuickSwitcher.vue'
+import { baseName, isUnder, matchesConversation, normPath, queryTokens, workspaceRootFor } from '../utils/workspaceNav'
 
 function fmtTokens(n?: number) {
   if (!n) return ''
@@ -33,6 +35,7 @@ const searchQuery = ref('')
 const editingId = ref<string | null>(null)
 const editingTitle = ref('')
 const showDirPicker = ref(false)
+const quickOpen = ref(false)
 const wsBusy = ref(false)
 const wsError = ref('')
 const collapsedGroups = ref<Record<string, boolean>>({})
@@ -103,28 +106,6 @@ onMounted(() => {
   perm.loadWorkspaces()
 })
 
-function normPath(path?: string | null): string {
-  return String(path || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-}
-function baseName(path: string): string {
-  const parts = String(path || '').split(/[\\/]+/).filter(Boolean)
-  return parts[parts.length - 1] || path
-}
-function isUnder(candidate: string, root: string): boolean {
-  const c = normPath(candidate)
-  const r = normPath(root)
-  return !!c && !!r && (c === r || c.startsWith(r + '/'))
-}
-// xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx?nullx?
-function workspaceRootFor(directory?: string): string | null {
-  if (!directory) return null
-  let best: string | null = null
-  for (const w of perm.workspaces) {
-    if (isUnder(directory, w) && (!best || normPath(w).length > normPath(best).length)) best = w
-  }
-  return best
-}
-
 interface WorkspaceGroup {
   key: string
   label: string
@@ -136,15 +117,18 @@ interface WorkspaceGroup {
 
 // xxxxxx + xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx?
 const groups = computed<WorkspaceGroup[]>(() => {
-  const q = searchQuery.value.trim().toLowerCase()
+  const tokens = queryTokens(searchQuery.value)
   const active = agent.activeDirectory
-  let list = agent.conversations.filter(c => !q || c.title.toLowerCase().includes(q))
+  let list = agent.conversations
   if (active) list = list.filter(c => isUnder(c.directory || '', active))
+  if (tokens.length) {
+    list = list.filter(c => matchesConversation(c, tokens, workspaceRootFor(c.directory, perm.workspaces)))
+  }
 
   const byRoot = new Map<string, ConversationMeta[]>()
   const temp: ConversationMeta[] = []
   for (const c of list) {
-    const root = workspaceRootFor(c.directory)
+    const root = workspaceRootFor(c.directory, perm.workspaces)
     if (!root) { temp.push(c); continue }
     const key = normPath(root)
     const items = byRoot.get(key)
@@ -194,6 +178,65 @@ function isWorkspaceRoot(root: string | null): boolean {
   return !!root && perm.workspaces.some(w => normPath(w) === normPath(root))
 }
 
+interface MenuItem {
+  label: string
+  icon: string
+  danger?: boolean
+  run: () => void
+}
+const menu = ref<{ x: number; y: number; items: MenuItem[] } | null>(null)
+const MENU_ITEM_HEIGHT = 32
+
+function openMenu(event: MouseEvent, items: MenuItem[]) {
+  event.preventDefault()
+  event.stopPropagation()
+  menu.value = {
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 196)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - items.length * MENU_ITEM_HEIGHT - 16)),
+    items,
+  }
+}
+
+function runMenuItem(item: MenuItem) {
+  menu.value = null
+  item.run()
+}
+
+function onGlobalKeydown(event: KeyboardEvent) {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault()
+    quickOpen.value = !quickOpen.value
+    return
+  }
+  if (event.key === 'Escape') {
+    menu.value = null
+    quickOpen.value = false
+  }
+}
+
+function onGlobalPointerDown() {
+  menu.value = null
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('pointerdown', onGlobalPointerDown)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('pointerdown', onGlobalPointerDown)
+})
+
+async function copyPath(path: string) {
+  try {
+    if (!navigator.clipboard) throw new Error('unsupported')
+    await navigator.clipboard.writeText(path)
+    agent.setNotice('已复制目录路径')
+  } catch {
+    agent.setNotice('复制失败，请手动复制路径')
+  }
+}
+
 // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 function goChat() {
   if (router.currentRoute.value.name !== 'MultiAgent') router.push({ name: 'MultiAgent' })
@@ -210,8 +253,7 @@ function selectWorkspace(root: string | null) {
   goChat()
 }
 
-function newSessionIn(event: Event, root: string | null) {
-  event.stopPropagation()
+function createSessionIn(root: string | null) {
   if (!root) return
   agent.newChat(root)
   goChat()
@@ -231,8 +273,7 @@ async function handleDirPick(path: string) {
   }
 }
 
-async function removeWorkspace(event: Event, root: string | null) {
-  event.stopPropagation()
+async function removeWorkspaceRoot(root: string | null) {
   if (!root) return
   wsBusy.value = true
   wsError.value = ''
@@ -240,10 +281,28 @@ async function removeWorkspace(event: Event, root: string | null) {
     await perm.removeWorkspace(root)
     if (agent.activeDirectory && isUnder(agent.activeDirectory, root)) agent.setActiveDirectory(null)
   } catch (e: any) {
-    wsError.value = String(e?.message || '添加目录失败')
+    wsError.value = String(e?.message || '移除目录失败')
   } finally {
     wsBusy.value = false
   }
+}
+
+function groupMenu(g: WorkspaceGroup): MenuItem[] {
+  const root = g.root
+  if (!root) return []
+  const items: MenuItem[] = [
+    { label: '在此目录新建会话', icon: 'M12 5v14M5 12h14', run: () => createSessionIn(root) },
+    { label: '复制目录路径', icon: 'M9 9h10v10H9zM5 15H3V5h10v2', run: () => void copyPath(root) },
+  ]
+  if (isWorkspaceRoot(root)) {
+    items.push({
+      label: '移出工作目录',
+      icon: 'M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8',
+      danger: true,
+      run: () => void removeWorkspaceRoot(root),
+    })
+  }
+  return items
 }
 
 function selectConversation(input: ConversationMeta | string) {
@@ -259,10 +318,22 @@ function selectConversation(input: ConversationMeta | string) {
 function startRename(c: ConversationMeta) { editingId.value = c.id; editingTitle.value = c.title }
 function saveRename() { if (editingId.value && editingTitle.value.trim()) { agent.renameConversation(editingId.value, editingTitle.value.trim()) }; editingId.value = null }
 function cancelRename() { editingId.value = null }
-function handleDelete(e: Event, id: string) { e.stopPropagation(); if (agent.conversationId === id) { agent.newChat(); router.push({ name: 'MultiAgent' }) }; apiDelete(id).then(() => agent.loadConversations()) }
 
-async function handleFork(e: Event, id: string) {
-  e.stopPropagation()
+async function deleteConversation(c: ConversationMeta) {
+  if (!window.confirm(`删除会话「${c.title}」？此操作不可撤销。`)) return
+  if (agent.conversationId === c.id) {
+    agent.newChat()
+    router.push({ name: 'MultiAgent' })
+  }
+  try {
+    await apiDelete(c.id)
+    await agent.loadConversations()
+  } catch (err) {
+    agent.setNotice(String(err instanceof Error ? err.message : err))
+  }
+}
+
+async function forkConversation(id: string) {
   try {
     const info = await apiV2Fork(id)
     v2.setInfo(info.id, info)
@@ -272,8 +343,8 @@ async function handleFork(e: Event, id: string) {
     agent.setNotice(String(err instanceof Error ? err.message : err))
   }
 }
-async function handleCompact(e: Event, id: string) {
-  e.stopPropagation()
+
+async function compactConversation(id: string) {
   const runtime = v2.getRuntime(id)
   if (runtime?.status.type === 'busy' || runtime?.status.type === 'retry') {
     agent.setNotice('会话运行中，请先停止后再压缩')
@@ -281,16 +352,29 @@ async function handleCompact(e: Event, id: string) {
   }
   try {
     await apiV2Compact(id)
-    // 压缩完成事件会触发 sessionRuntime hydration 同步时间线。
   } catch (err) {
     agent.setNotice(String(err instanceof Error ? err.message : err))
   }
 }
+
 const statusOf = ref<Record<string, string>>({})
-async function handleStatus(e: Event, c: ConversationMeta) {
-  e.stopPropagation()
-  const st = await agent.fetchSessionStatus(c.id)
-  statusOf.value = { ...statusOf.value, [c.id]: st?.status || 'unknown' }
+async function queryStatus(c: ConversationMeta) {
+  try {
+    const st = await agent.fetchSessionStatus(c.id)
+    statusOf.value = { ...statusOf.value, [c.id]: st?.status || 'unknown' }
+  } catch (err) {
+    agent.setNotice(String(err instanceof Error ? err.message : err))
+  }
+}
+
+function conversationMenu(c: ConversationMeta): MenuItem[] {
+  return [
+    { label: '分叉会话', icon: 'M6 3v12a3 3 0 0 0 3 3h9M18 18l-3-3m3 3-3 3M6 9h9a3 3 0 0 1 3 3v3', run: () => void forkConversation(c.id) },
+    { label: '压缩上下文', icon: 'M4 8h16M4 16h10M18 13l3 3-3 3', run: () => void compactConversation(c.id) },
+    { label: '查询状态', icon: 'M22 12h-4l-3 9L9 3l-3 9H2', run: () => void queryStatus(c) },
+    { label: '重命名', icon: 'M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z', run: () => startRename(c) },
+    { label: '删除会话', icon: 'M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2', danger: true, run: () => void deleteConversation(c) },
+  ]
 }
 </script>
 
@@ -298,13 +382,19 @@ async function handleStatus(e: Event, c: ConversationMeta) {
   <div class="chat-history">
     <div class="history-header">
       <span class="history-title">工作目录</span>
-      <button class="ws-add-btn" :disabled="wsBusy" title="添加工作目录" @click="showDirPicker = true">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
-      </button>
+      <div class="header-actions">
+        <button class="ws-add-btn" title="快速切换 (Ctrl/⌘+K)" @click="quickOpen = true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h10M4 18h7"/><circle cx="17" cy="15" r="4"/></svg>
+        </button>
+        <button class="ws-add-btn" :disabled="wsBusy" title="添加工作目录" @click="showDirPicker = true">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+        </button>
+      </div>
     </div>
     <div class="search-box">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-      <input v-model="searchQuery" placeholder="搜索会话..." />
+      <input v-model="searchQuery" placeholder="搜索目录或会话..." aria-label="搜索目录或会话" />
+      <kbd class="search-kbd">⌘K</kbd>
     </div>
     <div class="history-list">
       <div class="workspace-row all-row" :class="{ active: !agent.activeDirectory }" title="显示全部会话" @click="selectAll">
@@ -317,7 +407,7 @@ async function handleStatus(e: Event, c: ConversationMeta) {
       <div v-if="groups.length === 0" class="empty-hint">{{ searchQuery ? '无匹配结果' : '暂无工作目录或会话' }}</div>
 
       <div v-for="g in groups" :key="g.key" class="group">
-        <div class="group-head" :class="{ active: agent.activeDirectory === g.root }">
+        <div class="group-head" :class="{ active: agent.activeDirectory === g.root }" @contextmenu="openMenu($event, groupMenu(g))">
           <button class="group-toggle" :title="collapsedGroups[g.key] ? '展开' : '折叠'" @click="toggleGroup(g.key)">
             <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" :class="{ folded: collapsedGroups[g.key] }"><path d="m4 6.5 4 4 4-4"/></svg>
           </button>
@@ -328,18 +418,15 @@ async function handleStatus(e: Event, c: ConversationMeta) {
             <span class="workspace-count">{{ g.items.length }}</span>
           </button>
           <div class="group-actions">
-            <button v-if="g.root" class="ws-row-btn" title="在此目录新建会话" @click="newSessionIn($event, g.root)">
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
-            </button>
-            <button v-if="isWorkspaceRoot(g.root)" class="ws-row-btn remove" title="移出工作目录" @click="removeWorkspace($event, g.root)">
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8"/></svg>
+            <button v-if="g.root" class="ws-row-btn" title="更多操作" aria-label="目录更多操作" @click.stop="openMenu($event, groupMenu(g))">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></svg>
             </button>
           </div>
         </div>
 
         <div v-show="!collapsedGroups[g.key]" class="group-items">
           <div v-if="g.items.length === 0" class="group-empty">{{ searchQuery ? '无匹配结果' : '暂无会话' }}</div>
-          <div v-for="c in g.items" :key="c.id" class="history-item" :class="{ active: agent.conversationId === c.id }" @click="selectConversation(c)" @mouseenter="showUsage(c)" @mouseleave="hideUsage()">
+          <div v-for="c in g.items" :key="c.id" class="history-item" :class="{ active: agent.conversationId === c.id }" @click="selectConversation(c)" @contextmenu="openMenu($event, conversationMenu(c))" @mouseenter="showUsage(c)" @mouseleave="hideUsage()">
             <div class="item-content">
               <template v-if="editingId === c.id">
                 <input v-model="editingTitle" class="rename-input" @keyup.enter="saveRename" @keyup.escape="cancelRename" @blur="saveRename" autofocus />
@@ -362,20 +449,8 @@ async function handleStatus(e: Event, c: ConversationMeta) {
               </template>
             </div>
             <div class="item-actions">
-              <button class="action-btn" @click.stop="handleFork($event, c.id)" title="分叉会话">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M6 9v6a3 3 0 0 0 3 3h6"/></svg>
-              </button>
-              <button class="action-btn" @click.stop="handleCompact($event, c.id)" title="压缩上下文">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8h16M4 16h10"/><path d="M18 13l3 3-3 3"/></svg>
-              </button>
-              <button class="action-btn" @click.stop="handleStatus($event, c)" :title="statusOf[c.id] ? `状态：${statusOf[c.id]}` : '查询状态'">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-              </button>
-              <button class="action-btn" @click.stop="startRename(c)">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-              </button>
-              <button class="action-btn delete" @click="handleDelete($event, c.id)">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              <button class="action-btn" :title="statusOf[c.id] ? `状态：${statusOf[c.id]} · 更多操作` : '更多操作'" aria-label="会话更多操作" @click.stop="openMenu($event, conversationMenu(c))">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></svg>
               </button>
             </div>
             <div v-if="hoveredId === c.id" class="usage-pop">
@@ -397,6 +472,23 @@ async function handleStatus(e: Event, c: ConversationMeta) {
     </div>
 
     <DirPickerModal :show="showDirPicker" @close="showDirPicker = false" @select="handleDirPick" />
+    <WorkspaceQuickSwitcher
+      :show="quickOpen"
+      :workspaces="perm.workspaces"
+      :conversations="agent.conversations"
+      @close="quickOpen = false"
+      @select-directory="selectWorkspace"
+      @select-conversation="selectConversation"
+      @new-session="createSessionIn"
+    />
+    <Teleport to="body">
+      <div v-if="menu" class="ctx-menu" :style="{ left: `${menu.x}px`, top: `${menu.y}px` }" @pointerdown.stop @click.stop>
+        <button v-for="item in menu.items" :key="item.label" class="ctx-item" :class="{ danger: item.danger }" @click="runMenuItem(item)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path :d="item.icon" /></svg>
+          <span>{{ item.label }}</span>
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 

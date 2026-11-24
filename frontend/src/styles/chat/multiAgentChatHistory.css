@@ -22,6 +22,7 @@
 }
 .ws-add-btn:hover { background: var(--bg-subtle); color: var(--text); }
 .ws-add-btn:disabled { opacity: 0.5; }
+.header-actions { display: flex; align-items: center; gap: 2px; }
 
 .search-box {
   display: flex; align-items: center; gap: 6px;
@@ -29,6 +30,21 @@
   border-radius: 6px;
   background: var(--bg-subtle);
   color: var(--text-muted);
+  transition: box-shadow 0.15s var(--ease), background 0.15s var(--ease);
+}
+.search-box:focus-within {
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+.search-kbd {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.3;
 }
 .search-box input {
   flex: 1; min-width: 0;
@@ -175,3 +191,34 @@
 .up-ctx { border-top: 1px solid var(--border-subtle); margin-top: 5px; padding-top: 6px; }
 .up-bar { height: 4px; border-radius: 2px; background: var(--bg-subtle); overflow: hidden; margin-top: 4px; }
 .up-bar > span { display: block; height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--primary), var(--accent, var(--primary))); transition: width 0.3s; }
+
+.ctx-menu {
+  position: fixed;
+  z-index: 1400;
+  min-width: 188px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg), 0 10px 28px rgba(0, 0, 0, 0.22);
+  animation: ctx-in 0.12s var(--ease) both;
+}
+@keyframes ctx-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+.ctx-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; height: 30px; padding: 0 8px;
+  border: none; border-radius: 5px;
+  background: transparent; color: var(--text-secondary);
+  font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.ctx-item svg { flex-shrink: 0; color: var(--text-muted); }
+.ctx-item:hover { background: var(--bg-subtle); color: var(--text); }
+.ctx-item.danger { color: var(--danger); }
+.ctx-item.danger svg { color: var(--danger); }
+.ctx-item.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+@media (prefers-reduced-motion: reduce) {
+  .ctx-menu { animation: none; }
+}
