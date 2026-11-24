@@ -68,14 +68,33 @@ export async function fetchLocalModelSources(): Promise<LocalModelSources> {
   return apiRequest<LocalModelSources>('/api/local-models/sources', { method: 'GET' }, true)
 }
 
-export async function searchHubModels(q: string, source = 'auto', limit = 20): Promise<HubModel[]> {
-  const params = new URLSearchParams({ q, source, limit: String(limit) })
-  const data = await apiRequest<{ models: HubModel[] }>(
+export interface HubSearchResult {
+  models: HubModel[]
+  source: string
+  hasMore: boolean
+  page: number
+}
+
+export async function searchHubModels(
+  q: string, source = 'auto', limit = 20, page = 1,
+): Promise<HubSearchResult> {
+  const params = new URLSearchParams({ q, source, limit: String(limit), page: String(page) })
+  const data = await apiRequest<{
+    models: HubModel[]
+    source?: string
+    has_more?: boolean
+    page?: number
+  }>(
     `/api/local-models/search?${params.toString()}`,
     { method: 'GET' },
     true,
   )
-  return data.models || []
+  return {
+    models: data.models || [],
+    source: data.source || source,
+    hasMore: data.has_more === true,
+    page: data.page || page,
+  }
 }
 
 export async function fetchHubFiles(repoId: string, source = 'auto'): Promise<HubFile[]> {

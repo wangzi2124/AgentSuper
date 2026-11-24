@@ -66,9 +66,10 @@ def _request_json(url: str, *, method: str = "GET", payload: dict | None = None,
     return json.loads(raw.decode("utf-8"))
 
 
-def _hf_search(query: str, limit: int) -> list[dict[str, Any]]:
+def _hf_search(query: str, limit: int, page: int = 1) -> list[dict[str, Any]]:
     base = endpoints()["huggingface"]
-    url = f"{base}/api/models?search={urllib.parse.quote(query)}&limit={limit}"
+    skip = max(0, page - 1) * limit
+    url = f"{base}/api/models?search={urllib.parse.quote(query)}&limit={limit}&skip={skip}"
     data = _request_json(url)
     out: list[dict[str, Any]] = []
     for item in data or []:
@@ -84,13 +85,15 @@ def _hf_search(query: str, limit: int) -> list[dict[str, Any]]:
     return out
 
 
-def _ms_search(query: str, limit: int) -> list[dict[str, Any]]:
+def _ms_search(query: str, limit: int, page: int = 1) -> list[dict[str, Any]]:
     base = endpoints()["modelscope"]
+    size = max(1, min(limit, 50))
+    page_no = max(1, page)
     payload = {
-        "page_number": 1,
-        "page_size": max(1, min(limit, 50)),
-        "PageNumber": 1,
-        "PageSize": max(1, min(limit, 50)),
+        "page_number": page_no,
+        "page_size": size,
+        "PageNumber": page_no,
+        "PageSize": size,
         "Name": query,
     }
     try:
@@ -98,7 +101,7 @@ def _ms_search(query: str, limit: int) -> list[dict[str, Any]]:
         models = ((data or {}).get("Data") or {}).get("Models") or []
     except Exception:
         # Fallback to the newer OpenAPI shape; some deployments only expose one.
-        url = f"{base}/openapi/v1/models?search={urllib.parse.quote(query)}&page_size={limit}"
+        url = f"{base}/openapi/v1/models?search={urllib.parse.quote(query)}&page_size={size}&page_number={page_no}"
         data = _request_json(url)
         models = ((data or {}).get("data") or {}).get("models") or []
     out: list[dict[str, Any]] = []
@@ -120,22 +123,47 @@ def _ms_search(query: str, limit: int) -> list[dict[str, Any]]:
     return out
 
 
-def search_models(query: str, source: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+def search_models_page(
+    query: str, source: str | None = None, limit: int = 20, page: int = 1
+) -> dict[str, Any]:
+    """搜索一页模型，并回传实际命中的来源与是否还有下一页。
+
+    各来源都不返回统一的总数，按“满页即可能还有下一页”判断 ``has_more``：
+    返回条数达到 limit 时认为可能还有更多，不足一页则确定到底。前端据此
+    决定“加载更多”按钮是否可用，并把命中的 source 固定用于后续分页，避免
+    auto 模式下不同页落到不同来源。
+    """
     query = (query or "").strip()
+    page = max(1, page)
     if not query:
-        return []
+        return {"models": [], "source": "", "has_more": False}
     errors: list[str] = []
     for src in resolve_sources(source):
         try:
-            results = _ms_search(query, limit) if src == "modelscope" else _hf_search(query, limit)
+            results = (
+                _ms_search(query, limit, page) if src == "modelscope"
+                else _hf_search(query, limit, page)
+            )
         except Exception as exc:  # noqa: BLE001 - try next source
             errors.append(f"{src}: {exc}")
             continue
         if results:
-            return results[:limit]
+            page_items = results[:limit]
+            return {
+                "models": page_items,
+                "source": src,
+                "has_more": len(page_items) >= limit,
+            }
     if errors:
         raise SourceError("；".join(errors))
-    return []
+    return {"models": [], "source": "", "has_more": False}
+
+
+def search_models(
+    query: str, source: str | None = None, limit: int = 20, page: int = 1
+) -> list[dict[str, Any]]:
+    """兼容旧调用的薄封装，只返回模型列表。"""
+    return search_models_page(query, source, limit, page)["models"]
 
 
 def _group_gguf(files: list[dict[str, Any]]) -> list[dict[str, Any]]:

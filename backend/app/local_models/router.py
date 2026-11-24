@@ -31,12 +31,19 @@ async def list_sources() -> dict:
 
 
 @router.get("/search")
-async def search(q: str = "", source: str = "auto", limit: int = 20) -> dict:
+async def search(q: str = "", source: str = "auto", limit: int = 20, page: int = 1) -> dict:
     try:
-        models = await run_in_threadpool(sources.search_models, q, source, max(1, min(limit, 50)))
+        result = await run_in_threadpool(
+            sources.search_models_page, q, source, max(1, min(limit, 50)), max(1, page)
+        )
     except sources.SourceError as exc:
         return fail(message=str(exc))
-    return ok({"models": models})
+    return ok({
+        "models": result["models"],
+        "source": result["source"],
+        "has_more": result["has_more"],
+        "page": max(1, page),
+    })
 
 
 @router.get("/files")

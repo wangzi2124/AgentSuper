@@ -109,6 +109,52 @@ def test_modelscope_search_parses_pascal_case(monkeypatch):
     assert models[0]["source"] == "modelscope"
 
 
+def test_search_page_threads_page_number_and_has_more(monkeypatch):
+    seen = {}
+
+    def fake(url, method="GET", payload=None, timeout=20.0):
+        assert method == "PUT"
+        seen.update(payload or {})
+        return {"Code": 200, "Data": {"Models": [
+            {"Path": "Qwen", "Name": f"Qwen2.5-{i}B-GGUF", "Downloads": i}
+            for i in range(10, 20)
+        ]}}
+
+    monkeypatch.setattr(sources, "_request_json", fake)
+    result = sources.search_models_page("qwen", "modelscope", limit=10, page=2)
+    assert seen["page_number"] == 2
+    assert seen["PageNumber"] == 2
+    assert seen["page_size"] == 10
+    assert result["source"] == "modelscope"
+    assert result["has_more"] is True
+    assert len(result["models"]) == 10
+
+
+def test_search_page_last_page_has_more_false(monkeypatch):
+    def fake(url, method="GET", payload=None, timeout=20.0):
+        return {"Code": 200, "Data": {"Models": [
+            {"Path": "Qwen", "Name": "Qwen2.5-7B-GGUF"},
+        ]}}
+
+    monkeypatch.setattr(sources, "_request_json", fake)
+    result = sources.search_models_page("qwen", "modelscope", limit=20, page=3)
+    assert result["has_more"] is False
+    assert len(result["models"]) == 1
+
+
+def test_hf_search_uses_skip_offset(monkeypatch):
+    seen = {}
+
+    def fake(url, method="GET", payload=None, timeout=20.0):
+        seen["url"] = url
+        return [{"id": "org/model", "downloads": 1}]
+
+    monkeypatch.setattr(sources, "_request_json", fake)
+    result = sources.search_models_page("model", "huggingface", limit=20, page=3)
+    assert "skip=40" in seen["url"]
+    assert result["source"] == "huggingface"
+
+
 def test_download_url_shapes(monkeypatch):
     monkeypatch.setattr(sources, "endpoints", lambda: {
         "modelscope": "https://ms.test",
