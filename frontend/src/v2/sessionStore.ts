@@ -118,7 +118,7 @@ export const useV2SessionStore = defineStore('v2Session', () => {
         listMessages(sessionId, { limit: 500, order: 'asc' }),
         listInbox(sessionId),
         listPermissions(sessionId).catch(() => []),
-        listForms(sessionId).catch(() => []),
+        listForms(sessionId, 'pending').catch(() => []),
         getSessionPlan(sessionId).catch(() => null),
       ])
       const base: V2SessionRuntime = {
@@ -128,7 +128,7 @@ export const useV2SessionStore = defineStore('v2Session', () => {
         messages: messages.data,
         inbox,
         permissions,
-        forms,
+        forms: forms.filter((form) => form.state === 'pending'),
         plan: info.status === 'busy' || info.status === 'retry'
           ? (plan ? _livePlan(plan) : null)
           : null,
@@ -225,6 +225,14 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     })
   }
 
+  function removeForm(sessionId: string, formId: string): void {
+    const runtime = ensureRuntime(sessionId)
+    setRuntime({
+      ...runtime,
+      forms: runtime.forms.filter((form) => form.id !== formId),
+    })
+  }
+
   function setInfo(sessionId: string, info: SessionInfoV2): void {
     const runtime = ensureRuntime(sessionId)
     setRuntime({ ...runtime, info, status: { type: info.status } })
@@ -248,6 +256,7 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     send,
     setInbox,
     removeInbox,
+    removeForm,
     setInfo,
     setActive,
   }

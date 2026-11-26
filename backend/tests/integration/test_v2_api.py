@@ -218,12 +218,20 @@ def test_v2_permission_and_form_endpoints(client) -> None:
     repo.create_form(session_id, "form_api", [{"id": "pm", "type": "select"}])
     forms = client.get(f"/api/v2/session/{session_id}/form").json()["data"]
     assert [item["id"] for item in forms] == ["form_api"]
+    assert [
+        item["id"]
+        for item in client.get(f"/api/v2/session/{session_id}/form?state=pending").json()["data"]
+    ] == ["form_api"]
     form_reply = client.post(
         f"/api/v2/session/{session_id}/form/form_api/reply",
         json={"response": {"pm": "pnpm"}},
     )
     assert form_reply.status_code == 204
     assert client.get(f"/api/v2/session/{session_id}/form").json()["data"][0]["state"] == "replied"
+    assert client.post(
+        f"/api/v2/session/{session_id}/form/form_api/reply",
+        json={"response": {"pm": "pnpm"}},
+    ).status_code == 204
 
     repo.create_form(session_id, "form_cancel_api", [{"id": "answer", "type": "select"}])
     cancelled = client.post(
@@ -235,3 +243,10 @@ def test_v2_permission_and_form_endpoints(client) -> None:
         for item in client.get(f"/api/v2/session/{session_id}/form").json()["data"]
     }
     assert states["form_cancel_api"] == "cancelled"
+    assert client.post(
+        f"/api/v2/session/{session_id}/form/form_api/cancel"
+    ).status_code == 204
+    assert client.post(
+        f"/api/v2/session/{session_id}/form/form_cancel_api/reply",
+        json={"response": {"answer": "noop"}},
+    ).status_code == 204

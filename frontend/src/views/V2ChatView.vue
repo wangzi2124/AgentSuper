@@ -100,7 +100,7 @@ const runtime = computed(() => (sessionId.value ? v2.getRuntime(sessionId.value)
 const messages = computed(() => runtime.value?.messages ?? [])
 const inbox = computed(() => runtime.value?.inbox ?? [])
 const permissions = computed(() => runtime.value?.permissions ?? [])
-const forms = computed(() => runtime.value?.forms ?? [])
+const forms = computed(() => runtime.value?.forms.filter((form) => form.state === 'pending') ?? [])
 const status = computed(() => runtime.value?.status?.type ?? 'idle')
 const executionError = computed(() => runtime.value?.error?.message || '')
 const localErrorTimer = ref<ReturnType<typeof setTimeout> | null>(null)
@@ -723,6 +723,7 @@ async function submitForm(formId: string, response: Record<string, unknown>) {
   if (!id) return
   try {
     await replyForm(id, formId, response)
+    v2.removeForm(id, formId)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   }
@@ -733,6 +734,7 @@ async function cancelFormRequest(formId: string) {
   if (!id) return
   try {
     await cancelForm(id, formId)
+    v2.removeForm(id, formId)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   }

@@ -28,7 +28,7 @@ import {
   listMessages,
   listPermissions,
 } from '../../../src/api/v2'
-import type { InboxInfo } from '../../../src/contracts/v2'
+import type { FormInfo, InboxInfo } from '../../../src/contracts/v2'
 import { useV2SessionStore } from '../../../src/v2/sessionStore'
 
 function inboxItem(delivery: 'steer' | 'queue'): InboxInfo {
@@ -149,5 +149,19 @@ describe('v2 session store inbox actions', () => {
     const store = useV2SessionStore()
     await store.hydrate('s1')
     expect(store.getRuntime('s1')?.plan).toBeNull()
+  })
+
+  it('hydrates only pending forms and can remove them locally', async () => {
+    vi.mocked(listForms).mockResolvedValue([
+      { id: 'old', session_id: 's1', title: 'old', fields: [], state: 'replied', response: {} },
+      { id: 'live', session_id: 's1', title: 'live', fields: [], state: 'pending', response: {} },
+    ] as FormInfo[])
+    const store = useV2SessionStore()
+    await store.hydrate('s1')
+    expect(listForms).toHaveBeenCalledWith('s1', 'pending')
+    expect(store.getRuntime('s1')?.forms.map((form) => form.id)).toEqual(['live'])
+
+    store.removeForm('s1', 'live')
+    expect(store.getRuntime('s1')?.forms).toEqual([])
   })
 })

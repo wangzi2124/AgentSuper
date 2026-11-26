@@ -1290,6 +1290,18 @@ def create_form(
         conn.close()
 
 
+def get_form(session_id: str, form_id: str) -> Optional[dict[str, Any]]:
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM session_forms WHERE session_id = ? AND id = ?",
+            (session_id, form_id),
+        ).fetchone()
+        return _form_from_row(row) if row is not None else None
+    finally:
+        conn.close()
+
+
 def list_forms(session_id: str, *, state: Optional[str] = None) -> list[dict[str, Any]]:
     conn = _get_db()
     try:

@@ -279,9 +279,13 @@ export async function replyPermission(
   )
 }
 
-export async function listForms(sessionId: string): Promise<FormInfo[]> {
+export async function listForms(
+  sessionId: string,
+  state?: 'pending' | 'replied' | 'cancelled',
+): Promise<FormInfo[]> {
+  const query = state ? `?state=${encodeURIComponent(state)}` : ''
   const payload = await apiRequest<unknown>(
-    `${BASE}/session/${encodeURIComponent(sessionId)}/form`,
+    `${BASE}/session/${encodeURIComponent(sessionId)}/form${query}`,
   )
   return unwrap<FormInfo[]>(payload)
 }

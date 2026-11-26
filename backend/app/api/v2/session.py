@@ -876,10 +876,14 @@ async def get_session_plan(
 
 @router.get("/session/{session_id}/form")
 async def list_forms(
-    session_id: str, ctx: PlatformContext = Depends(get_context)
+    session_id: str,
+    state: str | None = None,
+    ctx: PlatformContext = Depends(get_context),
 ) -> dict[str, Any]:
     _must_get(ctx, session_id)
-    return {"data": repo.list_forms(session_id)}
+    if state is not None and state not in {"pending", "replied", "cancelled"}:
+        raise HTTPException(status_code=400, detail="invalid form state")
+    return {"data": repo.list_forms(session_id, state=state)}
 
 
 @router.post("/session/{session_id}/form/{form_id}/reply", status_code=204)
@@ -890,6 +894,23 @@ async def reply_form(
     ctx: PlatformContext = Depends(get_context),
 ) -> None:
     _must_get(ctx, session_id)
+    current = repo.get_form(session_id, form_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="form not found")
+    if current["state"] == "replied":
+        await emit_event(
+            ctx,
+            "form.replied",
+            {
+                "session_id": session_id,
+                "form_id": form_id,
+                "response": current.get("response") or {},
+            },
+            session_id=session_id,
+        )
+        return
+    if current["state"] != "pending":
+        return
     if not repo.reply_form(session_id, form_id, body.response):
         raise HTTPException(status_code=404, detail="form not found")
     try:
@@ -913,6 +934,19 @@ async def cancel_form(
     ctx: PlatformContext = Depends(get_context),
 ) -> None:
     _must_get(ctx, session_id)
+    current = repo.get_form(session_id, form_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="form not found")
+    if current["state"] == "cancelled":
+        await emit_event(
+            ctx,
+            "form.cancelled",
+            {"session_id": session_id, "form_id": form_id},
+            session_id=session_id,
+        )
+        return
+    if current["state"] != "pending":
+        return
     if not repo.cancel_form(session_id, form_id):
         raise HTTPException(status_code=404, detail="form not found")
     try:
