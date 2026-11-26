@@ -27,6 +27,9 @@ import {
   type V2SessionRuntime,
 } from './runtime'
 
+const ERROR_DISMISS_MS = 15_000
+const errorDismissTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
 function _livePlan(plan: PlanUpdatedData): LivePlan {
   return {
     plan_id: plan.plan_id,
@@ -58,6 +61,25 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     return runtimes.value[sessionId]
   }
 
+  function clearError(sessionId: string): void {
+    const timer = errorDismissTimers.get(sessionId)
+    if (timer) {
+      clearTimeout(timer)
+      errorDismissTimers.delete(sessionId)
+    }
+    const runtime = runtimes.value[sessionId]
+    if (runtime?.error) setRuntime({ ...runtime, error: null })
+  }
+
+  function scheduleErrorDismiss(sessionId: string): void {
+    const existing = errorDismissTimers.get(sessionId)
+    if (existing) clearTimeout(existing)
+    errorDismissTimers.set(sessionId, setTimeout(() => {
+      errorDismissTimers.delete(sessionId)
+      clearError(sessionId)
+    }, ERROR_DISMISS_MS))
+  }
+
   function setRuntime(runtime: V2SessionRuntime): void {
     runtimes.value[runtime.id] = runtime
   }
@@ -65,6 +87,7 @@ export const useV2SessionStore = defineStore('v2Session', () => {
   function apply(event: V2Event): void {
     const sessionId = eventSessionId(event)
     if (!sessionId) return
+    if (event.type === 'session.execution.failed') scheduleErrorDismiss(sessionId)
     const runtime = ensureRuntime(sessionId)
     if (!runtime.hydrated) {
       const buffer = buffers.get(sessionId) ?? []
@@ -152,6 +175,8 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     unsubscribeConnected?.()
     unsubscribeEvent = null
     unsubscribeConnected = null
+    for (const timer of errorDismissTimers.values()) clearTimeout(timer)
+    errorDismissTimers.clear()
     getV2EventStream().stop()
   }
 
@@ -212,6 +237,7 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     activeSessionId,
     ensureRuntime,
     getRuntime,
+    clearError,
     apply,
     hydrate,
     hydrateAllKnown,

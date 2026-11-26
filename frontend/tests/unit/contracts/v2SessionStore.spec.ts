@@ -90,6 +90,35 @@ describe('v2 session store inbox actions', () => {
     expect(store.getRuntime('s1')?.error?.message).toContain('额度已用尽')
   })
 
+  it('auto-dismisses the execution error after 15 seconds and resets on a new failure', async () => {
+    const failure = (id: string) => ({
+      id,
+      created: Date.now(),
+      type: 'session.execution.failed',
+      data: {
+        session_id: 's1',
+        error: { type: 'execution_error', message: 'OpenAI 账户额度已用尽，请充值。' },
+      },
+    } as never)
+    vi.useFakeTimers()
+    try {
+      const store = useV2SessionStore()
+      await store.hydrate('s1')
+      store.apply(failure('fail_a'))
+      expect(store.getRuntime('s1')?.error?.message).toContain('额度已用尽')
+
+      await vi.advanceTimersByTimeAsync(14_000)
+      store.apply(failure('fail_b'))
+      await vi.advanceTimersByTimeAsync(14_000)
+      expect(store.getRuntime('s1')?.error?.message).toContain('额度已用尽')
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(store.getRuntime('s1')?.error).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('hydrates persisted plan snapshot', async () => {
     vi.mocked(getSessionPlan).mockResolvedValue({
       session_id: 's1',

@@ -103,6 +103,18 @@ const permissions = computed(() => runtime.value?.permissions ?? [])
 const forms = computed(() => runtime.value?.forms ?? [])
 const status = computed(() => runtime.value?.status?.type ?? 'idle')
 const executionError = computed(() => runtime.value?.error?.message || '')
+const localErrorTimer = ref<ReturnType<typeof setTimeout> | null>(null)
+watch(error, (value) => {
+  if (localErrorTimer.value) {
+    clearTimeout(localErrorTimer.value)
+    localErrorTimer.value = null
+  }
+  if (!value) return
+  localErrorTimer.value = setTimeout(() => {
+    error.value = ''
+    localErrorTimer.value = null
+  }, 15_000)
+})
 const modelId = computed(() => runtime.value?.info?.model?.id || '')
 const pendingModel = ref('')
 const effectiveModelId = computed(
@@ -1159,6 +1171,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  if (localErrorTimer.value) clearTimeout(localErrorTimer.value)
   stopAutoRead()
 })
 
