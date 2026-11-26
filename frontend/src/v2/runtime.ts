@@ -41,6 +41,7 @@ export interface V2SessionRuntime {
   inbox: InboxInfo[]
   permissions: PermissionRequest[]
   forms: FormInfo[]
+  resolvedForms: Record<string, number>
   error: StructuredError | null
   /** Assistant message of the running turn; drives the transient execution panel. */
   activeAssistantId: string | null
@@ -49,6 +50,7 @@ export interface V2SessionRuntime {
   plan: LivePlan | null
   hydrated: boolean
   seenEventIds: string[]
+  lastDurableSeq: number
 }
 
 const MAX_SEEN_EVENTS = 500
@@ -62,12 +64,14 @@ export function emptyRuntime(id: string): V2SessionRuntime {
     inbox: [],
     permissions: [],
     forms: [],
+    resolvedForms: {},
     error: null,
     activeAssistantId: null,
     compaction: null,
     plan: null,
     hydrated: false,
     seenEventIds: [],
+    lastDurableSeq: 0,
   }
 }
 
@@ -87,11 +91,13 @@ function clone(runtime: V2SessionRuntime): V2SessionRuntime {
     inbox: runtime.inbox.slice(),
     permissions: runtime.permissions.slice(),
     forms: runtime.forms.slice(),
+    resolvedForms: { ...runtime.resolvedForms },
     error: runtime.error,
     activeAssistantId: runtime.activeAssistantId,
     compaction: runtime.compaction ? { ...runtime.compaction } : null,
     plan: runtime.plan ? { ...runtime.plan, steps: runtime.plan.steps.map(step => ({ ...step })) } : null,
     seenEventIds: runtime.seenEventIds.slice(),
+    lastDurableSeq: runtime.lastDurableSeq,
   }
 }
 
@@ -192,10 +198,21 @@ function upsertPermission(runtime: V2SessionRuntime, request: PermissionRequest)
   else runtime.permissions.push(request)
 }
 
+function formRevision(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
 function upsertForm(runtime: V2SessionRuntime, form: FormInfo): void {
+  const revision = formRevision(form.revision)
+  if ((runtime.resolvedForms[form.id] ?? -1) >= revision) return
   const index = runtime.forms.findIndex((entry) => entry.id === form.id)
   if (index >= 0) runtime.forms[index] = form
   else runtime.forms.push(form)
+}
+
+function resolveForm(runtime: V2SessionRuntime, formId: string, revision: number): void {
+  runtime.resolvedForms[formId] = Math.max(runtime.resolvedForms[formId] ?? -1, revision)
+  runtime.forms = runtime.forms.filter((form) => form.id !== formId)
 }
 
 export function applyV2Event(
@@ -207,6 +224,10 @@ export function applyV2Event(
   next.seenEventIds.push(event.id)
   if (next.seenEventIds.length > MAX_SEEN_EVENTS) {
     next.seenEventIds.splice(0, next.seenEventIds.length - MAX_SEEN_EVENTS)
+  }
+  const durable = event.durable
+  if (durable && durable.aggregate_id === next.id) {
+    next.lastDurableSeq = Math.max(next.lastDurableSeq, durable.seq)
   }
 
   const eventData = event.data as unknown as Record<string, unknown>
@@ -548,8 +569,10 @@ export function applyV2Event(
       upsertForm(next, event.data)
       break
     case 'form.replied':
+      resolveForm(next, event.data.form_id, formRevision(event.data.revision))
+      break
     case 'form.cancelled':
-      next.forms = next.forms.filter((item) => item.id !== event.data.form_id)
+      resolveForm(next, event.data.form_id, formRevision(event.data.revision))
       break
     case 'session.synthetic': {
       const metadata = event.data.metadata ?? {}

@@ -22,11 +22,13 @@ import {
 } from '../api/v2'
 import type { AgentInfoV2, TurnDiff } from '../api/v2'
 import { listCommands, type SlashCommandInfo } from '../api/commands'
+import { ApiError } from '../api/errors'
 import FormCard from '../v2/FormCard.vue'
 import MarkdownContent from '../components/MarkdownContent.vue'
 import type {
   AssistantMessage,
   FileAttachment,
+  FormInfo,
   InboxInfo,
   MessagePart,
   MessageV2,
@@ -718,24 +720,32 @@ async function answerPermission(request: PermissionRequest, decision: 'once' | '
   }
 }
 
-async function submitForm(formId: string, response: Record<string, unknown>) {
+async function submitForm(form: FormInfo, response: Record<string, unknown>) {
   const id = sessionId.value
   if (!id) return
   try {
-    await replyForm(id, formId, response)
-    v2.removeForm(id, formId)
+    await replyForm(id, form.id, response, form.revision)
+    v2.removeForm(id, form.id, form.revision + 1)
   } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      v2.removeForm(id, form.id, form.revision)
+      return
+    }
     error.value = err instanceof Error ? err.message : String(err)
   }
 }
 
-async function cancelFormRequest(formId: string) {
+async function cancelFormRequest(form: FormInfo) {
   const id = sessionId.value
   if (!id) return
   try {
-    await cancelForm(id, formId)
-    v2.removeForm(id, formId)
+    await cancelForm(id, form.id, form.revision)
+    v2.removeForm(id, form.id, form.revision + 1)
   } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      v2.removeForm(id, form.id, form.revision)
+      return
+    }
     error.value = err instanceof Error ? err.message : String(err)
   }
 }
@@ -1461,8 +1471,8 @@ onBeforeUnmount(() => {
           v-for="form in forms"
           :key="form.id"
           :form="form"
-          @submit="response => submitForm(form.id, response)"
-          @cancel="cancelFormRequest(form.id)"
+          @submit="response => submitForm(form, response)"
+          @cancel="cancelFormRequest(form)"
         />
       </div>
     </div>

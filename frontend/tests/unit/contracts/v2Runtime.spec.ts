@@ -218,6 +218,7 @@ describe('v2 runtime reducer', () => {
       question: '下一步怎么做？',
       state: 'pending',
       response: {},
+      revision: 0,
       fields: [{
         id: 'answer',
         type: 'select',
@@ -234,9 +235,29 @@ describe('v2 runtime reducer', () => {
     }))
     expect(runtime.forms[0]?.fields[0]?.option_details?.[0]?.recommended).toBe(true)
     runtime = applyV2Event(runtime, evt('form.cancelled', {
-      session_id: 's1', form_id: 'form_q',
+      session_id: 's1', form_id: 'form_q', revision: 1,
     }))
     expect(runtime.forms).toHaveLength(0)
+  })
+
+  it('ignores stale form revisions and tracks the durable cursor', () => {
+    let runtime = emptyRuntime('s1')
+    const form = {
+      session_id: 's1', id: 'form_q', kind: 'question', title: '下一步？',
+      state: 'pending', response: {}, revision: 0, fields: [],
+    }
+    runtime = applyV2Event(runtime, evt('form.created', form))
+    runtime = applyV2Event(runtime, evt('form.replied', {
+      session_id: 's1', form_id: 'form_q', response: { answer: 'A' }, revision: 1,
+    }))
+    runtime = applyV2Event(runtime, evt('form.created', form, 'stale-create'))
+    expect(runtime.forms).toHaveLength(0)
+    expect(runtime.resolvedForms.form_q).toBe(1)
+
+    const durableEvent = evt('form.created', form, 'replayed')
+    durableEvent.durable = { aggregate_id: 's1', seq: 42, version: 2 }
+    runtime = applyV2Event(runtime, durableEvent)
+    expect(runtime.lastDurableSeq).toBe(42)
   })
 
   it('surfaces execution failures and clears them on the next run', () => {

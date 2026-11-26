@@ -17,15 +17,30 @@ def _repo_stub(monkeypatch, state: dict) -> dict:
     def create_form(sid, fid, fields, title=""):
         created["id"] = fid
         created["fields"] = fields
-        state[fid] = {"id": fid, "session_id": sid, "state": "pending", "response": {}}
-        return {"id": fid, "session_id": sid, "title": title, "fields": fields}
+        state[fid] = {
+            "id": fid, "session_id": sid, "state": "pending",
+            "response": {}, "revision": 0,
+        }
+        return {
+            "id": fid, "session_id": sid, "title": title,
+            "fields": fields, "revision": 0,
+        }
 
-    def reply_form(sid, fid, response):
-        state[fid].update(response=response, state="replied")
+    def reply_form(sid, fid, response, expected_revision=None):
+        if expected_revision is not None and state[fid]["revision"] != expected_revision:
+            return False
+        state[fid].update(
+            response=response,
+            state="replied",
+            revision=int(state[fid].get("revision", 0)) + 1,
+        )
         return True
 
-    def cancel_form(sid, fid):
+    def cancel_form(sid, fid, expected_revision=None):
+        if expected_revision is not None and state[fid]["revision"] != expected_revision:
+            return False
         state[fid]["state"] = "cancelled"
+        state[fid]["revision"] = int(state[fid].get("revision", 0)) + 1
         return True
 
     monkeypatch.setattr(repo, "create_form", create_form)
@@ -144,6 +159,9 @@ def test_question_timeout_emits_cancel_event(monkeypatch):
     assert any(event_type == "form.cancelled" for event_type, _ in emitted)
     created = [data for event_type, data in emitted if event_type == "form.created"]
     assert created and created[0]["fields"][0]["option_details"]
+    assert created[0]["revision"] == 0
+    cancelled = [data for event_type, data in emitted if event_type == "form.cancelled"]
+    assert cancelled and cancelled[0]["revision"] == 1
 
 
 def test_question_without_session(monkeypatch):

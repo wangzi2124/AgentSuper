@@ -7,6 +7,7 @@ import type {
   PlanUpdatedData,
   PromptInput,
   SessionInfoV2,
+  V2Event,
 } from '../contracts/v2'
 import { apiRequest } from './errors'
 
@@ -290,20 +291,37 @@ export async function listForms(
   return unwrap<FormInfo[]>(payload)
 }
 
+export async function replaySessionEvents(
+  sessionId: string,
+  afterSeq: number = 0,
+  limit: number = 500,
+): Promise<V2Event[]> {
+  const query = `?after_seq=${afterSeq}&limit=${limit}`
+  const payload = await apiRequest<unknown>(
+    `${BASE}/session/${encodeURIComponent(sessionId)}/event/replay${query}`,
+  )
+  return unwrap<V2Event[]>(payload)
+}
+
 export async function replyForm(
   sessionId: string,
   formId: string,
   response: Record<string, unknown>,
+  revision: number,
 ): Promise<void> {
   await request(
     `/session/${encodeURIComponent(sessionId)}/form/${encodeURIComponent(formId)}/reply`,
-    json('POST', { response }),
+    json('POST', { response, revision }),
   )
 }
 
-export async function cancelForm(sessionId: string, formId: string): Promise<void> {
+export async function cancelForm(
+  sessionId: string,
+  formId: string,
+  revision: number,
+): Promise<void> {
   await request(
     `/session/${encodeURIComponent(sessionId)}/form/${encodeURIComponent(formId)}/cancel`,
-    json('POST', {}),
+    json('POST', { revision }),
   )
 }

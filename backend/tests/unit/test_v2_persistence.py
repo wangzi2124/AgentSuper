@@ -6,7 +6,7 @@ import pytest
 
 from app.session import repository
 from app.session.db import _get_db
-from app.session.migrations import MIGRATION_ID, migrate_v2
+from app.session.migrations import FORM_REVISION_MIGRATION_ID, MIGRATION_ID, migrate_v2
 
 
 @pytest.fixture
@@ -177,9 +177,13 @@ def test_permission_and_form_repository(store) -> None:
         sess.id, "form_1", [{"id": "pm", "type": "select", "label": "PM"}], title="选择"
     )
     assert form["state"] == "pending"
+    assert form["revision"] == 0
     assert repository.list_forms(sess.id)[0]["id"] == "form_1"
-    assert repository.reply_form(sess.id, "form_1", {"pm": "pnpm"}) is True
-    assert repository.list_forms(sess.id, state="replied")[0]["response"] == {"pm": "pnpm"}
+    assert repository.reply_form(sess.id, "form_1", {"pm": "pnpm"}, expected_revision=9) is False
+    assert repository.reply_form(sess.id, "form_1", {"pm": "pnpm"}, expected_revision=0) is True
+    replied = repository.list_forms(sess.id, state="replied")[0]
+    assert replied["response"] == {"pm": "pnpm"}
+    assert replied["revision"] == 1
 
 
 def test_connection_migrates_old_schema_without_new_columns(store) -> None:
@@ -193,10 +197,15 @@ def test_connection_migrates_old_schema_without_new_columns(store) -> None:
             "session_messages": ("time_completed",),
             "message_parts": ("ordinal", "time_updated"),
             "session_inputs": ("type", "status", "time_delivered"),
+            "session_forms": ("revision",),
         }.items():
             for column in columns:
                 conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
         conn.execute("DELETE FROM schema_migrations WHERE id = ?", (MIGRATION_ID,))
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE id = ?",
+            (FORM_REVISION_MIGRATION_ID,),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -205,15 +214,22 @@ def test_connection_migrates_old_schema_without_new_columns(store) -> None:
     try:
         part_cols = {row[1] for row in migrated.execute("PRAGMA table_info(message_parts)")}
         input_cols = {row[1] for row in migrated.execute("PRAGMA table_info(session_inputs)")}
+        form_cols = {row[1] for row in migrated.execute("PRAGMA table_info(session_forms)")}
         marker = migrated.execute(
             "SELECT id FROM schema_migrations WHERE id = ?", (MIGRATION_ID,)
+        ).fetchone()
+        form_marker = migrated.execute(
+            "SELECT id FROM schema_migrations WHERE id = ?",
+            (FORM_REVISION_MIGRATION_ID,),
         ).fetchone()
     finally:
         migrated.close()
 
     assert {"ordinal", "time_updated"} <= part_cols
     assert {"type", "status", "time_delivered"} <= input_cols
+    assert "revision" in form_cols
     assert marker is not None
+    assert form_marker is not None
 
 
 def test_legacy_ordinal_backfill_is_idempotent(store) -> None:

@@ -218,24 +218,42 @@ def test_v2_permission_and_form_endpoints(client) -> None:
     repo.create_form(session_id, "form_api", [{"id": "pm", "type": "select"}])
     forms = client.get(f"/api/v2/session/{session_id}/form").json()["data"]
     assert [item["id"] for item in forms] == ["form_api"]
+    assert [item["revision"] for item in forms] == [0]
     assert [
         item["id"]
         for item in client.get(f"/api/v2/session/{session_id}/form?state=pending").json()["data"]
     ] == ["form_api"]
+    stale = client.post(
+        f"/api/v2/session/{session_id}/form/form_api/reply",
+        json={"response": {"pm": "pnpm"}, "revision": 9},
+    )
+    assert stale.status_code == 409
     form_reply = client.post(
         f"/api/v2/session/{session_id}/form/form_api/reply",
-        json={"response": {"pm": "pnpm"}},
+        json={"response": {"pm": "pnpm"}, "revision": 0},
     )
     assert form_reply.status_code == 204
-    assert client.get(f"/api/v2/session/{session_id}/form").json()["data"][0]["state"] == "replied"
+    replied = client.get(f"/api/v2/session/{session_id}/form").json()["data"][0]
+    assert replied["state"] == "replied"
+    assert replied["revision"] == 1
     assert client.post(
         f"/api/v2/session/{session_id}/form/form_api/reply",
-        json={"response": {"pm": "pnpm"}},
+        json={"response": {"pm": "pnpm"}, "revision": 0},
     ).status_code == 204
+    replay = client.get(
+        f"/api/v2/session/{session_id}/event/replay?after_seq=0&limit=100"
+    )
+    assert replay.status_code == 200
+    replayed = replay.json()["data"]
+    assert any(
+        event["type"] == "form.replied" and event["data"]["revision"] == 1
+        for event in replayed
+    )
 
     repo.create_form(session_id, "form_cancel_api", [{"id": "answer", "type": "select"}])
     cancelled = client.post(
-        f"/api/v2/session/{session_id}/form/form_cancel_api/cancel"
+        f"/api/v2/session/{session_id}/form/form_cancel_api/cancel",
+        json={"revision": 0},
     )
     assert cancelled.status_code == 204
     states = {
@@ -244,9 +262,10 @@ def test_v2_permission_and_form_endpoints(client) -> None:
     }
     assert states["form_cancel_api"] == "cancelled"
     assert client.post(
-        f"/api/v2/session/{session_id}/form/form_api/cancel"
-    ).status_code == 204
+        f"/api/v2/session/{session_id}/form/form_api/cancel",
+        json={"revision": 1},
+    ).status_code == 409
     assert client.post(
         f"/api/v2/session/{session_id}/form/form_cancel_api/reply",
-        json={"response": {"answer": "noop"}},
-    ).status_code == 204
+        json={"response": {"answer": "noop"}, "revision": 1},
+    ).status_code == 409

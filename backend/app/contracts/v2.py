@@ -422,6 +422,7 @@ class FormInfo(StrictModel):
     fields: list[FormField] = Field(default_factory=list)
     state: Literal["pending", "replied", "cancelled"] = "pending"
     response: dict[str, Any] = Field(default_factory=dict)
+    revision: int = 0
 
 
 class RevertState(StrictModel):
@@ -740,11 +741,13 @@ class FormRepliedData(StrictModel):
     session_id: str
     form_id: str
     response: dict[str, Any] = Field(default_factory=dict)
+    revision: int = 0
 
 
 class FormRefData(StrictModel):
     session_id: str
     form_id: str
+    revision: int = 0
 
 
 class ServerConnectedData(StrictModel):
@@ -926,6 +929,9 @@ DURABLE_EVENT_TYPES = frozenset(
         "session.revert.cleared",
         "session.model.selected",
         "session.agent.selected",
+        "form.created",
+        "form.replied",
+        "form.cancelled",
     }
 )
 
@@ -943,9 +949,6 @@ VOLATILE_EVENT_TYPES = frozenset(
         "session.usage.updated",
         "permission.asked",
         "permission.replied",
-        "form.created",
-        "form.replied",
-        "form.cancelled",
     }
 )
 

@@ -206,6 +206,7 @@ session_forms = Table(
     Column("state", String(16), nullable=False, server_default="pending"),
     Column("response", Text().with_variant(LONGTEXT(), "mysql"), nullable=False,
            server_default="{}"),
+    Column("revision", Integer(), nullable=False, server_default="0"),
     Column("time_created", BigInteger, nullable=False),
     Column("time_updated", BigInteger, nullable=False),
     Index("idx_forms_session_state", "session_id", "state"),

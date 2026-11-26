@@ -109,11 +109,17 @@ def test_simulated_model_question_answer_loop(monkeypatch):
     def create_form(sid, fid, fields, title=""):
         created["id"] = fid
         created["fields"] = fields
-        state[fid] = {"id": fid, "session_id": sid, "state": "pending", "response": {}}
-        return {"id": fid, "session_id": sid, "title": title, "fields": fields}
+        state[fid] = {
+            "id": fid, "session_id": sid, "state": "pending",
+            "response": {}, "revision": 0,
+        }
+        return {
+            "id": fid, "session_id": sid, "title": title,
+            "fields": fields, "revision": 0,
+        }
 
-    def reply_form(sid, fid, response):
-        state[fid].update(response=response, state="replied")
+    def reply_form(sid, fid, response, expected_revision=None):
+        state[fid].update(response=response, state="replied", revision=1)
         return True
 
     def list_forms(sid):
@@ -125,7 +131,7 @@ def test_simulated_model_question_answer_loop(monkeypatch):
     monkeypatch.setattr(repo, "create_form", create_form)
     monkeypatch.setattr(repo, "list_forms", list_forms)
     monkeypatch.setattr(repo, "reply_form", reply_form)
-    monkeypatch.setattr(repo, "cancel_form", lambda sid, fid: True)
+    monkeypatch.setattr(repo, "cancel_form", lambda sid, fid, expected_revision=None: True)
     session_context.set_session_context("ses_sim", None)
 
     registry = ToolRegistry()

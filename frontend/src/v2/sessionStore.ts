@@ -9,6 +9,7 @@ import {
   listMessages,
   listPermissions,
   prompt as promptApi,
+  replaySessionEvents,
 } from '../api/v2'
 import type {
   InboxInfo,
@@ -113,13 +114,18 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     hydrating.add(sessionId)
     buffers.set(sessionId, [])
     try {
-      const [info, messages, inbox, permissions, forms, plan] = await Promise.all([
+      const previous = runtimes.value[sessionId]
+      const cursor = previous?.lastDurableSeq ?? 0
+      const [info, messages, inbox, permissions, forms, plan, replayed] = await Promise.all([
         getSession(sessionId),
         listMessages(sessionId, { limit: 500, order: 'asc' }),
         listInbox(sessionId),
         listPermissions(sessionId).catch(() => []),
         listForms(sessionId, 'pending').catch(() => []),
         getSessionPlan(sessionId).catch(() => null),
+        cursor > 0
+          ? replaySessionEvents(sessionId, cursor).catch(() => [])
+          : Promise.resolve([] as V2Event[]),
       ])
       const base: V2SessionRuntime = {
         ...emptyRuntime(sessionId),
@@ -133,15 +139,18 @@ export const useV2SessionStore = defineStore('v2Session', () => {
           ? (plan ? _livePlan(plan) : null)
           : null,
         hydrated: true,
+        seenEventIds: previous?.seenEventIds.slice() ?? [],
+        resolvedForms: previous ? { ...previous.resolvedForms } : {},
+        lastDurableSeq: cursor,
       }
-      const previous = runtimes.value[sessionId]
       base.error = previous?.error ?? null
       if (info.status === 'busy' || info.status === 'retry') {
         base.activeAssistantId = previous?.activeAssistantId ?? null
         base.compaction = previous?.compaction ?? null
       }
-      const buffered = buffers.get(sessionId) ?? []
       let next = base
+      for (const event of replayed) next = applyV2Event(next, event)
+      const buffered = buffers.get(sessionId) ?? []
       for (const event of buffered) next = applyV2Event(next, event)
       setRuntime(next)
       return next
@@ -225,11 +234,15 @@ export const useV2SessionStore = defineStore('v2Session', () => {
     })
   }
 
-  function removeForm(sessionId: string, formId: string): void {
+  function removeForm(sessionId: string, formId: string, revision: number = 0): void {
     const runtime = ensureRuntime(sessionId)
     setRuntime({
       ...runtime,
       forms: runtime.forms.filter((form) => form.id !== formId),
+      resolvedForms: {
+        ...runtime.resolvedForms,
+        [formId]: Math.max(runtime.resolvedForms[formId] ?? -1, revision),
+      },
     })
   }
 

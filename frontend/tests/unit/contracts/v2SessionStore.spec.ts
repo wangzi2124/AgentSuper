@@ -153,8 +153,8 @@ describe('v2 session store inbox actions', () => {
 
   it('hydrates only pending forms and can remove them locally', async () => {
     vi.mocked(listForms).mockResolvedValue([
-      { id: 'old', session_id: 's1', title: 'old', fields: [], state: 'replied', response: {} },
-      { id: 'live', session_id: 's1', title: 'live', fields: [], state: 'pending', response: {} },
+      { id: 'old', session_id: 's1', title: 'old', fields: [], state: 'replied', response: {}, revision: 1 },
+      { id: 'live', session_id: 's1', title: 'live', fields: [], state: 'pending', response: {}, revision: 0 },
     ] as FormInfo[])
     const store = useV2SessionStore()
     await store.hydrate('s1')

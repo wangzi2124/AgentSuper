@@ -61,6 +61,7 @@ def test_inbox_and_permission_fixtures() -> None:
 def test_form_fixture() -> None:
     forms = TypeAdapter(list[FormInfo]).validate_python(load("forms.json"))
     assert forms[0].state == "pending"
+    assert forms[0].revision == 0
     assert forms[0].fields[0].options == ["npm", "pnpm", "bun"]
 
 

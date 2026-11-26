@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.contracts.v2 import EVENT_LIST_ADAPTER
 from app.contracts.v2 import ModelRef as ContractModelRef
 from app.contracts.v2 import PromptInput
 from app.deps import ModelSwitchError, PlatformContext, get_context
@@ -77,6 +78,11 @@ class PermissionReplyV2(BaseModel):
 
 class FormReplyV2(BaseModel):
     response: dict[str, Any] = Field(default_factory=dict)
+    revision: int = Field(..., ge=0)
+
+
+class FormCancelV2(BaseModel):
+    revision: int = Field(..., ge=0)
 
 
 class CompactV2(BaseModel):
@@ -614,7 +620,16 @@ async def interrupt(
 ) -> dict[str, Any]:
     _must_get(ctx, session_id)
     interrupted = ctx.v2_coordinator.interrupt(session_id, resume=resume)
-    return {"data": {"interrupted": bool(interrupted), "resume": resume}}
+    from app.session.form_cleanup import cancel_pending_forms as cleanup_forms
+
+    cancelled = await cleanup_forms(ctx, session_id)
+    return {
+        "data": {
+            "interrupted": bool(interrupted),
+            "resume": resume,
+            "cancelled_forms": [form["id"] for form in cancelled],
+        }
+    }
 
 
 @router.get("/session/{session_id}/message")
@@ -702,6 +717,9 @@ async def revert_commit(
         raise HTTPException(status_code=409, detail="no staged revert")
     result = await ctx.revert_session(session_id, str(state["message_id"]))
     repo.update_session(session_id, revert_state=None)
+    from app.session.form_cleanup import cancel_pending_forms as cleanup_forms
+
+    await cleanup_forms(ctx, session_id)
     await emit_event(
         ctx, "session.revert.committed", {"session_id": session_id, "revert": state},
         session_id=session_id,
@@ -715,6 +733,9 @@ async def revert_clear(
 ) -> None:
     _must_get(ctx, session_id)
     repo.update_session(session_id, revert_state=None)
+    from app.session.form_cleanup import cancel_pending_forms as cleanup_forms
+
+    await cleanup_forms(ctx, session_id)
     await emit_event(
         ctx, "session.revert.cleared", {"session_id": session_id}, session_id=session_id
     )
@@ -886,6 +907,37 @@ async def list_forms(
     return {"data": repo.list_forms(session_id, state=state)}
 
 
+@router.get("/session/{session_id}/event/replay")
+async def replay_session_events(
+    session_id: str,
+    after_seq: int = Query(default=0, ge=0),
+    limit: int = Query(default=500, ge=1, le=1000),
+    ctx: PlatformContext = Depends(get_context),
+) -> dict[str, Any]:
+    _must_get(ctx, session_id)
+    rows = await asyncio.to_thread(repo.list_events, session_id, after_seq, limit)
+    events = [
+        {
+            "id": row["id"],
+            "created": int(row["created"]),
+            "type": row["type"],
+            "data": row["data"],
+            "durable": {
+                "aggregate_id": row["aggregate_id"],
+                "seq": int(row["seq"]),
+                "version": 2,
+            },
+        }
+        for row in rows
+    ]
+    payload = EVENT_LIST_ADAPTER.validate_python(events)
+    next_seq = int(rows[-1]["seq"]) if len(rows) == limit else None
+    return {
+        "data": payload,
+        "cursor": {"after_seq": after_seq, "next": next_seq},
+    }
+
+
 @router.post("/session/{session_id}/form/{form_id}/reply", status_code=204)
 async def reply_form(
     session_id: str,
@@ -897,32 +949,40 @@ async def reply_form(
     current = repo.get_form(session_id, form_id)
     if current is None:
         raise HTTPException(status_code=404, detail="form not found")
+    current_revision = int(current.get("revision", 0))
+    conflict = HTTPException(
+        status_code=409,
+        detail={"msg": "form revision conflict", "code": "form_revision_conflict", "form": current},
+    )
     if current["state"] == "replied":
-        await emit_event(
-            ctx,
-            "form.replied",
-            {
-                "session_id": session_id,
-                "form_id": form_id,
-                "response": current.get("response") or {},
-            },
-            session_id=session_id,
-        )
-        return
-    if current["state"] != "pending":
-        return
-    if not repo.reply_form(session_id, form_id, body.response):
-        raise HTTPException(status_code=404, detail="form not found")
+        if body.revision != current_revision - 1:
+            raise conflict
+        if (current.get("response") or {}) == body.response:
+            return
+        raise conflict
+    if current["state"] != "pending" or current_revision != body.revision:
+        raise conflict
+    if not repo.reply_form(
+        session_id, form_id, body.response, expected_revision=body.revision
+    ):
+        raise conflict
     try:
         from execution.tools.question_tools import wake_form
 
         wake_form(form_id)
     except Exception:  # noqa: BLE001 - no in-process waiter is fine
         pass
+    updated = repo.get_form(session_id, form_id)
+    revision = int(updated["revision"]) if updated else current_revision + 1
     await emit_event(
         ctx,
         "form.replied",
-        {"session_id": session_id, "form_id": form_id, "response": body.response},
+        {
+            "session_id": session_id,
+            "form_id": form_id,
+            "response": body.response,
+            "revision": revision,
+        },
         session_id=session_id,
     )
 
@@ -931,34 +991,40 @@ async def reply_form(
 async def cancel_form(
     session_id: str,
     form_id: str,
+    body: FormCancelV2,
     ctx: PlatformContext = Depends(get_context),
 ) -> None:
     _must_get(ctx, session_id)
     current = repo.get_form(session_id, form_id)
     if current is None:
         raise HTTPException(status_code=404, detail="form not found")
+    current_revision = int(current.get("revision", 0))
+    conflict = HTTPException(
+        status_code=409,
+        detail={"msg": "form revision conflict", "code": "form_revision_conflict", "form": current},
+    )
     if current["state"] == "cancelled":
-        await emit_event(
-            ctx,
-            "form.cancelled",
-            {"session_id": session_id, "form_id": form_id},
-            session_id=session_id,
-        )
+        if body.revision != current_revision - 1:
+            raise conflict
         return
-    if current["state"] != "pending":
-        return
-    if not repo.cancel_form(session_id, form_id):
-        raise HTTPException(status_code=404, detail="form not found")
+    if current["state"] != "pending" or current_revision != body.revision:
+        raise conflict
+    if not repo.cancel_form(
+        session_id, form_id, expected_revision=body.revision
+    ):
+        raise conflict
     try:
         from execution.tools.question_tools import wake_form
 
         wake_form(form_id)
     except Exception:  # noqa: BLE001 - no in-process waiter is fine
         pass
+    updated = repo.get_form(session_id, form_id)
+    revision = int(updated["revision"]) if updated else current_revision + 1
     await emit_event(
         ctx,
         "form.cancelled",
-        {"session_id": session_id, "form_id": form_id},
+        {"session_id": session_id, "form_id": form_id, "revision": revision},
         session_id=session_id,
     )
 

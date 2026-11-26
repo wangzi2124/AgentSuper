@@ -254,14 +254,15 @@
     "created": 1762500000510,
     "type": "form.created",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": null,
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 16, "version": 2 },
     "data": {
       "id": "form_01",
       "session_id": "ses_01J8Z3M4X5",
       "title": "选择包管理器",
       "fields": [{ "id": "pm", "type": "select", "label": "包管理器", "required": true, "options": ["npm", "pnpm", "bun"] }],
       "state": "pending",
-      "response": {}
+      "response": {},
+      "revision": 0
     }
   },
   {
@@ -269,15 +270,15 @@
     "created": 1762500000520,
     "type": "form.replied",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": null,
-    "data": { "session_id": "ses_01J8Z3M4X5", "form_id": "form_01", "response": { "pm": "pnpm" } }
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 17, "version": 2 },
+    "data": { "session_id": "ses_01J8Z3M4X5", "form_id": "form_01", "response": { "pm": "pnpm" }, "revision": 1 }
   },
   {
     "id": "evt_compaction_started",
     "created": 1762500000530,
     "type": "session.compaction.started",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 16, "version": 2 },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 18, "version": 2 },
     "data": { "session_id": "ses_01J8Z3M4X5", "reason": "auto", "input_id": null }
   },
   {
@@ -293,7 +294,7 @@
     "created": 1762500000550,
     "type": "session.compaction.ended",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 17, "version": 2 },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 19, "version": 2 },
     "data": {
       "session_id": "ses_01J8Z3M4X5",
       "reason": "auto",
@@ -320,7 +321,7 @@
     "created": 1762500000570,
     "type": "session.usage.recorded",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 18, "version": 2 },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 20, "version": 2 },
     "data": {
       "session_id": "ses_01J8Z3M4X5",
       "source": "compaction",
@@ -333,7 +334,7 @@
     "created": 1762500000580,
     "type": "session.renamed",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 19, "version": 2 },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 21, "version": 2 },
     "data": { "session_id": "ses_01J8Z3M4X5", "title": "仓库结构检查" }
   },
   {
@@ -341,7 +342,7 @@
     "created": 1762500000590,
     "type": "session.forked",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 20, "version": 2 },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 22, "version": 2 },
     "data": { "session_id": "ses_01J8Z3M4X5", "parent_id": "ses_parent", "boundary": "msg_asst_01" }
   },
   {
@@ -349,7 +350,7 @@
     "created": 1762500000600,
     "type": "session.revert.staged",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 21, "version": 2 },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 23, "version": 2 },
     "data": { "session_id": "ses_01J8Z3M4X5", "revert": { "message_id": "msg_asst_01", "files": false } }
   },
   {
@@ -357,7 +358,7 @@
     "created": 1762500000610,
     "type": "session.revert.committed",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 22, "version": 2 },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 24, "version": 2 },
     "data": { "session_id": "ses_01J8Z3M4X5", "revert": { "message_id": "msg_asst_01", "files": false } }
   },
   {
@@ -365,7 +366,7 @@
     "created": 1762500000620,
     "type": "session.model.selected",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 23, "version": 2 },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 25, "version": 2 },
     "data": { "session_id": "ses_01J8Z3M4X5", "model": { "id": "deepseek-v4-pro", "provider_id": "deepseek", "variant": null } }
   },
   {
@@ -373,7 +374,7 @@
     "created": 1762500000630,
     "type": "session.agent.selected",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 24, "version": 2 },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 26, "version": 2 },
     "data": { "session_id": "ses_01J8Z3M4X5", "agent": "plan" }
   },
   {
@@ -381,7 +382,7 @@
     "created": 1762500000640,
     "type": "session.deleted",
     "location": { "directory": "E:/AgentSuper", "project_id": "prj_agentsuper" },
-    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 25, "version": 2 },
+    "durable": { "aggregate_id": "ses_01J8Z3M4X5", "seq": 27, "version": 2 },
     "data": { "session_id": "ses_01J8Z3M4X5" }
   }
 ]

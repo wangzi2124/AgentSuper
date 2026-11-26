@@ -192,6 +192,7 @@ async def ask_question(
         "allow_custom": bool(custom) if details else True,
     }
     form_id = f"form_{uuid.uuid4().hex[:12]}"
+    created = repo.create_form(session_id, form_id, [field], title=str(question or "")[:120])
     info = {
         "id": form_id,
         "session_id": session_id,
@@ -202,8 +203,8 @@ async def ask_question(
         "fields": [field],
         "state": "pending",
         "response": {},
+        "revision": int(created.get("revision", 0)),
     }
-    repo.create_form(session_id, form_id, [field], title=info["title"])
     event = _waiters.register(form_id)
     await _emit_form_event("form.created", info, session_id)
 
@@ -223,7 +224,7 @@ async def ask_question(
                 repo.cancel_form(session_id, form_id)
                 await _emit_form_event(
                     "form.cancelled",
-                    {"session_id": session_id, "form_id": form_id},
+                    {"session_id": session_id, "form_id": form_id, "revision": 1},
                     session_id,
                 )
                 return "等待用户回答超时"

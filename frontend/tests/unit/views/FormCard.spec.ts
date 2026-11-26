@@ -13,6 +13,7 @@ const form = (overrides: Partial<FormInfo> = {}): FormInfo => ({
   question: '下一步怎么做？',
   state: 'pending',
   response: {},
+  revision: 0,
   fields: [{
     id: 'answer',
     type: 'select',

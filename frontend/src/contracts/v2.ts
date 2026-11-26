@@ -381,6 +381,7 @@ export interface FormInfo {
   fields: FormField[]
   state: 'pending' | 'replied' | 'cancelled'
   response: Record<string, unknown>
+  revision: number
 }
 
 export interface RevertState {
@@ -645,10 +646,12 @@ export interface FormRepliedData {
   session_id: string
   form_id: string
   response: Record<string, unknown>
+  revision: number
 }
 export interface FormRefData {
   session_id: string
   form_id: string
+  revision: number
 }
 export interface ServerConnectedData {
   version?: string | null
@@ -851,6 +854,9 @@ export const DURABLE_EVENT_TYPES: ReadonlySet<V2EventType> = new Set<V2EventType
   'session.revert.cleared',
   'session.model.selected',
   'session.agent.selected',
+  'form.created',
+  'form.replied',
+  'form.cancelled',
 ])
 
 export const VOLATILE_EVENT_TYPES: ReadonlySet<V2EventType> = new Set<V2EventType>([
@@ -866,7 +872,4 @@ export const VOLATILE_EVENT_TYPES: ReadonlySet<V2EventType> = new Set<V2EventTyp
   'session.usage.updated',
   'permission.asked',
   'permission.replied',
-  'form.created',
-  'form.replied',
-  'form.cancelled',
 ])

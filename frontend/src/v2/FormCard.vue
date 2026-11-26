@@ -15,7 +15,7 @@ const customText = ref('')
 const submitting = ref(false)
 
 watch(
-  () => props.form.id,
+  () => [props.form.id, props.form.revision] as const,
   () => {
     values.value = {}
     customOpen.value = null

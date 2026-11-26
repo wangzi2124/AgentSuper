@@ -194,6 +194,9 @@ class ExecutionCoordinator:
 
             repo.set_session_status(session_id, "idle", outcome="interrupted")
             self.ctx.sessions.update(session_id, status="idle")
+            from app.session.form_cleanup import cancel_pending_forms
+
+            await cancel_pending_forms(self.ctx, session_id)
         except Exception:  # noqa: BLE001
             logger.warning("重置会话状态失败: %s", session_id, exc_info=True)
 
@@ -203,6 +206,9 @@ class ExecutionCoordinator:
 
         repo.set_session_status(session_id, "idle", outcome=outcome)
         self.ctx.sessions.update(session_id, status="idle")
+        from app.session.form_cleanup import cancel_pending_forms
+
+        await cancel_pending_forms(self.ctx, session_id)
         await emit_event(
             self.ctx,
             "session.idle",

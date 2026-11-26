@@ -23,9 +23,11 @@ V2_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("session_inputs", "type", "VARCHAR(16) NOT NULL DEFAULT 'user'"),
     ("session_inputs", "status", "VARCHAR(16) NOT NULL DEFAULT 'pending'"),
     ("session_inputs", "time_delivered", "INTEGER"),
+    ("session_forms", "revision", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 MIGRATION_ID = "v2_persistence"
+FORM_REVISION_MIGRATION_ID = "form_revision"
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -38,6 +40,21 @@ def ensure_v2_columns(conn: sqlite3.Connection) -> list[str]:
         if column not in _columns(conn, table):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
             added.append(f"{table}.{column}")
+    conn.commit()
+    return added
+
+
+def ensure_form_revision(conn: sqlite3.Connection) -> list[str]:
+    added: list[str] = []
+    columns = _columns(conn, "session_forms")
+    if "revision" not in columns:
+        conn.execute(
+            "ALTER TABLE session_forms ADD COLUMN revision"
+            " INTEGER NOT NULL DEFAULT 0"
+        )
+        added.append("session_forms.revision")
+    else:
+        conn.execute("UPDATE session_forms SET revision = 0 WHERE revision IS NULL")
     conn.commit()
     return added
 
@@ -127,11 +144,28 @@ def migrate_v2(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, An
 
     迁移标记写在 schema_migrations，避免每次连接重复回填。
     """
+    form_revision_marker = conn.execute(
+        "SELECT id FROM schema_migrations WHERE id = ?",
+        (FORM_REVISION_MIGRATION_ID,),
+    ).fetchone()
+    form_revision_added: list[str] = []
+    if form_revision_marker is None or force:
+        form_revision_added = ensure_form_revision(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET applied_at = excluded.applied_at",
+            (FORM_REVISION_MIGRATION_ID, int(time.time() * 1000)),
+        )
+        conn.commit()
     row = conn.execute(
         "SELECT id FROM schema_migrations WHERE id = ?", (MIGRATION_ID,)
     ).fetchone()
     if row is not None and not force:
-        return {"applied": False, "validation": validate_v2(conn)}
+        return {
+            "applied": False,
+            "form_revision_added": form_revision_added,
+            "validation": validate_v2(conn),
+        }
 
     added = ensure_v2_columns(conn)
     ordinals = backfill_part_ordinals(conn)
@@ -146,6 +180,7 @@ def migrate_v2(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, An
     return {
         "applied": True,
         "added_columns": added,
+        "form_revision_added": form_revision_added,
         "part_ordinals_changed": ordinals,
         "inputs_marked_delivered": delivered,
         "validation": validate_v2(conn),

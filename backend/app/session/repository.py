@@ -1258,6 +1258,7 @@ def _form_from_row(row: Any) -> dict[str, Any]:
         "fields": _json_load(row["fields"], []),
         "state": row["state"],
         "response": _json_load(row["response"], {}),
+        "revision": int(row["revision"] or 0),
         "time_created": int(row["time_created"]),
         "time_updated": int(row["time_updated"]),
     }
@@ -1316,32 +1317,71 @@ def list_forms(session_id: str, *, state: Optional[str] = None) -> list[dict[str
         conn.close()
 
 
-def reply_form(session_id: str, form_id: str, response: dict[str, Any]) -> bool:
+def reply_form(
+    session_id: str,
+    form_id: str,
+    response: dict[str, Any],
+    *,
+    expected_revision: Optional[int] = None,
+) -> bool:
     conn = _get_db()
     try:
-        cur = conn.execute(
-            "UPDATE session_forms SET state = 'replied', response = ?, time_updated = ?"
-            " WHERE session_id = ? AND id = ? AND state = 'pending'",
-            (json.dumps(response, ensure_ascii=False), int(time.time() * 1000), session_id, form_id),
+        sql = (
+            "UPDATE session_forms SET state = 'replied', response = ?,"
+            " revision = revision + 1, time_updated = ?"
+            " WHERE session_id = ? AND id = ? AND state = 'pending'"
         )
+        params: list[Any] = [
+            json.dumps(response, ensure_ascii=False),
+            int(time.time() * 1000),
+            session_id,
+            form_id,
+        ]
+        if expected_revision is not None:
+            sql += " AND revision = ?"
+            params.append(int(expected_revision))
+        cur = conn.execute(sql, params)
         conn.commit()
         return cur.rowcount > 0
     finally:
         conn.close()
 
 
-def cancel_form(session_id: str, form_id: str) -> bool:
+def cancel_form(
+    session_id: str,
+    form_id: str,
+    *,
+    expected_revision: Optional[int] = None,
+) -> bool:
     conn = _get_db()
     try:
-        cur = conn.execute(
-            "UPDATE session_forms SET state = 'cancelled', time_updated = ?"
-            " WHERE session_id = ? AND id = ? AND state = 'pending'",
-            (int(time.time() * 1000), session_id, form_id),
+        sql = (
+            "UPDATE session_forms SET state = 'cancelled', revision = revision + 1,"
+            " time_updated = ?"
+            " WHERE session_id = ? AND id = ? AND state = 'pending'"
         )
+        params: list[Any] = [int(time.time() * 1000), session_id, form_id]
+        if expected_revision is not None:
+            sql += " AND revision = ?"
+            params.append(int(expected_revision))
+        cur = conn.execute(sql, params)
         conn.commit()
         return cur.rowcount > 0
     finally:
         conn.close()
+
+
+def cancel_pending_forms(session_id: str) -> list[dict[str, Any]]:
+    updated: list[dict[str, Any]] = []
+    for form in list_forms(session_id, state="pending"):
+        if not cancel_form(
+            session_id, form["id"], expected_revision=int(form.get("revision", 0))
+        ):
+            continue
+        row = get_form(session_id, form["id"])
+        if row is not None:
+            updated.append(row)
+    return updated
 
 # ── v2：durable event outbox ────────────────────────────────────────────────
 
