@@ -20,6 +20,8 @@ export async function fetchWithTimeout(
   options: RequestInit = {},
   timeoutMs: number = 0,
 ): Promise<Response> {
+  const headers = await addAuthHeaders(options.headers)
+
   let controller: AbortController | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -42,7 +44,6 @@ export async function fetchWithTimeout(
   }
 
   try {
-    const headers = await addAuthHeaders(options.headers)
     return await fetch(url, { ...options, headers, signal })
   } finally {
     if (timer) clearTimeout(timer)

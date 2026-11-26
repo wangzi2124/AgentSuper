@@ -382,10 +382,12 @@ def make_execute_node(
         finally:
             reset_agent_policy(policy_token)
 
-        for t in plan:
-            if t.get("id") == task_id:
-                t["status"] = "done"
-        _emit_plan_status("completed")
+        action_not_executed = bool(result.get("action_not_executed"))
+        if not action_not_executed:
+            for t in plan:
+                if t.get("id") == task_id:
+                    t["status"] = "done"
+            _emit_plan_status("completed")
         sub_results = dict(state.get("sub_results") or {})
         sub_results[task_id] = result["text"]
         return {
@@ -395,7 +397,7 @@ def make_execute_node(
             "current_task_id": task_id,
             "sub_results": sub_results,
             "draft_output": result["text"],
-            "action_not_executed": bool(result.get("action_not_executed")),
+            "action_not_executed": action_not_executed,
             "tool_rounds": state.get("tool_rounds", 0) + result["rounds"],
             "token_usage": result.get("usage") or {},
             "messages": _tool_history_to_lc(result.get("tool_history") or []),

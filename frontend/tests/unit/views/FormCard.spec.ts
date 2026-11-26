@@ -29,48 +29,53 @@ const form = (overrides: Partial<FormInfo> = {}): FormInfo => ({
   ...overrides,
 })
 
-function submitButton(wrapper: ReturnType<typeof mount>) {
-  const button = wrapper.findAll('button').find(item => item.text() === '提交')
-  expect(button).toBeDefined()
-  return button!
-}
-
-describe('FormCard 结构化问题卡', () => {
-  it('展示推荐徽标并提交选中项', async () => {
+describe('FormCard 快捷决策卡', () => {
+  it('单选点击即提交，推荐项显示为主选项', async () => {
     const wrapper = mount(FormCard, { props: { form: form() } })
-    const options = wrapper.findAll('.v2-option')
-    expect(options).toHaveLength(2)
+    const options = wrapper.findAll('.decision-option')
+    expect(options).toHaveLength(3)
+    expect(options[0]!.classes()).toContain('recommended')
     expect(options[0]!.text()).toContain('推荐')
     expect(options[0]!.text()).toContain('先写契约测试')
+    expect(wrapper.find('.decision-submit').exists()).toBe(false)
 
     await options[1]!.trigger('click')
-    await submitButton(wrapper).trigger('click')
-
     expect(wrapper.emitted('submit')?.[0]?.[0]).toEqual({ answer: '直接实现' })
   })
 
-  it('多选返回数组，数字键可选择选项', async () => {
+  it('数字键选择单选时立即提交', async () => {
+    const wrapper = mount(FormCard, { props: { form: form() } })
+    await wrapper.find('.decision-card').trigger('keydown', { key: '1' })
+    expect(wrapper.emitted('submit')?.[0]?.[0]).toEqual({ answer: '先补测试' })
+  })
+
+  it('多选可切换并需确认', async () => {
     const multi = form()
     multi.fields = [{ ...multi.fields[0]!, multiple: true }]
     const wrapper = mount(FormCard, { props: { form: multi } })
 
-    await wrapper.find('.v2-form').trigger('keydown', { key: '1' })
-    await wrapper.find('.v2-form').trigger('keydown', { key: '2' })
-    await submitButton(wrapper).trigger('click')
+    await wrapper.find('.decision-card').trigger('keydown', { key: '1' })
+    await wrapper.find('.decision-card').trigger('keydown', { key: '2' })
+    expect(wrapper.emitted('submit')).toBeUndefined()
 
+    const confirm = wrapper.find('.decision-submit')
+    expect(confirm.text()).toContain('2')
+    await confirm.trigger('click')
     expect(wrapper.emitted('submit')?.[0]?.[0]).toEqual({
       answer: ['先补测试', '直接实现'],
     })
   })
 
-  it('支持自定义答案与取消', async () => {
+  it('自定义答案 Enter 提交，跳过按钮取消', async () => {
     const wrapper = mount(FormCard, { props: { form: form() } })
-
-    await wrapper.find('.v2-custom').setValue('换一个方向')
-    await submitButton(wrapper).trigger('click')
+    await wrapper.findAll('.decision-option')[2]!.trigger('click')
+    const input = wrapper.find('.decision-custom')
+    expect(input.exists()).toBe(true)
+    await input.setValue('换一个方向')
+    await input.trigger('keydown', { key: 'Enter' })
     expect(wrapper.emitted('submit')?.[0]?.[0]).toEqual({ answer: '换一个方向' })
 
-    await wrapper.find('button.danger').trigger('click')
+    await wrapper.find('.decision-skip').trigger('click')
     expect(wrapper.emitted('cancel')).toHaveLength(1)
   })
 
@@ -87,12 +92,9 @@ describe('FormCard 结构化问题卡', () => {
     })
     const wrapper = mount(FormCard, { props: { form: legacy } })
 
-    expect(wrapper.findAll('.v2-option')).toHaveLength(0)
-    const select = wrapper.find('select')
-    expect(select.exists()).toBe(true)
-    await select.setValue('pnpm')
-    await submitButton(wrapper).trigger('click')
-
+    const options = wrapper.findAll('.decision-option')
+    expect(options).toHaveLength(2)
+    await options[0]!.trigger('click')
     expect(wrapper.emitted('submit')?.[0]?.[0]).toEqual({ pm: 'pnpm' })
   })
 })

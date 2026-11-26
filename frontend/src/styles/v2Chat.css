@@ -81,6 +81,13 @@
   font-size: 13px;
   line-height: 1.6;
 }
+.v2-timeline {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 .v2-messages {
   flex: 1;
   min-height: 0;
@@ -380,6 +387,41 @@
   box-shadow: var(--shadow-md);
   transition: border-color .15s, box-shadow .15s;
 }
+.scroll-controls {
+  position: absolute;
+  right: clamp(12px, 3vw, 32px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 20;
+}
+.scroll-control-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface-elevated);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: transform .15s var(--ease), color .15s var(--ease), border-color .15s var(--ease);
+  -webkit-tap-highlight-color: transparent;
+}
+.scroll-control-btn:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+  transform: translateY(-1px);
+}
+.scroll-control-btn:active { transform: scale(.94); }
+.scroll-fade-enter-active,
+.scroll-fade-leave-active { transition: opacity .18s ease, transform .18s ease; }
+.scroll-fade-enter-from,
+.scroll-fade-leave-to { opacity: 0; transform: translateY(6px); }
 .input-card:focus-within {
   border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
   box-shadow: 0 0 0 3px var(--primary-glow), var(--shadow-md);
@@ -542,6 +584,8 @@
 
 @media (max-width: 768px) {
   .v2-messages { padding: 12px 10px 8px; }
+  .scroll-controls { right: 10px; gap: 4px; }
+  .scroll-control-btn { width: 32px; height: 32px; }
   .chat-input { padding: 8px 10px calc(10px + env(safe-area-inset-bottom, 0px)); }
   .input-card { border-radius: 20px; padding: 10px 12px 8px; }
   .v2-message { margin-bottom: 14px; gap: 8px; }

@@ -28,6 +28,11 @@ export interface LivePlan {
   steps: PlanStep[]
 }
 
+export function isPlanVisible(plan: LivePlan | null): boolean {
+  if (!plan || plan.steps.length <= 1) return false
+  return plan.steps.some(step => step.status !== 'completed' && step.status !== 'cancelled')
+}
+
 export interface V2SessionRuntime {
   id: string
   info: SessionInfoV2 | null

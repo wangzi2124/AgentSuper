@@ -44,6 +44,8 @@ import { useAuthStore } from '../stores/auth'
 import { useSkillStore } from '../stores/skills'
 import { useChatSettingsStore } from '../stores/chatSettings'
 import { useV2SessionStore } from '../v2/sessionStore'
+import { isPlanVisible } from '../v2/runtime'
+import { useStickToBottom } from '../v2/useStickToBottom'
 
 
 const route = useRoute()
@@ -186,13 +188,23 @@ const canSend = computed(
     !sending.value,
 )
 
-function scrollToBottom() {
-  void nextTick(() => {
-    if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
-  })
-}
-
-watch(() => [messages.value.length, status.value], scrollToBottom)
+const scrollSignal = computed(() =>
+  messages.value
+    .map((message) => {
+      const parts = message.type === 'assistant' ? message.content : []
+      const signature = parts
+        .map((part) => (part.type === 'tool' ? `${part.id}:${part.state.status}` : `${part.type}:${part.text.length}`))
+        .join(',')
+      return `${message.id}:${signature}`
+    })
+    .join('|'),
+)
+const { isNearTop, isNearBottom, scrollDirection, onScroll, scrollToBottom, scrollToTop } = useStickToBottom(
+  scroller,
+  () => `${scrollSignal.value}|${status.value}`,
+)
+const showTopBtn = computed(() => scrollDirection.value === 'up' && !isNearTop.value)
+const showBottomBtn = computed(() => scrollDirection.value === 'down' && !isNearBottom.value)
 
 // ── `/skills` 技能/命令与 `@` Agent 选择（参考 /skills 交互）────────────
 // 输入 `/skills` 弹出技能/命令；输入 `@` 弹出可用 Agent（如 general/explore）并插入 `@name`。
@@ -806,7 +818,10 @@ const activeAssistant = computed<AssistantMessage | null>(() => {
   return message?.type === 'assistant' ? message : null
 })
 const liveCompaction = computed(() => (executing.value ? runtime.value?.compaction ?? null : null))
-const livePlan = computed(() => runtime.value?.plan ?? null)
+const livePlan = computed(() => {
+  const plan = runtime.value?.plan ?? null
+  return isPlanVisible(plan) ? plan : null
+})
 const planProgress = computed(() => {
   const steps = livePlan.value?.steps ?? []
   return {
@@ -1178,9 +1193,9 @@ onBeforeUnmount(() => {
 
     <p v-if="error || executionError" class="v2-error">{{ error || executionError }}</p>
 
-    <div ref="scroller" class="v2-messages">
-      <div v-if="!!sessionId && !messages.length && !runtime?.hydrated" class="v2-empty">载入会话…</div>
-      <div v-else-if="!messages.length" class="v2-empty-state">
+    <div class="v2-timeline">
+    <div ref="scroller" class="v2-messages" @scroll="onScroll">
+      <div v-if="!messages.length" class="v2-empty-state">
         <div class="empty-orb">
           <div class="empty-orb-core">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="4"/><path d="M12 3v4M8 12h.01M16 12h.01M9 16h6"/></svg>
@@ -1420,6 +1435,33 @@ onBeforeUnmount(() => {
           @cancel="cancelFormRequest(form.id)"
         />
       </div>
+    </div>
+    <div class="scroll-controls">
+      <transition name="scroll-fade">
+        <button
+          v-if="showTopBtn"
+          class="scroll-control-btn scroll-to-top-btn"
+          type="button"
+          title="回到顶部"
+          aria-label="回到顶部"
+          @click="scrollToTop('auto')"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5.5 11.5 12 5l6.5 6.5"/></svg>
+        </button>
+      </transition>
+      <transition name="scroll-fade">
+        <button
+          v-if="showBottomBtn"
+          class="scroll-control-btn scroll-to-bottom-btn"
+          type="button"
+          title="回到底部"
+          aria-label="回到底部"
+          @click="scrollToBottom('auto')"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M19 12l-7 7-7-7"/></svg>
+        </button>
+      </transition>
+    </div>
     </div>
 
     <footer class="chat-input">

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { V2Event } from '../../../src/contracts/v2'
 import { parseSseBuffer } from '../../../src/v2/eventStream'
-import { applyV2Event, emptyRuntime } from '../../../src/v2/runtime'
+import { applyV2Event, emptyRuntime, isPlanVisible, type LivePlan } from '../../../src/v2/runtime'
 
 let seq = 0
 function evt(type: string, data: Record<string, unknown>, id?: string): V2Event {
@@ -143,6 +143,35 @@ describe('v2 runtime reducer', () => {
 
     runtime = applyV2Event(runtime, evt('session.execution.started', { session_id: 's1' }))
     expect(runtime.plan).toBeNull()
+  })
+
+  it('hides a plan once every step reaches a terminal state', () => {
+    const plan: LivePlan = {
+      plan_id: 'p1',
+      revision: 1,
+      tier: null,
+      steps: [
+        { id: 't1', title: '读取文件', status: 'pending' },
+        { id: 't2', title: '修改文件', status: 'in_progress' },
+      ],
+    }
+    expect(isPlanVisible(null)).toBe(false)
+    expect(isPlanVisible({ ...plan, steps: [plan.steps[0]!] })).toBe(false)
+    expect(isPlanVisible(plan)).toBe(true)
+    expect(isPlanVisible({
+      ...plan,
+      steps: [
+        { ...plan.steps[0]!, status: 'completed' },
+        { ...plan.steps[1]!, status: 'in_progress' },
+      ],
+    })).toBe(true)
+    expect(isPlanVisible({
+      ...plan,
+      steps: [
+        { ...plan.steps[0]!, status: 'completed' },
+        { ...plan.steps[1]!, status: 'cancelled' },
+      ],
+    })).toBe(false)
   })
 
   it('drops the optimistic user message when its inbox item is cancelled', () => {

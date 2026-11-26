@@ -339,3 +339,51 @@ async def test_execute_progress_uses_latest_todo_revision(monkeypatch):
     assert events[-1]["plan"]["steps"][0]["status"] == "completed"
     assert out["plan_revision"] == 10
     assert session_repo.get_plan is execute_module.repo.get_plan
+
+
+async def test_execute_keeps_plan_in_progress_when_action_not_executed(monkeypatch):
+    stored = {
+        "session_id": "s1",
+        "plan_id": "plan_1",
+        "revision": 1,
+        "tier": "serial",
+        "steps": [
+            {"id": "t1", "title": "写入报告", "status": "pending", "agent": None},
+            {"id": "t2", "title": "校验结果", "status": "pending", "agent": None},
+        ],
+    }
+    monkeypatch.setattr(execute_module.repo, "get_plan", lambda sid, pid=None: stored)
+    monkeypatch.setattr(
+        execute_module.repo,
+        "save_plan",
+        lambda sid, pid, revision, steps, tier=None: (
+            stored.update(revision=revision, steps=steps, tier=tier) or True
+        ),
+    )
+
+    async def loop_without_action(*args, **kwargs):
+        return {
+            "text": "我还没有实际执行写入/修改/删除等工具调用，无法确认操作已完成。",
+            "rounds": 1,
+            "tool_trace": [],
+            "tool_history": [],
+            "usage": {},
+            "finish_reason": "stop",
+            "action_not_executed": True,
+        }
+
+    monkeypatch.setattr(execute_module, "run_tool_loop", loop_without_action)
+    queue = _EventQueue()
+    token = set_event_queue(queue)
+    try:
+        node = make_execute_node(_CaptureModel(), ToolRegistry(), system_prompt="SYS")
+        out = await node(_plan_state())
+    finally:
+        reset_event_queue(token)
+
+    events = [event for event in queue.events if event.get("type") == "plan_updated"]
+    assert [event["plan"]["revision"] for event in events] == [2]
+    assert events[0]["plan"]["steps"][0]["status"] == "in_progress"
+    assert out["action_not_executed"] is True
+    assert out["plan_revision"] == 2
+    assert out["task_plan"][0]["status"] == "pending"
