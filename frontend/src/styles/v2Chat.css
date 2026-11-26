@@ -979,7 +979,7 @@
 }
 
 .v2-plan-card {
-  margin: 0 0 14px;
+  margin: 0;
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
   background: var(--surface-elevated);

@@ -246,6 +246,7 @@ export function applyV2Event(
       if (event.data.status.type === 'idle') {
         next.activeAssistantId = null
         next.compaction = null
+        next.plan = null
       }
       if (next.info) next.info = { ...next.info, status: event.data.status.type }
       break
@@ -253,6 +254,7 @@ export function applyV2Event(
       next.status = { type: 'idle' }
       next.activeAssistantId = null
       next.compaction = null
+      next.plan = null
       if (next.info && event.data.outcome) next.info = { ...next.info, outcome: event.data.outcome }
       break
     case 'session.execution.started':
@@ -271,6 +273,7 @@ export function applyV2Event(
       next.status = { type: 'idle' }
       next.activeAssistantId = null
       next.compaction = null
+      next.plan = null
       if (next.info) {
         next.info = {
           ...next.info,
@@ -284,6 +287,7 @@ export function applyV2Event(
       next.error = event.data.error
       next.activeAssistantId = null
       next.compaction = null
+      next.plan = null
       if (next.info) next.info = { ...next.info, status: 'idle', outcome: 'failed' }
       break
     case 'session.retry.scheduled':

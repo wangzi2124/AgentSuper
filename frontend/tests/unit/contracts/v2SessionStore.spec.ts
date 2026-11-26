@@ -119,7 +119,8 @@ describe('v2 session store inbox actions', () => {
     }
   })
 
-  it('hydrates persisted plan snapshot', async () => {
+  it('hydrates persisted plan snapshot for a running session', async () => {
+    vi.mocked(getSession).mockResolvedValue({ id: 's1', status: 'busy' } as never)
     vi.mocked(getSessionPlan).mockResolvedValue({
       session_id: 's1',
       plan_id: 'plan_1',
@@ -135,5 +136,18 @@ describe('v2 session store inbox actions', () => {
       tier: 'serial',
       steps: [{ id: 's1', title: '读取文件', status: 'completed' }],
     })
+  })
+
+  it('ignores a persisted plan snapshot when the session is idle', async () => {
+    vi.mocked(getSessionPlan).mockResolvedValue({
+      session_id: 's1',
+      plan_id: 'plan_1',
+      revision: 4,
+      tier: 'serial',
+      steps: [{ id: 's1', title: '读取文件', status: 'pending' }],
+    })
+    const store = useV2SessionStore()
+    await store.hydrate('s1')
+    expect(store.getRuntime('s1')?.plan).toBeNull()
   })
 })

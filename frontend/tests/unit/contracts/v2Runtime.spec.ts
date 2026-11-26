@@ -145,6 +145,30 @@ describe('v2 runtime reducer', () => {
     expect(runtime.plan).toBeNull()
   })
 
+  it('clears the live plan on terminal turn events', () => {
+    const planEvent = evt('session.plan.updated', {
+      session_id: 's1',
+      plan_id: 'p1',
+      revision: 1,
+      steps: [
+        { id: 't1', title: '读取文件', status: 'pending' },
+        { id: 't2', title: '修改文件', status: 'pending' },
+      ],
+    })
+    const terminals = [
+      ['session.execution.succeeded', { session_id: 's1' }],
+      ['session.execution.failed', { session_id: 's1', error: { message: 'boom' } }],
+      ['session.execution.interrupted', { session_id: 's1' }],
+      ['session.idle', { session_id: 's1' }],
+    ] as const
+    for (const [type, data] of terminals) {
+      let runtime = applyV2Event(emptyRuntime('s1'), planEvent)
+      expect(runtime.plan).not.toBeNull()
+      runtime = applyV2Event(runtime, evt(type, data))
+      expect(runtime.plan).toBeNull()
+    }
+  })
+
   it('hides a plan once every step reaches a terminal state', () => {
     const plan: LivePlan = {
       plan_id: 'p1',

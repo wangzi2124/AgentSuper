@@ -129,7 +129,9 @@ export const useV2SessionStore = defineStore('v2Session', () => {
         inbox,
         permissions,
         forms,
-        plan: plan ? _livePlan(plan) : null,
+        plan: info.status === 'busy' || info.status === 'retry'
+          ? (plan ? _livePlan(plan) : null)
+          : null,
         hydrated: true,
       }
       const previous = runtimes.value[sessionId]

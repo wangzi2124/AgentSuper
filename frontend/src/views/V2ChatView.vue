@@ -831,6 +831,7 @@ const activeAssistant = computed<AssistantMessage | null>(() => {
 })
 const liveCompaction = computed(() => (executing.value ? runtime.value?.compaction ?? null : null))
 const livePlan = computed(() => {
+  if (!executing.value) return null
   const plan = runtime.value?.plan ?? null
   return isPlanVisible(plan) ? plan : null
 })
@@ -1219,22 +1220,6 @@ onBeforeUnmount(() => {
         <p class="empty-hint">知识库检索、代码编写、联网搜索一站完成</p>
       </div>
 
-      <div v-if="livePlan && livePlan.steps.length > 1" class="v2-plan-card">
-        <details :open="executing">
-          <summary>
-            <span class="v2-plan-title">执行计划</span>
-            <span class="v2-plan-progress">{{ planProgress.done }}/{{ planProgress.total }}</span>
-          </summary>
-          <ol class="v2-plan-steps">
-            <li v-for="step in livePlan.steps" :key="step.id" :class="step.status">
-              <span class="v2-plan-status" :class="step.status">{{ planStatusText(step.status) }}</span>
-              <span class="v2-plan-text">{{ step.title }}</span>
-              <span v-if="step.agent" class="v2-plan-agent">{{ step.agent }}</span>
-            </li>
-          </ol>
-        </details>
-      </div>
-
       <div
         v-for="message in renderedMessages"
         :key="message.id"
@@ -1273,6 +1258,21 @@ onBeforeUnmount(() => {
             <template v-if="isActiveMessage(message)">
               <div class="v2-think" role="status" aria-label="思考中">
                 <span class="v2-think-text">思考中</span>
+              </div>
+              <div v-if="livePlan" class="v2-plan-card">
+                <details open>
+                  <summary>
+                    <span class="v2-plan-title">执行计划</span>
+                    <span class="v2-plan-progress">{{ planProgress.done }}/{{ planProgress.total }}</span>
+                  </summary>
+                  <ol class="v2-plan-steps">
+                    <li v-for="step in livePlan.steps" :key="step.id" :class="step.status">
+                      <span class="v2-plan-status" :class="step.status">{{ planStatusText(step.status) }}</span>
+                      <span class="v2-plan-text">{{ step.title }}</span>
+                      <span v-if="step.agent" class="v2-plan-agent">{{ step.agent }}</span>
+                    </li>
+                  </ol>
+                </details>
               </div>
               <div v-if="hasExecInfo(message)" class="v2-exec">
                 <div v-if="liveCompaction" class="v2-exec-row" :class="liveCompaction.status">
@@ -1377,6 +1377,21 @@ onBeforeUnmount(() => {
         <div class="v2-assistant">
           <div class="v2-think" role="status" aria-label="思考中">
             <span class="v2-think-text">思考中</span>
+          </div>
+          <div v-if="livePlan" class="v2-plan-card">
+            <details open>
+              <summary>
+                <span class="v2-plan-title">执行计划</span>
+                <span class="v2-plan-progress">{{ planProgress.done }}/{{ planProgress.total }}</span>
+              </summary>
+              <ol class="v2-plan-steps">
+                <li v-for="step in livePlan.steps" :key="step.id" :class="step.status">
+                  <span class="v2-plan-status" :class="step.status">{{ planStatusText(step.status) }}</span>
+                  <span class="v2-plan-text">{{ step.title }}</span>
+                  <span v-if="step.agent" class="v2-plan-agent">{{ step.agent }}</span>
+                </li>
+              </ol>
+            </details>
           </div>
           <div v-if="liveCompaction" class="v2-exec">
             <div class="v2-exec-row" :class="liveCompaction.status">
