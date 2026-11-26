@@ -37,13 +37,23 @@ _PROVIDER_LABEL_MAX_LEN = 50
 # prompts/loader.py 的 profile 映射都把 `google` 当合法 provider。运行时按端点改写：
 # - Google Gemini 的 OpenAI 兼容端点（.../v1beta/openai）→ `openai/{model}`（/chat/completions）
 # - 其它（Google 原生 API / 未指定 base）→ `gemini/{model}`（litellm 原生 Gemini adapter）
-_LITELLM_PROVIDER_ALIASES = {"google": "gemini"}
+_LITELLM_PROVIDER_ALIASES = {"google": "gemini", "gemini": "gemini"}
 _OPENAI_COMPAT_BASE_SUFFIXES = ("/v1beta/openai", "/openai")
 
 
 def _is_openai_compatible_base(api_base: Optional[str]) -> bool:
     base = str(api_base or "").strip().rstrip("/").lower()
     return base.endswith(_OPENAI_COMPAT_BASE_SUFFIXES)
+
+
+def _bare_provider_model(mid: str, provider: str, api_base: Optional[str]) -> str:
+    bare = mid.split("/", 1)[1] if "/" in mid else mid
+    if bare.startswith("models/") and (
+        provider in ("google", "gemini")
+        or "generativelanguage.googleapis.com" in str(api_base or "").lower()
+    ):
+        return bare[len("models/"):]
+    return bare
 
 # 目录条目来源（`origin` 字段）：模型管理页「模型列表」只展示 override/extra/provider。
 #   builtin  —— 内置目录（含 DB kind='builtin' 物化副本）
@@ -1138,7 +1148,12 @@ def probe_provider_models(provider_name: str, api_base: str, api_key: str,
         extras: list[dict[str, Any]] = []
         seen: set[str] = set()
         for m in data.get("data") or []:
-            mid = m.get("id") or ""
+            mid = str(m.get("id") or "").strip()
+            if mid.startswith("models/") and (
+                provider_name in ("google", "gemini")
+                or "generativelanguage.googleapis.com" in base.lower()
+            ):
+                mid = mid[len("models/"):]
             if not mid:
                 continue
             full = f"{provider_name}/{mid}"
@@ -1453,10 +1468,10 @@ def provider_api(model_id: Optional[str]) -> dict[str, Any]:
         # 存量配置没有该字段时保持原行为；`google` 别名继续兼容历史配置。
         forced = str(reg.get("litellm_prefix") or "").strip()
         if forced and _provider_type(reg) == "openai":
-            bare = mid.split("/", 1)[1] if "/" in mid else mid
+            bare = _bare_provider_model(str(mid), provider, result["api_base"])
             result["litellm_model"] = f"{forced}/{bare}"
         elif provider in _LITELLM_PROVIDER_ALIASES and _provider_type(reg) == "openai":
-            bare = mid.split("/", 1)[1] if "/" in mid else mid
+            bare = _bare_provider_model(str(mid), provider, result["api_base"])
             alias = (
                 "openai" if _is_openai_compatible_base(result["api_base"])
                 else _LITELLM_PROVIDER_ALIASES[provider]
@@ -1587,6 +1602,16 @@ def normalize_llm_exception(exc: BaseException, model_id: Optional[str] = None) 
                 "若是云端服务，请到「模型管理」页核对模型 id。" % msg.strip()[:200])
     # 2) 连接/鉴权类 —— 报错文本常见的连接拒绝、401/403/404
     low = msg.lower()
+    if ("no credits remaining" in low or "add credits" in low or
+            "insufficient_quota" in low):
+        if "openai" in low or "platform.openai.com" in low:
+            return ("OpenAI 账户额度已用尽：请前往 "
+                    "https://platform.openai.com/settings/organization/billing/ 充值后重试。")
+        return "模型服务商账户额度不足：请在对应服务商控制台充值后重试。"
+    if ("add usage credits" in low or "usage credits" in low or
+            ("402" in low and "ollama" in low)):
+        return ("Ollama Cloud 账户额度不足或未订阅：请前往 https://ollama.com/plans "
+                "充值或开通订阅后重试。")
     if ("api key" in low or "apikey" in low or "401" in low or "403" in low or
             "authentication" in low or "authorization" in low):
         return ("模型服务商鉴权失败：%s。请到「模型管理」页核对当前模型的 api_base 与 api_key，"

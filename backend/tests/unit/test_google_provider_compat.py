@@ -10,7 +10,7 @@ from models import catalog
 _GOOGLE_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
-def _fake_urlopen(captured):
+def _fake_urlopen(captured, model_id="gemini-2.5-flash"):
     class _Resp:
         def __enter__(self):
             return self
@@ -19,7 +19,7 @@ def _fake_urlopen(captured):
             return False
 
         def read(self):
-            return json.dumps({"data": [{"id": "gemini-2.5-flash", "owned_by": "google"}]}).encode("utf-8")
+            return json.dumps({"data": [{"id": model_id, "owned_by": "google"}]}).encode("utf-8")
 
     def _urlopen(req, timeout=0):
         captured["url"] = req.full_url
@@ -28,9 +28,9 @@ def _fake_urlopen(captured):
     return _urlopen
 
 
-def _setup_probe(monkeypatch, captured):
+def _setup_probe(monkeypatch, captured, model_id="gemini-2.5-flash"):
     monkeypatch.setattr(catalog, "local_endpoint_alive", lambda _base: True)
-    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen(captured))
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen(captured, model_id))
     monkeypatch.setattr(catalog, "_probe_cache", {})
     monkeypatch.setattr(catalog, "_provider_seen", {})
 
@@ -44,6 +44,16 @@ def test_probe_google_openai_compatible_models_path(monkeypatch):
     assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/openai/models"
     assert [e["id"] for e in extras] == ["google/gemini-2.5-flash"]
     assert catalog._provider_seen["google"] == {"google/gemini-2.5-flash"}
+
+
+def test_probe_gemini_native_model_ids_strip_models_prefix(monkeypatch):
+    captured: dict[str, str] = {}
+    _setup_probe(monkeypatch, captured, "models/gemini-2.5-flash")
+
+    extras = catalog.probe_provider_models("gemini", _GOOGLE_BASE, "key", set(), force=True)
+
+    assert [e["id"] for e in extras] == ["gemini/gemini-2.5-flash"]
+    assert catalog._provider_seen["gemini"] == {"gemini/gemini-2.5-flash"}
 
 
 def test_probe_regular_openai_base_still_uses_v1_models(monkeypatch):
@@ -66,6 +76,19 @@ def test_google_prefix_routes_to_openai_adapter_for_compatible_base(monkeypatch)
     assert creds["litellm_model"] == "openai/gemini-2.5-flash"
     assert creds["api_base"] == _GOOGLE_BASE
     assert creds["api_key"] == "k"
+    assert creds["is_ollama"] is False
+
+
+def test_gemini_prefix_strips_models_prefix_for_openai_compatible_base(monkeypatch):
+    monkeypatch.setattr(catalog, "read_providers", lambda: {
+        "gemini": {"type": "openai", "api_base": _GOOGLE_BASE, "api_key": "k"},
+    })
+    monkeypatch.setattr(catalog, "lookup", lambda mid: {"id": mid, "provider": "gemini"})
+
+    creds = catalog.provider_api("gemini/models/gemini-2.5-flash")
+
+    assert creds["litellm_model"] == "openai/gemini-2.5-flash"
+    assert creds["api_base"] == _GOOGLE_BASE
     assert creds["is_ollama"] is False
 
 

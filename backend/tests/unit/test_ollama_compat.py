@@ -185,6 +185,27 @@ def test_ollama_type_provider_config_hint_requires_key_for_cloud(monkeypatch):
     assert "API Key" in hint
 
 
+def test_normalize_llm_exception_maps_ollama_cloud_quota():
+    exc = RuntimeError(
+        'litellm.BadRequestError: Ollama_chatException - {"error":"Add usage credits '
+        'or subscribe and save up to 66%: https://ollama.com/plans"}'
+    )
+    hint = catalog.normalize_llm_exception(exc, "ollama-cloud/beam")
+    assert "额度不足" in hint
+    assert "https://ollama.com/plans" in hint
+
+
+def test_normalize_llm_exception_maps_openai_no_credits():
+    exc = RuntimeError(
+        "litellm.RateLimitError: RateLimitError: OpenAIException - You have no credits "
+        "remaining. Add credits to continue using the API at "
+        "https://platform.openai.com/settings/organization/billing/."
+    )
+    hint = catalog.normalize_llm_exception(exc, "openai/gpt-4.1")
+    assert "OpenAI 账户额度已用尽" in hint
+    assert "platform.openai.com/settings/organization/billing" in hint
+
+
 def test_ollama_tags_url_accepts_root_v1_and_api():
     assert catalog._ollama_tags_url("https://ollama.com") == "https://ollama.com/api/tags"
     assert catalog._ollama_tags_url("https://ollama.com/v1") == "https://ollama.com/api/tags"

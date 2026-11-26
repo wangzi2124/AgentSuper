@@ -188,6 +188,29 @@ async def test_interrupt_resume_continues_steer_but_not_queue(env):
     assert [item["id"] for item in env.repo.pending] == ["queue_3"]
 
 
+async def test_execution_failed_surfaces_friendly_provider_error(env):
+    coord = ExecutionCoordinator(env.ctx)
+    sid = "ses_quota"
+
+    async def run_item(_sid, item):  # noqa: ANN001
+        raise RuntimeError(
+            'litellm.BadRequestError: Ollama_chatException - {"error":"Add usage credits '
+            'or subscribe and save up to 66%: https://ollama.com/plans"}'
+        )
+
+    coord._run_item = run_item
+    env.ctx.sessions.get = lambda _sid: SimpleNamespace(model="ollama-cloud/beam")
+    env.repo.pending = [_item("in_1")]
+
+    await coord.wake(sid)
+    await _wait_idle(coord, sid)
+
+    failed = [p for event, p, _ in env.payloads if event == "session.execution.failed"]
+    assert failed
+    assert "额度不足" in failed[0]["error"]["message"]
+    assert "Add usage credits" in failed[0]["error"]["detail"]
+
+
 async def test_action_not_executed_marks_execution_failed(env):
     coord = ExecutionCoordinator(env.ctx)
     sid = "ses_action"

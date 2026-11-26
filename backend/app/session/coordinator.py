@@ -110,13 +110,19 @@ class ExecutionCoordinator:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("v2 execution failed: %s", session_id, exc_info=True)
+            from models.catalog import normalize_llm_exception
+
+            sess = self.ctx.sessions.get(session_id) if hasattr(self.ctx.sessions, "get") else None
+            model_id = getattr(sess, "model", None) if sess is not None else None
+            raw = str(exc)
+            message = normalize_llm_exception(exc, model_id=model_id) or raw
+            error = {"type": "execution_error", "message": message}
+            if message != raw:
+                error["detail"] = raw[:500]
             await emit_event(
                 self.ctx,
                 "session.execution.failed",
-                {
-                    "session_id": session_id,
-                    "error": {"type": "execution_error", "message": str(exc)},
-                },
+                {"session_id": session_id, "error": error},
                 session_id=session_id,
             )
             await self._finish(session_id, "interrupted" if interrupted else "failed")
