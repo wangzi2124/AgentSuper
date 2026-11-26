@@ -9,9 +9,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import traceback
 from typing import Any
 
+from harness.security import redact_secrets
+from observability import chainlog
+
 logger = logging.getLogger(__name__)
+
+_MAX_ERROR_LOG_CHARS = 12000
 
 
 def _final_answer(final_state: dict[str, Any] | None, streamed: list[str]) -> str:
@@ -116,13 +122,24 @@ class ExecutionCoordinator:
             model_id = getattr(sess, "model", None) if sess is not None else None
             raw = str(exc)
             message = normalize_llm_exception(exc, model_id=model_id) or raw
-            error = {"type": "execution_error", "message": message}
-            if message != raw:
-                error["detail"] = raw[:500]
+            chainlog.set_fields(session_id=session_id)
+            chainlog.error(
+                "system",
+                "coordinator",
+                "execution.failed",
+                message=redact_secrets(traceback.format_exc())[:_MAX_ERROR_LOG_CHARS],
+                data={
+                    "session_id": session_id,
+                    "model_id": str(model_id or ""),
+                    "error_type": type(exc).__name__,
+                    "friendly_message": message,
+                    "raw_error": raw[:500],
+                },
+            )
             await emit_event(
                 self.ctx,
                 "session.execution.failed",
-                {"session_id": session_id, "error": error},
+                {"session_id": session_id, "error": {"type": "execution_error", "message": message}},
                 session_id=session_id,
             )
             await self._finish(session_id, "interrupted" if interrupted else "failed")
@@ -134,6 +151,14 @@ class ExecutionCoordinator:
             elif action_not_executed:
                 outcome = "failed"
                 event_type = "session.execution.failed"
+                chainlog.set_fields(session_id=session_id)
+                chainlog.error(
+                    "system",
+                    "coordinator",
+                    "action_not_executed",
+                    message="模型承诺执行但未产生工具调用，操作未完成。",
+                    data={"session_id": session_id},
+                )
                 payload = {
                     "session_id": session_id,
                     "error": {

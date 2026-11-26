@@ -1,30 +1,53 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { fetchStats } from '../../api/monitor'
 import type { MonitorStats } from '../../types'
 
 const stats = ref<MonitorStats | null>(null)
 const loading = ref(true)
 const error = ref('')
+let timer: ReturnType<typeof setInterval> | undefined
 
-onMounted(async () => {
+async function load(initial = false) {
   try {
     stats.value = await fetchStats()
+    if (initial) error.value = ''
   } catch (err: any) {
-    error.value = err.message
+    if (initial) error.value = err.message
   } finally {
-    loading.value = false
+    if (initial) loading.value = false
   }
-})
-
-function ms(v: number): string {
-  if (v >= 60000) return (v / 60000).toFixed(1) + ' min'
-  if (v >= 1000) return (v / 1000).toFixed(1) + ' s'
-  return Math.round(v) + ' ms'
 }
 
-function num(v: number): string {
-  return v.toLocaleString()
+onMounted(() => {
+  load(true)
+  timer = setInterval(() => load(false), 5000)
+})
+
+onUnmounted(() => {
+  if (timer !== undefined) clearInterval(timer)
+})
+
+const service = computed(() => stats.value?.service)
+
+function pct(v?: number): string {
+  return `${Number(v || 0).toFixed(1)}%`
+}
+
+function fmtBytes(v?: number): string {
+  const bytes = Number(v || 0)
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
+}
+
+function uptime(v?: number): string {
+  const seconds = Number(v || 0)
+  if (seconds >= 86400) return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`
+  return `${Math.round(seconds)}s`
 }
 </script>
 
@@ -32,166 +55,96 @@ function num(v: number): string {
   <div class="m-monitor">
     <van-loading v-if="loading" class="loading" />
     <van-empty v-else-if="error" image="network" :description="error" />
-    <template v-else-if="stats">
-      <!-- 2x2 统计卡片 -->
-      <div class="m-grid">
-        <div class="m-stat-card">
-          <div class="m-stat-icon ic-blue"><van-icon name="chart-trending-o" /></div>
-          <div class="m-stat-meta">
-            <div class="m-stat-label">HTTP 请求</div>
-            <div class="m-stat-value">{{ num(stats.requests.total) }}</div>
-          </div>
+    <template v-else-if="service">
+      <div class="m-card m-card-pad">
+        <div class="m-row">
+          <span class="m-row-name">{{ service.name }}</span>
+          <span class="m-pill">{{ service.available ? '采样正常' : '采样不可用' }}</span>
         </div>
-        <div class="m-stat-card">
-          <div class="m-stat-icon ic-violet"><van-icon name="records-o" /></div>
-          <div class="m-stat-meta">
-            <div class="m-stat-label">LLM 调用</div>
-            <div class="m-stat-value">{{ num(stats.model_calls.total) }}</div>
-          </div>
+        <div class="m-row">
+          <span class="m-row-name">PID / 运行时间</span>
+          <span class="m-row-val">{{ service.pid }} · {{ uptime(service.uptime_seconds) }}</span>
         </div>
-        <div class="m-stat-card">
-          <div class="m-stat-icon ic-cyan"><van-icon name="descending" /></div>
-          <div class="m-stat-meta">
-            <div class="m-stat-label">输入 Token</div>
-            <div class="m-stat-value">{{ num(stats.model_calls.total_prompt_tokens) }}</div>
+      </div>
+
+      <div class="m-sec-title">服务进程</div>
+      <div class="m-card m-card-pad">
+        <div class="m-metric">
+          <div class="m-row">
+            <span class="m-row-name">CPU</span>
+            <span class="m-row-val">{{ pct(service.cpu_percent) }}</span>
           </div>
+          <div class="m-bar"><i :style="{ width: `${Math.min(service.cpu_percent, 100)}%` }"></i></div>
         </div>
-        <div class="m-stat-card">
-          <div class="m-stat-icon ic-orange"><van-icon name="ascending" /></div>
-          <div class="m-stat-meta">
-            <div class="m-stat-label">输出 Token</div>
-            <div class="m-stat-value">{{ num(stats.model_calls.total_completion_tokens) }}</div>
+        <div class="m-metric">
+          <div class="m-row">
+            <span class="m-row-name">内存</span>
+            <span class="m-row-val">{{ pct(service.memory_percent) }}</span>
+          </div>
+          <div class="m-bar"><i :style="{ width: `${Math.min(service.memory_percent, 100)}%` }"></i></div>
+          <div class="m-row">
+            <span class="m-row-name">RSS / VMS</span>
+            <span class="m-row-val">{{ fmtBytes(service.memory_rss_bytes) }} / {{ fmtBytes(service.memory_vms_bytes) }}</span>
           </div>
         </div>
       </div>
 
-      <!-- HTTP 明细 -->
-      <div class="m-sec-title">HTTP 请求明细</div>
+      <div class="m-sec-title">主机资源</div>
       <div class="m-card m-card-pad">
-        <div v-for="(count, path) in stats.requests.by_path" :key="path" class="m-row">
-          <span class="m-row-name mono">{{ path }}</span>
-          <span class="m-pill">{{ num(count) }}</span>
+        <div class="m-metric">
+          <div class="m-row">
+            <span class="m-row-name">CPU</span>
+            <span class="m-row-val">{{ pct(service.host_cpu_percent) }}</span>
+          </div>
+          <div class="m-bar"><i :style="{ width: `${Math.min(service.host_cpu_percent, 100)}%` }"></i></div>
         </div>
-        <div v-if="Object.keys(stats.requests.by_status).length" class="m-tags">
-          <span
-            v-for="(count, status) in stats.requests.by_status"
-            :key="'s' + status"
-            class="m-tag"
-          >状态 {{ status }} · {{ num(count) }}</span>
+        <div class="m-metric">
+          <div class="m-row">
+            <span class="m-row-name">内存</span>
+            <span class="m-row-val">{{ pct(service.host_memory_percent) }}</span>
+          </div>
+          <div class="m-bar"><i :style="{ width: `${Math.min(service.host_memory_percent, 100)}%` }"></i></div>
+          <div class="m-row">
+            <span class="m-row-name">已用 / 总量</span>
+            <span class="m-row-val">{{ fmtBytes(service.host_memory_used_bytes) }} / {{ fmtBytes(service.host_memory_total_bytes) }}</span>
+          </div>
         </div>
-      </div>
-
-      <!-- LLM 明细 -->
-      <div class="m-sec-title">LLM 调用</div>
-      <div class="m-card m-card-pad">
-        <div class="m-row">
-          <span class="m-row-name">总耗时</span>
-          <span class="m-row-val">{{ ms(stats.model_calls.total_duration_ms) }}</span>
-        </div>
-        <div class="m-row">
-          <span class="m-row-name">平均耗时</span>
-          <span class="m-row-val">{{ ms(stats.model_calls.avg_duration_ms) }}</span>
-        </div>
-        <div class="m-row">
-          <span class="m-row-name">工具轮数</span>
-          <span class="m-row-val">{{ num(stats.model_calls.tool_rounds_total) }}（均 {{ stats.model_calls.avg_tool_rounds }}）</span>
-        </div>
-      </div>
-
-      <!-- 按模型 -->
-      <div class="m-sec-title">按模型</div>
-      <div class="m-card m-card-pad">
-        <div v-for="(count, model) in stats.model_calls.by_model" :key="model" class="m-row">
-          <span class="m-row-name mono">{{ model }}</span>
-          <span class="m-pill">{{ num(count) }}</span>
-        </div>
+        <p v-if="!service.available" class="m-warning">资源采样不可用，请确认后端已安装 psutil。</p>
       </div>
     </template>
+    <van-empty v-else description="服务资源指标不可用" />
   </div>
 </template>
-
 
 <style scoped>
 .m-monitor { padding: 8px 12px 24px; }
 .loading { display: flex; justify-content: center; padding: 48px 0; }
-
-/* 2x2 统计卡 */
-.m-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 4px; }
-.m-stat-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.m-sec-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-secondary, #64748b);
+  margin: 16px 2px 8px;
+}
+.m-card {
   background: var(--surface, #fff);
   border: 1px solid var(--border, #eef1f6);
   border-radius: var(--m-card-radius, 16px);
   box-shadow: var(--m-card-shadow, 0 2px 12px rgba(31, 41, 55, 0.06));
-  padding: 12px;
 }
-.m-stat-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  color: #fff;
-  flex-shrink: 0;
-}
-.ic-blue   { background: linear-gradient(135deg, #3b82f6, #38bdf8); }
-.ic-violet { background: linear-gradient(135deg, #8b5cf6, #6d5ef1); }
-.ic-cyan   { background: linear-gradient(135deg, #06b6d4, #22d3ee); }
-.ic-orange { background: linear-gradient(135deg, #f59e0b, #f97316); }
-.m-stat-meta { min-width: 0; }
-.m-stat-label { font-size: 12px; color: var(--text-secondary, #64748b); }
-.m-stat-value {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text, #1e293b);
-  margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 卡片内行 */
-.m-card-pad { padding: 4px 14px; }
-.m-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 11px 0;
-  border-bottom: 1px dashed var(--border, #eef1f6);
-}
-.m-row:last-child { border-bottom: none; }
-.m-row-name {
-  font-size: 13px;
-  color: var(--text, #1e293b);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.m-row-val { font-size: 13px; font-weight: 600; color: var(--text, #1e293b); flex-shrink: 0; }
-.mono { font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px; }
+.m-card-pad { padding: 14px; }
+.m-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; }
+.m-row-name { font-size: 13px; color: var(--text-secondary, #64748b); }
+.m-row-val { font-size: 13px; font-weight: 600; color: var(--text, #0f172a); text-align: right; }
 .m-pill {
-  flex-shrink: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--m-monitor, #f59e0b);
-  background: var(--m-monitor-soft, rgba(245, 158, 11, 0.12));
-  padding: 3px 10px;
-  border-radius: 999px;
-}
-.m-tags { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 0 4px; }
-.m-tag {
   font-size: 11px;
   font-weight: 600;
-  color: var(--text-secondary, #64748b);
-  background: var(--surface, #fff);
-  border: 1px solid var(--border, #eef1f6);
+  color: var(--primary, #2563eb);
+  background: var(--primary-glow, rgba(37, 99, 235, 0.1));
   border-radius: 999px;
   padding: 4px 10px;
 }
+.m-metric + .m-metric { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border, #eef1f6); }
+.m-bar { height: 6px; margin: 8px 0; border-radius: 999px; background: var(--border, #eef1f6); overflow: hidden; }
+.m-bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--primary, #2563eb), var(--accent, #7c3aed)); }
+.m-warning { margin: 10px 0 0; font-size: 12px; color: var(--danger, #ef4444); }
 </style>
-

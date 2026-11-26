@@ -110,6 +110,7 @@ export const useV2SessionStore = defineStore('v2Session', () => {
         hydrated: true,
       }
       const previous = runtimes.value[sessionId]
+      base.error = previous?.error ?? null
       if (info.status === 'busy' || info.status === 'retry') {
         base.activeAssistantId = previous?.activeAssistantId ?? null
         base.compaction = previous?.compaction ?? null

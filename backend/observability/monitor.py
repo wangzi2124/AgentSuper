@@ -7,6 +7,7 @@ this gives local visibility into every LLM call, including summarization,
 compaction, supervisor decompose/synthesize, and sub-agent calls).
 """
 import json
+import os
 import time
 import logging
 from collections import defaultdict
@@ -14,6 +15,11 @@ from pathlib import Path
 from threading import Lock
 
 from storage.paths import data_path
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +68,61 @@ _METRICS_PRUNE_INTERVAL_SECONDS = 300.0
 _metrics_buffer: list = []
 _last_metrics_flush = 0.0
 _last_metrics_prune = 0.0
+
+_service_lock = Lock()
+_service_process = None
+
+
+def _empty_service_metrics() -> dict:
+    return {
+        "name": "agentsuper-backend",
+        "pid": os.getpid(),
+        "available": False,
+        "timestamp": int(time.time() * 1000),
+        "uptime_seconds": 0.0,
+        "cpu_percent": 0.0,
+        "memory_rss_bytes": 0,
+        "memory_vms_bytes": 0,
+        "memory_percent": 0.0,
+        "host_cpu_percent": 0.0,
+        "host_memory_total_bytes": 0,
+        "host_memory_used_bytes": 0,
+        "host_memory_percent": 0.0,
+    }
+
+
+def _sample_service() -> dict:
+    result = _empty_service_metrics()
+    if psutil is None:
+        return result
+    global _service_process
+    try:
+        with _service_lock:
+            if _service_process is None:
+                _service_process = psutil.Process(os.getpid())
+                _service_process.cpu_percent(None)
+                psutil.cpu_percent(None)
+            proc_cpu = float(_service_process.cpu_percent(None))
+            host_cpu = float(psutil.cpu_percent(None))
+            proc_mem = _service_process.memory_info()
+            proc_mem_percent = float(_service_process.memory_percent())
+            host_mem = psutil.virtual_memory()
+            uptime = max(0.0, time.time() - float(_service_process.create_time()))
+        result.update({
+            "available": True,
+            "uptime_seconds": round(uptime, 1),
+            "cpu_percent": round(proc_cpu, 1),
+            "memory_rss_bytes": int(proc_mem.rss),
+            "memory_vms_bytes": int(getattr(proc_mem, "vms", 0)),
+            "memory_percent": round(proc_mem_percent, 2),
+            "host_cpu_percent": round(host_cpu, 1),
+            "host_memory_total_bytes": int(host_mem.total),
+            "host_memory_used_bytes": int(getattr(host_mem, "used", host_mem.total - host_mem.available)),
+            "host_memory_percent": round(float(host_mem.percent), 1),
+        })
+    except Exception as exc:
+        logger.warning("Failed to sample service resources: %s", exc)
+    return result
 
 
 def _load_persisted():
@@ -248,9 +309,11 @@ def record_harness_signal(name: str, **fields):
 
 def get_stats() -> dict:
     """获取当前累积的请求和模型调用统计，返回格式化字典。"""
+    service = _sample_service()
     with _stats_lock:
         calls = _stats["model_calls_total"]
         return {
+            "service": service,
             "requests": {
                 "total": _stats["requests_total"],
                 "by_path": dict(_stats["requests_by_path"]),

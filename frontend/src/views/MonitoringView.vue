@@ -1,78 +1,76 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { fetchStats } from '../api/monitor'
 import type { MonitorStats } from '../types'
 
 const stats = ref<MonitorStats | null>(null)
 const loading = ref(true)
 const error = ref('')
+const cpuHistory = ref<number[]>([])
+const memHistory = ref<number[]>([])
+let timer: ReturnType<typeof setInterval> | undefined
 
-onMounted(async () => {
+async function load(initial = false) {
   try {
     stats.value = await fetchStats()
+    const service = stats.value.service
+    if (service?.available) {
+      cpuHistory.value = [...cpuHistory.value, service.cpu_percent].slice(-60)
+      memHistory.value = [...memHistory.value, service.memory_percent].slice(-60)
+    }
+    if (initial) error.value = ''
   } catch (err: any) {
-    error.value = err.message
+    if (initial) error.value = err.message
   } finally {
-    loading.value = false
+    if (initial) loading.value = false
   }
+}
+
+onMounted(() => {
+  load(true)
+  timer = setInterval(() => load(false), 5000)
 })
 
-function ms(v: number): string {
-  if (v >= 60000) return (v / 60000).toFixed(1) + ' min'
-  if (v >= 1000) return (v / 1000).toFixed(1) + ' s'
-  return Math.round(v) + ' ms'
-}
-
-function num(v: number): string {
-  return v.toLocaleString()
-}
-function fmtCost(v?: number) {
-  if (!v || v <= 0) return '免费'
-  return `$${v.toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 })}`
-}
-
-interface ModelRow {
-  model: string
-  calls: number
-  input: number
-  output: number
-  reasoning: number
-  cacheRead: number
-  cacheWrite: number
-  cost: number
-}
-
-const modelRows = computed<ModelRow[]>(() => {
-  const mc = stats.value?.model_calls
-  if (!mc) return []
-  const models = new Set<string>(Object.keys(mc.by_model || {}))
-  for (const k of Object.keys(mc.prompt_tokens_by_model || {})) models.add(k)
-  for (const k of Object.keys(mc.cost_by_model || {})) models.add(k)
-  return [...models].map(m => ({
-    model: m,
-    calls: mc.by_model?.[m] ?? 0,
-    input: mc.prompt_tokens_by_model?.[m] ?? 0,
-    output: mc.completion_tokens_by_model?.[m] ?? 0,
-    reasoning: mc.reasoning_tokens_by_model?.[m] ?? 0,
-    cacheRead: mc.cache_read_by_model?.[m] ?? 0,
-    cacheWrite: mc.cache_write_by_model?.[m] ?? 0,
-    cost: mc.cost_by_model?.[m] ?? 0,
-  })).sort((a, b) => b.calls - a.calls)
+onUnmounted(() => {
+  if (timer !== undefined) clearInterval(timer)
 })
 
-// [P1 #12] 最近窗口（默认 24h）按模型调用次数
-const recentModelRows = computed(() => {
-  const byModel = stats.value?.recent?.model_calls.by_model || {}
-  return Object.entries(byModel)
-    .map(([model, calls]) => ({ model, calls }))
-    .sort((a, b) => b.calls - a.calls)
-})
+const service = computed(() => stats.value?.service)
+
+function pct(v?: number): string {
+  return `${Number(v || 0).toFixed(1)}%`
+}
+
+function fmtBytes(v?: number): string {
+  const bytes = Number(v || 0)
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
+}
+
+function uptime(v?: number): string {
+  const seconds = Number(v || 0)
+  if (seconds >= 86400) return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`
+  return `${Math.round(seconds)}s`
+}
+
+function sparkPoints(values: number[], width = 120, height = 32): string {
+  if (!values.length) return ''
+  const max = Math.max(100, ...values)
+  const step = values.length > 1 ? width / (values.length - 1) : width
+  return values
+    .map((value, index) => `${index * step},${height - Math.min(value, max) / max * height}`)
+    .join(' ')
+}
 </script>
 
 <template>
   <div class="page-header">
-    <h2>系统监控</h2>
-    <p>系统使用统计</p>
+    <h2>运行监控</h2>
+    <p>后端服务 CPU / 内存实时状态</p>
   </div>
   <div class="page-content">
     <div v-if="loading" class="loading-wrap">
@@ -80,162 +78,72 @@ const recentModelRows = computed(() => {
     </div>
 
     <div v-else-if="error" class="empty-state">
-      <p style="color:var(--danger);">统计数据加载失败：{{ error }}</p>
+      <p style="color:var(--danger);">资源指标加载失败：{{ error }}</p>
     </div>
 
-    <div v-if="stats" class="monitor-wrap">
-      <!-- 最近窗口（时间窗 ring buffer，data/metrics.jsonl） -->
-      <section v-if="stats.recent" class="monitor-section">
-        <div class="section-head">
-          <span class="section-dot"></span>
-          <h3>最近 {{ stats.recent.window_hours }}h</h3>
-        </div>
-        <div class="card stat-card">
-          <div class="stat-grid stat-grid-4">
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.recent.model_calls.total) }}</div>
-              <div class="stat-label">LLM 调用</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.recent.model_calls.total_prompt_tokens) }}</div>
-              <div class="stat-label">输入 Token</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.recent.model_calls.total_completion_tokens) }}</div>
-              <div class="stat-label">输出 Token</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ fmtCost(stats.recent.model_calls.total_cost) }}</div>
-              <div class="stat-label">成本 (USD)</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.recent.requests.total) }}</div>
-              <div class="stat-label">HTTP 请求</div>
-            </div>
-          </div>
-          <div v-if="recentModelRows.length" class="list-block">
-            <h4>按模型调用次数</h4>
-            <div class="list-table">
-              <div v-for="row in recentModelRows" :key="row.model" class="list-row">
-                <span class="row-path">{{ row.model }}</span>
-                <span class="badge badge-count">{{ num(row.calls) }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Model Calls（置顶：LLM 调用为最重要的具体信息） -->
+    <div v-else-if="service" class="monitor-wrap">
       <section class="monitor-section">
         <div class="section-head">
           <span class="section-dot"></span>
-          <h3>LLM 调用</h3>
+          <h3>服务资源</h3>
         </div>
-        <div class="card stat-card">
-          <div v-if="modelRows.length" class="list-block">
-            <h4>按模型明细（Token / 成本）</h4>
-            <div class="model-table">
-              <div class="model-table-head">
-                <span>模型</span><span>调用</span><span>输入</span><span>输出</span><span>推理</span><span>缓存</span><span>成本</span>
-              </div>
-              <div v-for="row in modelRows" :key="row.model" class="model-table-row">
-                <span class="mt-model">{{ row.model }}</span>
-                <span class="mt-cell">{{ num(row.calls) }}</span>
-                <span class="mt-cell">{{ num(row.input) }}</span>
-                <span class="mt-cell">{{ num(row.output) }}</span>
-                <span class="mt-cell">{{ num(row.reasoning) }}</span>
-                <span class="mt-cell">{{ num(row.cacheRead) }}→{{ num(row.cacheWrite) }}</span>
-                <span class="mt-cell cost">{{ fmtCost(row.cost) }}</span>
-              </div>
+        <div class="card stat-card svc-card">
+          <div class="svc-head">
+            <div>
+              <div class="svc-title">{{ service.name }}</div>
+              <div class="svc-sub">PID {{ service.pid }} · 已运行 {{ uptime(service.uptime_seconds) }}</div>
             </div>
+            <span class="svc-pill" :class="service.available ? 'svc-pill-ok' : 'svc-pill-bad'">
+              {{ service.available ? '采样正常' : '采样不可用' }}
+            </span>
           </div>
-          <div class="stat-grid stat-grid-4">
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.model_calls.total) }}</div>
-              <div class="stat-label">调用总数</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.model_calls.total_prompt_tokens) }}</div>
-              <div class="stat-label">输入 Token</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.model_calls.total_completion_tokens) }}</div>
-              <div class="stat-label">输出 Token</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.model_calls.total_reasoning_tokens || 0) }}</div>
-              <div class="stat-label">推理 Token</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.model_calls.total_cache_read || 0) }}</div>
-              <div class="stat-label">缓存命中</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ fmtCost(stats.total_cost) }}</div>
-              <div class="stat-label">总成本 (USD)</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ ms(stats.model_calls.total_duration_ms) }}</div>
-              <div class="stat-label">总耗时</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ ms(stats.model_calls.avg_duration_ms) }}</div>
-              <div class="stat-label">平均耗时</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.model_calls.tool_rounds_total) }}</div>
-              <div class="stat-label">工具轮数</div>
-            </div>
-            <div class="stat-item">
-              <div class="stat-value">{{ stats.model_calls.avg_tool_rounds }}</div>
-              <div class="stat-label">平均工具轮数</div>
-            </div>
-          </div>
-          <div class="list-block">
-            <h4>按模型调用次数</h4>
-            <div class="list-table">
-              <div v-for="(count, model) in stats.model_calls.by_model" :key="model" class="list-row">
-                <span class="row-path">{{ model }}</span>
-                <span class="badge badge-count">{{ num(count) }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
 
-      <!-- HTTP Requests -->
-      <section class="monitor-section">
-        <div class="section-head">
-          <span class="section-dot"></span>
-          <h3>HTTP 请求</h3>
-        </div>
-        <div class="card stat-card">
-          <div class="stat-grid">
-            <div class="stat-item">
-              <div class="stat-value">{{ num(stats.requests.total) }}</div>
-              <div class="stat-label">请求总数</div>
-            </div>
-          </div>
-          <div class="list-block">
-            <h4>按路径</h4>
-            <div class="list-table">
-              <div v-for="(count, path) in stats.requests.by_path" :key="path" class="list-row">
-                <span class="row-path">{{ path }}</span>
-                <span class="badge badge-count">{{ num(count) }}</span>
+          <div class="svc-grid">
+            <div class="svc-metric">
+              <div class="svc-metric-head">
+                <span>进程 CPU</span>
+                <strong class="svc-cpu-value">{{ pct(service.cpu_percent) }}</strong>
               </div>
+              <div class="svc-bar"><i :style="{ width: `${Math.min(service.cpu_percent, 100)}%` }"></i></div>
+              <svg class="svc-spark" viewBox="0 0 120 32" preserveAspectRatio="none">
+                <polyline :points="sparkPoints(cpuHistory)" />
+              </svg>
             </div>
-          </div>
-          <div class="list-block">
-            <h4>按状态码</h4>
-            <div class="list-table">
-              <div v-for="(count, status) in stats.requests.by_status" :key="status" class="list-row">
-                <span class="row-path">{{ status }}</span>
-                <span class="badge badge-count">{{ num(count) }}</span>
+            <div class="svc-metric">
+              <div class="svc-metric-head">
+                <span>进程内存</span>
+                <strong class="svc-mem-value">{{ pct(service.memory_percent) }}</strong>
               </div>
+              <div class="svc-bar"><i :style="{ width: `${Math.min(service.memory_percent, 100)}%` }"></i></div>
+              <svg class="svc-spark" viewBox="0 0 120 32" preserveAspectRatio="none">
+                <polyline :points="sparkPoints(memHistory)" />
+              </svg>
+              <div class="svc-sub">RSS {{ fmtBytes(service.memory_rss_bytes) }} · VMS {{ fmtBytes(service.memory_vms_bytes) }}</div>
+            </div>
+            <div class="svc-metric">
+              <div class="svc-metric-head">
+                <span>主机 CPU</span>
+                <strong>{{ pct(service.host_cpu_percent) }}</strong>
+              </div>
+              <div class="svc-bar"><i :style="{ width: `${Math.min(service.host_cpu_percent, 100)}%` }"></i></div>
+              <div class="svc-sub">宿主机逻辑核平均值</div>
+            </div>
+            <div class="svc-metric">
+              <div class="svc-metric-head">
+                <span>主机内存</span>
+                <strong>{{ pct(service.host_memory_percent) }}</strong>
+              </div>
+              <div class="svc-bar"><i :style="{ width: `${Math.min(service.host_memory_percent, 100)}%` }"></i></div>
+              <div class="svc-sub">{{ fmtBytes(service.host_memory_used_bytes) }} / {{ fmtBytes(service.host_memory_total_bytes) }}</div>
             </div>
           </div>
+          <p v-if="!service.available" class="svc-warning">资源采样不可用，请确认后端已安装 psutil。</p>
         </div>
       </section>
+    </div>
+
+    <div v-else class="empty-state">
+      <p>服务资源指标不可用</p>
     </div>
   </div>
 </template>
@@ -252,83 +160,31 @@ const recentModelRows = computed(() => {
   background: linear-gradient(135deg, var(--primary), var(--accent));
   box-shadow: 0 0 10px var(--primary-glow);
 }
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 12px;
-}
-.stat-grid-4 { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
-.stat-item {
-  text-align: center;
-  padding: 16px 10px;
-  background: var(--bg-subtle);
-  border-radius: var(--radius);
-  border: 1px solid var(--border-subtle);
-  transition: all var(--duration) var(--ease);
-}
-.stat-item:hover {
-  border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 16px);
+  padding: 20px;
   box-shadow: var(--shadow-sm);
 }
-.stat-value {
-  font-size: 22px;
-  font-weight: 800;
-  color: var(--primary);
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-}
-.stat-label {
-  font-size: 11px;
-  color: var(--text-secondary);
-  margin-top: 4px;
-  font-weight: 500;
-}
-.list-block { margin-top: 16px; }
-.list-block h4 {
-  margin: 0 0 8px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.list-table { display: flex; flex-direction: column; gap: 6px; }
-.list-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  background: var(--bg-subtle);
-  border-radius: var(--radius);
+.svc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.svc-title { font-size: 17px; font-weight: 700; }
+.svc-sub { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+.svc-pill { font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: var(--radius-pill, 999px); }
+.svc-pill-ok { color: #16a34a; background: rgba(34, 197, 94, 0.14); }
+.svc-pill-bad { color: #dc2626; background: rgba(239, 68, 68, 0.14); }
+.svc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.svc-metric {
+  padding: 14px;
+  border-radius: var(--radius, 12px);
   border: 1px solid var(--border-subtle);
-  transition: all var(--duration) var(--ease);
+  background: var(--bg-subtle);
 }
-.list-row:hover { background: var(--surface); border-color: color-mix(in srgb, var(--primary) 20%, var(--border)); }
-.row-path {
-  font-family: 'JetBrains Mono', Consolas, monospace;
-  font-size: 12px;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.badge-count {
-  font-size: 12px;
-  font-weight: 700;
-  padding: 2px 10px;
-  border-radius: var(--radius-pill);
-  background: var(--primary-glow);
-  color: var(--primary);
-  flex-shrink: 0;
-}
-.model-table { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; overflow-x: auto; }
-.model-table-head, .model-table-row { display: grid; grid-template-columns: 2fr 0.7fr 0.8fr 0.8fr 0.8fr 1fr 0.8fr; gap: 6px; align-items: center; font-size: 11px; padding: 6px 10px; }
-.model-table-head { color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-.model-table-head span { text-align: right; }
-.model-table-head span:first-child { text-align: left; }
-.model-table-row { background: var(--bg-subtle); border-radius: var(--radius); border: 1px solid var(--border-subtle); }
-.model-table-row:hover { background: var(--surface); border-color: color-mix(in srgb, var(--primary) 20%, var(--border)); }
-.mt-model { font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mt-cell { font-variant-numeric: tabular-nums; color: var(--text); white-space: nowrap; text-align: right; }
-.mt-cell.cost { color: #22c55e; font-weight: 600; }
+.svc-metric-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 13px; }
+.svc-metric-head strong { font-size: 20px; font-variant-numeric: tabular-nums; color: var(--primary); }
+.svc-bar { height: 6px; margin-top: 10px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.svc-bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--primary), var(--accent)); }
+.svc-spark { width: 100%; height: 32px; margin-top: 10px; }
+.svc-spark polyline { fill: none; stroke: var(--primary); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.svc-warning { margin: 14px 0 0; font-size: 12px; color: var(--danger); }
 </style>

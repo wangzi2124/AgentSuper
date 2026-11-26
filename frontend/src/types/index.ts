@@ -164,8 +164,25 @@ export interface GeneratedFileList {
   total: number
 }
 
+export interface MonitorServiceMetrics {
+  name: string
+  pid: number
+  available: boolean
+  timestamp: number
+  uptime_seconds: number
+  cpu_percent: number
+  memory_rss_bytes: number
+  memory_vms_bytes: number
+  memory_percent: number
+  host_cpu_percent: number
+  host_memory_total_bytes: number
+  host_memory_used_bytes: number
+  host_memory_percent: number
+}
+
 // 监控统计数据
 export interface MonitorStats {
+  service?: MonitorServiceMetrics
   requests: {
     total: number
     by_path: Record<string, number>

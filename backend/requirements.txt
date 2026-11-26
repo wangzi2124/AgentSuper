@@ -32,6 +32,7 @@ psycopg2-binary
 # HTTP 客户端（web 抓取 / 模型下载）
 httpx
 requests
+psutil>=6.0
 
 # 分词 / token 计数（不可用时自动回退启发式估算，不阻塞启动）
 tiktoken

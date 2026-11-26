@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   getTrace: vi.fn(),
   getStats: vi.fn(),
   getFilterOptions: vi.fn(),
+  fetchSystemErrors: vi.fn(),
   cleanupLogs: vi.fn(),
   clearLogs: vi.fn(),
 }))
@@ -21,6 +22,7 @@ vi.mock('@/api/logs', () => ({
   getTrace: mocks.getTrace,
   getStats: mocks.getStats,
   getFilterOptions: mocks.getFilterOptions,
+  fetchSystemErrors: mocks.fetchSystemErrors,
   cleanupLogs: mocks.cleanupLogs,
   clearLogs: mocks.clearLogs,
   STAGES: ['http', 'agent', 'tool', 'llm', 'system'],
@@ -51,6 +53,9 @@ beforeEach(() => {
   mocks.getFilterOptions.mockReset().mockResolvedValue({
     components: ['supervisor'], agents: ['build'], sessions: ['s1'], stages: [], levels: [],
   })
+  mocks.fetchSystemErrors.mockReset().mockResolvedValue({
+    entries: [], total: 0, offset: 0, limit: 20,
+  })
   mocks.cleanupLogs.mockReset().mockResolvedValue({ expired: 2, overflow: 1 })
   mocks.clearLogs.mockReset().mockResolvedValue({ deleted: 5 })
 })
@@ -65,6 +70,25 @@ describe('logs store', () => {
     expect(store.total).toBe(1)
     expect(store.stats?.by_level.ERROR).toBe(1)
     expect(store.options?.components).toEqual(['supervisor'])
+    expect(mocks.fetchSystemErrors).toHaveBeenCalledWith(20)
+  })
+
+  it('loadSystemErrors 保存系统错误并暴露加载失败', async () => {
+    const store = useLogsStore()
+    const row = {
+      id: 'lg_1', trace_id: 'tr_1', parent_id: '', seq: 1, ts: 1, time: 1,
+      level: 'ERROR', stage: 'system', component: 'coordinator', event: 'execution.failed',
+      agent_id: '', session_id: 's1', user_id: '', path: '', message: 'boom',
+      data: {}, duration_ms: null,
+    }
+    mocks.fetchSystemErrors.mockResolvedValueOnce({ entries: [row], total: 1, offset: 0, limit: 20 })
+    await store.loadSystemErrors()
+    expect(store.systemErrors).toEqual([row])
+
+    mocks.fetchSystemErrors.mockRejectedValueOnce(new Error('boom'))
+    await store.loadSystemErrors()
+    expect(store.systemErrors).toEqual([])
+    expect(store.systemErrorError).toBe('boom')
   })
 
   it('setFilter 合并筛选条件、回第一页并同步刷新统计', async () => {

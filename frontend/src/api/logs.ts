@@ -145,6 +145,11 @@ export function listEntries(
   return apiRequest(`${BASE}${query(filters, { view: 'entries', offset, limit, order })}`)
 }
 
+// 最近的系统异常节点（ERROR + CRITICAL）
+export function fetchSystemErrors(limit = 20): Promise<Paged<ChainLogEntry>> {
+  return apiRequest(`${BASE}/system-errors?limit=${limit}`)
+}
+
 // 单条链路时间线
 export function getTrace(traceId: string, limit = 2000): Promise<TraceDetail> {
   return apiRequest(`${BASE}/traces/${encodeURIComponent(traceId)}?limit=${limit}`)

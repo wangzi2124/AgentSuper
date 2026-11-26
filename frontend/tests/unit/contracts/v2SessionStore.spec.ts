@@ -66,6 +66,30 @@ describe('v2 session store inbox actions', () => {
     expect(store.getRuntime('s1')?.inbox).toEqual([])
   })
 
+  it('keeps the execution error visible after failure hydration', async () => {
+    const store = useV2SessionStore()
+    await store.hydrate('s1')
+    const callsBefore = vi.mocked(getSession).mock.calls.length
+    store.apply({
+      id: 'fail1',
+      created: Date.now(),
+      type: 'session.execution.failed',
+      data: {
+        session_id: 's1',
+        error: {
+          type: 'execution_error',
+          message: 'OpenAI 账户额度已用尽：请前往 billing 充值后重试。',
+        },
+      },
+    } as never)
+    expect(store.getRuntime('s1')?.error?.message).toContain('额度已用尽')
+    await vi.waitFor(() => {
+      expect(vi.mocked(getSession).mock.calls.length).toBeGreaterThan(callsBefore)
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(store.getRuntime('s1')?.error?.message).toContain('额度已用尽')
+  })
+
   it('hydrates persisted plan snapshot', async () => {
     vi.mocked(getSessionPlan).mockResolvedValue({
       session_id: 's1',

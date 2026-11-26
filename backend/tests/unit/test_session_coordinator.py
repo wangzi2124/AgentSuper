@@ -205,10 +205,52 @@ async def test_execution_failed_surfaces_friendly_provider_error(env):
     await coord.wake(sid)
     await _wait_idle(coord, sid)
 
+    from app.contracts.v2 import EventEnvelope
+
     failed = [p for event, p, _ in env.payloads if event == "session.execution.failed"]
     assert failed
     assert "额度不足" in failed[0]["error"]["message"]
-    assert "Add usage credits" in failed[0]["error"]["detail"]
+    assert set(failed[0]["error"]) == {"type", "message"}
+    EventEnvelope.model_validate({
+        "id": "evt_test",
+        "created": 1,
+        "type": "session.execution.failed",
+        "data": failed[0],
+        "durable": {"aggregate_id": sid, "seq": 1, "version": 2},
+    })
+
+
+async def test_execution_failed_persists_raw_error_to_chainlog(env, monkeypatch):
+    from observability import chainlog
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        chainlog,
+        "error",
+        lambda stage, component, event, **kw: calls.append((stage, component, event, kw)),
+    )
+    coord = ExecutionCoordinator(env.ctx)
+    sid = "ses_chainlog"
+
+    async def run_item(_sid, item):  # noqa: ANN001
+        raise RuntimeError('OpenAIException - api_key=sk-secretvalue123 You have no credits remaining.')
+
+    coord._run_item = run_item
+    env.ctx.sessions.get = lambda _sid: SimpleNamespace(model="openai/gpt-4.1")
+    env.repo.pending = [_item("in_1")]
+
+    await coord.wake(sid)
+    await _wait_idle(coord, sid)
+
+    assert calls
+    stage, component, event, payload = calls[0]
+    assert (stage, component, event) == ("system", "coordinator", "execution.failed")
+    assert "You have no credits remaining" in payload["message"]
+    assert "[REDACTED]" in payload["message"]
+    assert "sk-secretvalue123" not in payload["message"]
+    assert payload["data"]["session_id"] == sid
+    assert payload["data"]["model_id"] == "openai/gpt-4.1"
+    assert payload["data"]["error_type"] == "RuntimeError"
 
 
 async def test_action_not_executed_marks_execution_failed(env):

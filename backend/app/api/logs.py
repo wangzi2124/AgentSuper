@@ -114,6 +114,30 @@ def log_filters(request: Request):
     return ok(_store().distinct_values(user_id=_scope(request)))
 
 
+@router.get("/system-errors")
+def system_errors(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+):
+    """最近的系统异常节点（ERROR + CRITICAL，按时间倒序）。"""
+    st = _store()
+    scope = _scope(request)
+    by_id: dict[str, dict] = {}
+    for level in ("ERROR", "CRITICAL"):
+        page = st.list_entries(
+            stage="system", level=level, order="desc", offset=0, limit=limit,
+            user_id=scope,
+        )
+        for row in page.get("entries", []):
+            by_id[str(row.get("id") or "")] = row
+    entries = sorted(
+        by_id.values(),
+        key=lambda row: int(row.get("ts") or 0),
+        reverse=True,
+    )[:limit]
+    return ok({"entries": entries, "total": len(entries), "offset": 0, "limit": limit})
+
+
 @router.post("/cleanup")
 def logs_cleanup(_: None = Depends(require_admin)):
     """按 TTL 与行数上限裁剪历史日志（手动触发；启动/定时任务也会自动执行）。"""

@@ -60,6 +60,17 @@ class UpstreamError(HarnessError):
         )
 
 
+class QuotaExhaustedError(HarnessError):
+    def __init__(self, message: str = "模型服务商账户额度已用尽") -> None:
+        super().__init__(
+            message,
+            code="QUOTA_EXHAUSTED",
+            retryable=False,
+            status_code=429,
+            error_type="quota_exhausted",
+        )
+
+
 class ContextOverflowError(HarnessError):
     def __init__(self, message: str = "上下文超出模型窗口") -> None:
         super().__init__(
@@ -80,6 +91,31 @@ class BudgetExceededError(HarnessError):
             status_code=429,
             error_type="budget_exceeded",
         )
+
+
+_QUOTA_HINTS = (
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "no credits remaining",
+    "add credits",
+    "billing_hard_requirement",
+    "out of credits",
+    "额度已用尽",
+    "余额不足",
+)
+
+
+def _is_quota_error(exc: BaseException, text: str) -> bool:
+    code = str(getattr(exc, "code", "") or "").lower()
+    error = getattr(exc, "error", None)
+    if isinstance(error, dict):
+        code += " " + " ".join(
+            str(error.get(key) or "").lower() for key in ("code", "type", "message")
+        )
+    elif error is not None:
+        code += " " + str(error).lower()
+    haystack = f"{text} {code}"
+    return any(hint in haystack for hint in _QUOTA_HINTS)
 
 
 _OVERFLOW_HINTS = (
@@ -107,6 +143,8 @@ def classify_error(exc: BaseException) -> HarnessError:
     except (TypeError, ValueError):
         status = 0
     text = str(exc).lower()
+    if _is_quota_error(exc, text):
+        return QuotaExhaustedError(str(exc))
     if status in (401, 403):
         return AuthError(str(exc))
     if status == 429:
@@ -131,6 +169,7 @@ __all__ = [
     "BudgetExceededError",
     "ContextOverflowError",
     "HarnessError",
+    "QuotaExhaustedError",
     "RateLimitError",
     "UpstreamError",
     "classify_error",

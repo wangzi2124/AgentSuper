@@ -146,6 +146,11 @@ async function onClearAll() {
     showCleanupResult.value = `清空失败：${err?.message || err}`
   }
 }
+
+async function showSystemOnly() {
+  await store.setView('entries')
+  await store.setFilter('stage', 'system')
+}
 </script>
 
 <template>
@@ -219,6 +224,39 @@ async function onClearAll() {
       <div v-if="counters" class="stat-mini muted">
         <b>{{ fmtNum(counters.written) }}</b>
         <span>已落库 · 队列 {{ counters.queued }}/{{ counters.queue_size }} · 丢弃 {{ counters.dropped }}</span>
+      </div>
+    </div>
+
+    <div class="card syserr-card">
+      <div class="syserr-head">
+        <div>
+          <h3>系统错误</h3>
+          <span>服务运行异常（ERROR / CRITICAL），完整堆栈已写入链路日志</span>
+        </div>
+        <div class="syserr-actions">
+          <button class="btn btn-ghost" @click="store.loadSystemErrors()">刷新</button>
+          <button class="btn btn-ghost" @click="showSystemOnly">查看系统日志</button>
+        </div>
+      </div>
+      <div v-if="store.systemErrorLoading" class="loading-wrap"><span class="spinner"></span></div>
+      <p v-else-if="store.systemErrorError" class="empty-state" style="color:var(--danger)">{{ store.systemErrorError }}</p>
+      <p v-else-if="!store.systemErrors.length" class="empty-state">暂无系统错误</p>
+      <div v-else class="syserr-list">
+        <div
+          v-for="e in store.systemErrors"
+          :key="e.id"
+          class="syserr-row"
+          @click="store.openTrace(e.trace_id)"
+        >
+          <div class="syserr-line">
+            <span class="lvl nowrap" :class="'lv-' + levelOf(e.level)">{{ levelLabel(e.level) }}</span>
+            <span class="mono nowrap">{{ fmtTimeMs(e.ts) }}</span>
+            <span class="mono syserr-event">{{ e.event }}</span>
+            <span class="mono syserr-comp">{{ e.component }}</span>
+            <span v-if="e.data?.session_id" class="mono dim nowrap">{{ String(e.data.session_id).slice(0, 12) }}</span>
+          </div>
+          <pre class="syserr-message">{{ e.message }}</pre>
+        </div>
       </div>
     </div>
 
@@ -377,6 +415,27 @@ async function onClearAll() {
 .stat-mini.err b { color: var(--danger); }
 .stat-mini.warn b { color: #f59e0b; }
 .stat-mini.muted b { color: var(--text-secondary); }
+
+.syserr-card { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.syserr-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.syserr-head h3 { margin: 0 0 3px; font-size: 14px; font-weight: 700; }
+.syserr-head span { font-size: 11px; color: var(--text-secondary); }
+.syserr-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.syserr-list { display: flex; flex-direction: column; gap: 6px; max-height: 360px; overflow-y: auto; }
+.syserr-row {
+  padding: 8px 10px; border-radius: var(--radius); border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--danger) 5%, var(--bg-subtle)); cursor: pointer;
+}
+.syserr-row:hover { border-color: color-mix(in srgb, var(--danger) 30%, var(--border)); }
+.syserr-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; }
+.syserr-event { font-weight: 700; color: var(--text); }
+.syserr-comp { color: var(--text-secondary); }
+.syserr-message {
+  margin: 6px 0 0; padding: 7px 9px; max-height: 150px; overflow: auto;
+  font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10.5px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-all; color: var(--text-secondary);
+  background: var(--bg-subtle); border-radius: var(--radius);
+}
 
 /* ── 时间线 ── */
 .detail-card { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }

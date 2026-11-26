@@ -10,6 +10,7 @@ from harness.errors import (
     AuthError,
     BudgetExceededError,
     ContextOverflowError,
+    QuotaExhaustedError,
     RateLimitError,
     UpstreamError,
     classify_error,
@@ -126,6 +127,21 @@ def test_event_envelope_serializes_turn_fields():
     assert payload["turn_id"] == "turn_1"
     assert payload["step_id"] == "call_1"
     assert payload["data"]["name"] == "read_file"
+
+
+def test_quota_exhausted_429_is_not_retryable():
+    class Quota429(Exception):
+        status_code = 429
+        code = "insufficient_quota"
+
+    err = classify_error(
+        Quota429("Error code: 429 - {'error': {'code': 'insufficient_quota', "
+                 "'message': 'You have no credits remaining.'}}")
+    )
+    assert isinstance(err, QuotaExhaustedError)
+    assert err.status_code == 429
+    assert err.retryable is False
+    assert err.error_type == "quota_exhausted"
 
 
 def test_classify_error_maps_retry_and_status():

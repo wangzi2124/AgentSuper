@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import {
   clearLogs,
   cleanupLogs,
+  fetchSystemErrors,
   getFilterOptions,
   getStats,
   getTrace,
@@ -43,6 +44,10 @@ export const useLogsStore = defineStore('logs', () => {
   const stats = ref<ChainLogStats | null>(null)
   const options = ref<FilterOptions | null>(null)
   const statsLoading = ref(false)
+
+  const systemErrors = ref<ChainLogEntry[]>([])
+  const systemErrorLoading = ref(false)
+  const systemErrorError = ref('')
 
   const hasFilters = computed(() => Object.values(filters.value).some(v => v !== undefined && v !== '' && v !== false))
   const page = computed(() => Math.floor(offset.value / limit.value) + 1)
@@ -116,6 +121,20 @@ export const useLogsStore = defineStore('logs', () => {
     }
   }
 
+  async function loadSystemErrors(limit = 20) {
+    systemErrorLoading.value = true
+    systemErrorError.value = ''
+    try {
+      const res = await fetchSystemErrors(limit)
+      systemErrors.value = res.entries ?? []
+    } catch (err: any) {
+      systemErrors.value = []
+      systemErrorError.value = err?.message || '系统错误加载失败'
+    } finally {
+      systemErrorLoading.value = false
+    }
+  }
+
   // 设置单个筛选条件（传 undefined/'' 视为清除），回到第一页并刷新
   async function setFilter<K extends keyof ChainLogFilters>(key: K, value: ChainLogFilters[K]) {
     const next = { ...filters.value }
@@ -176,15 +195,18 @@ export const useLogsStore = defineStore('logs', () => {
 
   // 首屏加载
   async function init() {
-    await Promise.all([fetchList(), loadStats(), loadOptions()])
+    await Promise.all([
+      fetchList(), loadStats(), loadOptions(), loadSystemErrors(),
+    ])
   }
 
   return {
     filters, view, offset, limit, traces, entries, total,
     listLoading, listError, activeTraceId, detail, detailLoading, detailError,
     stats, options, statsLoading, timeline,
+    systemErrors, systemErrorLoading, systemErrorError,
     hasFilters, page, pageCount, canPrev, canNext,
-    init, fetchList, openTrace, closeTrace, loadStats, loadOptions,
+    init, fetchList, openTrace, closeTrace, loadStats, loadOptions, loadSystemErrors,
     setFilter, resetFilters, setView, changeLimit, prevPage, nextPage,
     cleanup, clear,
   }
