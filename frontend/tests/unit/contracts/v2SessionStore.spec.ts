@@ -9,6 +9,7 @@ vi.mock('../../../src/api/v2', () => ({
   listMessages: vi.fn(),
   listPermissions: vi.fn(),
   prompt: vi.fn(),
+  replaySessionEvents: vi.fn(async () => []),
 }))
 
 vi.mock('../../../src/v2/eventStream', () => ({
@@ -161,7 +162,10 @@ describe('v2 session store inbox actions', () => {
     expect(listForms).toHaveBeenCalledWith('s1', 'pending')
     expect(store.getRuntime('s1')?.forms.map((form) => form.id)).toEqual(['live'])
 
-    store.removeForm('s1', 'live')
+    store.removeForm('s1', 'live', 1)
+    expect(store.getRuntime('s1')?.forms).toEqual([])
+
+    await store.hydrate('s1')
     expect(store.getRuntime('s1')?.forms).toEqual([])
   })
 })

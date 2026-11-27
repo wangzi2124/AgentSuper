@@ -127,6 +127,7 @@ export const useV2SessionStore = defineStore('v2Session', () => {
           ? replaySessionEvents(sessionId, cursor).catch(() => [])
           : Promise.resolve([] as V2Event[]),
       ])
+      const resolvedForms = previous ? { ...previous.resolvedForms } : {}
       const base: V2SessionRuntime = {
         ...emptyRuntime(sessionId),
         info,
@@ -134,13 +135,15 @@ export const useV2SessionStore = defineStore('v2Session', () => {
         messages: messages.data,
         inbox,
         permissions,
-        forms: forms.filter((form) => form.state === 'pending'),
+        forms: forms.filter(
+          (form) => form.state === 'pending' && (resolvedForms[form.id] ?? -1) < form.revision,
+        ),
         plan: info.status === 'busy' || info.status === 'retry'
           ? (plan ? _livePlan(plan) : null)
           : null,
         hydrated: true,
         seenEventIds: previous?.seenEventIds.slice() ?? [],
-        resolvedForms: previous ? { ...previous.resolvedForms } : {},
+        resolvedForms,
         lastDurableSeq: cursor,
       }
       base.error = previous?.error ?? null
