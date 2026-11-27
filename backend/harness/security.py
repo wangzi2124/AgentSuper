@@ -10,6 +10,8 @@ _PATTERNS = (
     re.compile(r"(?i)\b(api[_-]?key|password|secret|token)\s*[=:]\s*([^\s,;]+)"),
 )
 
+_PROVIDER_RISK_TERMS = re.compile(r"独裁者|独裁政权|暴君")
+
 
 def redact_secrets(text: str) -> str:
     value = str(text or "")
@@ -19,4 +21,8 @@ def redact_secrets(text: str) -> str:
     return value
 
 
-__all__ = ["redact_secrets"]
+def sanitize_external_text(text: str) -> str:
+    return _PROVIDER_RISK_TERMS.sub("[已过滤]", str(text or ""))
+
+
+__all__ = ["redact_secrets", "sanitize_external_text"]

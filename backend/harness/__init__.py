@@ -32,6 +32,7 @@ from .contracts import EventEnvelope, ModelProfileSnapshot, TurnContext, TurnRes
 from .errors import (
     AuthError,
     BudgetExceededError,
+    ContentPolicyError,
     ContextOverflowError,
     HarnessError,
     RateLimitError,
@@ -86,6 +87,7 @@ __all__ = [
     "CompressionError",
     "CompressionPlan",
     "CompressionResult",
+    "ContentPolicyError",
     "ContextCompactor",
     "ContextOverflowError",
     "Done",

@@ -9,6 +9,7 @@ from harness.contracts import EventEnvelope, TurnContext, TurnResult
 from harness.errors import (
     AuthError,
     BudgetExceededError,
+    ContentPolicyError,
     ContextOverflowError,
     QuotaExhaustedError,
     RateLimitError,
@@ -155,3 +156,18 @@ def test_classify_error_maps_retry_and_status():
     )
     assert isinstance(BudgetExceededError(), BudgetExceededError)
     assert classify_error(RuntimeError("misc")).code == "UNKNOWN"
+
+
+def test_classify_error_maps_deepseek_content_policy():
+    err = classify_error(
+        RuntimeError(
+            'litellm.BadRequestError: DeepseekException - {"error":{"message":'
+            '"Content Exists Risk (request_id: a5ffe4fc)","code":"invalid_request_error"}} '
+            "LiteLLM Retried: 2 times"
+        )
+    )
+    assert isinstance(err, ContentPolicyError)
+    assert err.code == "CONTENT_POLICY"
+    assert err.error_type == "content_policy"
+    assert err.status_code == 400
+    assert err.retryable is False

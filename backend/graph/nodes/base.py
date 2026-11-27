@@ -24,9 +24,11 @@ from execution.tools.file_tools import (
 )
 from harness.adapter import call_argument_error, stable_call_id
 from harness.budget import BudgetExceeded, BudgetLedger
+from harness.errors import ContentPolicyError, classify_error
 from harness.hooks import run_post_tool, run_pre_tool
 from harness.retry import retry_async
 from harness.schema import ToolSchemaCache
+from harness.security import sanitize_external_text
 from models.router import TierModel, ToolCall, normalize_finish_reason
 from observability.metrics import record_llm_call
 from observability.monitor import record_harness_signal
@@ -53,6 +55,19 @@ MAX_TOOL_ARG_REPAIR_RETRIES = 2
 # 写文件与 shell 独占工作区；文件读/搜索共享读锁，彼此仍可并行。
 _MUTATING_TOOL_NAMES = frozenset(_FILE_WRITE_TOOLS | {"shell_exec"})
 _WORKSPACE_READ_TOOLS = frozenset(_FILE_READ_TOOLS)
+
+
+def _sanitize_tool_messages(messages: list[dict]) -> tuple[list[dict], bool]:
+    changed = False
+    cleaned: list[dict] = []
+    for message in messages:
+        if message.get("role") == "tool" and isinstance(message.get("content"), str):
+            sanitized = sanitize_external_text(message["content"])
+            if sanitized != message["content"]:
+                message = {**message, "content": sanitized}
+                changed = True
+        cleaned.append(message)
+    return cleaned, changed
 
 
 class _AsyncRWLock:
@@ -996,6 +1011,7 @@ async def run_tool_loop(
     action_nudges = 0
     arg_repair_retries = 0
     overflow_retried = False
+    content_policy_retried = False
 
     while rounds < max_rounds:
         convo = _maybe_prune_tool_outputs(
@@ -1095,6 +1111,19 @@ async def run_tool_loop(
                             lambda: tool_adapter.complete(convo, tool_defs or None)
                         )
         except Exception as exc:  # noqa: BLE001 - 上下文超限时压缩后重试一次
+            classified = classify_error(exc)
+            if isinstance(classified, ContentPolicyError):
+                if content_policy_retried:
+                    raise
+                content_policy_retried = True
+                convo, changed = _sanitize_tool_messages(convo)
+                if not changed:
+                    raise
+                _signal("content_policy_sanitized")
+                logger.warning(
+                    "provider content policy rejected request; retrying with sanitized tool outputs"
+                )
+                continue
             from models.context_guard import is_overflow_error
 
             if overflow_retried or not is_overflow_error(exc):
@@ -1428,9 +1457,29 @@ async def run_tool_loop(
                 "finish_reason": "budget-exceeded",
                 "budget_exceeded": True,
             }
-    try:
+    async def _final_completion():
         with trace_span("llm.call", rounds=rounds, final=True):
-            final = await retry_async(lambda: tool_adapter.complete(convo, None))
+            return await retry_async(lambda: tool_adapter.complete(convo, None))
+
+    try:
+        try:
+            final = await _final_completion()
+        except Exception as exc:
+            if (
+                isinstance(classify_error(exc), ContentPolicyError)
+                and not content_policy_retried
+            ):
+                content_policy_retried = True
+                convo, changed = _sanitize_tool_messages(convo)
+                if not changed:
+                    raise
+                _signal("content_policy_sanitized")
+                logger.warning(
+                    "provider content policy rejected final call; retrying with sanitized tool outputs"
+                )
+                final = await _final_completion()
+            else:
+                raise
         rounds += 1
         label = model.model_name() if hasattr(model, "model_name") else model.tier
         final_usage = usage_from_result(final, label)

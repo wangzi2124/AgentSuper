@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from execution.tool_registry import ToolDefinition, ToolRegistry
 from graph.nodes.base import MAX_TOOL_ARG_REPAIR_RETRIES, MAX_TOOL_ROUNDS, run_tool_loop
@@ -517,5 +518,45 @@ async def test_closed_schema_unknown_field_triggers_retry():
     assert "未知字段" in out["tool_trace"][0]["argument_error"]
     assert "未知字段" in model.seen[1]["content"]
     assert out["text"] == "done"
+
+
+class _ContentPolicyThenAnswerAdapter:
+    mode = "native"
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict]] = []
+
+    async def complete(self, messages, tools=None):
+        self.calls.append([dict(m) for m in messages])
+        if len(self.calls) == 1:
+            raise RuntimeError(
+                'litellm.BadRequestError: DeepseekException - {"error":{"message":'
+                '"Content Exists Risk (request_id: a5ffe4fc)"}}'
+            )
+        return ChatResult(content="新闻摘要", finish_reason="stop")
+
+
+async def test_content_policy_retry_sanitizes_tool_output():
+    adapter = _ContentPolicyThenAnswerAdapter()
+    messages = [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": "最新有什么新闻"},
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "德语媒体：深圳峰会——独裁者的狂欢 黄仁勋复职，特朗普向习近平学到了什么？",
+        },
+    ]
+
+    out = await run_tool_loop(
+        SimpleNamespace(tier="fake"), messages, ToolRegistry(), adapter=adapter
+    )
+
+    assert out["text"] == "新闻摘要"
+    assert len(adapter.calls) == 2
+    retried_tool_content = adapter.calls[1][-1]["content"]
+    assert "独裁者" not in retried_tool_content
+    assert "[已过滤]" in retried_tool_content
+    assert "习近平" in retried_tool_content
 
 

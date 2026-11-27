@@ -93,6 +93,17 @@ class BudgetExceededError(HarnessError):
         )
 
 
+class ContentPolicyError(HarnessError):
+    def __init__(self, message: str = "模型服务商内容策略拒绝") -> None:
+        super().__init__(
+            message,
+            code="CONTENT_POLICY",
+            retryable=False,
+            status_code=400,
+            error_type="content_policy",
+        )
+
+
 _QUOTA_HINTS = (
     "insufficient_quota",
     "credit_balance_exhausted",
@@ -116,6 +127,16 @@ def _is_quota_error(exc: BaseException, text: str) -> bool:
         code += " " + str(error).lower()
     haystack = f"{text} {code}"
     return any(hint in haystack for hint in _QUOTA_HINTS)
+
+
+_CONTENT_POLICY_HINTS = (
+    "content exists risk",
+    "content policy",
+    "content_policy",
+    "content moderation",
+    "inappropriate content",
+    "sensitive content",
+)
 
 
 _OVERFLOW_HINTS = (
@@ -145,6 +166,8 @@ def classify_error(exc: BaseException) -> HarnessError:
     text = str(exc).lower()
     if _is_quota_error(exc, text):
         return QuotaExhaustedError(str(exc))
+    if any(hint in text for hint in _CONTENT_POLICY_HINTS):
+        return ContentPolicyError(str(exc))
     if status in (401, 403):
         return AuthError(str(exc))
     if status == 429:
@@ -167,6 +190,7 @@ def classify_error(exc: BaseException) -> HarnessError:
 __all__ = [
     "AuthError",
     "BudgetExceededError",
+    "ContentPolicyError",
     "ContextOverflowError",
     "HarnessError",
     "QuotaExhaustedError",
